@@ -1,4 +1,4 @@
-use eframe::egui::{CentralPanel, Checkbox, Context, ScrollArea, TextEdit, TopBottomPanel};
+use eframe::egui::{CentralPanel, Checkbox, Context, ScrollArea, TextEdit, TopBottomPanel, Window, Button};
 use eframe::{run_native, App, NativeOptions};
 use std::path::PathBuf;
 use std::process::Command;
@@ -19,6 +19,7 @@ struct CpuAffinityApp {
     groups: Vec<CoreGroup>,
     new_group_name: String,
     dropped_file: Option<PathBuf>,
+    show_group_window: bool,
 }
 
 impl Default for CpuAffinityApp {
@@ -30,6 +31,7 @@ impl Default for CpuAffinityApp {
             groups: Vec::new(),
             new_group_name: String::new(),
             dropped_file: None,
+            show_group_window: false,
         }
     }
 }
@@ -45,36 +47,8 @@ impl App for CpuAffinityApp {
         });
 
         CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Group name:");
-                ui.add(TextEdit::singleline(&mut self.new_group_name));
-            });
-
-            ui.label("Select CPU cores for new group:");
-            ui.horizontal_wrapped(|ui| {
-                for i in 0..self.num_cores {
-                    ui.add(Checkbox::new(&mut self.core_selection[i], format!("Core {}", i)));
-                }
-            });
-
-            if ui.button("Create Group").clicked() {
-                if !self.new_group_name.trim().is_empty() {
-                    let cores = self
-                        .core_selection
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, &selected)| if selected { Some(i) } else { None })
-                        .collect::<Vec<_>>();
-
-                    if !cores.is_empty() {
-                        self.groups.push(CoreGroup {
-                            name: self.new_group_name.trim().to_string(),
-                            cores,
-                        });
-                        self.new_group_name.clear();
-                        self.core_selection = vec![false; self.num_cores];
-                    }
-                }
+            if ui.button("Создать группу ядер").clicked() {
+                self.show_group_window = true;
             }
 
             ui.separator();
@@ -84,6 +58,7 @@ impl App for CpuAffinityApp {
                 for group in &self.groups {
                     ui.horizontal(|ui| {
                         if ui.button("Run Here").clicked() {
+                            println!("Running with affinity for group: {}", group.name);
                             if let Some(file) = &self.dropped_file {
                                 run_with_affinity(file.clone(), &group.cores);
                             }
@@ -98,6 +73,58 @@ impl App for CpuAffinityApp {
                 ui.label(format!("Dropped file: {}", path.display()));
             }
         });
+
+        let mut close_window = false;
+
+        if self.show_group_window {
+            Window::new("Создание группы ядер")
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Group name:");
+                        ui.add(TextEdit::singleline(&mut self.new_group_name));
+                    });
+
+                    ui.label("Select CPU cores:");
+                    ui.horizontal_wrapped(|ui| {
+                        for i in 0..self.num_cores {
+                            ui.add(Checkbox::new(&mut self.core_selection[i], format!("Core {}", i)));
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Create").clicked() {
+                            if !self.new_group_name.trim().is_empty() {
+                                let cores = self
+                                    .core_selection
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(i, &selected)| if selected { Some(i) } else { None })
+                                    .collect::<Vec<_>>();
+
+                                if !cores.is_empty() {
+                                    self.groups.push(CoreGroup {
+                                        name: self.new_group_name.trim().to_string(),
+                                        cores,
+                                    });
+                                    self.new_group_name.clear();
+                                    self.core_selection = vec![false; self.num_cores];
+                                    close_window = true;
+                                }
+                            }
+                        }
+
+                        if ui.button("Отмена").clicked() {
+                            self.new_group_name.clear();
+                            self.core_selection = vec![false; self.num_cores];
+                            close_window = true;
+                        }
+                    });
+                });
+        }
+
+        if close_window {
+            self.show_group_window = false;
+        }
     }
 }
 
@@ -109,6 +136,8 @@ fn run_with_affinity(file_path: PathBuf, cores: &[usize]) {
     } else {
         file_path.clone()
     };
+
+    print!("Running file: {}", resolved.display());
 
     if let Ok(child) = Command::new(&resolved).spawn() {
         unsafe {
