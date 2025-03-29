@@ -9,10 +9,11 @@ use eframe::{run_native, NativeOptions};
 
 fn main() {
     let options = NativeOptions::default();
+
     run_native(
         "CPU Affinity Tool",
         options,
-        Box::new(|_cc| Box::new(CpuAffinityApp::default())),
+        Box::new(|_cc| Ok(Box::new(CpuAffinityApp::default()))),
     )
     .unwrap();
 }
