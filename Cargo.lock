@@ -838,6 +838,7 @@ dependencies = [
  "eframe",
  "num_cpus",
  "parselnk",
+ "shlex",
  "windows 0.52.0",
 ]
 

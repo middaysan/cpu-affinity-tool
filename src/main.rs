@@ -6,11 +6,13 @@ use std::os::windows::io::AsRawHandle;
 use parselnk::Lnk;
 use windows::Win32::System::Threading::SetProcessAffinityMask;
 use windows::Win32::Foundation::HANDLE;
+use shlex;
 
 #[derive(Debug, Clone)]
 struct CoreGroup {
     name: String,
     cores: Vec<usize>,
+    programs: Vec<PathBuf>,
 }
 
 struct CpuAffinityApp {
@@ -52,25 +54,52 @@ impl App for CpuAffinityApp {
             }
 
             ui.separator();
-            ui.label("Created groups:");
+            ui.label("Группы и программы:");
+
+            let mut dropped_assigned = false;
 
             ScrollArea::vertical().show(ui, |ui| {
-                for group in &self.groups {
-                    ui.horizontal(|ui| {
-                        if ui.button("Run Here").clicked() {
-                            println!("Running with affinity for group: {}", group.name);
-                            if let Some(file) = &self.dropped_file {
-                                run_with_affinity(file.clone(), &group.cores);
-                            }
+                for group in &mut self.groups {
+                    let response = ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{}: ядра {:?}", group.name, group.cores));
+                        });
+
+                        for prog in &group.programs {
+                            ui.horizontal(|ui| {
+                                if ui.button("▶").clicked() {
+                                    run_with_affinity(prog.clone(), &group.cores);
+                                }
+                                ui.label(prog.display().to_string());
+                            });
                         }
-                        ui.label(format!("{}: cores {:?}", group.name, group.cores));
                     });
+
+                    if let Some(dropped) = &self.dropped_file {
+                        if response.response.rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
+                            group.programs.push(dropped.clone());
+                            dropped_assigned = true;
+                        }
+                    }
+
+                    ui.separator();
                 }
             });
 
-            if let Some(path) = &self.dropped_file {
-                ui.separator();
-                ui.label(format!("Dropped file: {}", path.display()));
+            if let Some(dropped) = &self.dropped_file {
+                if dropped_assigned {
+                    self.dropped_file = None;
+                } else {
+                    ui.separator();
+                    ui.label(format!("Ожидает добавления: {}", dropped.display()));
+                    for group in &mut self.groups {
+                        if ui.button(format!("Добавить в группу {}", group.name)).clicked() {
+                            group.programs.push(dropped.clone());
+                            self.dropped_file = None;
+                            break;
+                        }
+                    }
+                }
             }
         });
 
@@ -80,11 +109,11 @@ impl App for CpuAffinityApp {
             Window::new("Создание группы ядер")
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Group name:");
+                        ui.label("Имя группы:");
                         ui.add(TextEdit::singleline(&mut self.new_group_name));
                     });
 
-                    ui.label("Select CPU cores:");
+                    ui.label("Выбор ядер CPU:");
                     ui.horizontal_wrapped(|ui| {
                         for i in 0..self.num_cores {
                             ui.add(Checkbox::new(&mut self.core_selection[i], format!("Core {}", i)));
@@ -92,7 +121,7 @@ impl App for CpuAffinityApp {
                     });
 
                     ui.horizontal(|ui| {
-                        if ui.button("Create").clicked() {
+                        if ui.button("Создать").clicked() {
                             if !self.new_group_name.trim().is_empty() {
                                 let cores = self
                                     .core_selection
@@ -105,6 +134,7 @@ impl App for CpuAffinityApp {
                                     self.groups.push(CoreGroup {
                                         name: self.new_group_name.trim().to_string(),
                                         cores,
+                                        programs: Vec::new(),
                                     });
                                     self.new_group_name.clear();
                                     self.core_selection = vec![false; self.num_cores];
@@ -131,27 +161,42 @@ impl App for CpuAffinityApp {
 fn run_with_affinity(file_path: PathBuf, cores: &[usize]) {
     let affinity_mask: usize = cores.iter().map(|&i| 1 << i).sum();
 
-    let resolved = if file_path.extension().and_then(|e| e.to_str()) == Some("lnk") {
-        resolve_lnk_target(&file_path).unwrap_or(file_path.clone())
+    let (resolved, args) = if file_path.extension().and_then(|e| e.to_str()) == Some("lnk") {
+        resolve_lnk_target_with_args(&file_path).unwrap_or((file_path.clone(), vec![]))
     } else {
-        file_path.clone()
+        (file_path.clone(), vec![])
     };
 
-    print!("Running file: {}", resolved.display());
+    println!("Запуск: {}", resolved.display());
 
-    if let Ok(child) = Command::new(&resolved).spawn() {
-        unsafe {
-            let handle = HANDLE(child.as_raw_handle() as isize);
-            if let Err(e) = SetProcessAffinityMask(handle, affinity_mask) {
-                eprintln!("Failed to set process affinity mask: {:?}", e);
+    let mut cmd = Command::new(&resolved);
+    if !args.is_empty() {
+        cmd.args(args);
+    }
+
+    match cmd.spawn() {
+        Ok(child) => {
+            unsafe {
+                let handle = HANDLE(child.as_raw_handle() as isize);
+                if let Err(e) = SetProcessAffinityMask(handle, affinity_mask) {
+                    eprintln!("Не удалось установить маску affinity: {:?}", e);
+                }
             }
+        }
+        Err(e) => {
+            eprintln!("Ошибка запуска: {:?}", e);
         }
     }
 }
 
-fn resolve_lnk_target(lnk_path: &PathBuf) -> Option<PathBuf> {
+fn resolve_lnk_target_with_args(lnk_path: &PathBuf) -> Option<(PathBuf, Vec<String>)> {
     match Lnk::try_from(lnk_path.as_path()) {
-        Ok(link) => link.link_info.local_base_path.clone().map(PathBuf::from),
+        Ok(link) => {
+            let path = link.link_info.local_base_path.clone().map(PathBuf::from)?;
+            let args = link.string_data.command_line_arguments.unwrap_or_default();
+            let split_args = shlex::split(&args).unwrap_or_else(|| vec![args]);
+            Some((path, split_args))
+        }
         Err(_) => None,
     }
 }
