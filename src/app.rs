@@ -111,12 +111,13 @@ fn render_groups(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut CpuAffinityAp
 
     for (i, group) in app.state.groups.iter_mut().enumerate() {
         Frame::group(ui.style())
+            .outer_margin(5.0)
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&group.name).heading()).on_hover_text(RichText::new(format!("cores: {:?}", group.cores)).weak());
                         ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
-                            if ui.button("⚙gsettings").on_hover_text("Edit group settings").clicked() {
+                            if ui.button("⚙").on_hover_text("Edit group settings").clicked() {
                                 app.edit_group_index = Some(i);
                             }
                             if ui.button("📁add").on_hover_text("Add executables...").clicked() {
@@ -130,9 +131,7 @@ fn render_groups(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut CpuAffinityAp
 
                     ui.separator();
 
-                    ScrollArea::vertical()
-                    .id_salt(i)
-                    .show(ui, |ui| {
+                    ScrollArea::vertical().id_salt(i).show(ui, |ui| {
                         if group.programs.is_empty() {
                             ui.label("No executables. Drag & drop to add.");
                         } else {
@@ -146,7 +145,7 @@ fn render_groups(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut CpuAffinityAp
                                         button
                                     );
                                     let delete = ui.button("❌").on_hover_text("Remove from group");
-                                    if response.on_hover_text("Run with affinity").clicked() {
+                                    if response.on_hover_text(prog.to_str().unwrap_or("")).clicked() {
                                         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
                                         let ts = format!("{:02}:{:02}:{:02}", (now.as_secs() % 86400) / 3600, (now.as_secs() % 3600) / 60, now.as_secs() % 60);
                                         app.log_text.push(format!("[{}] Starting '{}', app: {}", ts, label, prog.display()));
