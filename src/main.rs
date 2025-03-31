@@ -10,7 +10,7 @@ use eframe::{run_native, NativeOptions};
 fn main() {
     let native_options = NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_min_inner_size([400.0, 200.0]), // Устанавливаем минимальный размер окна
+            .with_min_inner_size([450.0, 200.0]), // Устанавливаем минимальный размер окна
         ..Default::default()
     };
 
