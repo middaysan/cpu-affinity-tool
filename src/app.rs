@@ -1,4 +1,6 @@
-use eframe::egui::{self, RichText, ScrollArea, Frame, Layout, TopBottomPanel, CentralPanel, Window, Vec2};
+use std::thread::sleep;
+
+use eframe::egui::{self, RichText, ScrollArea, Frame, Layout, TopBottomPanel, CentralPanel, Window, Color32};
 use crate::models::{AppState, CoreGroup};
 
 pub struct CpuAffinityApp {
@@ -34,42 +36,122 @@ impl Default for CpuAffinityApp {
 impl eframe::App for CpuAffinityApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         handle_dropped_file(ctx, &mut self.dropped_file);
-        CentralPanel::default().show(ctx, |ui| {
-            main_panel(ui, ctx, self);
+
+        TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+            ui.label(RichText::new("Core Groups").heading());
+            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(format!("📄 View Logs({})", self.log_text.len())).clicked() {
+                self.show_log_window = true;
+                }
+                if ui.button("➕ Create Core Group").clicked() {
+                self.show_group_window = true;
+                }
+            });
+            });
         });
+
+        CentralPanel::default().show(ctx, |ui| {
+            let mut dropped_assigned = false;
+            ScrollArea::vertical().show(ui, |ui| {
+                dropped_assigned = render_groups(ui, ctx, self);
+            });
+
+            if let Some(dropped) = &self.dropped_file {
+                if !dropped_assigned {
+                    ui.separator();
+                    ui.label(RichText::new("Dropped file:").strong());
+                    ui.label(dropped.display().to_string());
+                    for group in &mut self.state.groups {
+                        if ui.button(format!("Add to group '{}'", group.name)).clicked() {
+                            group.programs.push(dropped.clone());
+                            self.dropped_file = None;
+                            save_state(&self.state);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
         group_window(ctx, self);
         edit_group_window(ctx, self);
-        bottom_panel(ctx, self);
         log_window(ctx, self);
     }
 }
 
-fn main_panel(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut CpuAffinityApp) {
-    if ui.button("➕ Create Core Group").clicked() {
-        app.show_group_window = true;
-    }
-
+fn render_groups(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut CpuAffinityApp) -> bool {
     let mut dropped_assigned = false;
+    let mut modified = false;
 
-    ScrollArea::vertical().show(ui, |ui| {
-        dropped_assigned = render_groups(ui, ctx, app);
-    });
+    app.state.groups.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-    if let Some(dropped) = &app.dropped_file {
-        if !dropped_assigned {
-            ui.separator();
-            ui.label(RichText::new("Dropped file:").strong());
-            ui.label(dropped.display().to_string());
-            for group in &mut app.state.groups {
-                if ui.button(format!("Add to group '{}'", group.name)).clicked() {
-                    group.programs.push(dropped.clone());
-                    app.dropped_file = None;
-                    save_state(&app.state);
-                    break;
-                }
-            }
-        }
+    for (i, group) in app.state.groups.iter_mut().enumerate() {
+        Frame::group(ui.style())
+            .inner_margin(8.0)
+            .fill(Color32::from_gray(30))
+            .stroke(egui::Stroke::new(1.0, Color32::DARK_GRAY))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&group.name).heading());
+                        ui.label(RichText::new(format!("Cores: {:?}", group.cores)).weak());
+                        ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
+                            if ui.button("⚙").on_hover_text("Edit group settings").clicked() {
+                                app.edit_group_index = Some(i);
+                            }
+                            if ui.button("📁").on_hover_text("Add executables...").clicked() {
+                                if let Some(paths) = rfd::FileDialog::new().add_filter("Executables", &["exe", "lnk"]).pick_files() {
+                                    group.programs.extend(paths);
+                                    modified = true;
+                                }
+                            }
+                        });
+                    });
+
+                    ScrollArea::vertical()
+                    .id_salt(i)
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        if group.programs.is_empty() {
+                            ui.label("No executables. Drag & drop to add.");
+                        } else {
+                            for prog in group.programs.clone() {
+                                let label = prog.file_name().map_or_else(|| prog.display().to_string(), |n| n.to_string_lossy().to_string());
+                                ui.horizontal(|ui| {
+                                    if ui.button(format!("▶ {}", label)).on_hover_text("Run with affinity").clicked() {
+                                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                                        let ts = format!("{:02}:{:02}:{:02}", (now.as_secs() % 86400) / 3600, (now.as_secs() % 3600) / 60, now.as_secs() % 60);
+                                        if let Err(e) = crate::affinity::run_with_affinity(prog.clone(), &group.cores) {
+                                            app.log_text.push(format!("[{}] ERROR: {}", ts, e));
+                                        } else {
+                                            app.log_text.push(format!("[{}] OK: started '{}'", ts, label));
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        ui.label("💡 Tip: Drag & drop files to add to this group.");
+                    });
+
+                    if let Some(dropped) = &app.dropped_file {
+                        let rect = ui.min_rect();
+                        if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
+                            group.programs.push(dropped.clone());
+                            app.dropped_file = None;
+                            dropped_assigned = true;
+                            modified = true;
+                        }
+                    }
+                });
+            });
     }
+
+    if modified {
+        save_state(&app.state);
+    }
+
+    dropped_assigned
 }
 
 fn group_window(ctx: &egui::Context, app: &mut CpuAffinityApp) {
@@ -78,7 +160,6 @@ fn group_window(ctx: &egui::Context, app: &mut CpuAffinityApp) {
     }
 
     let mut close = false;
-
     Window::new("Create Core Group").open(&mut true).show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.label("Group name:");
@@ -91,6 +172,8 @@ fn group_window(ctx: &egui::Context, app: &mut CpuAffinityApp) {
                 ui.checkbox(selected, format!("Core {}", i));
             }
         });
+
+        ui.separator();
 
         ui.horizontal(|ui| {
             if ui.button("✅ Create").clicked() {
@@ -113,8 +196,6 @@ fn group_window(ctx: &egui::Context, app: &mut CpuAffinityApp) {
     }
 }
 
-
-// В edit_group_window теперь сохраняем состояние выбора между кадрами
 fn edit_group_window(ctx: &egui::Context, app: &mut CpuAffinityApp) {
     if let Some(index) = app.edit_group_index {
         if index >= app.state.groups.len() {
@@ -123,7 +204,6 @@ fn edit_group_window(ctx: &egui::Context, app: &mut CpuAffinityApp) {
             return;
         }
 
-        // lazy init
         if app.edit_group_selection.is_none() {
             let mut selection = vec![false; num_cpus::get()];
             for &core in &app.state.groups[index].cores {
@@ -135,145 +215,44 @@ fn edit_group_window(ctx: &egui::Context, app: &mut CpuAffinityApp) {
         }
 
         let mut open = true;
-        Window::new("Edit Group Settings")
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.label(format!("Editing group: {}", app.state.groups[index].name));
-                ui.label("Select CPU cores:");
+        Window::new("Edit Group Settings").open(&mut open).show(ctx, |ui| {
+            ui.label(format!("Editing group: {}", app.state.groups[index].name));
+            ui.label("Select CPU cores:");
 
-                if let Some(selection) = &mut app.edit_group_selection {
-                    ui.horizontal_wrapped(|ui| {
-                        for (i, selected) in selection.iter_mut().enumerate() {
-                            ui.checkbox(selected, format!("Core {}", i));
-                        }
-                    });
-        
-                    let mut save = false;
-                    let mut delete = false;
-                    let mut cancel = false;
-                    
-                    ui.horizontal(|ui| {
-                        save = ui.button("💾 Save").clicked();
-                        delete = ui.button("❌ Delete Group").clicked();
-                        cancel = ui.button("Cancel").clicked();
-                    });
-                    
-                    if save {
-                        app.state.groups[index].cores = selection.iter().enumerate()
-                            .filter_map(|(i, &v)| if v { Some(i) } else { None })
-                            .collect();
+            if let Some(selection) = app.edit_group_selection.take() {
+                let mut selection = selection;
+                ui.horizontal_wrapped(|ui| {
+                    for (i, selected) in selection.iter_mut().enumerate() {
+                        ui.checkbox(selected, format!("Core {}", i));
+                    }
+                });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("💾 Save").clicked() {
+                        app.state.groups[index].cores = selection.iter().enumerate().filter_map(|(i, &v)| if v { Some(i) } else { None }).collect();
                         save_state(&app.state);
                         app.edit_group_index = None;
-                        app.edit_group_selection = None;
                     }
-                    if delete {
+                    if ui.button("❌ Delete Group").clicked() {
                         app.state.groups.remove(index);
                         save_state(&app.state);
                         app.edit_group_index = None;
-                        app.edit_group_selection = None;
                     }
-                    if cancel {
+                    if ui.button("Cancel").clicked() {
                         app.edit_group_index = None;
-                        app.edit_group_selection = None;
                     }
-                }
-            });
+                });
+
+                app.edit_group_selection = Some(selection);
+            }
+        });
 
         if !open {
             app.edit_group_index = None;
             app.edit_group_selection = None;
         }
     }
-}
-
-fn render_groups(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut CpuAffinityApp) -> bool {
-    let mut dropped_assigned = false;
-    let mut modified = false;
-
-    for (i, group) in app.state.groups.iter_mut().enumerate() {
-        Frame::group(ui.style())
-            .inner_margin(8.0)
-            .show(ui, |ui| {
-                ui.set_min_height(60.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&group.name).heading());
-                    ui.label(RichText::new(format!("Cores: {:?}", group.cores)).weak());
-                    ui.with_layout(Layout::right_to_left(egui::Align::RIGHT), |ui| {
-                        if ui.button("⚙").on_hover_text("Edit group settings").clicked() {
-                            app.edit_group_index = Some(i);
-                        }
-                        if ui.button("📁").on_hover_text("Add executables...").clicked() {
-                            if let Some(paths) = rfd::FileDialog::new().add_filter("Executables", &["exe", "lnk"]).pick_files() {
-                                group.programs.extend(paths);
-                                modified = true;
-                            }
-                        }
-                    });
-                });
-
-                ScrollArea::vertical()
-                .max_height(160.0)
-                .id_salt(format!("group_{}", i))
-                .show(ui, |ui| {
-                    if group.programs.is_empty() {
-                        ui.label("No executables. Drag & drop to add.");
-                    } else {
-                        for prog in group.programs.clone() {
-                            let label = prog.file_name()
-                                .map_or_else(|| prog.display().to_string(), |n| n.to_string_lossy().to_string());
-
-                            if ui.button(format!("▶ {}", label)).on_hover_text("Run with affinity").clicked() {
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default();
-                                let ts = format!("{:02}:{:02}:{:02}",
-                                    (now.as_secs() % 86400) / 3600,
-                                    (now.as_secs() % 3600) / 60,
-                                    now.as_secs() % 60);
-                                if let Err(e) = crate::affinity::run_with_affinity(prog.clone(), &group.cores) {
-                                    app.log_text.push(format!("[{}] {}", ts, e));
-                                }
-                            }
-                        }
-                    }
-
-                    ui.separator();
-                    ui.label("💡 Tip: You can drag & drop files to add them to this group.");
-                });
-
-                if let Some(dropped) = &app.dropped_file {
-                    let rect = ui.min_rect();
-                    if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
-                        group.programs.push(dropped.clone());
-                        app.dropped_file = None;
-                        dropped_assigned = true;
-                        modified = true;
-                    }
-                }
-            });
-    }
-
-    if modified {
-        save_state(&app.state);
-    }
-
-    dropped_assigned
-}
-
-fn bottom_panel(ctx: &egui::Context, app: &mut CpuAffinityApp) {
-    TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
-        ui.horizontal_centered(|ui| {
-            let log_count = app.log_text.len();
-            let text = if log_count > 0 {
-                format!("📄 Logs ({})", log_count)
-            } else {
-                "📄 Logs".to_string()
-            };
-            if ui.button(text).clicked() {
-                app.show_log_window = true;
-            }
-        });
-    });
 }
 
 fn log_window(ctx: &egui::Context, app: &mut CpuAffinityApp) {
@@ -285,10 +264,21 @@ fn log_window(ctx: &egui::Context, app: &mut CpuAffinityApp) {
     Window::new("Execution Log").resizable(true).open(&mut open).show(ctx, |ui| {
         ScrollArea::vertical().show(ui, |ui| {
             for log in &app.log_text {
-                ui.label(log);
+                let color = if log.contains("ERROR") {
+                    Color32::RED
+                } else if log.contains("OK") {
+                    Color32::GREEN
+                } else {
+                    Color32::LIGHT_GRAY
+                };
+                ui.label(RichText::new(log).color(color));
             }
         });
+        if ui.button("Clear Logs").clicked() {
+            app.log_text.clear();
+        }
     });
+
     app.show_log_window = open;
 }
 

@@ -8,11 +8,15 @@ use app::CpuAffinityApp;
 use eframe::{run_native, NativeOptions};
 
 fn main() {
-    let options = NativeOptions::default();
+    let native_options = NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_min_inner_size([400.0, 200.0]), // Устанавливаем минимальный размер окна
+        ..Default::default()
+    };
 
     run_native(
         "CPU Affinity Tool",
-        options,
+        native_options,
         Box::new(|_cc| Ok(Box::new(CpuAffinityApp::default()))),
     )
     .unwrap();
