@@ -1,0 +1,54 @@
+{
+  "groups": [
+    {
+      "name": "2212",
+      "cores": [
+        0,
+        1,
+        2,
+        4,
+        5,
+        7,
+        10,
+        14,
+        15,
+        16,
+        17,
+        18,
+        20,
+        22,
+        24,
+        25,
+        26,
+        28,
+        30
+      ],
+      "programs": [
+        "C:\\Users\\Public\\Desktop\\Battlestate Games Launcher.lnk"
+      ]
+    },
+    {
+      "name": "222",
+      "cores": [
+        1,
+        6,
+        11
+      ],
+      "programs": [
+        "C:\\Users\\Anton Rudy\\Desktop\\Telegram.lnk"
+      ]
+    },
+    {
+      "name": "2344",
+      "cores": [
+        0,
+        1,
+        6,
+        10
+      ],
+      "programs": [
+        "C:\\Users\\Anton Rudy\\Desktop\\Discord.lnk"
+      ]
+    }
+  ]
+}
