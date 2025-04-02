@@ -744,6 +744,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "num_cpus",
+ "once_cell",
  "parselnk",
  "rfd",
  "serde",
