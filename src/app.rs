@@ -41,13 +41,20 @@ impl eframe::App for CpuAffinityApp {
         self.handle_dropped_file(ctx);
         main_header::draw_top_panel(self, ctx);
         main_central::draw_central_panel(self, ctx);
-        create_group::draw_group_window(self, ctx);
-        edit_group::draw_edit_group_window(self, ctx);
+        group::group_window(self, ctx);
         log_window::draw_log_window(self, ctx);
     }
 }
 
 impl CpuAffinityApp {
+    pub fn reset_group_form(&mut self) {
+        self.edit_group_index = None;
+        self.edit_group_selection = None;
+        self.show_group_window = false;
+        self.new_group_name.clear();
+        self.core_selection.fill(false);
+    }
+    
     fn toggle_theme(&mut self, ctx: &egui::Context) {
         self.theme_index = (self.theme_index + 1) % 3;
         let visuals = match self.theme_index {

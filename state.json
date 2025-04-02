@@ -1,14 +1,16 @@
 {
   "groups": [
     {
-      "name": "123",
+      "name": "12312",
       "cores": [
-        17,
-        27
+        2,
+        8,
+        19,
+        23,
+        24,
+        29
       ],
-      "programs": [
-        "C:\\Users\\Anton Rudy\\Desktop\\Spotify.lnk"
-      ]
+      "programs": []
     }
   ]
 }
