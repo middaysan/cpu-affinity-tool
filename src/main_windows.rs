@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod app;
 use app::CpuAffinityApp;
 
@@ -15,6 +17,6 @@ fn main() {
     );
 
     if let Err(_) = res {
-        std::process::exit(1)
+        std::process::exit(1);
     }
 }

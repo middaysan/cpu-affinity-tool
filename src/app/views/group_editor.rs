@@ -4,8 +4,7 @@ use crate::app::CpuAffinityApp;
 pub fn group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     if app.show_group_window {
         create_group_window(app, ctx);
-    }
-    if app.edit_group_index.is_some() {
+    } else if app.edit_group_index.is_some() {
         edit_group_window(app, ctx);
     }
 }

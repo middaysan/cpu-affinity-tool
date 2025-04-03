@@ -2,9 +2,19 @@
 name = "coreman"
 version = "0.1.0"
 edition = "2021"
+default-run = "coreman"
 
 [package.metadata.winres]
 manifest = "app.manifest"
+
+[[bin]]
+name = "coreman"
+path = "src/main_windows.rs"
+
+[[bin]]
+name = "coreman_linux"
+path = "src/main_linux.rs"
+required-features = ["linux"]
 
 [profile.dev]
 opt-level = 3               # Use slightly better optimizations.
@@ -16,10 +26,7 @@ num_cpus = "1.16"
 rfd = "0.15.3"
 parselnk = "0.1.1"
 shlex = "1.3.0"
-windows = { version = "0.61.1", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Security", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"]   }
+windows = { version = "0.61.1", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Security", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-once_cell = "1.21.3"
-lazy_static = "1.5.0"
-tokio = { version = "1.44.1", features = ["sync", "rt", "macros"] }
 libc = "0.2.171"

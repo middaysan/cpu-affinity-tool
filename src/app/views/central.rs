@@ -1,5 +1,5 @@
 use eframe::egui::{self, RichText, CentralPanel, ScrollArea, Frame, Layout};
-use crate::app::CpuAffinityApp;
+use crate::app::{app_state::AppToRun, CpuAffinityApp};
 
 pub fn draw_central_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     CentralPanel::default().show(ctx, |ui| {
@@ -7,22 +7,6 @@ pub fn draw_central_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
         ScrollArea::vertical().show(ui, |ui| {
             dropped_assigned = render_groups(app, ui, ctx);
         });
-
-        if let Some(dropped) = &app.dropped_file {
-            if !dropped_assigned {
-                ui.separator();
-                ui.label(RichText::new("Dropped file:").strong());
-                ui.label(dropped.display().to_string());
-                for group in &mut app.state.groups {
-                    if ui.button(format!("Add to group '{}'", group.name)).clicked() {
-                        group.programs.push(dropped.clone());
-                        app.dropped_file = None;
-                        app.state.save_state();
-                        break;
-                    }
-                }
-            }
-        }
     });
 }
 
@@ -31,11 +15,10 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
     let mut modified = false;
 
     app.state.groups.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    
-    // Take ownership of dropped_file to avoid borrowing conflicts
+
     let dropped_file = app.dropped_file.take();
     let mut edit_index = None;
-    let mut run_program: Option<(usize, std::path::PathBuf)> = None;
+    let mut run_program: Option<(usize, AppToRun)> = None;
     let mut remove_program: Option<(usize, std::path::PathBuf)> = None;
 
     for (i, group) in app.state.groups.iter_mut().enumerate() {
@@ -48,9 +31,11 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                         if ui.button("⚙").on_hover_text("Edit group settings").clicked() {
                             edit_index = Some(i);
                         }
+
+                        // TODO: add linux support
                         if ui.button("📁add").on_hover_text("Add executables...").clicked() {
                             if let Some(paths) = rfd::FileDialog::new().add_filter("Executables", &["exe", "lnk"]).pick_files() {
-                                group.programs.extend(paths);
+                                group.add_app_to_group(paths);
                                 modified = true;
                             }
                         }
@@ -61,26 +46,39 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
 
                 ScrollArea::vertical().id_salt(i).show(ui, |ui| {
                     if group.programs.is_empty() {
-                        ui.label("No executables. Drag & drop to add.");
+                        ui.label("No executables. Drag & drop a file here to add.");
                     } else {
                         for prog in group.programs.clone() {
-                            let label = prog.file_name().map_or_else(|| prog.display().to_string(), |n| n.to_string_lossy().to_string());
+                            let label = prog.name.clone();
                             ui.horizontal(|ui| {
+                                // Set a fixed width for the entire row
+                                let available_width = ui.available_width();
+                                
+                                // Create the main button with most of the width
                                 let app_name = format!("▶  {}", label);
                                 let button = egui::Button::new(RichText::new(app_name));
                                 let response = ui.add_sized([
-                                    ui.available_width() - 30.0,
+                                    available_width - 70.0, // Reserve space for the two buttons
                                     24.0
                                 ], button);
 
-                                let delete = ui.button("❌").on_hover_text("Remove from group");
+                                // Add the two action buttons with fixed widths
+                                let edit_settings = ui.add_sized([24.0, 24.0], egui::Button::new("⚙"))
+                                    .on_hover_text("Edit app settings");
+                                let delete = ui.add_sized([24.0, 24.0], egui::Button::new("❌"))
+                                    .on_hover_text("Remove from group");
 
-                                if response.on_hover_text(prog.to_str().unwrap_or("")).clicked() {
+                                if response.on_hover_text(prog.bin_path.to_str().unwrap_or("")).clicked() {
                                     run_program = Some((i, prog.clone()));
                                 }
                                 if delete.clicked() {
-                                    remove_program = Some((i, prog.clone()));
+                                    remove_program = Some((i, prog.bin_path.clone()));
                                     modified = true;
+                                }
+                                if edit_settings.clicked() {
+                                    let prog_index = group.programs.clone().iter().position(|p| p.bin_path == prog.bin_path).unwrap_or_default();
+                                    app.edit_app_to_run_settings = Some((i, prog_index));
+                                    app.show_app_run_settings = true;
                                 }
                             });
                         }
@@ -90,7 +88,7 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                 if let Some(dropped) = &dropped_file {
                     let rect = ui.min_rect();
                     if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
-                        group.programs.push(dropped.clone());
+                        group.add_app_to_group(vec![dropped.clone()]);
                         dropped_assigned = true;
                         modified = true;
                     }

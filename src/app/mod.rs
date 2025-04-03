@@ -1,10 +1,12 @@
 mod app_state;
 mod os_cmd;
+use os_cmd::{OsCmd, OsCmdTrait};
 
+use app_state::AppToRun;
 use eframe::egui;
 
 mod views;
-use views::{header, central, group_editor, logs};
+use views::{run_settings, central, group_editor, header, logs};
 
 pub struct CpuAffinityApp {
     state: app_state::AppState,
@@ -12,6 +14,9 @@ pub struct CpuAffinityApp {
     new_group_name: String,
     dropped_file: Option<std::path::PathBuf>,
     show_group_window: bool,
+    show_app_run_settings: bool,
+    edit_app_clone: Option<AppToRun>,
+    edit_app_to_run_settings: Option<(usize, usize)>,
     theme_index: usize,
     log_text: Vec<String>,
     show_log_window: bool,
@@ -27,6 +32,9 @@ impl Default for CpuAffinityApp {
             new_group_name: String::new(),
             dropped_file: None,
             show_group_window: false,
+            show_app_run_settings: false,
+            edit_app_to_run_settings: None,
+            edit_app_clone: None,
             log_text: Vec::new(),
             theme_index: 0,
             show_log_window: false,
@@ -42,6 +50,7 @@ impl eframe::App for CpuAffinityApp {
             self.dropped_file = Some(path);
         }
 
+        run_settings::draw_app_run_settings(self, ctx);
         header::draw_top_panel(self, ctx);
         central::draw_central_panel(self, ctx);
         group_editor::group_window(self, ctx);
@@ -99,21 +108,22 @@ impl CpuAffinityApp {
 
     pub fn remove_app_from_group(&mut self, group_index: usize, prog_path: &std::path::Path) {
         if let Some(group) = self.state.groups.get_mut(group_index) {
-            group.programs.retain(|p| p != prog_path);
+            group.programs.retain(|p| p.bin_path != prog_path);
+            self.edit_app_clone = None;
             self.state.save_state();
         }
     }
 
-    pub fn run_app_with_affinity(&mut self, group_index: usize, prog_path: std::path::PathBuf) {
+    pub fn run_app_with_affinity(&mut self, group_index: usize, app_to_run: AppToRun) {
         let groups = self.state.groups.clone();
         let group = match groups.get(group_index) {
             Some(g) => g,
             None => return,
         };
-        
-        let label = prog_path.file_name()
-            .map_or_else(|| prog_path.display().to_string(), |n| n.to_string_lossy().to_string());
-        
+
+        let label = app_to_run.bin_path.file_name()
+            .map_or_else(|| app_to_run.bin_path.display().to_string(), |n| n.to_string_lossy().to_string());
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
@@ -121,10 +131,10 @@ impl CpuAffinityApp {
             (now.as_secs() % 86400) / 3600, 
             (now.as_secs() % 3600) / 60, 
             now.as_secs() % 60);
-        
-        self.add_to_log(format!("[{}] Starting '{}', app: {}", ts, label, prog_path.display()));
 
-        match os_cmd::PlatformSystemCMD::run(prog_path.clone(), &group.cores) {
+        self.add_to_log(format!("[{}] Starting '{}', app: {}", ts, label, app_to_run.display()));
+
+        match OsCmd::run(app_to_run.bin_path, app_to_run.args, &group.cores) {
             Ok(_) => self.add_to_log(format!("[{}] OK: started '{}'", ts, label)),
             Err(e) => self.add_to_log(format!("[{}] ERROR: {}", ts, e)),
         }

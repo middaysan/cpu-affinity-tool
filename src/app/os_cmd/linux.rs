@@ -5,8 +5,14 @@ use libc::{cpu_set_t, CPU_SET, CPU_ZERO, sched_setaffinity, pid_t};
 use std::mem::MaybeUninit;
 use std::io::Error;
 
-impl PlatformSystemCMD {
-    pub fn run(file_path: PathBuf, cores: &[usize]) -> Result<(), String> {
+pub struct OsCmd;
+
+impl super::OsCmdTrait for OsCmd {
+    fn parse_dropped_file(file_path: PathBuf) -> Option<(PathBuf, Vec<String>)> {
+        Some((file_path, Vec::new()))
+    }
+
+    fn run(file_path: PathBuf, args: Vec<String>, cores: &[usize]) {
         let mut cmd = Command::new(&file_path);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
