@@ -26,43 +26,56 @@ fn draw_group_form_ui(
 
     ui.label("Select CPU cores:");
     ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.5;
+        ui.spacing_mut().item_spacing.y = 0.5;
         for (i, selected) in core_selection.iter_mut().enumerate() {
+            let selected_color = if ui.visuals().dark_mode {
+                egui::Color32::from_rgb(61, 79, 3)
+            } else {
+                egui::Color32::from_rgb(175, 191, 124)
+            };
+            let unselected_color = if ui.visuals().dark_mode {
+                egui::Color32::DARK_GRAY
+            } else {
+                egui::Color32::GRAY
+            };
+            
             let button = egui::Button::new(format!("Core {}", i))
-                .fill(if *selected { egui::Color32::LIGHT_BLUE } else { egui::Color32::DARK_GRAY });
-            if ui.add(button).clicked() {
+                .min_size(egui::vec2(70.0, 20.0))
+                .fill(
+                    if *selected { selected_color } else { unselected_color }
+                );
+            let ui_button = ui.add(button);
+            if ui_button.clicked() {
                 *selected = !*selected;
             }
         }
     });
 
     ui.separator();
+
     ui.horizontal(|ui| {
+        if ui.button("💾 Save").clicked() {
+            on_save();
+        }
+
+        if ui.button("❌ Cancel").clicked() {
+            on_cancel();
+        }
+
+        ui.separator();
+
         if is_edit {
-            if ui.button("💾 Save").clicked() {
-                on_save();
-            }
             if let Some(delete_fn) = on_delete {
                 if ui.button("❌ Delete Group").clicked() {
                     delete_fn();
                 }
-            }
-            if ui.button("Cancel").clicked() {
-                on_cancel();
-            }
-        } else {
-            if ui.button("✅ Create").clicked() {
-                on_save();
-            }
-            if ui.button("❌ Cancel").clicked() {
-                on_cancel();
             }
         }
     });
 }
 pub fn create_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     let mut open = true;
-    let mut name = app.new_group_name.clone();
-    let mut selection = app.core_selection.clone();
     let mut create_clicked = false;
     let mut cancel_clicked = false;
 
@@ -70,8 +83,8 @@ pub fn create_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
         .open(&mut open)
         .show(ctx, |ui| {
             draw_group_form_ui(ui,
-                &mut name,
-                &mut selection,
+                &mut app.new_group_name,
+                &mut app.core_selection,
                 false,
                 &mut || create_clicked = true,
                 &mut || cancel_clicked = true,
@@ -79,12 +92,7 @@ pub fn create_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             );
         });
 
-    let name_clone = name.clone();
-    let selection_clone = selection.clone();
-
     if create_clicked {
-        app.new_group_name = name;
-        app.core_selection = selection;
         app.create_group();
         app.reset_group_form();
     }
@@ -95,9 +103,6 @@ pub fn create_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
 
     if !open {
         app.reset_group_form();
-    } else {
-        app.new_group_name = name_clone;
-        app.core_selection = selection_clone;
     }
 }
 
@@ -122,7 +127,6 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     }
 
     let mut open = true;
-    let mut selection = app.edit_group_selection.clone().unwrap();
 
     Window::new("Edit Group Settings")
         .open(&mut open)
@@ -134,7 +138,7 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             draw_group_form_ui(
                 ui,
                 &mut app.state.groups[index].name,
-                &mut selection,
+                &mut app.edit_group_selection.as_mut().unwrap(),
                 true,
                 &mut || save_clicked = true,
                 &mut || cancel_clicked = true,
@@ -142,10 +146,12 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             );
 
             if save_clicked {
-                app.state.groups[index].cores = selection
+                app.state.groups[index].cores = app.edit_group_selection
+                    .as_ref()
+                    .unwrap()
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, &v)| if v { Some(i) } else { None })
+                    .filter_map(|(i, &selected)| if selected { Some(i) } else { None })
                     .collect();
                 app.state.save_state();
                 app.reset_group_form();
@@ -156,7 +162,7 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
                 app.state.save_state();
                 app.reset_group_form();
             }
-            
+
             if cancel_clicked {
                 app.reset_group_form();
             }
@@ -165,8 +171,5 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     if !open {
         app.edit_group_index = None;
         app.edit_group_selection = None;
-    } else {
-        // сохранить временное состояние обратно
-        app.edit_group_selection = Some(selection);
     }
 }

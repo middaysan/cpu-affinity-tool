@@ -104,10 +104,10 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
         app.edit_group_index = Some(index);
     }
     if let Some((index, prog)) = run_program {
-        app.run_program_with_affinity(index, prog);
+        app.run_app_with_affinity(index, prog);
     }
     if let Some((index, prog)) = remove_program {
-        app.remove_program_from_group(index, &prog);
+        app.remove_app_from_group(index, &prog);
     }
     
     // Only put dropped_file back if it wasn't assigned to a group

@@ -1,5 +1,5 @@
 
-pub mod main_header;
-pub mod main_central;
-pub mod group;
-pub mod log_window;
+pub mod header;
+pub mod central;
+pub mod group_editor;
+pub mod logs;

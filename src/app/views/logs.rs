@@ -1,7 +1,7 @@
 use eframe::egui::{self, RichText, Window, ScrollArea, Color32};
 use crate::app::CpuAffinityApp;
 
-pub fn draw_log_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
+pub fn draw_logs_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     if !app.show_log_window {
         return;
     }
