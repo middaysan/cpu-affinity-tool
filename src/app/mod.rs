@@ -1,11 +1,13 @@
+mod app_state;
+mod os_cmd;
+
 use eframe::egui;
-use crate::models::{AppState, CoreGroup};
 
 mod views;
 use views::{header, central, group_editor, logs};
 
 pub struct CpuAffinityApp {
-    state: AppState,
+    state: app_state::AppState,
     core_selection: Vec<bool>,
     new_group_name: String,
     dropped_file: Option<std::path::PathBuf>,
@@ -20,7 +22,7 @@ pub struct CpuAffinityApp {
 impl Default for CpuAffinityApp {
     fn default() -> Self {
         Self {
-            state: AppState::load_state(),
+            state: app_state::AppState::load_state(),
             core_selection: vec![false; num_cpus::get()],
             new_group_name: String::new(),
             dropped_file: None,
@@ -56,7 +58,7 @@ impl CpuAffinityApp {
         self.core_selection.fill(false);
     }
 
-    fn toggle_theme(&mut self, ctx: &egui::Context) {
+    pub fn toggle_theme(&mut self, ctx: &egui::Context) {
         self.theme_index = (self.theme_index + 1) % 3;
         ctx.set_visuals(match self.theme_index {
             0 => egui::Visuals::default(),
@@ -65,16 +67,23 @@ impl CpuAffinityApp {
         });
     }
 
-    fn create_group(&mut self) {
+    pub fn create_group(&mut self) {
         let name_str = self.new_group_name.trim();
-        if name_str.is_empty() { return; }
+        if name_str.is_empty() { 
+            self.add_to_log("Group name cannot be empty".to_string());
+            return; 
+        }
 
         let cores: Vec<_> = self.core_selection.iter().enumerate()
             .filter_map(|(i, &v)| v.then_some(i))
             .collect();
-        if cores.is_empty() { return; }
 
-        self.state.groups.push(CoreGroup {
+        if cores.is_empty() { 
+            self.add_to_log("At least one core must be selected".to_string());
+            return; 
+        }
+
+        self.state.groups.push(app_state::CoreGroup {
             name: name_str.to_string(),
             cores,
             programs: vec![],
@@ -84,18 +93,18 @@ impl CpuAffinityApp {
         self.state.save_state();
     }
 
-    fn add_to_log(&mut self, message: String) {
+    pub fn add_to_log(&mut self, message: String) {
         self.log_text.push(message);
     }
 
-    fn remove_app_from_group(&mut self, group_index: usize, prog_path: &std::path::Path) {
+    pub fn remove_app_from_group(&mut self, group_index: usize, prog_path: &std::path::Path) {
         if let Some(group) = self.state.groups.get_mut(group_index) {
             group.programs.retain(|p| p != prog_path);
             self.state.save_state();
         }
     }
 
-    fn run_app_with_affinity(&mut self, group_index: usize, prog_path: std::path::PathBuf) {
+    pub fn run_app_with_affinity(&mut self, group_index: usize, prog_path: std::path::PathBuf) {
         let groups = self.state.groups.clone();
         let group = match groups.get(group_index) {
             Some(g) => g,
@@ -115,7 +124,7 @@ impl CpuAffinityApp {
         
         self.add_to_log(format!("[{}] Starting '{}', app: {}", ts, label, prog_path.display()));
 
-        match crate::affinity::run_with_affinity(prog_path.clone(), &group.cores) {
+        match os_cmd::PlatformSystemCMD::run(prog_path.clone(), &group.cores) {
             Ok(_) => self.add_to_log(format!("[{}] OK: started '{}'", ts, label)),
             Err(e) => self.add_to_log(format!("[{}] ERROR: {}", ts, e)),
         }
