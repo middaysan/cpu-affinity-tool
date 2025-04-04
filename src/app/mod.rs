@@ -12,6 +12,7 @@ pub struct CpuAffinityApp {
     state: app_state::AppState,
     core_selection: Vec<bool>,
     new_group_name: String,
+    enable_run_all_button: bool,
     dropped_file: Option<std::path::PathBuf>,
     show_group_window: bool,
     show_app_run_settings: bool,
@@ -31,6 +32,7 @@ impl Default for CpuAffinityApp {
             state: state,
             core_selection: vec![false; num_cpus::get()],
             new_group_name: String::new(),
+            enable_run_all_button: false,
             dropped_file: None,
             show_group_window: false,
             show_app_run_settings: false,
@@ -63,6 +65,7 @@ impl CpuAffinityApp {
     pub fn reset_group_form(&mut self) {
         self.edit_group_index = None;
         self.edit_group_selection = None;
+        self.enable_run_all_button = false;
         self.show_group_window = false;
         self.new_group_name.clear();
         self.core_selection.fill(false);
@@ -97,7 +100,7 @@ impl CpuAffinityApp {
             name: name_str.to_string(),
             cores,
             programs: vec![],
-            run_all_button: false,
+            run_all_button: self.enable_run_all_button,
         });
 
         self.reset_group_form();

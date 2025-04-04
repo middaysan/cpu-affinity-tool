@@ -9,7 +9,7 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     let was_open = app.show_app_run_settings;
     let mut need_to_close = false;
 
-    Window::new("App run settings")
+    Window::new("App's Running Settings")
         .resizable(true)
         .open(&mut app.show_app_run_settings)
         .show(ctx, |ui| {
@@ -102,13 +102,11 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
         });
 
     if need_to_close {
-        println!("Save or Cancel clicked");
         app.show_app_run_settings = false;
         app.edit_app_clone = None;
     }
 
     if was_open && !app.show_app_run_settings {
-        println!("Window closed");
         app.edit_app_clone = None;
     }
 }

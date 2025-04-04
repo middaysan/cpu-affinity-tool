@@ -18,6 +18,7 @@ fn draw_group_form_ui(
     core_selection: &mut Vec<bool>,
     clusters: &mut Vec<Vec<usize>>,
     is_edit: bool,
+    enable_run_all_button: &mut bool,
     on_save: &mut dyn FnMut(),
     on_cancel: &mut dyn FnMut(),
     on_delete: Option<&mut dyn FnMut()>,
@@ -26,6 +27,12 @@ fn draw_group_form_ui(
 
     ui.spacing_mut().item_spacing.y = 10.0;
     draw_group_name_ui(ui, group_name);
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Enable run all button:");
+        ui.checkbox(enable_run_all_button, "Run all apps in group");
+    });
+
     ui.separator();
     draw_cpu_cores_ui(ui, core_selection, clusters);
     ui.separator();
@@ -88,22 +95,23 @@ fn draw_cpu_cores_ui(ui: &mut egui::Ui, core_selection: &mut Vec<bool>, clusters
     ui.group(|ui| {
         ui.label("Free Cores");
         draw_core_buttons(ui, core_selection, &mut free_core_indexes.clone(), selected_color, unselected_color);
-    });
-
-    if ui.button("➕ Add New Cluster").clicked() {
-        let new_cluster: Vec<usize> = free_core_indexes
-            .into_iter()
-            .filter(|&i| core_selection[i])
-            .collect();
-        if !new_cluster.is_empty() {
-            clusters.push(new_cluster);
-            if let Some(last) = clusters.last() {
-                for &i in last {
-                    core_selection[i] = false;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+            if ui.button("➕ Add New Cluster").on_hover_text("Add selected cores to a new cluster").clicked() {
+                let new_cluster: Vec<usize> = free_core_indexes
+                    .into_iter()
+                    .filter(|&i| core_selection[i])
+                    .collect();
+                if !new_cluster.is_empty() {
+                    clusters.push(new_cluster);
+                    if let Some(last) = clusters.last() {
+                        for &i in last {
+                            core_selection[i] = false;
+                        }
+                    }
                 }
             }
-        }
-    }
+        });
+    });
 }
 
 /// Rendering a set of buttons to toggle the state of cores in a given set (cluster or free cores).
@@ -175,6 +183,7 @@ pub fn create_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
                     &mut app.core_selection,
                     &mut app.state.clusters,
                     false,
+                    &mut app.enable_run_all_button,
                     &mut || create_clicked = true,
                     &mut || cancel_clicked = true,
                     None,
@@ -221,6 +230,7 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             let mut save_clicked = false;
             let mut delete_clicked = false;
             let mut cancel_clicked = false;
+            app.enable_run_all_button = app.state.groups[index].run_all_button;
 
             draw_group_form_ui(
                 ui,
@@ -228,10 +238,13 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
                 &mut app.edit_group_selection.as_mut().unwrap(),
                 &mut app.state.clusters,
                 true,
+                &mut app.enable_run_all_button,
                 &mut || save_clicked = true,
                 &mut || cancel_clicked = true,
                 Some(&mut || delete_clicked = true),
             );
+
+            app.state.groups[index].run_all_button = app.enable_run_all_button;
 
             if save_clicked {
                 let mut assigned: HashSet<usize> = app.state.clusters.iter().flatten().copied().collect();
@@ -241,6 +254,7 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
                     }
                 }
                 app.state.groups[index].cores = assigned.into_iter().collect();
+                app.state.groups[index].run_all_button = app.enable_run_all_button;
                 app.state.save_state();
                 app.reset_group_form();
             }
