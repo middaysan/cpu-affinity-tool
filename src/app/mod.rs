@@ -97,6 +97,7 @@ impl CpuAffinityApp {
             name: name_str.to_string(),
             cores,
             programs: vec![],
+            run_all_button: false,
         });
 
         self.reset_group_form();

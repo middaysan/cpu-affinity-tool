@@ -18,7 +18,7 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
 
     let dropped_file = app.dropped_file.take();
     let mut edit_index = None;
-    let mut run_program: Option<(usize, AppToRun)> = None;
+    let mut run_program: Option<Vec<(usize, AppToRun)>> = None;
     let mut remove_program: Option<(usize, std::path::PathBuf)> = None;
 
     for (i, group) in app.state.groups.iter_mut().enumerate() {
@@ -33,7 +33,7 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                         }
 
                         // TODO: add linux support
-                        if ui.button("📁add").on_hover_text("Add executables...").clicked() {
+                        if ui.button("📁Add").on_hover_text("Add executables...").clicked() {
                             if let Some(paths) = rfd::FileDialog::new().add_filter("Executables", &["exe", "lnk"]).pick_files() {
                                 app.log_text.push(format!("Adding executables to group: {}, paths: {:?}", group.name, paths));
                                 let res = group.add_app_to_group(paths);
@@ -43,6 +43,18 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                                     app.log_text.push(format!("Added executables to group: {}", group.name));
                                 }
                                 modified = true;
+                            }
+                        }
+
+                        if group.run_all_button {
+                            if ui.button("▶ Run all").on_hover_text("Run all apps in group").clicked() {
+                                if group.programs.is_empty() {
+                                    app.log_text.push(format!("No executables to run in group: {}", group.name));
+                                } else {
+                                    for prog in &group.programs {
+                                        run_program.get_or_insert_with(Vec::new).push((i, prog.clone()));
+                                    }
+                                }
                             }
                         }
                     });
@@ -75,7 +87,7 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                                     .on_hover_text("Remove from group");
 
                                 if response.on_hover_text(prog.bin_path.to_str().unwrap_or("")).clicked() {
-                                    run_program = Some((i, prog.clone()));
+                                    run_program = Some(vec![(i, prog.clone())]);
                                 }
                                 if delete.clicked() {
                                     remove_program = Some((i, prog.bin_path.clone()));
@@ -111,9 +123,13 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
     if let Some(index) = edit_index {
         app.edit_group_index = Some(index);
     }
-    if let Some((index, prog)) = run_program {
-        app.run_app_with_affinity(index, prog);
+
+    if let Some(programs) = run_program {
+        for (index, prog) in programs {
+            app.run_app_with_affinity(index, prog);
+        }
     }
+
     if let Some((index, prog)) = remove_program {
         app.remove_app_from_group(index, &prog);
     }

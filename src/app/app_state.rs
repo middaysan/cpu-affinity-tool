@@ -40,6 +40,7 @@ pub struct CoreGroup {
     pub name: String,
     pub cores: Vec<usize>,
     pub programs: Vec<AppToRun>,
+    pub run_all_button: bool,
 }
 
 impl CoreGroup {
