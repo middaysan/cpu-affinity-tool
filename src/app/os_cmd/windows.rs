@@ -21,7 +21,7 @@ impl super::OsCmdTrait for super::OsCmd {
     }
 
     fn run(file_path: PathBuf, args: Vec<String>, cores: &[usize]) -> Result<(), String> {
-        let affinity_mask = build_affinity_mask(cores);
+        let affinity_mask = cores.iter().map(|&i| 1 << i).sum();
         let child = spawn_process(&file_path, &args)?;
         apply_affinity(&child, affinity_mask)?;
 
@@ -35,10 +35,6 @@ fn resolve_target_with_args(lnk_path: &PathBuf) -> Option<(PathBuf, Vec<String>)
     let args = link.string_data.command_line_arguments.unwrap_or_default();
     let split_args = shlex::split(&args).unwrap_or_else(|| vec![args]);
     Some((target, split_args))
-}
-
-fn build_affinity_mask(cores: &[usize]) -> usize {
-    cores.iter().map(|&i| 1 << i).sum()
 }
 
 fn spawn_process(target: &PathBuf, args: &[String]) -> Result<Child, String> {
