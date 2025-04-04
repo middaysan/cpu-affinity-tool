@@ -1,6 +1,6 @@
 mod app_state;
 mod os_cmd;
-use os_cmd::{OsCmd, OsCmdTrait};
+use os_cmd::{OsCmd, OsCmdTrait, PriorityClass};
 
 use app_state::AppToRun;
 use eframe::egui;
@@ -135,7 +135,7 @@ impl CpuAffinityApp {
 
         self.add_to_log(format!("[{}] Starting '{}', app: {}", ts, label, app_to_run.display()));
 
-        match OsCmd::run(app_to_run.bin_path, app_to_run.args, &group.cores) {
+        match OsCmd::run(app_to_run.bin_path, app_to_run.args, &group.cores, app_to_run.priority) {
             Ok(_) => self.add_to_log(format!("[{}] OK: started '{}'", ts, label)),
             Err(e) => self.add_to_log(format!("[{}] ERROR: {}", ts, e)),
         }

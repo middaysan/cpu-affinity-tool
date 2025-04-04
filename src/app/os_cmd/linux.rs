@@ -1,3 +1,4 @@
+// os_cmd_unix.rs
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::os::unix::process::CommandExt;
@@ -12,10 +13,13 @@ impl super::OsCmdTrait for OsCmd {
         Some((file_path, Vec::new()))
     }
 
-    fn run(file_path: PathBuf, args: Vec<String>, cores: &[usize]) {
+    fn run(file_path: PathBuf, args: Vec<String>, cores: &[usize], _priority: super::PriorityClass) -> Result<(), String> {
         let mut cmd = Command::new(&file_path);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        if !args.is_empty() {
+            cmd.args(&args);
+        }
 
         let child = cmd.spawn()
             .map_err(|e| format!("Failed to spawn process {:?}: {}", file_path, e))?;
@@ -34,7 +38,6 @@ impl super::OsCmdTrait for OsCmd {
             }
         }
 
-        println!("Affinity set. Process started: {:?}", file_path);
         Ok(())
     }
 }

@@ -35,7 +35,13 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                         // TODO: add linux support
                         if ui.button("📁add").on_hover_text("Add executables...").clicked() {
                             if let Some(paths) = rfd::FileDialog::new().add_filter("Executables", &["exe", "lnk"]).pick_files() {
-                                group.add_app_to_group(paths);
+                                app.log_text.push(format!("Adding executables to group: {}, paths: {:?}", group.name, paths));
+                                let res = group.add_app_to_group(paths);
+                                if let Err(err) = res {
+                                    app.log_text.push(format!("Error adding executables: {}", err));
+                                } else {
+                                    app.log_text.push(format!("Added executables to group: {}", group.name));
+                                }
                                 modified = true;
                             }
                         }
@@ -88,7 +94,11 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                 if let Some(dropped) = &dropped_file {
                     let rect = ui.min_rect();
                     if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
-                        group.add_app_to_group(vec![dropped.clone()]);
+                        if let Err(err) = group.add_app_to_group(vec![dropped.clone()]) {
+                            app.log_text.push(format!("Error adding executables: {}", err));
+                        } else {
+                            app.log_text.push(format!("Added executables to group: {}", group.name));
+                        }
                         dropped_assigned = true;
                         modified = true;
                     }

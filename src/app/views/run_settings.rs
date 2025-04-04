@@ -26,7 +26,7 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             let selected_app = app
                 .edit_app_clone
                 .as_mut()
-                .expect("edit_app_clone должна быть инициализирована");
+                .expect("edit_app_clone must be initialized");
 
             ui.horizontal(|ui| {
                 ui.label("App name:");
@@ -46,6 +46,20 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
                         selected_app.bin_path = paths.clone();
                     }
                 }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Priority:");
+                egui::ComboBox::from_label("")
+                    .selected_text(format!("{:?}", selected_app.priority))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::Idle, "Idle");
+                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::BelowNormal, "Below Normal");
+                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::Normal, "Normal");
+                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::AboveNormal, "Above Normal");
+                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::High, "High");
+                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::Realtime, "RealTime");
+                    });
             });
 
             ui.label("Arguments:");

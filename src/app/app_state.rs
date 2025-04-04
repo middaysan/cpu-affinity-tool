@@ -1,4 +1,4 @@
-use super::os_cmd::{OsCmd, OsCmdTrait};
+use super::os_cmd::{OsCmd, OsCmdTrait, PriorityClass};
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -9,10 +9,11 @@ pub struct AppToRun {
     pub dropped_path: PathBuf,
     pub args: Vec<String>,
     pub bin_path: PathBuf,
+    pub priority: PriorityClass,
 }
 
 impl AppToRun {
-    pub fn new(dropped_path: PathBuf, args: Vec<String>, bin_path: PathBuf) -> Self {
+    pub fn new(dropped_path: PathBuf, args: Vec<String>, bin_path: PathBuf, priority: PriorityClass) -> Self {
         let name = dropped_path.file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("Unknown")
@@ -24,12 +25,13 @@ impl AppToRun {
             name,
             dropped_path, 
             args, 
-            bin_path 
+            bin_path,
+            priority,
         }
     }
 
     pub fn display(&self) -> String {
-        format!("{} {}(src: {})", self.bin_path.display(), self.args.join(" "), self.dropped_path.display())
+        format!("{} {}(src: {}) P({:?})", self.bin_path.display(), self.args.join(" "), self.dropped_path.display(), self.priority)
     }
 }
 
@@ -41,31 +43,37 @@ pub struct CoreGroup {
 }
 
 impl CoreGroup {
-    pub fn add_app_to_group(&mut self, dropped_paths: Vec<std::path::PathBuf>) {
+    pub fn add_app_to_group(&mut self, dropped_paths: Vec<std::path::PathBuf>) -> Result<(), String> {
         if dropped_paths.is_empty() {
-            return;
+            return Ok(());
         }
 
         for path in dropped_paths {
             let parsed_app_file = OsCmd::parse_dropped_file(path.clone());
 
-            if let Some((target, args)) = parsed_app_file {
-                let app_to_run = AppToRun::new(
-                    path, 
-                    args, 
-                    target
-                );
+            match parsed_app_file {
+                Ok((target, args)) => {
+                    let app_to_run = AppToRun::new(
+                        path, 
+                        args, 
+                        target,
+                        PriorityClass::Normal,
+                    );
 
-                self.programs.push(app_to_run);
+                    self.programs.push(app_to_run);
+                },
+                Err(err) => return Err(err),
             }
         }
+
+        Ok(())
     }
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct AppState {
     pub groups: Vec<CoreGroup>,
-    pub cluster_cores_indexes: Vec<usize>,
+    pub clusters: Vec<Vec<usize>>,
 }
 
 impl AppState {
@@ -77,7 +85,7 @@ impl AppState {
 
         std::fs::read_to_string(&path).ok()
             .and_then(|data| serde_json::from_str::<AppState>(&data).ok())
-            .unwrap_or_else(|| AppState { groups: Vec::new(), cluster_cores_indexes: Vec::new() })
+            .unwrap_or_else(|| AppState { groups: Vec::new(), clusters: Vec::new() })
     }
 
     pub fn save_state(&self) {
