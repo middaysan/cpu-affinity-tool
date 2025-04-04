@@ -65,6 +65,7 @@ impl CoreGroup {
 #[derive(Serialize, Deserialize)]
 pub struct AppState {
     pub groups: Vec<CoreGroup>,
+    pub cluster_cores_indexes: Vec<usize>,
 }
 
 impl AppState {
@@ -76,7 +77,7 @@ impl AppState {
 
         std::fs::read_to_string(&path).ok()
             .and_then(|data| serde_json::from_str::<AppState>(&data).ok())
-            .unwrap_or_else(|| AppState { groups: vec![] })
+            .unwrap_or_else(|| AppState { groups: Vec::new(), cluster_cores_indexes: Vec::new() })
     }
 
     pub fn save_state(&self) {

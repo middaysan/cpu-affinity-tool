@@ -26,8 +26,9 @@ pub struct CpuAffinityApp {
 
 impl Default for CpuAffinityApp {
     fn default() -> Self {
+        let state = app_state::AppState::load_state();
         Self {
-            state: app_state::AppState::load_state(),
+            state: state,
             core_selection: vec![false; num_cpus::get()],
             new_group_name: String::new(),
             dropped_file: None,

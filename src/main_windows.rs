@@ -10,7 +10,7 @@ fn main() {
         "CPU Affinity Tool",
         NativeOptions {
             run_and_return: true,
-            viewport: eframe::egui::ViewportBuilder::default().with_min_inner_size([450.0, 200.0]),
+            viewport: eframe::egui::ViewportBuilder::default().with_min_inner_size([450.0, 600.0]),
             ..Default::default()
         },
         Box::new(|_cc| Ok(Box::new(CpuAffinityApp::default()))),
