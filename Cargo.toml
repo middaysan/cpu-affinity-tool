@@ -1,18 +1,18 @@
 [package]
-name = "coreman"
+name = "cpu-affinity-tool" 
 version = "0.1.0"
 edition = "2021"
-default-run = "coreman"
+default-run = "cpu-affinity-tool"
 
 [package.metadata.winres]
 manifest = "app.manifest"
 
 [[bin]]
-name = "coreman"
+name = "cpu-affinity-tool" 
 path = "src/main_windows.rs"
 
 [[bin]]
-name = "coreman_linux"
+name = "cpu-affinity-tool-linux" 
 path = "src/main_linux.rs"
 required-features = ["linux"]
 
