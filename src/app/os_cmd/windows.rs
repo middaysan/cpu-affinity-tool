@@ -37,18 +37,31 @@ impl super::OsCmdTrait for OsCmd {
 }
 
 fn resolve_target_with_args(lnk_path: &PathBuf) -> Result<(PathBuf, Vec<String>), String> {
-    let link = Lnk::try_from(lnk_path.as_path())
-        .map_err(|e| format!("Failed to open LNK file {:?}: {}", lnk_path, e))?;
+    // Пытаемся открыть ярлык
+    let link = Lnk::try_from(lnk_path.as_path()).map_err(|e| format!("Failed to open LNK file {:?}: {}", lnk_path, e)).unwrap();
     
-    let target = link.link_info.local_base_path
-        .clone()
-        .map(PathBuf::from)
-        .ok_or_else(|| format!("The LNK file {:?} does not specify a path to the target file", lnk_path))?;
-    
+    // 1. Пытаемся взять путь из link_info.local_base_path
+    let target = if let Some(ref path) = link.link_info.local_base_path {
+        PathBuf::from(path)
+    } else if let Some(ref rel_path) = link.string_data.relative_path {
+        if rel_path.is_absolute() {
+            PathBuf::from(rel_path)
+        } else if let Some(ref work_dir) = link.string_data.working_dir {
+            PathBuf::from(work_dir).join(rel_path)
+        } else {
+            PathBuf::from(rel_path)
+        }
+    } else {
+        return Err(format!(
+            "The LNK file {:?} does not specify an extractable target path (LinkTargetIdList parsing not implemented)",
+            lnk_path
+        ));
+    };
+
+    // Обработка аргументов
     let args = link.string_data.command_line_arguments.unwrap_or_default();
-    let split_args = shlex::split(&args)
-        .unwrap_or_else(|| vec![args]);
-    
+    let split_args = shlex::split(&args).unwrap_or_else(|| vec![args]);
+
     Ok((target, split_args))
 }
 
