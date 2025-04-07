@@ -14,17 +14,33 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
     let mut dropped_assigned = false;
     let mut modified = false;
 
-    app.state.groups.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-
     let dropped_file = app.dropped_file.take();
     let mut edit_index = None;
     let mut run_program: Option<Vec<(usize, AppToRun)>> = None;
     let mut remove_program: Option<(usize, std::path::PathBuf)> = None;
-
-    for (i, group) in app.state.groups.iter_mut().enumerate() {
+    
+    let mut swap_step: Option<(usize, bool)> = None;
+    let groups_len = app.state.groups.len();
+    
+    for i in 0..groups_len {
+        let group = &mut app.state.groups[i];
         Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        if i > 0 {
+                            ui.small_button("⬆").on_hover_text("Move group up").clicked().then(|| {
+                                swap_step = Some((i, true));
+                            });
+                        }
+
+                        if i < groups_len - 1 {
+                            ui.small_button("⬇").on_hover_text("Move group down").clicked().then(|| {
+                                swap_step = Some((i, false));
+                            });
+                        }
+                    });
                     ui.label(RichText::new(&group.name).heading())
                         .on_hover_text(RichText::new(format!("cores: {:?}", group.cores)).weak());
                     ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
@@ -117,6 +133,14 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                 }
             });
         });
+    }
+
+    if let Some((index, is_up)) = swap_step {
+        if is_up {
+            app.state.groups.swap(index, index - 1);
+        } else {
+            app.state.groups.swap(index + 1, index);
+        }
     }
 
     // Handle actions outside of the iterator

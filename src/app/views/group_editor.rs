@@ -87,31 +87,33 @@ fn draw_cpu_cores_ui(ui: &mut egui::Ui, core_selection: &mut Vec<bool>, clusters
     for (i, cluster) in clusters.iter_mut().enumerate() {
         ui.group(|ui| {
             ui.label(format!("Cluster {}", i + 1));
-            draw_core_buttons(ui, core_selection, cluster, selected_color, unselected_color);
+            draw_core_buttons(ui, core_selection, cluster, selected_color, unselected_color, true);
         });
-        ui.separator();
     }
 
-    ui.group(|ui| {
-        ui.label("Free Cores");
-        draw_core_buttons(ui, core_selection, &mut free_core_indexes.clone(), selected_color, unselected_color);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-            if ui.button("➕ Add New Cluster").on_hover_text("Add selected cores to a new cluster").clicked() {
-                let new_cluster: Vec<usize> = free_core_indexes
-                    .into_iter()
-                    .filter(|&i| core_selection[i])
-                    .collect();
-                if !new_cluster.is_empty() {
-                    clusters.push(new_cluster);
-                    if let Some(last) = clusters.last() {
-                        for &i in last {
-                            core_selection[i] = false;
+    if !free_core_indexes.is_empty() {
+        ui.separator();
+        ui.group(|ui| {
+            ui.label("Free Cores");
+            draw_core_buttons(ui, core_selection, &mut free_core_indexes.clone(), selected_color, unselected_color, false);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                if ui.button("➕ Add New Cluster").on_hover_text("Add selected cores to a new cluster").clicked() {
+                    let new_cluster: Vec<usize> = free_core_indexes
+                        .into_iter()
+                        .filter(|&i| core_selection[i])
+                        .collect();
+                    if !new_cluster.is_empty() {
+                        clusters.push(new_cluster);
+                        if let Some(last) = clusters.last() {
+                            for &i in last {
+                                core_selection[i] = false;
+                            }
                         }
                     }
                 }
-            }
+            });
         });
-    });
+    }
 }
 
 /// Rendering a set of buttons to toggle the state of cores in a given set (cluster or free cores).
@@ -122,6 +124,7 @@ fn draw_core_buttons(
     indexes: &mut Vec<usize>,
     selected_color: egui::Color32,
     unselected_color: egui::Color32,
+    is_clear_button: bool,
 ) {
     ui.horizontal(|ui| {
         let all_selected = indexes.iter().all(|&i| core_selection[i]);
@@ -143,8 +146,10 @@ fn draw_core_buttons(
             }
         }
 
-        if ui.button("Clear").clicked() {
-            indexes.clear();
+        if is_clear_button {
+            if ui.button("Clear").clicked() {
+                indexes.clear();
+            }
         }
     });
 
