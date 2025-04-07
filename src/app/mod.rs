@@ -5,26 +5,34 @@ use std::path::PathBuf;
 use os_cmd::{OsCmd, OsCmdTrait, PriorityClass};
 
 use app_state::AppToRun;
-use eframe::{egui, epaint::tessellator::Path};
+use eframe::egui;
 
 mod views;
 use views::{run_settings, central, group_editor, header, logs};
 
+pub struct Logs {
+    pub show: bool,
+    pub log_text: Vec<String>,
+}
+
+pub struct Groups {
+    edit_index: Option<usize>,
+    edit_selection: Option<Vec<bool>>,
+    core_selection: Vec<bool>,
+    new_name: String,
+    enable_run_all_button: bool,
+}
+
 pub struct CpuAffinityApp {
     state: app_state::AppState,
-    core_selection: Vec<bool>,
-    new_group_name: String,
+    groups: Groups,
     dropped_files: Option<Vec<PathBuf>>,
-    enable_run_all_button: bool,
     show_group_window: bool,
     show_app_run_settings: bool,
     edit_app_clone: Option<AppToRun>,
     edit_app_to_run_settings: Option<(usize, usize)>,
     theme_index: usize,
-    log_text: Vec<String>,
-    show_log_window: bool,
-    edit_group_index: Option<usize>,
-    edit_group_selection: Option<Vec<bool>>,
+    logs: Logs,
 }
 
 impl Default for CpuAffinityApp {
@@ -32,19 +40,23 @@ impl Default for CpuAffinityApp {
         let state = app_state::AppState::load_state();
         Self {
             state: state,
-            core_selection: vec![false; num_cpus::get()],
-            new_group_name: String::new(),
-            enable_run_all_button: false,
+            groups: Groups {
+                edit_index: None,
+                edit_selection: None,
+                core_selection: vec![false; num_cpus::get()],
+                new_name: String::new(),
+                enable_run_all_button: false,
+            },
             show_group_window: false,
             dropped_files: None,
             show_app_run_settings: false,
             edit_app_to_run_settings: None,
             edit_app_clone: None,
-            log_text: Vec::new(),
+            logs: Logs {
+                show: false,
+                log_text: vec![],
+            },
             theme_index: 0,
-            show_log_window: false,
-            edit_group_index: None,
-            edit_group_selection: None,
         }
     }
 }
@@ -73,12 +85,12 @@ impl eframe::App for CpuAffinityApp {
 
 impl CpuAffinityApp {
     pub fn reset_group_form(&mut self) {
-        self.edit_group_index = None;
-        self.edit_group_selection = None;
-        self.enable_run_all_button = false;
+        self.groups.edit_index = None;
+        self.groups.edit_selection = None;
+        self.groups.enable_run_all_button = false;
         self.show_group_window = false;
-        self.new_group_name.clear();
-        self.core_selection.fill(false);
+        self.groups.new_name.clear();
+        self.groups.core_selection.fill(false);
     }
 
     pub fn toggle_theme(&mut self, ctx: &egui::Context) {
@@ -91,13 +103,13 @@ impl CpuAffinityApp {
     }
 
     pub fn create_group(&mut self) {
-        let name_str = self.new_group_name.trim();
+        let name_str = self.groups.new_name.trim();
         if name_str.is_empty() { 
             self.add_to_log("Group name cannot be empty".to_string());
             return; 
         }
 
-        let cores: Vec<_> = self.core_selection.iter().enumerate()
+        let cores: Vec<_> = self.groups.core_selection.iter().enumerate()
             .filter_map(|(i, &v)| v.then_some(i))
             .collect();
 
@@ -110,7 +122,7 @@ impl CpuAffinityApp {
             name: name_str.to_string(),
             cores,
             programs: vec![],
-            run_all_button: self.enable_run_all_button,
+            run_all_button: self.groups.enable_run_all_button,
         });
 
         self.reset_group_form();
@@ -118,7 +130,7 @@ impl CpuAffinityApp {
     }
 
     pub fn add_to_log(&mut self, message: String) {
-        self.log_text.push(message);
+        self.logs.log_text.push(message);
     }
 
     pub fn remove_app_from_group(&mut self, group_index: usize, prog_path: &std::path::Path) {

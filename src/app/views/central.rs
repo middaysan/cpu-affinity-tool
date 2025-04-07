@@ -50,12 +50,12 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                         // TODO: add linux support
                         if ui.button("📁Add").on_hover_text("Add executables...").clicked() {
                             if let Some(paths) = rfd::FileDialog::new().add_filter("Executables", &["exe", "lnk"]).pick_files() {
-                                app.log_text.push(format!("Adding executables to group: {}, paths: {:?}", group.name, paths));
+                                app.logs.log_text.push(format!("Adding executables to group: {}, paths: {:?}", group.name, paths));
                                 let res = group.add_app_to_group(paths);
                                 if let Err(err) = res {
-                                    app.log_text.push(format!("Error adding executables: {}", err));
+                                    app.logs.log_text.push(format!("Error adding executables: {}", err));
                                 } else {
-                                    app.log_text.push(format!("Added executables to group: {}", group.name));
+                                    app.logs.log_text.push(format!("Added executables to group: {}", group.name));
                                 }
                                 modified = true;
                             }
@@ -64,7 +64,7 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                         if group.run_all_button {
                             if ui.button("▶ Run all").on_hover_text("Run all apps in group").clicked() {
                                 if group.programs.is_empty() {
-                                    app.log_text.push(format!("No executables to run in group: {}", group.name));
+                                    app.logs.log_text.push(format!("No executables to run in group: {}", group.name));
                                 } else {
                                     for prog in &group.programs {
                                         run_program.get_or_insert_with(Vec::new).push((i, prog.clone()));
@@ -123,9 +123,9 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                         let rect = ui.min_rect();
                         if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
                             if let Err(err) = group.add_app_to_group(dropped_files.clone()) {
-                                app.log_text.push(format!("Error adding executables: {}", err));
+                                app.logs.log_text.push(format!("Error adding executables: {}", err));
                             } else {
-                                app.log_text.push(format!("Added {} executables to group: {}", 
+                                app.logs.log_text.push(format!("Added {} executables to group: {}", 
                                     dropped_files.len(), group.name));
                             }
                             dropped_assigned = true;
@@ -148,7 +148,7 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
 
     // Handle actions outside of the iterator
     if let Some(index) = edit_index {
-        app.edit_group_index = Some(index);
+        app.groups.edit_index = Some(index);
     }
 
     if let Some(programs) = run_program {

@@ -17,8 +17,8 @@ pub fn draw_top_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             ui.separator();
             ui.label(RichText::new("Core Groups").heading());
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(format!("📄 View Logs({})", app.log_text.len())).clicked() {
-                    app.show_log_window = true;
+                if ui.button(format!("📄 View Logs({})", app.logs.log_text.len())).clicked() {
+                    app.logs.show = true;
                 }
                 if ui.button("➕ Create Core Group").clicked() {
                     app.show_group_window = true;

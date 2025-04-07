@@ -1,12 +1,12 @@
 use eframe::egui::{self, Window};
 use std::collections::HashSet;
-use crate::app::CpuAffinityApp;
+use crate::app::{CpuAffinityApp, Groups};
 
 /// Rendering the main group window
 pub fn group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     if app.show_group_window {
         create_group_window(app, ctx);
-    } else if app.edit_group_index.is_some() {
+    } else if app.groups.edit_index.is_some() {
         edit_group_window(app, ctx);
     }
 }
@@ -14,11 +14,9 @@ pub fn group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
 /// Form for creating/editing a group: divided into rendering the name and the section with cores and clusters.
 fn draw_group_form_ui(
     ui: &mut egui::Ui,
-    group_name: &mut String,
-    core_selection: &mut Vec<bool>,
+    groups: &mut Groups,
     clusters: &mut Vec<Vec<usize>>,
     is_edit: bool,
-    enable_run_all_button: &mut bool,
     on_save: &mut dyn FnMut(),
     on_cancel: &mut dyn FnMut(),
     on_delete: Option<&mut dyn FnMut()>,
@@ -26,15 +24,15 @@ fn draw_group_form_ui(
     clusters.retain(|cluster| !cluster.is_empty());
 
     ui.spacing_mut().item_spacing.y = 10.0;
-    draw_group_name_ui(ui, group_name);
+    draw_group_name_ui(ui, &mut groups.new_name);
     ui.separator();
     ui.horizontal(|ui| {
         ui.label("Enable run all button:");
-        ui.checkbox(enable_run_all_button, "Run all apps in group");
+        ui.checkbox(&mut groups.enable_run_all_button, "Run all apps in group");
     });
 
     ui.separator();
-    draw_cpu_cores_ui(ui, core_selection, clusters);
+    draw_cpu_cores_ui(ui, &mut groups.core_selection, clusters);
     ui.separator();
     ui.horizontal(|ui| {
         if ui.button("💾 Save").clicked() {
@@ -184,11 +182,9 @@ pub fn create_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 draw_group_form_ui(
                     ui,
-                    &mut app.new_group_name,
-                    &mut app.core_selection,
+                    &mut app.groups,
                     &mut app.state.clusters,
                     false,
-                    &mut app.enable_run_all_button,
                     &mut || create_clicked = true,
                     &mut || cancel_clicked = true,
                     None,
@@ -208,23 +204,23 @@ pub fn create_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
 /// Group editing window.
 /// The logic is similar to creation but with loading group data, and the final state of cores is formed as a union of clusters and free cores.
 pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
-    let index = match app.edit_group_index {
+    let index = match app.groups.edit_index {
         Some(i) if i < app.state.groups.len() => i,
         _ => {
-            app.edit_group_index = None;
-            app.edit_group_selection = None;
+            app.groups.edit_index = None;
+            app.groups.edit_selection = None;
             return;
         }
     };
 
-    if app.edit_group_selection.is_none() {
+    if app.groups.edit_selection.is_none() {
         let mut selection = vec![false; num_cpus::get()];
         for &core in &app.state.groups[index].cores {
             if core < selection.len() {
                 selection[core] = true;
             }
         }
-        app.edit_group_selection = Some(selection);
+        app.groups.edit_selection = Some(selection);
     }
 
     let mut open = true;
@@ -235,31 +231,29 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             let mut save_clicked = false;
             let mut delete_clicked = false;
             let mut cancel_clicked = false;
-            app.enable_run_all_button = app.state.groups[index].run_all_button;
+            app.groups.enable_run_all_button = app.state.groups[index].run_all_button;
 
             draw_group_form_ui(
                 ui,
-                &mut app.state.groups[index].name,
-                &mut app.edit_group_selection.as_mut().unwrap(),
+                &mut app.groups,
                 &mut app.state.clusters,
                 true,
-                &mut app.enable_run_all_button,
                 &mut || save_clicked = true,
                 &mut || cancel_clicked = true,
                 Some(&mut || delete_clicked = true),
             );
 
-            app.state.groups[index].run_all_button = app.enable_run_all_button;
+            app.state.groups[index].run_all_button = app.groups.enable_run_all_button;
 
             if save_clicked {
                 let mut assigned: HashSet<usize> = app.state.clusters.iter().flatten().copied().collect();
-                for (i, &selected) in app.edit_group_selection.as_ref().unwrap().iter().enumerate() {
+                for (i, &selected) in app.groups.edit_selection.as_ref().unwrap().iter().enumerate() {
                     if selected {
                         assigned.insert(i);
                     }
                 }
                 app.state.groups[index].cores = assigned.into_iter().collect();
-                app.state.groups[index].run_all_button = app.enable_run_all_button;
+                app.state.groups[index].run_all_button = app.groups.enable_run_all_button;
                 app.state.save_state();
                 app.reset_group_form();
             }
@@ -274,7 +268,7 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
         });
 
     if !open {
-        app.edit_group_index = None;
-        app.edit_group_selection = None;
+        app.groups.edit_index = None;
+        app.groups.edit_selection = None;
     }
 }
