@@ -1,7 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
-use app::CpuAffinityApp;
+use app::app_models::CpuAffinityApp;
 
 use eframe::{run_native, NativeOptions};
 

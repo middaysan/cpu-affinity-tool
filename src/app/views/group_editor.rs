@@ -1,10 +1,10 @@
 use eframe::egui::{self, Window};
 use std::collections::HashSet;
-use crate::app::{CpuAffinityApp, Groups};
+use crate::app::app_models::{CpuAffinityApp, Groups};
 
 /// Rendering the main group window
 pub fn group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
-    if app.show_group_window {
+    if app.groups.show_window {
         create_group_window(app, ctx);
     } else if app.groups.edit_index.is_some() {
         edit_group_window(app, ctx);

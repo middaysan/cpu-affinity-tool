@@ -1,5 +1,5 @@
 use eframe::egui::{self, RichText, CentralPanel, ScrollArea, Frame, Layout};
-use crate::app::{app_state::AppToRun, CpuAffinityApp};
+use crate::app::{app_state::AppToRun, app_models::CpuAffinityApp};
 
 pub fn draw_central_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     CentralPanel::default().show(ctx, |ui| {
@@ -110,8 +110,8 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                                 }
                                 if edit_settings.clicked() {
                                     let prog_index = group.programs.clone().iter().position(|p| p.bin_path == prog.bin_path).unwrap_or_default();
-                                    app.edit_app_to_run_settings = Some((i, prog_index));
-                                    app.show_app_run_settings = true;
+                                    app.apps.edit_run_settings = Some((i, prog_index));
+                                    app.apps.show_app_settings = true;
                                 }
                             });
                         }

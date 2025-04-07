@@ -1,30 +1,30 @@
 use eframe::egui::{self, Window};
-use crate::app::CpuAffinityApp;
+use crate::app::app_models::CpuAffinityApp;
 
 pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
-    if !app.show_app_run_settings {
+    if !app.apps.show_app_settings {
         return;
     }
 
-    let was_open = app.show_app_run_settings;
+    let was_open = app.apps.show_app_settings;
     let mut need_to_close = false;
 
     Window::new("App's Running Settings")
         .resizable(true)
-        .open(&mut app.show_app_run_settings)
+        .open(&mut app.apps.show_app_settings)
         .show(ctx, |ui| {
-            let (group_idx, prog_idx) = match app.edit_app_to_run_settings {
+            let (group_idx, prog_idx) = match app.apps.edit_run_settings {
                 Some((ref mut g, ref mut p)) => (g, p),
                 None => return,
             };
 
-            if app.edit_app_clone.is_none() {
+            if app.apps.edit.is_none() {
                 let original = app.state.groups[*group_idx].programs[*prog_idx].clone();
-                app.edit_app_clone = Some(original);
+                app.apps.edit = Some(original);
             }
 
             let selected_app = app
-                .edit_app_clone
+                .apps.edit
                 .as_mut()
                 .expect("edit_app_clone must be initialized");
 
@@ -53,12 +53,12 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
                 egui::ComboBox::from_label("")
                     .selected_text(format!("{:?}", selected_app.priority))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::Idle, "Idle");
-                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::BelowNormal, "Below Normal");
-                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::Normal, "Normal");
-                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::AboveNormal, "Above Normal");
-                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::High, "High");
-                        ui.selectable_value(&mut selected_app.priority, crate::app::PriorityClass::Realtime, "RealTime");
+                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::Idle, "Idle");
+                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::BelowNormal, "Below Normal");
+                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::Normal, "Normal");
+                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::AboveNormal, "Above Normal");
+                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::High, "High");
+                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::Realtime, "RealTime");
                     });
             });
 
@@ -102,11 +102,11 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
         });
 
     if need_to_close {
-        app.show_app_run_settings = false;
-        app.edit_app_clone = None;
+        app.apps.show_app_settings = false;
+        app.apps.edit = None;
     }
 
-    if was_open && !app.show_app_run_settings {
-        app.edit_app_clone = None;
+    if was_open && !app.apps.show_app_settings {
+        app.apps.edit = None;
     }
 }

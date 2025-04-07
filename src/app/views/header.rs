@@ -1,7 +1,7 @@
 
 
 use eframe::egui::{self, RichText, Layout, TopBottomPanel};
-use crate::app::CpuAffinityApp;
+use crate::app::app_models::CpuAffinityApp;
 
 pub fn draw_top_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -21,7 +21,7 @@ pub fn draw_top_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
                     app.logs.show = true;
                 }
                 if ui.button("➕ Create Core Group").clicked() {
-                    app.show_group_window = true;
+                    app.groups.show_window = true;
                 }
             });
         });

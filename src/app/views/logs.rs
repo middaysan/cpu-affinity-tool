@@ -1,5 +1,5 @@
 use eframe::egui::{self, RichText, Window, ScrollArea, Color32};
-use crate::app::CpuAffinityApp;
+use crate::app::app_models::CpuAffinityApp;
 
 pub fn draw_logs_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     if !app.logs.show {
