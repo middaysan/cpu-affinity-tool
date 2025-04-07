@@ -93,6 +93,7 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
                     app.state.groups[*group_idx].programs[*prog_idx] = selected_app.clone();
+                    app.state.save_state();
                     need_to_close = true;
                 }
                 if ui.button("Cancel").clicked() {
