@@ -1,9 +1,11 @@
 mod app_state;
 mod os_cmd;
+use std::path::PathBuf;
+
 use os_cmd::{OsCmd, OsCmdTrait, PriorityClass};
 
 use app_state::AppToRun;
-use eframe::egui;
+use eframe::{egui, epaint::tessellator::Path};
 
 mod views;
 use views::{run_settings, central, group_editor, header, logs};
@@ -12,8 +14,8 @@ pub struct CpuAffinityApp {
     state: app_state::AppState,
     core_selection: Vec<bool>,
     new_group_name: String,
+    dropped_files: Option<Vec<PathBuf>>,
     enable_run_all_button: bool,
-    dropped_file: Option<std::path::PathBuf>,
     show_group_window: bool,
     show_app_run_settings: bool,
     edit_app_clone: Option<AppToRun>,
@@ -33,8 +35,8 @@ impl Default for CpuAffinityApp {
             core_selection: vec![false; num_cpus::get()],
             new_group_name: String::new(),
             enable_run_all_button: false,
-            dropped_file: None,
             show_group_window: false,
+            dropped_files: None,
             show_app_run_settings: false,
             edit_app_to_run_settings: None,
             edit_app_clone: None,
@@ -49,8 +51,16 @@ impl Default for CpuAffinityApp {
 
 impl eframe::App for CpuAffinityApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Some(path) = ctx.input(|i| i.raw.dropped_files.get(0).and_then(|f| f.path.clone())) {
-            self.dropped_file = Some(path);
+        // Check for dropped files
+        if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
+            let files: Vec<PathBuf> = ctx.input(|i| 
+            i.raw.dropped_files.iter()
+            .filter_map(|f| f.path.clone())
+            .collect());
+            
+            if !files.is_empty() {
+            self.dropped_files = Some(files);
+            }
         }
 
         run_settings::draw_app_run_settings(self, ctx);

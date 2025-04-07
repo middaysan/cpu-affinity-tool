@@ -14,7 +14,6 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
     let mut dropped_assigned = false;
     let mut modified = false;
 
-    let dropped_file = app.dropped_file.take();
     let mut edit_index = None;
     let mut run_program: Option<Vec<(usize, AppToRun)>> = None;
     let mut remove_program: Option<(usize, std::path::PathBuf)> = None;
@@ -119,16 +118,20 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                     }
                 });
 
-                if let Some(dropped) = &dropped_file {
-                    let rect = ui.min_rect();
-                    if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
-                        if let Err(err) = group.add_app_to_group(vec![dropped.clone()]) {
-                            app.log_text.push(format!("Error adding executables: {}", err));
-                        } else {
-                            app.log_text.push(format!("Added executables to group: {}", group.name));
+                if let Some(dropped_files) = &app.dropped_files {
+                    if !dropped_files.is_empty() {
+                        let rect = ui.min_rect();
+                        if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
+                            if let Err(err) = group.add_app_to_group(dropped_files.clone()) {
+                                app.log_text.push(format!("Error adding executables: {}", err));
+                            } else {
+                                app.log_text.push(format!("Added {} executables to group: {}", 
+                                    dropped_files.len(), group.name));
+                            }
+                            dropped_assigned = true;
+                            app.dropped_files = None;
+                            modified = true;
                         }
-                        dropped_assigned = true;
-                        modified = true;
                     }
                 }
             });
@@ -156,11 +159,6 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
 
     if let Some((index, prog)) = remove_program {
         app.remove_app_from_group(index, &prog);
-    }
-    
-    // Only put dropped_file back if it wasn't assigned to a group
-    if !dropped_assigned {
-        app.dropped_file = dropped_file;
     }
 
     if modified {
