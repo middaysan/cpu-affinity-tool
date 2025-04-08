@@ -10,7 +10,6 @@ use windows::Win32::Foundation::HANDLE;
 use parselnk::Lnk;
 use shlex;
 
-
 pub struct OsCmd;
 
 impl super::OsCmdTrait for OsCmd {
@@ -36,7 +35,7 @@ impl super::OsCmdTrait for OsCmd {
     }
 }
 
-fn resolve_target_with_args(lnk_path: &PathBuf) -> Result<(PathBuf, Vec<String>), String> {
+pub fn resolve_target_with_args(lnk_path: &PathBuf) -> Result<(PathBuf, Vec<String>), String> {
     // Пытаемся открыть ярлык
     let link = Lnk::try_from(lnk_path.as_path()).map_err(|e| format!("Failed to open LNK file {:?}: {}", lnk_path, e)).unwrap();
     
@@ -65,7 +64,7 @@ fn resolve_target_with_args(lnk_path: &PathBuf) -> Result<(PathBuf, Vec<String>)
     Ok((target, split_args))
 }
 
-fn spawn_process(target: &PathBuf, args: &[String]) -> Result<Child, String> {
+pub fn spawn_process(target: &PathBuf, args: &[String]) -> Result<Child, String> {
     let mut cmd = Command::new(target);
     if !args.is_empty() {
         cmd.args(args);
@@ -75,7 +74,7 @@ fn spawn_process(target: &PathBuf, args: &[String]) -> Result<Child, String> {
     cmd.spawn().map_err(|e| format!("Failed to start process {:?}: {:?}", target, e))
 }
 
-fn apply_affinity(child: &Child, affinity_mask: usize) -> Result<(), String> {
+pub fn apply_affinity(child: &Child, affinity_mask: usize) -> Result<(), String> {
     unsafe {
         let handle = HANDLE(child.as_raw_handle() as *mut std::ffi::c_void);
         SetProcessAffinityMask(handle, affinity_mask)
@@ -83,7 +82,7 @@ fn apply_affinity(child: &Child, affinity_mask: usize) -> Result<(), String> {
     }
 }
 
-fn set_process_priority(child: &Child, priority: super::PriorityClass) -> Result<(), String> {
+pub fn set_process_priority(child: &Child, priority: super::PriorityClass) -> Result<(), String> {
     let priority_value = match priority {
         super::PriorityClass::Idle => IDLE_PRIORITY_CLASS,
         super::PriorityClass::BelowNormal => BELOW_NORMAL_PRIORITY_CLASS,

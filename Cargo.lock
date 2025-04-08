@@ -752,6 +752,7 @@ dependencies = [
  "serde_json",
  "shlex",
  "windows 0.61.1",
+ "windows_api",
  "winres",
 ]
 
@@ -1916,6 +1917,15 @@ name = "nohash-hasher"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
+
+[[package]]
+name = "ntapi"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8a3895c6391c39d7fe7ebc444a87eb2991b2a0bc718fdabd071eec617fc68e4"
+dependencies = [
+ "winapi",
+]
 
 [[package]]
 name = "num-traits"
@@ -3801,6 +3811,17 @@ name = "windows_aarch64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
+
+[[package]]
+name = "windows_api"
+version = "0.1.0"
+dependencies = [
+ "ntapi",
+ "parselnk",
+ "shlex",
+ "windows 0.61.1",
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "windows_i686_gnu"
