@@ -6,7 +6,7 @@ use crate::app::app_models::CpuAffinityApp;
 pub fn draw_top_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
     TopBottomPanel::top("top_panel").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            let (icon, label) = match app.theme_index {
+            let (icon, label) = match app.state.theme_index {
                 0 => ("💻", "System theme"),
                 1 => ("☀", "Light theme"),
                 _ => ("🌙", "Dark theme"),

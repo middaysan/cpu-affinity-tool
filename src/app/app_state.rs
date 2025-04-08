@@ -75,6 +75,7 @@ impl CoreGroup {
 pub struct AppState {
     pub groups: Vec<CoreGroup>,
     pub clusters: Vec<Vec<usize>>,
+    pub theme_index: usize,
 }
 
 impl AppState {
@@ -86,7 +87,7 @@ impl AppState {
 
         std::fs::read_to_string(&path).ok()
             .and_then(|data| serde_json::from_str::<AppState>(&data).ok())
-            .unwrap_or_else(|| AppState { groups: Vec::new(), clusters: Vec::new() })
+            .unwrap_or_else(|| AppState { groups: Vec::new(), clusters: Vec::new(), theme_index: 0 })
     }
 
     pub fn save_state(&self) {

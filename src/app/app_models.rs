@@ -33,7 +33,6 @@ pub struct CpuAffinityApp {
     pub groups: Groups,
     pub apps: Apps,
     pub dropped_files: Option<Vec<PathBuf>>,
-    pub theme_index: usize,
     pub logs: Logs,
 }
 
@@ -60,7 +59,6 @@ impl Default for CpuAffinityApp {
                 show: false,
                 log_text: vec![],
             },
-            theme_index: 0,
         }
     }
 }
@@ -98,12 +96,14 @@ impl CpuAffinityApp {
     }
 
     pub fn toggle_theme(&mut self, ctx: &egui::Context) {
-        self.theme_index = (self.theme_index + 1) % 3;
-        ctx.set_visuals(match self.theme_index {
+        self.state.theme_index = (self.state.theme_index + 1) % 3;
+        ctx.set_visuals(match self.state.theme_index {
             0 => egui::Visuals::default(),
             1 => egui::Visuals::light(),
             _ => egui::Visuals::dark(),
         });
+
+        self.state.save_state();
     }
 
     pub fn create_group(&mut self) {
