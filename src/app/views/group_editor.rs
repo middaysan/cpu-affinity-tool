@@ -1,13 +1,13 @@
-use eframe::egui::{self, Window};
+use eframe::egui::{self, CentralPanel,Frame};
 use std::collections::HashSet;
 use crate::app::app_models::{CpuAffinityApp, Groups};
 
 /// Rendering the main group window
 pub fn group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
-    if app.groups.show_window {
-        create_group_window(app, ctx);
-    } else if app.groups.edit_index.is_some() {
+    if app.groups.edit_index.is_some() {
         edit_group_window(app, ctx);
+    } else {
+        create_group_window(app, ctx);
     }
 }
 
@@ -171,14 +171,20 @@ fn draw_core_buttons(
 /// Group creation window.
 /// Uses the refactored draw_group_form_ui and updated state (clusters instead of cluster_cores_indexes).
 pub fn create_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
-    let mut open = true;
     let mut create_clicked = false;
     let mut cancel_clicked = false;
 
-    Window::new("Create Core Group")
-        .open(&mut open)
-        .resizable(true)  // Allow window to be resized
-        .show(ctx, |ui| {
+    CentralPanel::default().show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            ui.heading("Create New Group");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("❌").on_hover_text("Close").clicked() {
+                    app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
+                }
+            });
+        });
+
+        Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 draw_group_form_ui(
                     ui,
@@ -191,43 +197,23 @@ pub fn create_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
                 );
             });
         });
+    });
 
-    if create_clicked {
-        app.create_group();
+    if create_clicked || cancel_clicked {
+        if create_clicked {
+            app.create_group();
+        }
         app.reset_group_form();
-    }
-    if cancel_clicked || !open {
-        app.reset_group_form();
+        app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
     }
 }
 
 /// Group editing window.
 /// The logic is similar to creation but with loading group data, and the final state of cores is formed as a union of clusters and free cores.
 pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
-    let index = match app.groups.edit_index {
-        Some(i) if i < app.state.groups.len() => i,
-        _ => {
-            app.groups.edit_index = None;
-            app.groups.edit_selection = None;
-            return;
-        }
-    };
+    let index = app.groups.edit_index.unwrap();
 
-    if app.groups.edit_selection.is_none() {
-        let mut selection = vec![false; num_cpus::get()];
-        for &core in &app.state.groups[index].cores {
-            if core < selection.len() {
-                selection[core] = true;
-            }
-        }
-        app.groups.edit_selection = Some(selection);
-    }
-
-    let mut open = true;
-
-    Window::new("Edit Group Settings")
-        .open(&mut open)
-        .show(ctx, |ui| {
+    CentralPanel::default().show(ctx, |ui| {
             let mut save_clicked = false;
             let mut delete_clicked = false;
             let mut cancel_clicked = false;
@@ -257,18 +243,19 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
                 app.state.save_state();
                 app.reset_group_form();
             }
+
             if delete_clicked {
                 app.state.groups.remove(index);
                 app.state.save_state();
                 app.reset_group_form();
             }
+
             if cancel_clicked {
                 app.reset_group_form();
             }
-        });
 
-    if !open {
-        app.groups.edit_index = None;
-        app.groups.edit_selection = None;
-    }
+            if save_clicked || delete_clicked || cancel_clicked {
+                app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
+            }
+        });
 }

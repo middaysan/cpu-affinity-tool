@@ -1,5 +1,7 @@
 use super::views::{run_settings, central, group_editor, header, logs};
 
+use super::controllers;
+
 use super::os_cmd::{OsCmd, OsCmdTrait};
 use super::app_state;
 use std::path::PathBuf;
@@ -9,7 +11,6 @@ use eframe::egui;
 
 
 pub struct Logs {
-    pub show: bool,
     pub log_text: Vec<String>,
 }
 
@@ -29,6 +30,8 @@ pub struct Groups {
 }
 
 pub struct CpuAffinityApp {
+    pub current_controller: controllers::WindowController,
+    pub current_controller_was_changed: bool,
     pub state: app_state::AppState,
     pub groups: Groups,
     pub apps: Apps,
@@ -41,6 +44,8 @@ impl Default for CpuAffinityApp {
         let state = app_state::AppState::load_state();
         Self {
             state: state,
+            current_controller: controllers::WindowController::Groups(controllers::Group::ListGroups),
+            current_controller_was_changed: false,
             groups: Groups {
                 edit_index: None,
                 edit_selection: None,
@@ -56,16 +61,21 @@ impl Default for CpuAffinityApp {
             },
             dropped_files: None,
             logs: Logs {
-                show: false,
                 log_text: vec![],
             },
         }
     }
 }
 
-impl eframe::App for CpuAffinityApp {
+
+#[derive(Default)]
+pub struct App {
+    pub app: CpuAffinityApp,
+    pub window_controller: controllers::MainPanel,
+}
+
+impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Check for dropped files
         if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
             let files: Vec<PathBuf> = ctx.input(|i| 
             i.raw.dropped_files.iter()
@@ -73,15 +83,38 @@ impl eframe::App for CpuAffinityApp {
             .collect());
             
             if !files.is_empty() {
-            self.dropped_files = Some(files);
+                self.app.dropped_files = Some(files);
             }
         }
+                
+        let app = &mut self.app;
+        self.window_controller.render_with(ctx, |controller, ctx| {
+            match &controller.window_controller {
+                controllers::WindowController::Groups(group) => match group {
+                    controllers::Group::ListGroups => {
+                        header::draw_top_panel(app, ctx);
+                        central::draw_central_panel(app, ctx);
+                    }
+                    controllers::Group::CreateGroup => {
+                        group_editor::group_window(app, ctx);
+                    }
+                    controllers::Group::EditGroup => {
+                        group_editor::group_window(app, ctx);
+                    }
+                },
+                controllers::WindowController::Logs => {
+                    logs::draw_logs_window(app, ctx);
+                }
+                controllers::WindowController::AppRunSettings => {
+                    run_settings::draw_app_run_settings(app, ctx);
+                }
+            }
+        });
 
-        run_settings::draw_app_run_settings(self, ctx);
-        header::draw_top_panel(self, ctx);
-        central::draw_central_panel(self, ctx);
-        group_editor::group_window(self, ctx);
-        logs::draw_logs_window(self, ctx);
+        if app.current_controller_was_changed {
+            app.current_controller_was_changed = false;
+            self.window_controller.set_window(app.current_controller.clone());
+        }
     }
 }
 
@@ -135,6 +168,11 @@ impl CpuAffinityApp {
 
     pub fn add_to_log(&mut self, message: String) {
         self.logs.log_text.push(message);
+    }
+
+    pub fn set_current_controller(&mut self, controller: controllers::WindowController) {
+        self.current_controller = controller;
+        self.current_controller_was_changed = true;
     }
 
     pub fn remove_app_from_group(&mut self, group_index: usize, prog_path: &std::path::Path) {

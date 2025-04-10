@@ -14,7 +14,6 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
     let mut dropped_assigned = false;
     let mut modified = false;
 
-    let mut edit_index = None;
     let mut run_program: Option<Vec<(usize, AppToRun)>> = None;
     let mut remove_program: Option<(usize, std::path::PathBuf)> = None;
     
@@ -22,7 +21,7 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
     let groups_len = app.state.groups.len();
     
     for i in 0..groups_len {
-        let group = &mut app.state.groups[i];
+
         Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
@@ -40,33 +39,36 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                             });
                         }
                     });
-                    ui.label(RichText::new(&group.name).heading())
-                        .on_hover_text(RichText::new(format!("cores: {:?}", group.cores)).weak());
+                    ui.label(RichText::new(&app.state.groups[i].name).heading())
+                        .on_hover_text(RichText::new(format!("cores: {:?}", app.state.groups[i].cores)).weak());
                     ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
                         if ui.button("⚙").on_hover_text("Edit group settings").clicked() {
-                            edit_index = Some(i);
+                            app.logs.log_text.push(format!("Editing group: {}", app.state.groups[i].name));
+                            app.groups.edit_index = Some(i);
+                            app.groups.new_name = app.state.groups[i].name.clone();
+                            app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::EditGroup));
                         }
 
                         // TODO: add linux support
                         if ui.button("📁Add").on_hover_text("Add executables...").clicked() {
                             if let Some(paths) = rfd::FileDialog::new().add_filter("Executables", &["exe", "lnk"]).pick_files() {
-                                app.logs.log_text.push(format!("Adding executables to group: {}, paths: {:?}", group.name, paths));
-                                let res = group.add_app_to_group(paths);
+                                app.logs.log_text.push(format!("Adding executables to group: {}, paths: {:?}", app.state.groups[i].name, paths));
+                                let res = app.state.groups[i].add_app_to_group(paths);
                                 if let Err(err) = res {
                                     app.logs.log_text.push(format!("Error adding executables: {}", err));
                                 } else {
-                                    app.logs.log_text.push(format!("Added executables to group: {}", group.name));
+                                    app.logs.log_text.push(format!("Added executables to group: {}", app.state.groups[i].name));
                                 }
                                 modified = true;
                             }
                         }
 
-                        if group.run_all_button {
+                        if app.state.groups[i].run_all_button {
                             if ui.button("▶ Run all").on_hover_text("Run all apps in group").clicked() {
-                                if group.programs.is_empty() {
-                                    app.logs.log_text.push(format!("No executables to run in group: {}", group.name));
+                                if app.state.groups[i].programs.is_empty() {
+                                    app.logs.log_text.push(format!("No executables to run in group: {}", app.state.groups[i].name));
                                 } else {
-                                    for prog in &group.programs {
+                                    for prog in &app.state.groups[i].programs {
                                         run_program.get_or_insert_with(Vec::new).push((i, prog.clone()));
                                     }
                                 }
@@ -78,10 +80,10 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                 ui.separator();
 
                 ScrollArea::vertical().id_salt(i).show(ui, |ui| {
-                    if group.programs.is_empty() {
+                    if app.state.groups[i].programs.is_empty() {
                         ui.label("No executables. Drag & drop a file here to add.");
                     } else {
-                        for prog in group.programs.clone() {
+                        for prog in app.state.groups[i].programs.clone() {
                             let label = prog.name.clone();
                             ui.horizontal(|ui| {
                                 // Set a fixed width for the entire row
@@ -109,9 +111,9 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                                     modified = true;
                                 }
                                 if edit_settings.clicked() {
-                                    let prog_index = group.programs.clone().iter().position(|p| p.bin_path == prog.bin_path).unwrap_or_default();
+                                    let prog_index = app.state.groups[i].programs.clone().iter().position(|p| p.bin_path == prog.bin_path).unwrap_or_default();
                                     app.apps.edit_run_settings = Some((i, prog_index));
-                                    app.apps.show_app_settings = true;
+                                    app.set_current_controller(crate::app::controllers::WindowController::AppRunSettings);
                                 }
                             });
                         }
@@ -122,11 +124,11 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                     if !dropped_files.is_empty() {
                         let rect = ui.min_rect();
                         if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
-                            if let Err(err) = group.add_app_to_group(dropped_files.clone()) {
+                            if let Err(err) = app.state.groups[i].add_app_to_group(dropped_files.clone()) {
                                 app.logs.log_text.push(format!("Error adding executables: {}", err));
                             } else {
                                 app.logs.log_text.push(format!("Added {} executables to group: {}", 
-                                    dropped_files.len(), group.name));
+                                    dropped_files.len(), app.state.groups[i].name));
                             }
                             dropped_assigned = true;
                             app.dropped_files = None;
@@ -144,11 +146,6 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
         } else {
             app.state.groups.swap(index + 1, index);
         }
-    }
-
-    // Handle actions outside of the iterator
-    if let Some(index) = edit_index {
-        app.groups.edit_index = Some(index);
     }
 
     if let Some(programs) = run_program {

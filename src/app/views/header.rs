@@ -18,10 +18,10 @@ pub fn draw_top_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             ui.label(RichText::new("Core Groups").heading());
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(format!("📄 View Logs({})", app.logs.log_text.len())).clicked() {
-                    app.logs.show = true;
+                    app.set_current_controller(crate::app::controllers::WindowController::Logs);
                 }
                 if ui.button("➕ Create Core Group").clicked() {
-                    app.groups.show_window = true;
+                    app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::CreateGroup));
                 }
             });
         });

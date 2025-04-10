@@ -1,18 +1,10 @@
-use eframe::egui::{self, Window};
+use eframe::egui::{Context, CentralPanel, ComboBox, Frame};
 use crate::app::app_models::CpuAffinityApp;
 
-pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
-    if !app.apps.show_app_settings {
-        return;
-    }
+pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &Context) {
 
-    let was_open = app.apps.show_app_settings;
-    let mut need_to_close = false;
-
-    Window::new("App's Running Settings")
-        .resizable(true)
-        .open(&mut app.apps.show_app_settings)
-        .show(ctx, |ui| {
+    CentralPanel::default().show(ctx, |ui| {
+        Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
             let (group_idx, prog_idx) = match app.apps.edit_run_settings {
                 Some((ref mut g, ref mut p)) => (g, p),
                 None => return,
@@ -50,7 +42,7 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
 
             ui.horizontal(|ui| {
                 ui.label("Priority:");
-                egui::ComboBox::from_label("")
+                ComboBox::from_label("")
                     .selected_text(format!("{:?}", selected_app.priority))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::Idle, "Idle");
@@ -67,7 +59,7 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             if selected_app.args.is_empty() {
                 ui.label("No arguments. Add one below.");
             } else {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
+                Frame::group(ui.style()).show(ui, |ui| {
                     for (i, arg) in selected_app.args.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(format!("Arg {}:", i + 1));
@@ -90,24 +82,21 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &egui::Context) {
 
             ui.separator();
 
+            let mut is_close = false;
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
                     app.state.groups[*group_idx].programs[*prog_idx] = selected_app.clone();
                     app.state.save_state();
-                    need_to_close = true;
+                    is_close = true;
                 }
                 if ui.button("Cancel").clicked() {
-                    need_to_close = true;
+                    is_close = true;
                 }
             });
+
+            if is_close {
+                app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
+            }
         });
-
-    if need_to_close {
-        app.apps.show_app_settings = false;
-        app.apps.edit = None;
-    }
-
-    if was_open && !app.apps.show_app_settings {
-        app.apps.edit = None;
-    }
+    });
 }
