@@ -15,7 +15,6 @@ pub struct Logs {
 }
 
 pub struct Apps {
-    pub show_app_settings: bool,
     pub edit: Option<AppToRun>,
     pub edit_run_settings: Option<(usize, usize)>,
 }
@@ -55,7 +54,6 @@ impl Default for CpuAffinityApp {
                 show_window: false,
             },
             apps: Apps {
-                show_app_settings: false,
                 edit: None,
                 edit_run_settings: None,
             },
@@ -89,17 +87,17 @@ impl eframe::App for App {
                 
         let app = &mut self.app;
         self.window_controller.render_with(ctx, |controller, ctx| {
+            header::draw_top_panel(app, ctx);
             match &controller.window_controller {
                 controllers::WindowController::Groups(group) => match group {
                     controllers::Group::ListGroups => {
-                        header::draw_top_panel(app, ctx);
                         central::draw_central_panel(app, ctx);
                     }
                     controllers::Group::CreateGroup => {
-                        group_editor::group_window(app, ctx);
+                        group_editor::create_group_window(app, ctx);
                     }
                     controllers::Group::EditGroup => {
-                        group_editor::group_window(app, ctx);
+                        group_editor::edit_group_window(app, ctx);
                     }
                 },
                 controllers::WindowController::Logs => {
@@ -167,7 +165,16 @@ impl CpuAffinityApp {
     }
 
     pub fn add_to_log(&mut self, message: String) {
-        self.logs.log_text.push(message);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let ts = format!(
+            "[{:02}:{:02}:{:02}]",
+            (now.as_secs() % 86400) / 3600,
+            (now.as_secs() % 3600) / 60,
+            now.as_secs() % 60
+        );
+        self.logs.log_text.push(format!("{}::{}", ts, message));
     }
 
     pub fn set_current_controller(&mut self, controller: controllers::WindowController) {
@@ -183,6 +190,32 @@ impl CpuAffinityApp {
         }
     }
 
+    pub fn start_editing_group(&mut self, index: usize) {
+        let total_cores = self.groups.core_selection.len();
+
+        self.groups.core_selection = {
+            let mut selection = vec![false; total_cores];
+            for &core in &self.state.groups[index].cores {
+                if core < total_cores {
+                    selection[core] = true;
+                }
+            }
+            selection
+        };
+
+        self.groups.new_name = self.state.groups[index].name.clone();
+        self.groups.edit_index = Some(index);
+        self.groups.enable_run_all_button = self.state.groups[index].run_all_button;
+
+        self.state.clusters = self.state.groups[index].cores.iter()
+            .map(|&ci| self.state.clusters.get(ci).cloned().unwrap_or_default())
+            .collect();
+
+        self.set_current_controller(crate::app::controllers::WindowController::Groups(
+            crate::app::controllers::Group::EditGroup,
+        ));
+    }
+
     pub fn run_app_with_affinity(&mut self, group_index: usize, app_to_run: AppToRun) {
         let groups = self.state.groups.clone();
         let group = match groups.get(group_index) {
@@ -193,19 +226,11 @@ impl CpuAffinityApp {
         let label = app_to_run.bin_path.file_name()
             .map_or_else(|| app_to_run.bin_path.display().to_string(), |n| n.to_string_lossy().to_string());
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let ts = format!("{:02}:{:02}:{:02}", 
-            (now.as_secs() % 86400) / 3600, 
-            (now.as_secs() % 3600) / 60, 
-            now.as_secs() % 60);
-
-        self.add_to_log(format!("[{}] Starting '{}', app: {}", ts, label, app_to_run.display()));
+        self.add_to_log(format!("Starting '{}', app: {}", label, app_to_run.display()));
 
         match OsCmd::run(app_to_run.bin_path, app_to_run.args, &group.cores, app_to_run.priority) {
-            Ok(_) => self.add_to_log(format!("[{}] OK: started '{}'", ts, label)),
-            Err(e) => self.add_to_log(format!("[{}] ERROR: {}", ts, e)),
+            Ok(_) => self.add_to_log(format!("OK: started '{}'", label)),
+            Err(e) => self.add_to_log(format!("ERROR: {}", e)),
         }
     }
 }

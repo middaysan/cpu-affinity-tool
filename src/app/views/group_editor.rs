@@ -2,15 +2,6 @@ use eframe::egui::{self, CentralPanel,Frame};
 use std::collections::HashSet;
 use crate::app::app_models::{CpuAffinityApp, Groups};
 
-/// Rendering the main group window
-pub fn group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
-    if app.groups.edit_index.is_some() {
-        edit_group_window(app, ctx);
-    } else {
-        create_group_window(app, ctx);
-    }
-}
-
 /// Form for creating/editing a group: divided into rendering the name and the section with cores and clusters.
 fn draw_group_form_ui(
     ui: &mut egui::Ui,
@@ -24,7 +15,9 @@ fn draw_group_form_ui(
     clusters.retain(|cluster| !cluster.is_empty());
 
     ui.spacing_mut().item_spacing.y = 10.0;
+
     draw_group_name_ui(ui, &mut groups.new_name);
+
     ui.separator();
     ui.horizontal(|ui| {
         ui.label("Enable run all button:");
@@ -32,13 +25,16 @@ fn draw_group_form_ui(
     });
 
     ui.separator();
+
     draw_cpu_cores_ui(ui, &mut groups.core_selection, clusters);
+
     ui.separator();
+    
     ui.horizontal(|ui| {
-        if ui.button("💾 Save").clicked() {
+        if ui.add(egui::Button::new("💾 Save").min_size(egui::vec2(100.0, 30.0))).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             on_save();
         }
-        if ui.button("❌ Cancel").clicked() {
+        if ui.add(egui::Button::new("❌ Cancel").min_size(egui::vec2(100.0, 30.0))).clicked() {
             on_cancel();
         }
         if is_edit {
@@ -55,7 +51,7 @@ fn draw_group_form_ui(
 fn draw_group_name_ui(ui: &mut egui::Ui, group_name: &mut String) {
     ui.horizontal(|ui| {
         ui.label("Group name:");
-        ui.text_edit_singleline(group_name);
+        ui.text_edit_singleline(group_name).request_focus();
     });
 }
 
@@ -176,10 +172,11 @@ pub fn create_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
 
     CentralPanel::default().show(ctx, |ui| {
         ui.horizontal(|ui| {
-            ui.heading("Create New Group");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let res = ui.heading("Create New Group");
+            res.on_hover_text("Create a new group of CPU cores");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                 if ui.button("❌").on_hover_text("Close").clicked() {
-                    app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
+                    cancel_clicked = true;
                 }
             });
         });
@@ -217,7 +214,16 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             let mut save_clicked = false;
             let mut delete_clicked = false;
             let mut cancel_clicked = false;
-            app.groups.enable_run_all_button = app.state.groups[index].run_all_button;
+            let selected_group = &mut app.state.groups[index];
+
+            ui.horizontal(|ui| {
+                ui.heading("Edit Group");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    if ui.button("❌").on_hover_text("Close").clicked() {
+                        cancel_clicked = true;
+                    }
+                });
+            });
 
             draw_group_form_ui(
                 ui,
@@ -229,17 +235,16 @@ pub fn edit_group_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
                 Some(&mut || delete_clicked = true),
             );
 
-            app.state.groups[index].run_all_button = app.groups.enable_run_all_button;
-
             if save_clicked {
                 let mut assigned: HashSet<usize> = app.state.clusters.iter().flatten().copied().collect();
-                for (i, &selected) in app.groups.edit_selection.as_ref().unwrap().iter().enumerate() {
+                for (i, &selected) in app.groups.core_selection.iter().enumerate() {
                     if selected {
                         assigned.insert(i);
                     }
                 }
-                app.state.groups[index].cores = assigned.into_iter().collect();
-                app.state.groups[index].run_all_button = app.groups.enable_run_all_button;
+                selected_group.cores = assigned.into_iter().collect();
+                selected_group.run_all_button = app.groups.enable_run_all_button;
+                selected_group.name = app.groups.new_name.clone();
                 app.state.save_state();
                 app.reset_group_form();
             }

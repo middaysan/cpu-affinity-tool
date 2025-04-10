@@ -1,4 +1,4 @@
-use eframe::egui::{self, RichText, CentralPanel, ScrollArea, Color32};
+use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
 use crate::app::app_models::CpuAffinityApp;
 
 pub fn draw_logs_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
@@ -16,18 +16,13 @@ pub fn draw_logs_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             });
         });
         ui.separator();
+
         ScrollArea::vertical()
-            .auto_shrink([false, false]) // Отключаем автоматическое сжатие
+            .auto_shrink([false, false]) 
             .show(ui, |ui| {
                 for log in app.logs.log_text.iter().rev() {
-                    let color = if log.contains("ERROR") {
-                        Color32::RED
-                    } else if log.contains("OK") {
-                        Color32::GREEN
-                    } else {
-                        Color32::LIGHT_GRAY
-                    };
-                    ui.label(RichText::new(log).color(color));
+                    ui.label(RichText::new(log));
+                    ui.separator();
                 }
             });
     });

@@ -1,6 +1,4 @@
-
-
-use eframe::egui::{self, RichText, Layout, TopBottomPanel};
+use eframe::egui::{self, Layout, RichText, TopBottomPanel};
 use crate::app::app_models::CpuAffinityApp;
 
 pub fn draw_top_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
@@ -27,5 +25,7 @@ pub fn draw_top_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
         });
         ui.separator();
         ui.label("💡 Tip: Drag & drop executable files (.exe/.lnk) onto a group to add them, then click ▶ to run with the assigned CPU cores");
+        ui.separator();
+        ui.add_space(3.0);
     });
 }

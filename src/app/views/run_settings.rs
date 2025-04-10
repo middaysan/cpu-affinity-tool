@@ -1,9 +1,22 @@
-use eframe::egui::{Context, CentralPanel, ComboBox, Frame};
+use eframe::egui::{self, CentralPanel, ComboBox, Context, Frame, Layout, Align};
 use crate::app::app_models::CpuAffinityApp;
 
 pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &Context) {
 
     CentralPanel::default().show(ctx, |ui| {
+        let mut is_close = false;
+
+        ui.horizontal(|ui| {
+            ui.heading("Edit App Run Settings");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("❌").on_hover_text("Close").clicked() {
+                    is_close = true;
+                }
+            });
+        });
+
+        ui.separator();
+
         Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
             let (group_idx, prog_idx) = match app.apps.edit_run_settings {
                 Some((ref mut g, ref mut p)) => (g, p),
@@ -25,6 +38,8 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &Context) {
                 ui.text_edit_singleline(&mut selected_app.name).changed()
             });
 
+            ui.add_space(5.0);
+
             ui.horizontal(|ui| {
                 ui.label("Binary path:");
                 let mut bin_path_str = selected_app.bin_path.to_string_lossy().to_string();
@@ -40,6 +55,8 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &Context) {
                 }
             });
 
+            ui.add_space(5.0);
+
             ui.horizontal(|ui| {
                 ui.label("Priority:");
                 ComboBox::from_label("")
@@ -53,6 +70,8 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &Context) {
                         ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::Realtime, "RealTime");
                     });
             });
+
+            ui.add_space(5.0);
 
             ui.label("Arguments:");
             let mut arg_to_remove: Option<usize> = None;
@@ -76,27 +95,33 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &Context) {
                 selected_app.args.remove(idx);
             }
 
+            ui.separator();
+
             if ui.button("Add Argument").clicked() {
                 selected_app.args.push(String::new());
             }
 
             ui.separator();
 
-            let mut is_close = false;
+
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+                if ui.add_sized(egui::vec2(100.0, 30.0), egui::Button::new("Save")).clicked() {
                     app.state.groups[*group_idx].programs[*prog_idx] = selected_app.clone();
                     app.state.save_state();
                     is_close = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.add_sized(egui::vec2(100.0, 30.0), egui::Button::new("Cancel")).clicked() {
                     is_close = true;
                 }
             });
 
-            if is_close {
-                app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
-            }
+
         });
+
+        if is_close {
+            app.apps.edit = None;
+            app.apps.edit_run_settings = None;
+            app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
+        }
     });
 }

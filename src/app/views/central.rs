@@ -20,56 +20,53 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
     let mut swap_step: Option<(usize, bool)> = None;
     let groups_len = app.state.groups.len();
     
-    for i in 0..groups_len {
+    for g_i in 0..groups_len {
 
         Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        if i > 0 {
+                        if g_i > 0 {
                             ui.small_button("⬆").on_hover_text("Move group up").clicked().then(|| {
-                                swap_step = Some((i, true));
+                                swap_step = Some((g_i, true));
                             });
                         }
 
-                        if i < groups_len - 1 {
+                        if g_i < groups_len - 1 {
                             ui.small_button("⬇").on_hover_text("Move group down").clicked().then(|| {
-                                swap_step = Some((i, false));
+                                swap_step = Some((g_i, false));
                             });
                         }
                     });
-                    ui.label(RichText::new(&app.state.groups[i].name).heading())
-                        .on_hover_text(RichText::new(format!("cores: {:?}", app.state.groups[i].cores)).weak());
+                    ui.label(RichText::new(&app.state.groups[g_i].name).heading())
+                        .on_hover_text(RichText::new(format!("cores: {:?}", app.state.groups[g_i].cores)).weak());
                     ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
                         if ui.button("⚙").on_hover_text("Edit group settings").clicked() {
-                            app.logs.log_text.push(format!("Editing group: {}", app.state.groups[i].name));
-                            app.groups.edit_index = Some(i);
-                            app.groups.new_name = app.state.groups[i].name.clone();
-                            app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::EditGroup));
+                            app.start_editing_group(g_i);
                         }
 
                         // TODO: add linux support
                         if ui.button("📁Add").on_hover_text("Add executables...").clicked() {
                             if let Some(paths) = rfd::FileDialog::new().add_filter("Executables", &["exe", "lnk"]).pick_files() {
-                                app.logs.log_text.push(format!("Adding executables to group: {}, paths: {:?}", app.state.groups[i].name, paths));
-                                let res = app.state.groups[i].add_app_to_group(paths);
+                                app.add_to_log(format!("Adding executables to group: {}, paths: {:?}", app.state.groups[g_i].name, paths));
+                                let res = app.state.groups[g_i].add_app_to_group(paths);
                                 if let Err(err) = res {
-                                    app.logs.log_text.push(format!("Error adding executables: {}", err));
+                                    app.add_to_log(format!("Error adding executables: {}", err));
                                 } else {
-                                    app.logs.log_text.push(format!("Added executables to group: {}", app.state.groups[i].name));
+                                    app.add_to_log(format!("Added executables to group: {}", app.state.groups[g_i].name));
                                 }
                                 modified = true;
                             }
                         }
 
-                        if app.state.groups[i].run_all_button {
+                        if app.state.groups[g_i].run_all_button {
                             if ui.button("▶ Run all").on_hover_text("Run all apps in group").clicked() {
-                                if app.state.groups[i].programs.is_empty() {
-                                    app.logs.log_text.push(format!("No executables to run in group: {}", app.state.groups[i].name));
+                                if app.state.groups[g_i].programs.is_empty() {
+                                    app.add_to_log(format!("No executables to run in group: {}", app.state.groups[g_i].name));
                                 } else {
-                                    for prog in &app.state.groups[i].programs {
-                                        run_program.get_or_insert_with(Vec::new).push((i, prog.clone()));
+                                    for prog in &app.state.groups[g_i].programs {
+                                        run_program.get_or_insert_with(Vec::new).push((g_i, prog.clone()));
                                     }
                                 }
                             }
@@ -79,13 +76,15 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
 
                 ui.separator();
 
-                ScrollArea::vertical().id_salt(i).show(ui, |ui| {
-                    if app.state.groups[i].programs.is_empty() {
+                ScrollArea::vertical().id_salt(g_i).show(ui, |ui| {
+                    if app.state.groups[g_i].programs.is_empty() {
                         ui.label("No executables. Drag & drop a file here to add.");
                     } else {
-                        for prog in app.state.groups[i].programs.clone() {
-                            let label = prog.name.clone();
+                        let len = app.state.groups[g_i].programs.len();
+                        for prog_index in 0..len {
                             ui.horizontal(|ui| {
+                                let prog = &app.state.groups[g_i].programs[prog_index];
+                                let label = prog.name.clone();
                                 // Set a fixed width for the entire row
                                 let available_width = ui.available_width();
                                 
@@ -104,15 +103,14 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                                     .on_hover_text("Remove from group");
 
                                 if response.on_hover_text(prog.bin_path.to_str().unwrap_or("")).clicked() {
-                                    run_program = Some(vec![(i, prog.clone())]);
+                                    run_program = Some(vec![(g_i, prog.clone())]);
                                 }
                                 if delete.clicked() {
-                                    remove_program = Some((i, prog.bin_path.clone()));
+                                    remove_program = Some((g_i, prog.bin_path.clone()));
                                     modified = true;
                                 }
                                 if edit_settings.clicked() {
-                                    let prog_index = app.state.groups[i].programs.clone().iter().position(|p| p.bin_path == prog.bin_path).unwrap_or_default();
-                                    app.apps.edit_run_settings = Some((i, prog_index));
+                                    app.apps.edit_run_settings = Some((g_i, prog_index));
                                     app.set_current_controller(crate::app::controllers::WindowController::AppRunSettings);
                                 }
                             });
@@ -124,11 +122,11 @@ fn render_groups(app: &mut CpuAffinityApp, ui: &mut egui::Ui, ctx: &egui::Contex
                     if !dropped_files.is_empty() {
                         let rect = ui.min_rect();
                         if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
-                            if let Err(err) = app.state.groups[i].add_app_to_group(dropped_files.clone()) {
-                                app.logs.log_text.push(format!("Error adding executables: {}", err));
+                            if let Err(err) = app.state.groups[g_i].add_app_to_group(dropped_files.clone()) {
+                                app.add_to_log(format!("Error adding executables: {}", err));
                             } else {
-                                app.logs.log_text.push(format!("Added {} executables to group: {}", 
-                                    dropped_files.len(), app.state.groups[i].name));
+                                app.add_to_log(format!("Added {} executables to group: {}", 
+                                    dropped_files.len(), app.state.groups[g_i].name));
                             }
                             dropped_assigned = true;
                             app.dropped_files = None;
