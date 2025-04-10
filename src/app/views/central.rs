@@ -15,7 +15,7 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
     let mut modified = false;
 
     let mut run_program: Option<Vec<(usize, AppToRun)>> = None;
-    let mut remove_program: Option<(usize, std::path::PathBuf)> = None;
+    let mut remove_program: Option<(usize, usize)> = None;
     
     let mut swap_step: Option<(usize, bool)> = None;
     let groups_len = app.persistent_state.groups.len();
@@ -79,6 +79,7 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
                 ScrollArea::vertical().id_salt(g_i).show(ui, |ui| {
                     if app.persistent_state.groups[g_i].programs.is_empty() {
                         ui.label("No executables. Drag & drop a file here to add.");
+                        ui.add_space(15.0);
                     } else {
                         let len = app.persistent_state.groups[g_i].programs.len();
                         for prog_index in 0..len {
@@ -106,7 +107,7 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
                                     run_program = Some(vec![(g_i, prog.clone())]);
                                 }
                                 if delete.clicked() {
-                                    remove_program = Some((g_i, prog.bin_path.clone()));
+                                    remove_program = Some((g_i, prog_index));
                                     modified = true;
                                 }
                                 if edit_settings.clicked() {
@@ -152,8 +153,8 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
         }
     }
 
-    if let Some((index, prog)) = remove_program {
-        app.remove_app_from_group(index, &prog);
+    if let Some((g_i, p_i)) = remove_program {
+        app.remove_app_from_group(g_i, p_i);
     }
 
     if modified {

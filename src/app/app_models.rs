@@ -64,9 +64,9 @@ pub struct AffinityAppState {
     pub log_manager: LogManager,
 }
 
-impl Default for AffinityAppState {
-    fn default() -> Self {
-        Self {
+impl AffinityAppState {
+    pub fn new(ctx: &egui::Context) -> Self {
+        let app = Self {
             persistent_state: app_state::AppState::load_state(),
             current_controller: controllers::WindowController::Groups(controllers::Group::ListGroups),
             controller_changed: false,
@@ -84,18 +84,46 @@ impl Default for AffinityAppState {
             },
             dropped_files: None,
             log_manager: LogManager { entries: vec![] },
-        }
+        };
+
+        // Установить тему из состояния
+        let visuals = match app.persistent_state.theme_index {
+            0 => egui::Visuals::default(),
+            1 => egui::Visuals::light(),
+            _ => egui::Visuals::dark(),
+        };
+        ctx.set_visuals(visuals);
+
+        app
     }
 }
 
-#[derive(Default)]
 pub struct AffinityApp {
     pub state: AffinityAppState,
     pub main_panel: controllers::MainPanel,
 }
 
+impl AffinityApp {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let state = AffinityAppState::new(&cc.egui_ctx);
+        let main_panel = controllers::MainPanel::new();
+ 
+        Self { state, main_panel }
+    }
+}
+
 impl eframe::App for AffinityApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Set theme based on the persistent state.
+
+        let visuals = match self.state.persistent_state.theme_index {
+            0 => egui::Visuals::default(),
+            1 => egui::Visuals::light(),
+            _ => egui::Visuals::dark(),
+        };
+        ctx.set_visuals(visuals);
+
+
         // Handle file drop events; check OS events and update dropped_files if any.
         if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
             let files: Vec<PathBuf> = ctx.input(|i| {
@@ -201,11 +229,13 @@ impl AffinityAppState {
     }
 
     /// Remove an application from a specified group by binary path.
-    pub fn remove_app_from_group(&mut self, group_index: usize, prog_path: &std::path::Path) {
+    pub fn remove_app_from_group(&mut self, group_index: usize, programm_index: usize) {
         if let Some(group) = self.persistent_state.groups.get_mut(group_index) {
-            group.programs.retain(|program| program.bin_path != prog_path);
-            self.app_edit_state.current_edit = None;
-            self.persistent_state.save_state();
+            if programm_index < group.programs.len() {
+                let app = &group.programs[programm_index];
+                self.log_manager.add_entry(format!("Removing app: {}", app.bin_path.display()));
+                group.programs.remove(programm_index);
+            }
         }
     }
 

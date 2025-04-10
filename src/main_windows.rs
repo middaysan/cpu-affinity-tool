@@ -11,12 +11,12 @@ fn main() {
         NativeOptions {
             run_and_return: true,
             viewport: eframe::egui::ViewportBuilder::default()
-                .with_min_inner_size([450.0, 600.0])
-                .with_max_inner_size([450.0, 1000.0])
+                .with_min_inner_size([470.0, 600.0])
+                .with_max_inner_size([470.0, 1000.0])
                 .with_maximize_button(false), // Disable maximize button
             ..Default::default()
         },
-        Box::new(|_cc| Ok(Box::new(AffinityApp::default()))),
+        Box::new(|cc| Ok(Box::new(AffinityApp::new(cc)))),
     );
 
     if let Err(_) = res {
