@@ -1,10 +1,10 @@
 use eframe::egui::{self, Layout, RichText, TopBottomPanel};
-use crate::app::app_models::CpuAffinityApp;
+use crate::app::app_models::AffinityAppState;
 
-pub fn draw_top_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
+pub fn draw_top_panel(app: &mut AffinityAppState, ctx: &egui::Context) {
     TopBottomPanel::top("top_panel").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            let (icon, label) = match app.state.theme_index {
+            let (icon, label) = match app.persistent_state.theme_index {
                 0 => ("💻", "System theme"),
                 1 => ("☀", "Light theme"),
                 _ => ("🌙", "Dark theme"),
@@ -15,7 +15,7 @@ pub fn draw_top_panel(app: &mut CpuAffinityApp, ctx: &egui::Context) {
             ui.separator();
             ui.label(RichText::new("Core Groups").heading());
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(format!("📄 View Logs({})", app.logs.log_text.len())).clicked() {
+                if ui.button(format!("📄 View Logs({})", app.log_manager.entries.len())).clicked() {
                     app.set_current_controller(crate::app::controllers::WindowController::Logs);
                 }
                 if ui.button("➕ Create Core Group").clicked() {

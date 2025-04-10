@@ -5,166 +5,16 @@ use super::controllers;
 use super::os_cmd::{OsCmd, OsCmdTrait};
 use super::app_state;
 use std::path::PathBuf;
-
-use app_state::AppToRun;
 use eframe::egui;
+use num_cpus;
 
-
-pub struct Logs {
-    pub log_text: Vec<String>,
+pub struct LogManager {
+    pub entries: Vec<String>,
 }
 
-pub struct Apps {
-    pub edit: Option<AppToRun>,
-    pub edit_run_settings: Option<(usize, usize)>,
-}
-
-pub struct Groups {
-    pub edit_index: Option<usize>,
-    pub edit_selection: Option<Vec<bool>>,
-    pub core_selection: Vec<bool>,
-    pub new_name: String,
-    pub enable_run_all_button: bool,
-    pub show_window: bool,
-}
-
-pub struct CpuAffinityApp {
-    pub current_controller: controllers::WindowController,
-    pub current_controller_was_changed: bool,
-    pub state: app_state::AppState,
-    pub groups: Groups,
-    pub apps: Apps,
-    pub dropped_files: Option<Vec<PathBuf>>,
-    pub logs: Logs,
-}
-
-impl Default for CpuAffinityApp {
-    fn default() -> Self {
-        let state = app_state::AppState::load_state();
-        Self {
-            state: state,
-            current_controller: controllers::WindowController::Groups(controllers::Group::ListGroups),
-            current_controller_was_changed: false,
-            groups: Groups {
-                edit_index: None,
-                edit_selection: None,
-                core_selection: vec![false; num_cpus::get()],
-                new_name: String::new(),
-                enable_run_all_button: false,
-                show_window: false,
-            },
-            apps: Apps {
-                edit: None,
-                edit_run_settings: None,
-            },
-            dropped_files: None,
-            logs: Logs {
-                log_text: vec![],
-            },
-        }
-    }
-}
-
-
-#[derive(Default)]
-pub struct App {
-    pub app: CpuAffinityApp,
-    pub window_controller: controllers::MainPanel,
-}
-
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
-            let files: Vec<PathBuf> = ctx.input(|i| 
-            i.raw.dropped_files.iter()
-            .filter_map(|f| f.path.clone())
-            .collect());
-            
-            if !files.is_empty() {
-                self.app.dropped_files = Some(files);
-            }
-        }
-                
-        let app = &mut self.app;
-        self.window_controller.render_with(ctx, |controller, ctx| {
-            header::draw_top_panel(app, ctx);
-            match &controller.window_controller {
-                controllers::WindowController::Groups(group) => match group {
-                    controllers::Group::ListGroups => {
-                        central::draw_central_panel(app, ctx);
-                    }
-                    controllers::Group::CreateGroup => {
-                        group_editor::create_group_window(app, ctx);
-                    }
-                    controllers::Group::EditGroup => {
-                        group_editor::edit_group_window(app, ctx);
-                    }
-                },
-                controllers::WindowController::Logs => {
-                    logs::draw_logs_window(app, ctx);
-                }
-                controllers::WindowController::AppRunSettings => {
-                    run_settings::draw_app_run_settings(app, ctx);
-                }
-            }
-        });
-
-        if app.current_controller_was_changed {
-            app.current_controller_was_changed = false;
-            self.window_controller.set_window(app.current_controller.clone());
-        }
-    }
-}
-
-impl CpuAffinityApp {
-    pub fn reset_group_form(&mut self) {
-        self.groups.edit_index = None;
-        self.groups.edit_selection = None;
-        self.groups.enable_run_all_button = false;
-        self.groups.show_window = false;
-        self.groups.new_name.clear();
-        self.groups.core_selection.fill(false);
-    }
-
-    pub fn toggle_theme(&mut self, ctx: &egui::Context) {
-        self.state.theme_index = (self.state.theme_index + 1) % 3;
-        ctx.set_visuals(match self.state.theme_index {
-            0 => egui::Visuals::default(),
-            1 => egui::Visuals::light(),
-            _ => egui::Visuals::dark(),
-        });
-
-        self.state.save_state();
-    }
-
-    pub fn create_group(&mut self) {
-        let name_str = self.groups.new_name.trim();
-        if name_str.is_empty() { 
-            self.add_to_log("Group name cannot be empty".to_string());
-            return; 
-        }
-
-        let cores: Vec<_> = self.groups.core_selection.iter().enumerate()
-            .filter_map(|(i, &v)| v.then_some(i))
-            .collect();
-
-        if cores.is_empty() { 
-            self.add_to_log("At least one core must be selected".to_string());
-            return; 
-        }
-
-        self.state.groups.push(app_state::CoreGroup {
-            name: name_str.to_string(),
-            cores,
-            programs: vec![],
-            run_all_button: self.groups.enable_run_all_button,
-        });
-
-        self.reset_group_form();
-        self.state.save_state();
-    }
-
-    pub fn add_to_log(&mut self, message: String) {
+impl LogManager {
+    /// Add a new log entry with a timestamp.
+    pub fn add_entry(&mut self, message: String) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
@@ -174,28 +24,199 @@ impl CpuAffinityApp {
             (now.as_secs() % 3600) / 60,
             now.as_secs() % 60
         );
-        self.logs.log_text.push(format!("{}::{}", ts, message));
+        self.entries.push(format!("{} :: {}", ts, message));
+    }
+}
+
+pub struct AppEditState {
+    pub current_edit: Option<app_state::AppToRun>,
+    pub run_settings: Option<(usize, usize)>,
+}
+
+pub struct GroupFormState {
+    pub editing_index: Option<usize>,
+    pub editing_selection: Option<Vec<bool>>,
+    pub core_selection: Vec<bool>,
+    pub group_name: String,
+    pub run_all_enabled: bool,
+    pub is_visible: bool,
+}
+
+impl GroupFormState {
+    /// Reset all group form fields to their default values.
+    pub fn reset(&mut self) {
+        self.editing_index = None;
+        self.editing_selection = None;
+        self.run_all_enabled = false;
+        self.is_visible = false;
+        self.group_name.clear();
+        self.core_selection.fill(false);
+    }
+}
+
+pub struct AffinityAppState {
+    pub current_controller: controllers::WindowController,
+    pub controller_changed: bool,
+    pub persistent_state: app_state::AppState, // Holds persistent data like theme, groups, etc.
+    pub group_form: GroupFormState,
+    pub app_edit_state: AppEditState,
+    pub dropped_files: Option<Vec<PathBuf>>,
+    pub log_manager: LogManager,
+}
+
+impl Default for AffinityAppState {
+    fn default() -> Self {
+        Self {
+            persistent_state: app_state::AppState::load_state(),
+            current_controller: controllers::WindowController::Groups(controllers::Group::ListGroups),
+            controller_changed: false,
+            group_form: GroupFormState {
+                editing_index: None,
+                editing_selection: None,
+                core_selection: vec![false; num_cpus::get()],
+                group_name: String::new(),
+                run_all_enabled: false,
+                is_visible: false,
+            },
+            app_edit_state: AppEditState {
+                current_edit: None,
+                run_settings: None,
+            },
+            dropped_files: None,
+            log_manager: LogManager { entries: vec![] },
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct AffinityApp {
+    pub state: AffinityAppState,
+    pub main_panel: controllers::MainPanel,
+}
+
+impl eframe::App for AffinityApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle file drop events; check OS events and update dropped_files if any.
+        if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
+            let files: Vec<PathBuf> = ctx.input(|i| {
+                i.raw.dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .collect()
+            });
+            if !files.is_empty() {
+                self.state.dropped_files = Some(files);
+            }
+        }
+
+        // Render UI based on the current window controller.
+        let app_state = &mut self.state;
+        self.main_panel.render_with(ctx, |controller, ui_ctx| {
+            // Draw the top panel (common for all views)
+            header::draw_top_panel(app_state, ui_ctx);
+            // Branch into different views based on current window controller.
+            match &controller.window_controller {
+                controllers::WindowController::Groups(group_view) => match group_view {
+                    controllers::Group::ListGroups => {
+                        central::draw_central_panel(app_state, ui_ctx);
+                    }
+                    controllers::Group::CreateGroup => {
+                        group_editor::create_group_window(app_state, ui_ctx);
+                    }
+                    controllers::Group::EditGroup => {
+                        group_editor::edit_group_window(app_state, ui_ctx);
+                    }
+                },
+                controllers::WindowController::Logs => {
+                    logs::draw_logs_window(app_state, ui_ctx);
+                }
+                controllers::WindowController::AppRunSettings => {
+                    run_settings::draw_app_run_settings(app_state, ui_ctx);
+                }
+            }
+        });
+
+        // If the window controller has been updated, notify the main panel.
+        if app_state.controller_changed {
+            app_state.controller_changed = false;
+            self.main_panel.set_window(app_state.current_controller.clone());
+        }
+    }
+}
+
+impl AffinityAppState {
+    /// Resets the group form state.
+    pub fn reset_group_form(&mut self) {
+        self.group_form.reset();
     }
 
+    /// Toggles the UI theme between default, light, and dark modes and saves the state.
+    pub fn toggle_theme(&mut self, ctx: &egui::Context) {
+        self.persistent_state.theme_index = (self.persistent_state.theme_index + 1) % 3;
+        let visuals = match self.persistent_state.theme_index {
+            0 => egui::Visuals::default(),
+            1 => egui::Visuals::light(),
+            _ => egui::Visuals::dark(),
+        };
+        ctx.set_visuals(visuals);
+        self.persistent_state.save_state();
+    }
+
+    /// Creates a new core group from the group form data.
+    /// Validates that group name is non-empty and at least one core is selected.
+    pub fn create_group(&mut self) {
+        let group_name_trimmed = self.group_form.group_name.trim();
+        if group_name_trimmed.is_empty() {
+            self.log_manager.add_entry("Group name cannot be empty".into());
+            return;
+        }
+
+        // Gather indices of selected cores.
+        let selected_cores: Vec<usize> = self.group_form.core_selection.iter()
+            .enumerate()
+            .filter_map(|(i, &selected)| if selected { Some(i) } else { None })
+            .collect();
+
+        if selected_cores.is_empty() {
+            self.log_manager.add_entry("At least one core must be selected".into());
+            return;
+        }
+
+        // Add new group to the persistent application state.
+        self.persistent_state.groups.push(app_state::CoreGroup {
+            name: group_name_trimmed.to_string(),
+            cores: selected_cores,
+            programs: vec![],
+            run_all_button: self.group_form.run_all_enabled,
+        });
+
+        self.reset_group_form();
+        self.persistent_state.save_state();
+    }
+
+    /// Sets a new window controller and marks the controller as changed.
     pub fn set_current_controller(&mut self, controller: controllers::WindowController) {
         self.current_controller = controller;
-        self.current_controller_was_changed = true;
+        self.controller_changed = true;
     }
 
+    /// Remove an application from a specified group by binary path.
     pub fn remove_app_from_group(&mut self, group_index: usize, prog_path: &std::path::Path) {
-        if let Some(group) = self.state.groups.get_mut(group_index) {
-            group.programs.retain(|p| p.bin_path != prog_path);
-            self.apps.edit = None;
-            self.state.save_state();
+        if let Some(group) = self.persistent_state.groups.get_mut(group_index) {
+            group.programs.retain(|program| program.bin_path != prog_path);
+            self.app_edit_state.current_edit = None;
+            self.persistent_state.save_state();
         }
     }
 
+    /// Prepares the group form for editing an existing group.
+    /// It fills the form with the group data and updates associated clusters.
     pub fn start_editing_group(&mut self, index: usize) {
-        let total_cores = self.groups.core_selection.len();
-
-        self.groups.core_selection = {
+        let total_cores = self.group_form.core_selection.len();
+        // Update the core selection based on the selected group's cores.
+        self.group_form.core_selection = {
             let mut selection = vec![false; total_cores];
-            for &core in &self.state.groups[index].cores {
+            for &core in &self.persistent_state.groups[index].cores {
                 if core < total_cores {
                     selection[core] = true;
                 }
@@ -203,34 +224,37 @@ impl CpuAffinityApp {
             selection
         };
 
-        self.groups.new_name = self.state.groups[index].name.clone();
-        self.groups.edit_index = Some(index);
-        self.groups.enable_run_all_button = self.state.groups[index].run_all_button;
+        self.group_form.group_name = self.persistent_state.groups[index].name.clone();
+        self.group_form.editing_index = Some(index);
+        self.group_form.run_all_enabled = self.persistent_state.groups[index].run_all_button;
 
-        self.state.clusters = self.state.groups[index].cores.iter()
-            .map(|&ci| self.state.clusters.get(ci).cloned().unwrap_or_default())
+        // Map the cores to their corresponding clusters.
+        // This is a critical operation that ensures UI consistency.
+        self.persistent_state.clusters = self.persistent_state.groups[index].cores.iter()
+            .map(|&ci| self.persistent_state.clusters.get(ci).cloned().unwrap_or_default())
             .collect();
 
-        self.set_current_controller(crate::app::controllers::WindowController::Groups(
-            crate::app::controllers::Group::EditGroup,
-        ));
+        self.set_current_controller(controllers::WindowController::Groups(controllers::Group::EditGroup));
     }
 
-    pub fn run_app_with_affinity(&mut self, group_index: usize, app_to_run: AppToRun) {
-        let groups = self.state.groups.clone();
-        let group = match groups.get(group_index) {
+    /// Runs an application with a specified CPU affinity based on the provided group.
+    /// Logs the start of the app and any resulting errors.
+    pub fn run_app_with_affinity(&mut self, group_index: usize, app_to_run: app_state::AppToRun) {
+        let group = match self.persistent_state.groups.get(group_index) {
             Some(g) => g,
             None => return,
         };
 
+        // Extract a human-readable label from the binary path.
         let label = app_to_run.bin_path.file_name()
-            .map_or_else(|| app_to_run.bin_path.display().to_string(), |n| n.to_string_lossy().to_string());
-
-        self.add_to_log(format!("Starting '{}', app: {}", label, app_to_run.display()));
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| app_to_run.bin_path.display().to_string());
+        
+        self.log_manager.add_entry(format!("Starting '{}', app: {}", label, app_to_run.display()));
 
         match OsCmd::run(app_to_run.bin_path, app_to_run.args, &group.cores, app_to_run.priority) {
-            Ok(_) => self.add_to_log(format!("OK: started '{}'", label)),
-            Err(e) => self.add_to_log(format!("ERROR: {}", e)),
+            Ok(_) => self.log_manager.add_entry(format!("OK: started '{}'", label)),
+            Err(e) => self.log_manager.add_entry(format!("ERROR: {}", e)),
         }
     }
 }

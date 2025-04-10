@@ -1,7 +1,7 @@
 use eframe::egui::{self, CentralPanel, ComboBox, Context, Frame, Layout, Align};
-use crate::app::app_models::CpuAffinityApp;
+use crate::app::app_models::AffinityAppState;
 
-pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &Context) {
+pub fn draw_app_run_settings(app: &mut AffinityAppState, ctx: &Context) {
 
     CentralPanel::default().show(ctx, |ui| {
         let mut is_close = false;
@@ -18,18 +18,18 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &Context) {
         ui.separator();
 
         Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
-            let (group_idx, prog_idx) = match app.apps.edit_run_settings {
+            let (group_idx, prog_idx) = match app.app_edit_state.run_settings {
                 Some((ref mut g, ref mut p)) => (g, p),
                 None => return,
             };
 
-            if app.apps.edit.is_none() {
-                let original = app.state.groups[*group_idx].programs[*prog_idx].clone();
-                app.apps.edit = Some(original);
+            if app.app_edit_state.current_edit.is_none() {
+                let original = app.persistent_state.groups[*group_idx].programs[*prog_idx].clone();
+                app.app_edit_state.current_edit = Some(original);
             }
 
             let selected_app = app
-                .apps.edit
+                .app_edit_state.current_edit
                 .as_mut()
                 .expect("edit_app_clone must be initialized");
 
@@ -106,8 +106,8 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &Context) {
 
             ui.horizontal(|ui| {
                 if ui.add_sized(egui::vec2(100.0, 30.0), egui::Button::new("Save")).clicked() {
-                    app.state.groups[*group_idx].programs[*prog_idx] = selected_app.clone();
-                    app.state.save_state();
+                    app.persistent_state.groups[*group_idx].programs[*prog_idx] = selected_app.clone();
+                    app.persistent_state.save_state();
                     is_close = true;
                 }
                 if ui.add_sized(egui::vec2(100.0, 30.0), egui::Button::new("Cancel")).clicked() {
@@ -119,8 +119,8 @@ pub fn draw_app_run_settings(app: &mut CpuAffinityApp, ctx: &Context) {
         });
 
         if is_close {
-            app.apps.edit = None;
-            app.apps.edit_run_settings = None;
+            app.app_edit_state.current_edit = None;
+            app.app_edit_state.run_settings = None;
             app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
         }
     });

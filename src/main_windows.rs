@@ -1,7 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
-use app::app_models::App;
+use app::app_models::AffinityApp;
 
 use eframe::{run_native, NativeOptions};
 
@@ -16,7 +16,7 @@ fn main() {
                 .with_maximize_button(false), // Disable maximize button
             ..Default::default()
         },
-        Box::new(|_cc| Ok(Box::new(App::default()))),
+        Box::new(|_cc| Ok(Box::new(AffinityApp::default()))),
     );
 
     if let Err(_) = res {

@@ -1,7 +1,7 @@
 use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
-use crate::app::app_models::CpuAffinityApp;
+use crate::app::app_models::AffinityAppState;
 
-pub fn draw_logs_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
+pub fn draw_logs_window(app: &mut AffinityAppState, ctx: &egui::Context) {
     CentralPanel::default().show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.heading("Logs");
@@ -10,7 +10,7 @@ pub fn draw_logs_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
                     app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
                 }
                 if ui.button("Clear Logs").clicked() {
-                    app.logs.log_text.clear();
+                    app.log_manager.entries.clear();
                 }
     
             });
@@ -20,7 +20,7 @@ pub fn draw_logs_window(app: &mut CpuAffinityApp, ctx: &egui::Context) {
         ScrollArea::vertical()
             .auto_shrink([false, false]) 
             .show(ui, |ui| {
-                for log in app.logs.log_text.iter().rev() {
+                for log in app.log_manager.entries.iter().rev() {
                     ui.label(RichText::new(log));
                     ui.separator();
                 }
