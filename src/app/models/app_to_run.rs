@@ -3,6 +3,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use crate::app::os_cmd::PriorityClass;
 
+pub struct RunAppEditState {
+    pub current_edit: Option<AppToRun>,
+    pub run_settings: Option<(usize, usize)>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppToRun {
     pub name: String,

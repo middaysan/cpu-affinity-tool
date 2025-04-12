@@ -1,17 +1,13 @@
 use crate::app::models::affinity_app_state_storage::AffinityAppStateStorage;
 use crate::app::controllers;
-use crate::app::models::app_to_run_edit_state::RunAppEditState;
-use crate::app::models::group_form_state::GroupFormState;
-use crate::app::models::core_group::CoreGroup;
+use crate::app::models::app_to_run::{RunAppEditState, AppToRun};
+use crate::app::models::core_group::{CoreGroup, GroupFormState};
 use crate::app::models::LogManager;
 use crate::app::os_cmd::OsCmd;
 
 use std::path::PathBuf;
 use num_cpus;
 use eframe::egui;
-
-use super::app_to_run;
-
 
 pub struct AffinityAppState {
     pub current_window: controllers::WindowController,
@@ -154,7 +150,7 @@ impl AffinityAppState {
 
     /// Runs an application with a specified CPU affinity based on the provided group.
     /// Logs the start of the app and any resulting errors.
-    pub fn run_app_with_affinity(&mut self, group_index: usize, app_to_run: app_to_run::AppToRun) {
+    pub fn run_app_with_affinity(&mut self, group_index: usize, app_to_run: AppToRun) {
         let group = match self.persistent_state.groups.get(group_index) {
             Some(g) => g,
             None => return,
