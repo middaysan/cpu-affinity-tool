@@ -21,26 +21,26 @@ impl Default for WindowController {
 }
 
 #[derive(Clone)]
-pub struct MainPanel {
+pub struct MainController {
     pub window_controller: WindowController,
 }
 
-impl Default for MainPanel {
+impl Default for MainController {
     fn default() -> Self {
-        MainPanel::new()
+        MainController::new()
     }
 }
 
-impl MainPanel {
+impl MainController {
     pub fn new() -> Self {
-        MainPanel {
+        MainController {
             window_controller: WindowController::Groups(Group::ListGroups),
         }
     }
 
     pub fn render_with<F>(&self, ctx: &egui::Context, mut dispatch_fn: F)
     where
-        F: FnMut(&MainPanel, &egui::Context),
+        F: FnMut(&MainController, &egui::Context),
     {
         dispatch_fn(&self, ctx);
     }

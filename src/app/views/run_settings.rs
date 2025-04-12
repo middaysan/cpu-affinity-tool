@@ -1,5 +1,5 @@
 use eframe::egui::{self, CentralPanel, ComboBox, Context, Frame, Layout, Align};
-use crate::app::app_models::AffinityAppState;
+use crate::app::models::AffinityAppState;
 
 pub fn draw_app_run_settings(app: &mut AffinityAppState, ctx: &Context) {
 

@@ -1,6 +1,7 @@
 use eframe::egui::{self, CentralPanel,Frame};
 use std::collections::HashSet;
-use crate::app::app_models::{AffinityAppState, GroupFormState};
+use crate::app::models::AffinityAppState;
+use crate::app::models::GroupFormState;
 
 /// Form for creating/editing a group: divided into rendering the name and the section with cores and clusters.
 fn draw_group_form_ui(

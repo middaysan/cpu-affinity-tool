@@ -1,5 +1,6 @@
 use eframe::egui::{self, RichText, CentralPanel, ScrollArea, Frame, Layout};
-use crate::app::{app_state::AppToRun, app_models::AffinityAppState};
+use crate::app::models::AffinityAppState;
+use crate::app::models::AppToRun;
 
 pub fn draw_central_panel(app: &mut AffinityAppState, ctx: &egui::Context) {
     CentralPanel::default().show(ctx, |ui| {

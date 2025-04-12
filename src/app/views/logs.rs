@@ -1,5 +1,5 @@
 use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
-use crate::app::app_models::AffinityAppState;
+use crate::app::models::AffinityAppState;
 
 pub fn draw_logs_window(app: &mut AffinityAppState, ctx: &egui::Context) {
     CentralPanel::default().show(ctx, |ui| {

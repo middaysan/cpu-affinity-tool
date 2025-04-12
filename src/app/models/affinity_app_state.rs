@@ -1,65 +1,24 @@
-use super::views::{run_settings, central, group_editor, header, logs};
+use crate::app::models::app_state;
+use crate::app::controllers;
+use crate::app::models::app_to_run_edit_state::RunAppEditState;
+use crate::app::models::group_form_state::GroupFormState;
+use crate::app::models::core_group::CoreGroup;
+use crate::app::models::LogManager;
+use crate::app::os_cmd::OsCmd;
 
-use super::controllers;
-
-use super::os_cmd::{OsCmd, OsCmdTrait};
-use super::app_state;
 use std::path::PathBuf;
-use eframe::egui;
 use num_cpus;
+use eframe::egui;
 
-pub struct LogManager {
-    pub entries: Vec<String>,
-}
+use super::app_to_run;
 
-impl LogManager {
-    /// Add a new log entry with a timestamp.
-    pub fn add_entry(&mut self, message: String) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let ts = format!(
-            "[{:02}:{:02}:{:02}]",
-            (now.as_secs() % 86400) / 3600,
-            (now.as_secs() % 3600) / 60,
-            now.as_secs() % 60
-        );
-        self.entries.push(format!("{} :: {}", ts, message));
-    }
-}
-
-pub struct AppEditState {
-    pub current_edit: Option<app_state::AppToRun>,
-    pub run_settings: Option<(usize, usize)>,
-}
-
-pub struct GroupFormState {
-    pub editing_index: Option<usize>,
-    pub editing_selection: Option<Vec<bool>>,
-    pub core_selection: Vec<bool>,
-    pub group_name: String,
-    pub run_all_enabled: bool,
-    pub is_visible: bool,
-}
-
-impl GroupFormState {
-    /// Reset all group form fields to their default values.
-    pub fn reset(&mut self) {
-        self.editing_index = None;
-        self.editing_selection = None;
-        self.run_all_enabled = false;
-        self.is_visible = false;
-        self.group_name.clear();
-        self.core_selection.fill(false);
-    }
-}
 
 pub struct AffinityAppState {
     pub current_controller: controllers::WindowController,
     pub controller_changed: bool,
     pub persistent_state: app_state::AppState, // Holds persistent data like theme, groups, etc.
     pub group_form: GroupFormState,
-    pub app_edit_state: AppEditState,
+    pub app_edit_state: RunAppEditState,
     pub dropped_files: Option<Vec<PathBuf>>,
     pub log_manager: LogManager,
 }
@@ -78,7 +37,7 @@ impl AffinityAppState {
                 run_all_enabled: false,
                 is_visible: false,
             },
-            app_edit_state: AppEditState {
+            app_edit_state: RunAppEditState {
                 current_edit: None,
                 run_settings: None,
             },
@@ -95,80 +54,6 @@ impl AffinityAppState {
         ctx.set_visuals(visuals);
 
         app
-    }
-}
-
-pub struct AffinityApp {
-    pub state: AffinityAppState,
-    pub main_panel: controllers::MainPanel,
-}
-
-impl AffinityApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let state = AffinityAppState::new(&cc.egui_ctx);
-        let main_panel = controllers::MainPanel::new();
- 
-        Self { state, main_panel }
-    }
-}
-
-impl eframe::App for AffinityApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Set theme based on the persistent state.
-
-        let visuals = match self.state.persistent_state.theme_index {
-            0 => egui::Visuals::default(),
-            1 => egui::Visuals::light(),
-            _ => egui::Visuals::dark(),
-        };
-        ctx.set_visuals(visuals);
-
-
-        // Handle file drop events; check OS events and update dropped_files if any.
-        if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
-            let files: Vec<PathBuf> = ctx.input(|i| {
-                i.raw.dropped_files
-                    .iter()
-                    .filter_map(|f| f.path.clone())
-                    .collect()
-            });
-            if !files.is_empty() {
-                self.state.dropped_files = Some(files);
-            }
-        }
-
-        // Render UI based on the current window controller.
-        let app_state = &mut self.state;
-        self.main_panel.render_with(ctx, |controller, ui_ctx| {
-            // Draw the top panel (common for all views)
-            header::draw_top_panel(app_state, ui_ctx);
-            // Branch into different views based on current window controller.
-            match &controller.window_controller {
-                controllers::WindowController::Groups(group_view) => match group_view {
-                    controllers::Group::ListGroups => {
-                        central::draw_central_panel(app_state, ui_ctx);
-                    }
-                    controllers::Group::CreateGroup => {
-                        group_editor::create_group_window(app_state, ui_ctx);
-                    }
-                    controllers::Group::EditGroup => {
-                        group_editor::edit_group_window(app_state, ui_ctx);
-                    }
-                },
-                controllers::WindowController::Logs => {
-                    logs::draw_logs_window(app_state, ui_ctx);
-                }
-                controllers::WindowController::AppRunSettings => {
-                    run_settings::draw_app_run_settings(app_state, ui_ctx);
-                }
-            }
-        });
-
-        // If the window controller has been updated, notify the main panel.
-        if app_state.controller_changed {
-            app_state.controller_changed = false;
-            self.main_panel.set_window(app_state.current_controller.clone());
-        }
     }
 }
 
@@ -211,7 +96,7 @@ impl AffinityAppState {
         }
 
         // Add new group to the persistent application state.
-        self.persistent_state.groups.push(app_state::CoreGroup {
+        self.persistent_state.groups.push(CoreGroup {
             name: group_name_trimmed.to_string(),
             cores: selected_cores,
             programs: vec![],
@@ -269,7 +154,7 @@ impl AffinityAppState {
 
     /// Runs an application with a specified CPU affinity based on the provided group.
     /// Logs the start of the app and any resulting errors.
-    pub fn run_app_with_affinity(&mut self, group_index: usize, app_to_run: app_state::AppToRun) {
+    pub fn run_app_with_affinity(&mut self, group_index: usize, app_to_run: app_to_run::AppToRun) {
         let group = match self.persistent_state.groups.get(group_index) {
             Some(g) => g,
             None => return,

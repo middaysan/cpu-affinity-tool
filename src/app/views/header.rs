@@ -1,5 +1,5 @@
 use eframe::egui::{self, Layout, RichText, TopBottomPanel};
-use crate::app::app_models::AffinityAppState;
+use crate::app::models::AffinityAppState;
 
 pub fn draw_top_panel(app: &mut AffinityAppState, ctx: &egui::Context) {
     TopBottomPanel::top("top_panel").show(ctx, |ui| {

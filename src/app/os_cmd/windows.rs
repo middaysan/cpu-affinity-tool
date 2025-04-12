@@ -12,8 +12,8 @@ use shlex;
 
 pub struct OsCmd;
 
-impl super::OsCmdTrait for OsCmd {
-    fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, Vec<String>), String> {
+impl OsCmd {
+    pub fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, Vec<String>), String> {
         if file_path.extension()
             .and_then(|e| e.to_str())
             .map(|ext| ext.eq_ignore_ascii_case("lnk"))
@@ -26,7 +26,7 @@ impl super::OsCmdTrait for OsCmd {
         }
     }
 
-    fn run(file_path: PathBuf, args: Vec<String>, cores: &[usize], priority: super::PriorityClass) -> Result<(), String> {
+    pub fn run(file_path: PathBuf, args: Vec<String>, cores: &[usize], priority: super::PriorityClass) -> Result<(), String> {
         let affinity_mask = cores.iter().map(|&i| 1 << i).sum();
         let child = spawn_process(&file_path, &args)?;
         apply_affinity(&child, affinity_mask)?;
