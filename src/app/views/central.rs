@@ -113,7 +113,7 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
                                 }
                                 if edit_settings.clicked() {
                                     app.app_edit_state.run_settings = Some((g_i, prog_index));
-                                    app.set_current_controller(crate::app::controllers::WindowController::AppRunSettings);
+                                    app.set_current_window(crate::app::controllers::WindowController::AppRunSettings);
                                 }
                             });
                         }

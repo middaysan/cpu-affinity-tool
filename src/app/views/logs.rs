@@ -7,7 +7,7 @@ pub fn draw_logs_window(app: &mut AffinityAppState, ctx: &egui::Context) {
             ui.heading("Logs");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("❌").on_hover_text("Close").clicked() {
-                    app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
+                    app.set_current_window(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
                 }
                 if ui.button("Clear Logs").clicked() {
                     app.log_manager.entries.clear();

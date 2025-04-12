@@ -121,7 +121,7 @@ pub fn draw_app_run_settings(app: &mut AffinityAppState, ctx: &Context) {
         if is_close {
             app.app_edit_state.current_edit = None;
             app.app_edit_state.run_settings = None;
-            app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
+            app.set_current_window(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
         }
     });
 }

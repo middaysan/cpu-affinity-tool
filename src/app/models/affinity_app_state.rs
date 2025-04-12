@@ -14,7 +14,7 @@ use super::app_to_run;
 
 
 pub struct AffinityAppState {
-    pub current_controller: controllers::WindowController,
+    pub current_window: controllers::WindowController,
     pub controller_changed: bool,
     pub persistent_state: AffinityAppStateStorage, // Holds persistent data like theme, groups, etc.
     pub group_form: GroupFormState,
@@ -27,7 +27,7 @@ impl AffinityAppState {
     pub fn new(ctx: &egui::Context) -> Self {
         let app = Self {
             persistent_state: AffinityAppStateStorage::load_state(),
-            current_controller: controllers::WindowController::Groups(controllers::Group::ListGroups),
+            current_window: controllers::WindowController::Groups(controllers::Group::ListGroups),
             controller_changed: false,
             group_form: GroupFormState {
                 editing_index: None,
@@ -107,9 +107,9 @@ impl AffinityAppState {
         self.persistent_state.save_state();
     }
 
-    /// Sets a new window controller and marks the controller as changed.
-    pub fn set_current_controller(&mut self, controller: controllers::WindowController) {
-        self.current_controller = controller;
+    /// Sets a new window and marks the controller as changed.
+    pub fn set_current_window(&mut self, window: controllers::WindowController) {
+        self.current_window = window;
         self.controller_changed = true;
     }
 
@@ -149,7 +149,7 @@ impl AffinityAppState {
             .map(|&ci| self.persistent_state.clusters.get(ci).cloned().unwrap_or_default())
             .collect();
 
-        self.set_current_controller(controllers::WindowController::Groups(controllers::Group::EditGroup));
+        self.set_current_window(controllers::WindowController::Groups(controllers::Group::EditGroup));
     }
 
     /// Runs an application with a specified CPU affinity based on the provided group.

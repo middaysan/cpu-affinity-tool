@@ -202,7 +202,7 @@ pub fn create_group_window(app: &mut AffinityAppState, ctx: &egui::Context) {
             app.create_group();
         }
         app.reset_group_form();
-        app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
+        app.set_current_window(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
     }
 }
 
@@ -261,7 +261,7 @@ pub fn edit_group_window(app: &mut AffinityAppState, ctx: &egui::Context) {
             }
 
             if save_clicked || delete_clicked || cancel_clicked {
-                app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
+                app.set_current_window(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
             }
         });
 }

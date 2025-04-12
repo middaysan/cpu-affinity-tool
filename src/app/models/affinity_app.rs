@@ -75,7 +75,7 @@ impl eframe::App for AffinityApp {
         // If the window controller has been updated, notify the main panel.
         if app_state.controller_changed {
             app_state.controller_changed = false;
-            self.main_controller.set_window(app_state.current_controller.clone());
+            self.main_controller.set_window(app_state.current_window.clone());
         }
     }
 }

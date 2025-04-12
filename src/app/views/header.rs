@@ -16,10 +16,10 @@ pub fn draw_top_panel(app: &mut AffinityAppState, ctx: &egui::Context) {
             ui.label(RichText::new("Core Groups").heading());
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(format!("📄 View Logs({})", app.log_manager.entries.len())).clicked() {
-                    app.set_current_controller(crate::app::controllers::WindowController::Logs);
+                    app.set_current_window(crate::app::controllers::WindowController::Logs);
                 }
                 if ui.button("➕ Create Core Group").clicked() {
-                    app.set_current_controller(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::CreateGroup));
+                    app.set_current_window(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::CreateGroup));
                 }
             });
         });
