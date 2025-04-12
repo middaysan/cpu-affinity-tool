@@ -4,7 +4,7 @@ mod app_to_run_edit_state;
 mod affinity_app_state;
 mod affinity_app;
 mod core_group;
-mod affinity_app_state_saver;
+mod affinity_app_state_storage;
 mod app_to_run;
 
 pub use log_manager::LogManager;
