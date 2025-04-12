@@ -18,7 +18,11 @@ impl AffinityAppStateStorage {
 
         std::fs::read_to_string(&path).ok()
             .and_then(|data| serde_json::from_str::<AffinityAppStateStorage>(&data).ok())
-            .unwrap_or_else(|| AffinityAppStateStorage { groups: Vec::new(), clusters: Vec::new(), theme_index: 0 })
+            .unwrap_or_else(|| {
+                let default_state = AffinityAppStateStorage { groups: Vec::new(), clusters: Vec::new(), theme_index: 0 };
+                let _ = std::fs::write(&path, serde_json::to_string_pretty(&default_state).unwrap_or_default());
+                default_state
+            })
     }
 
     pub fn save_state(&self) {

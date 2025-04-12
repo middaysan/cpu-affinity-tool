@@ -122,12 +122,12 @@ impl AffinityAppState {
 
     /// Prepares the group form for editing an existing group.
     /// It fills the form with the group data and updates associated clusters.
-    pub fn start_editing_group(&mut self, index: usize) {
+    pub fn start_editing_group(&mut self, group_index: usize) {
         let total_cores = self.group_form.core_selection.len();
         // Update the core selection based on the selected group's cores.
         self.group_form.core_selection = {
             let mut selection = vec![false; total_cores];
-            for &core in &self.persistent_state.groups[index].cores {
+            for &core in &self.persistent_state.groups[group_index].cores {
                 if core < total_cores {
                     selection[core] = true;
                 }
@@ -135,13 +135,13 @@ impl AffinityAppState {
             selection
         };
 
-        self.group_form.group_name = self.persistent_state.groups[index].name.clone();
-        self.group_form.editing_index = Some(index);
-        self.group_form.run_all_enabled = self.persistent_state.groups[index].run_all_button;
+        self.group_form.group_name = self.persistent_state.groups[group_index].name.clone();
+        self.group_form.editing_index = Some(group_index);
+        self.group_form.run_all_enabled = self.persistent_state.groups[group_index].run_all_button;
 
         // Map the cores to their corresponding clusters.
         // This is a critical operation that ensures UI consistency.
-        self.persistent_state.clusters = self.persistent_state.groups[index].cores.iter()
+        self.persistent_state.clusters = self.persistent_state.groups[group_index].cores.iter()
             .map(|&ci| self.persistent_state.clusters.get(ci).cloned().unwrap_or_default())
             .collect();
 
