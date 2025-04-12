@@ -8,15 +8,15 @@ use eframe::egui;
 
 pub struct AffinityApp {
     pub state: AffinityAppState,
-    pub main_panel: controllers::MainController,
+    pub main_controller: controllers::MainController,
 }
 
 impl AffinityApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let state = AffinityAppState::new(&cc.egui_ctx);
-        let main_panel = controllers::MainController::new();
+        let main_controller = controllers::MainController::new();
  
-        Self { state, main_panel }
+        Self { state, main_controller: main_controller }
     }
 }
 
@@ -47,7 +47,7 @@ impl eframe::App for AffinityApp {
 
         // Render UI based on the current window controller.
         let app_state = &mut self.state;
-        self.main_panel.render_with(ctx, |controller, ui_ctx| {
+        self.main_controller.render_with(ctx, |controller, ui_ctx| {
             // Draw the top panel (common for all views)
             header::draw_top_panel(app_state, ui_ctx);
             // Branch into different views based on current window controller.
@@ -75,7 +75,7 @@ impl eframe::App for AffinityApp {
         // If the window controller has been updated, notify the main panel.
         if app_state.controller_changed {
             app_state.controller_changed = false;
-            self.main_panel.set_window(app_state.current_controller.clone());
+            self.main_controller.set_window(app_state.current_controller.clone());
         }
     }
 }

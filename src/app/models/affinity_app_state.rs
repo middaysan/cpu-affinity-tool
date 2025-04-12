@@ -1,4 +1,4 @@
-use crate::app::models::app_state;
+use crate::app::models::affinity_app_state_saver;
 use crate::app::controllers;
 use crate::app::models::app_to_run_edit_state::RunAppEditState;
 use crate::app::models::group_form_state::GroupFormState;
@@ -16,7 +16,7 @@ use super::app_to_run;
 pub struct AffinityAppState {
     pub current_controller: controllers::WindowController,
     pub controller_changed: bool,
-    pub persistent_state: app_state::AppState, // Holds persistent data like theme, groups, etc.
+    pub persistent_state: affinity_app_state_saver::AffinityAppStateSaver, // Holds persistent data like theme, groups, etc.
     pub group_form: GroupFormState,
     pub app_edit_state: RunAppEditState,
     pub dropped_files: Option<Vec<PathBuf>>,
@@ -26,7 +26,7 @@ pub struct AffinityAppState {
 impl AffinityAppState {
     pub fn new(ctx: &egui::Context) -> Self {
         let app = Self {
-            persistent_state: app_state::AppState::load_state(),
+            persistent_state: affinity_app_state_saver::AffinityAppStateSaver::load_state(),
             current_controller: controllers::WindowController::Groups(controllers::Group::ListGroups),
             controller_changed: false,
             group_form: GroupFormState {
