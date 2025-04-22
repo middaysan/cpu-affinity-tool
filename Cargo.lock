@@ -746,13 +746,13 @@ dependencies = [
  "libc",
  "num_cpus",
  "once_cell",
+ "os_api",
  "parselnk",
  "rfd",
  "serde",
  "serde_json",
  "shlex",
  "windows 0.61.1",
- "windows_api",
  "winres",
 ]
 
@@ -2253,6 +2253,19 @@ checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
 dependencies = [
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "os_api"
+version = "0.1.0"
+dependencies = [
+ "ntapi",
+ "parselnk",
+ "serde",
+ "serde_json",
+ "shlex",
+ "windows 0.61.1",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3811,17 +3824,6 @@ name = "windows_aarch64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
-
-[[package]]
-name = "windows_api"
-version = "0.1.0"
-dependencies = [
- "ntapi",
- "parselnk",
- "shlex",
- "windows 0.61.1",
- "windows-sys 0.59.0",
-]
 
 [[package]]
 name = "windows_i686_gnu"

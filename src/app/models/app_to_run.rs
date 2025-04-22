@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use crate::app::os_cmd::PriorityClass;
+use os_api::PriorityClass;
 
 pub struct RunAppEditState {
     pub current_edit: Option<AppToRun>,

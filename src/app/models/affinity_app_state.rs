@@ -3,7 +3,7 @@ use crate::app::controllers;
 use crate::app::models::app_to_run::{RunAppEditState, AppToRun};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
 use crate::app::models::LogManager;
-use crate::app::os_cmd::OsCmd;
+use os_api::OS;
 
 use std::path::PathBuf;
 use num_cpus;
@@ -163,7 +163,7 @@ impl AffinityAppState {
         
         self.log_manager.add_entry(format!("Starting '{}', app: {}", label, app_to_run.display()));
 
-        match OsCmd::run(app_to_run.bin_path, app_to_run.args, &group.cores, app_to_run.priority) {
+        match OS::run(app_to_run.bin_path, app_to_run.args, &group.cores, app_to_run.priority) {
             Ok(_) => self.log_manager.add_entry(format!("OK: started '{}'", label)),
             Err(e) => self.log_manager.add_entry(format!("ERROR: {}", e)),
         }

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::app::os_cmd::{OsCmd, PriorityClass};
+use os_api::{OS, PriorityClass};
 use crate::app::models::app_to_run::AppToRun;
 
 pub struct GroupFormState {
@@ -38,7 +38,7 @@ impl CoreGroup {
         }
 
         for path in dropped_paths {
-            let parsed_app_file = OsCmd::parse_dropped_file(path.clone());
+            let parsed_app_file = OS::parse_dropped_file(path.clone());
 
             match parsed_app_file {
                 Ok((target, args)) => {

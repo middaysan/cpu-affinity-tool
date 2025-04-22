@@ -22,7 +22,7 @@ overflow-checks = false     # Disable integer overflow checks.
 
 [dependencies]
 [target.'cfg(windows)'.dependencies]
-windows_api = { path = "libs/windows_api" }
+os_api = { path = "libs/os_api" }
 eframe = "0.31.1"
 num_cpus = "1.16"
 rfd = "0.15.3"

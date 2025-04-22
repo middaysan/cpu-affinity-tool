@@ -1,5 +1,6 @@
 use eframe::egui::{self, CentralPanel, ComboBox, Context, Frame, Layout, Align};
 use crate::app::models::AffinityAppState;
+use os_api::PriorityClass;
 
 pub fn draw_app_run_settings(app: &mut AffinityAppState, ctx: &Context) {
 
@@ -62,12 +63,12 @@ pub fn draw_app_run_settings(app: &mut AffinityAppState, ctx: &Context) {
                 ComboBox::from_label("")
                     .selected_text(format!("{:?}", selected_app.priority))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::Idle, "Idle");
-                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::BelowNormal, "Below Normal");
-                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::Normal, "Normal");
-                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::AboveNormal, "Above Normal");
-                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::High, "High");
-                        ui.selectable_value(&mut selected_app.priority, crate::app::os_cmd::PriorityClass::Realtime, "RealTime");
+                        ui.selectable_value(&mut selected_app.priority, PriorityClass::Idle, "Idle");
+                        ui.selectable_value(&mut selected_app.priority, PriorityClass::BelowNormal, "Below Normal");
+                        ui.selectable_value(&mut selected_app.priority, PriorityClass::Normal, "Normal");
+                        ui.selectable_value(&mut selected_app.priority, PriorityClass::AboveNormal, "Above Normal");
+                        ui.selectable_value(&mut selected_app.priority, PriorityClass::High, "High");
+                        ui.selectable_value(&mut selected_app.priority, PriorityClass::Realtime, "RealTime");
                     });
             });
 
