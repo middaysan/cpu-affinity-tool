@@ -22,7 +22,7 @@ impl AffinityApp {
 
 impl eframe::App for AffinityApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Set theme based on the persistent state.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         let visuals = match self.state.persistent_state.theme_index {
             0 => egui::Visuals::default(),

@@ -1,6 +1,3 @@
-// windows_process_ops.rs
-
-
 use std::path::PathBuf;
 use std::process::{Command, Child, Stdio};
 use std::os::windows::io::AsRawHandle;
@@ -109,7 +106,7 @@ impl OS {
         let mut buf = vec![0u32; 1024];
         let mut ret = 0;
         unsafe {
-            if K32EnumProcesses(buf.as_mut_ptr(), (buf.len()*4) as u32, &mut ret) == 0 {
+            if K32EnumProcesses(buf.as_mut_ptr(), (buf.len() * 4) as u32, &mut ret) == 0 {
                 panic!("K32EnumProcesses failed");
             }
         }
@@ -137,7 +134,8 @@ impl OS {
     }
 
     pub fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, Vec<String>), String> {
-        if file_path.extension()
+        if file_path
+            .extension()
             .and_then(|e| e.to_str())
             .map(|ext| ext.eq_ignore_ascii_case("lnk"))
             .unwrap_or(false)
@@ -148,12 +146,38 @@ impl OS {
         }
     }
 
-    pub fn run(file_path: PathBuf, args: Vec<String>, cores: &[usize], priority: PriorityClass) -> Result<(), String> {
+    pub fn is_pid_live(pid: u32) -> bool {
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+    
+            // Проверка статуса процесса
+            use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+            use windows_sys::Win32::Foundation::STILL_ACTIVE;
+            let mut exit_code: u32 = 0;
+            let ok = GetExitCodeProcess(handle, &mut exit_code as *mut u32);
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+    
+            if ok == 0 {
+                false // не удалось получить код — считаем мёртвым
+            } else {
+                exit_code == STILL_ACTIVE as u32
+            }
+        }
+    }
+
+    pub fn run(
+        file_path: PathBuf,
+        args: Vec<String>,
+        cores: &[usize],
+        priority: PriorityClass,
+    ) -> Result<u32, String> {
         let mask = cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
         let child = Self::spawn(&file_path, &args)?;
         Self::set_affinity(&child, mask)?;
         Self::set_priority(&child, priority)?;
-        Ok(())
+        Ok(child.id()) // Возвращаем PID запущенного процесса
     }
 }
-

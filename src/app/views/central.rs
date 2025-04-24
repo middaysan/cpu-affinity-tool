@@ -17,7 +17,7 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
     let mut dropped_assigned = false;
     let mut modified = false;
 
-    let mut run_program: Option<Vec<(usize, AppToRun)>> = None;
+    let mut run_program: Option<Vec<(usize, usize, AppToRun)>> = None;
     let mut remove_program: Option<(usize, usize)> = None;
     
     let mut swap_step: Option<(usize, bool)> = None;
@@ -83,8 +83,8 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
                             if app.persistent_state.groups[g_i].programs.is_empty() {
                                 app.log_manager.add_entry(format!("No executables to run in group: {}", app.persistent_state.groups[g_i].name));
                             } else {
-                                for prog in &app.persistent_state.groups[g_i].programs {
-                                    run_program.get_or_insert_with(Vec::new).push((g_i, prog.clone()));
+                                for (prog_index, prog) in app.persistent_state.groups[g_i].programs.iter().enumerate() {
+                                    run_program.get_or_insert_with(Vec::new).push((g_i, prog_index, prog.clone()));
                                 }
                             }
                         }
@@ -106,10 +106,15 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
                             let label = prog.name.clone();
                             // Set a fixed width for the entire row
                             let available_width = ui.available_width();
-                            
-                            // Create the main button with most of the width
-                            let app_name = format!("▶  {}", label);
-                            let button = egui::Button::new(RichText::new(app_name));
+
+                            let app_title =  RichText::new(format!("▶  {}", label));
+                            let app_title = if app.is_running_app(&prog.get_key()) {
+                                app_title.color(egui::Color32::GREEN)
+                            } else {
+                                app_title.color(egui::Color32::RED)
+                            };
+
+                            let button = egui::Button::new(app_title);
                             let response = ui.add_sized([
                                 available_width - 70.0, // Reserve space for the two buttons
                                 24.0
@@ -122,7 +127,7 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
                                 .on_hover_text("Remove from group");
     
                             if response.on_hover_text(prog.bin_path.to_str().unwrap_or("")).clicked() {
-                                run_program = Some(vec![(g_i, prog.clone())]);
+                                run_program = Some(vec![(g_i, prog_index, prog.clone())]);
                             }
                             if delete.clicked() {
                                 remove_program = Some((g_i, prog_index));
@@ -165,8 +170,8 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
     }
 
     if let Some(programs) = run_program {
-        for (index, prog) in programs {
-            app.run_app_with_affinity(index, prog);
+        for (g_index, p_index, prog) in programs {
+            app.run_app_with_affinity(g_index, p_index, prog);
         }
     }
 

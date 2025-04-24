@@ -38,4 +38,8 @@ impl AppToRun {
     pub fn display(&self) -> String {
         format!("{} {}(src: {}) P({:?})", self.bin_path.display(), self.args.join(" "), self.dropped_path.display(), self.priority)
     }
+
+    pub fn get_key(&self) -> String {
+        format!("{} {} {:?}", self.bin_path.display(), self.args.join(" "), self.priority)
+    }
 }

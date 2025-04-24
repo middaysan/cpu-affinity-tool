@@ -19,8 +19,10 @@ required-features = ["linux"]
 [profile.dev]
 opt-level = 3               # Use slightly better optimizations.
 overflow-checks = false     # Disable integer overflow checks.
+debug = true
 
 [dependencies]
+tokio = { version = "1.44.2", features = ["time", "sync", "rt", "macros", "full"] }
 [target.'cfg(windows)'.dependencies]
 os_api = { path = "libs/os_api" }
 eframe = "0.31.1"

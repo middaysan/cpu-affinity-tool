@@ -1,5 +1,3 @@
-
-
 pub struct LogManager {
     pub entries: Vec<String>,
 }

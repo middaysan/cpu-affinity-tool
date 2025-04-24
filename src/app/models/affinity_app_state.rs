@@ -3,6 +3,9 @@ use crate::app::controllers;
 use crate::app::models::app_to_run::{RunAppEditState, AppToRun};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
 use crate::app::models::LogManager;
+use crate::app::models::running_app::RunningApps;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use os_api::OS;
 
 use std::path::PathBuf;
@@ -12,11 +15,12 @@ use eframe::egui;
 pub struct AffinityAppState {
     pub current_window: controllers::WindowController,
     pub controller_changed: bool,
-    pub persistent_state: AffinityAppStateStorage, // Holds persistent data like theme, groups, etc.
+    pub persistent_state: AffinityAppStateStorage,
     pub group_form: GroupFormState,
     pub app_edit_state: RunAppEditState,
     pub dropped_files: Option<Vec<PathBuf>>,
     pub log_manager: LogManager,
+    pub running_apps: Arc<RwLock<RunningApps>>,
 }
 
 impl AffinityAppState {
@@ -38,15 +42,18 @@ impl AffinityAppState {
             },
             dropped_files: None,
             log_manager: LogManager { entries: vec![] },
+            running_apps: Arc::new(RwLock::new(RunningApps::default())),
         };
 
-        // Установить тему из состояния
         let visuals = match app.persistent_state.theme_index {
             0 => egui::Visuals::default(),
             1 => egui::Visuals::light(),
             _ => egui::Visuals::dark(),
         };
         ctx.set_visuals(visuals);
+        let apps_clone = Arc::clone(&app.running_apps);
+        
+        tokio::spawn(run_running_app_monitor(apps_clone ));
 
         app
     }
@@ -150,7 +157,7 @@ impl AffinityAppState {
 
     /// Runs an application with a specified CPU affinity based on the provided group.
     /// Logs the start of the app and any resulting errors.
-    pub fn run_app_with_affinity(&mut self, group_index: usize, app_to_run: AppToRun) {
+    pub fn run_app_with_affinity(&mut self, group_index: usize, prog_index: usize, app_to_run: AppToRun) {
         let group = match self.persistent_state.groups.get(group_index) {
             Some(g) => g,
             None => return,
@@ -163,9 +170,55 @@ impl AffinityAppState {
         
         self.log_manager.add_entry(format!("Starting '{}', app: {}", label, app_to_run.display()));
 
+        let app_key = app_to_run.get_key();
         match OS::run(app_to_run.bin_path, app_to_run.args, &group.cores, app_to_run.priority) {
-            Ok(_) => self.log_manager.add_entry(format!("OK: started '{}'", label)),
+            Ok(pid) => {
+                self.add_running_app(&app_key, pid, group_index, prog_index);
+            },
             Err(e) => self.log_manager.add_entry(format!("ERROR: {}", e)),
+        }
+    }
+
+    pub fn add_running_app(&self, app_key: &str, pid: u32, group_index: usize, prog_index: usize) {
+        if let Ok(mut apps) = self.running_apps.try_write() {
+            apps.add_app(app_key, pid, group_index, prog_index);
+        } 
+    }
+
+    pub fn is_running_app(&self, app_key: &str) -> bool {
+        let lock_result = self.running_apps.try_read(); // не await
+        if let Ok(apps) = lock_result {
+            apps.apps.contains_key(app_key)
+        } else {
+            false
+        }
+    }
+}
+
+pub async fn run_running_app_monitor(running_apps: Arc<RwLock<RunningApps>>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+
+    loop {
+        interval.tick().await;
+
+        let app_keys: Vec<String> = {
+            let apps = running_apps.read().await;
+            apps.apps
+                .keys()
+                .cloned()
+                .collect()
+        };
+
+        for app_key in app_keys {
+            let pid = {
+                let apps = running_apps.read().await;
+                apps.apps.get(&app_key).map(|app| app.pid).unwrap_or(0)
+            };
+
+            if !OS::is_pid_live(pid) {
+                let mut apps = running_apps.write().await;
+                apps.remove_app(&app_key);
+            }
         }
     }
 }
