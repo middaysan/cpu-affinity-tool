@@ -8,7 +8,6 @@ pub struct GroupFormState {
     pub core_selection: Vec<bool>,
     pub group_name: String,
     pub run_all_enabled: bool,
-    pub is_visible: bool,
 }
 
 impl GroupFormState {
@@ -17,7 +16,6 @@ impl GroupFormState {
         self.editing_index = None;
         self.editing_selection = None;
         self.run_all_enabled = false;
-        self.is_visible = false;
         self.group_name.clear();
         self.core_selection.fill(false);
     }
@@ -28,6 +26,7 @@ pub struct CoreGroup {
     pub name: String,
     pub cores: Vec<usize>,
     pub programs: Vec<AppToRun>,
+    pub is_hidden: bool,
     pub run_all_button: bool,
 }
 

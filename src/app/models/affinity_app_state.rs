@@ -31,7 +31,6 @@ impl AffinityAppState {
                 core_selection: vec![false; num_cpus::get()],
                 group_name: String::new(),
                 run_all_enabled: false,
-                is_visible: false,
             },
             app_edit_state: RunAppEditState {
                 current_edit: None,
@@ -96,6 +95,7 @@ impl AffinityAppState {
             name: group_name_trimmed.to_string(),
             cores: selected_cores,
             programs: vec![],
+            is_hidden: false,
             run_all_button: self.group_form.run_all_enabled,
         });
 
