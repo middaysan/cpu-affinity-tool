@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 
 pub struct RunningApp {
-    pub pid: u32,
+    pub pids: Vec<u32>,
     pub group_index: usize,
     pub prog_index: usize,
     pub created_at: std::time::SystemTime,
@@ -16,7 +16,7 @@ pub struct RunningApps {
 impl RunningApps {
     pub fn add_app(&mut self, app_key: &str, pid: u32, group_index: usize, prog_index: usize) {
         self.apps.insert(app_key.to_string(), RunningApp {
-            pid,
+            pids: vec![pid],
             group_index: group_index,
             prog_index: prog_index,
             created_at: std::time::SystemTime::now(),

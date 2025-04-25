@@ -1,3 +1,4 @@
+use eframe::egui::{Color32, Painter, Vec2};
 use eframe::egui::{self, RichText, CentralPanel, ScrollArea, Frame, Layout};
 use crate::app::models::AffinityAppState;
 use crate::app::models::AppToRun;
@@ -107,16 +108,15 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
                             // Set a fixed width for the entire row
                             let available_width = ui.available_width();
 
-                            let app_title =  RichText::new(format!("▶  {}", label));
-                            let app_title = if app.is_running_app(&prog.get_key()) {
-                                app_title.color(egui::Color32::GREEN)
-                            } else {
-                                app_title.color(egui::Color32::RED)
-                            };
+                            let (rect, _) = ui.allocate_exact_size(Vec2::splat(15.0), egui::Sense::hover());
+                            let color = if app.is_running_app(&prog.get_key()) { Color32::GREEN } else { Color32::RED };
+                            let painter = Painter::new(ui.ctx().clone(), ui.layer_id(), rect);
+                            painter.circle_filled(rect.center(), 4.0, color);
 
+                            let app_title =  RichText::new(format!("▶  {}", label));
                             let button = egui::Button::new(app_title);
                             let response = ui.add_sized([
-                                available_width - 70.0, // Reserve space for the two buttons
+                                available_width - 90.0, // Reserve space for the two buttons
                                 24.0
                             ], button);
     
@@ -144,7 +144,7 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
 
             if let Some(dropped_files) = &app.dropped_files {
                 if !dropped_files.is_empty() {
-                    let rect = ui.max_rect();
+                    let rect = ui.min_rect();
                     if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
                         if let Err(err) = app.persistent_state.groups[g_i].add_app_to_group(dropped_files.clone()) {
                             app.log_manager.add_entry(format!("Error adding executables: {}", err));

@@ -3,6 +3,11 @@ use std::process::{Command, Child, Stdio};
 use std::os::windows::io::AsRawHandle;
 use std::mem::{size_of, zeroed};
 use std::ptr::null_mut;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowThreadProcessId, ShowWindow, SetForegroundWindow,
+    IsWindowVisible,
+    SW_RESTORE,
+};
 
 use ntapi::ntpsapi::{NtQueryInformationProcess, ProcessBasicInformation, PROCESS_BASIC_INFORMATION};
 use windows_sys::Win32::System::Threading::{
@@ -124,7 +129,7 @@ impl OS {
     }
 
     #[allow(dead_code)]
-    fn find_all_descendants(parent_pid: u32, descendants: &mut Vec<u32>) {
+    pub fn find_all_descendants(parent_pid: u32, descendants: &mut Vec<u32>) {
         for &child in &Self::find_child_pids(parent_pid) {
             if !descendants.contains(&child) {
                 descendants.push(child);
@@ -153,7 +158,6 @@ impl OS {
                 return false;
             }
     
-            // Проверка статуса процесса
             use windows_sys::Win32::System::Threading::GetExitCodeProcess;
             use windows_sys::Win32::Foundation::STILL_ACTIVE;
             let mut exit_code: u32 = 0;
@@ -161,9 +165,44 @@ impl OS {
             windows_sys::Win32::Foundation::CloseHandle(handle);
     
             if ok == 0 {
-                false // не удалось получить код — считаем мёртвым
+                false
             } else {
                 exit_code == STILL_ACTIVE as u32
+            }
+        }
+    }
+
+    pub fn focus_window_by_pid(pid: u32) -> bool {
+        use std::sync::atomic::{AtomicU32, Ordering};
+    
+        static mut FOUND_HWND: windows_sys::Win32::Foundation::HWND = 0 as windows_sys::Win32::Foundation::HWND;
+        static TARGET_PID: AtomicU32 = AtomicU32::new(0);
+    
+        unsafe extern "system" fn enum_windows_proc(hwnd: windows_sys::Win32::Foundation::HWND, _: isize) -> i32 {
+            let mut window_pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, &mut window_pid); }
+    
+            if window_pid == TARGET_PID.load(Ordering::Relaxed) {
+                if unsafe { IsWindowVisible(hwnd) } != 0 {
+                    unsafe { FOUND_HWND = hwnd; }
+                    return 0;
+                }
+            }
+            1
+        }
+    
+        unsafe {
+            TARGET_PID.store(pid, Ordering::Relaxed);
+            FOUND_HWND = 0 as windows_sys::Win32::Foundation::HWND;
+    
+            EnumWindows(Some(enum_windows_proc), 0);
+    
+            if FOUND_HWND != 0 as windows_sys::Win32::Foundation::HWND {
+                ShowWindow(FOUND_HWND, SW_RESTORE);
+                SetForegroundWindow(FOUND_HWND);
+                true
+            } else {
+                false
             }
         }
     }
@@ -178,6 +217,6 @@ impl OS {
         let child = Self::spawn(&file_path, &args)?;
         Self::set_affinity(&child, mask)?;
         Self::set_priority(&child, priority)?;
-        Ok(child.id()) // Возвращаем PID запущенного процесса
+        Ok(child.id())
     }
 }

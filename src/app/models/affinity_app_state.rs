@@ -158,6 +158,30 @@ impl AffinityAppState {
     /// Runs an application with a specified CPU affinity based on the provided group.
     /// Logs the start of the app and any resulting errors.
     pub fn run_app_with_affinity(&mut self, group_index: usize, prog_index: usize, app_to_run: AppToRun) {
+        let app_key = app_to_run.get_key();
+        let is_running_app = self.is_running_app(&app_to_run.get_key());
+        let mut is_app_exist = false;
+        if is_running_app {
+            let lock_result = self.running_apps.try_read(); // не await
+            let mut was_focused = false;
+            if let Ok(apps) = lock_result {
+                apps.apps.iter().find(|(key, app)| {
+                    if **key == app_key {
+                        is_app_exist = true;
+                        app.pids.iter().for_each(|pid| {
+                            was_focused = was_focused || OS::focus_window_by_pid(*pid);
+                        });
+
+                        self.log_manager.add_entry(format!("App already running: {}, pids: {:?}", app_to_run.display(), app.pids));
+                        return true;
+                    }
+                    false
+                });
+            }
+        
+            if is_app_exist && was_focused { return }
+        }
+
         let group = match self.persistent_state.groups.get(group_index) {
             Some(g) => g,
             None => return,
@@ -167,13 +191,16 @@ impl AffinityAppState {
         let label = app_to_run.bin_path.file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| app_to_run.bin_path.display().to_string());
-        
-        self.log_manager.add_entry(format!("Starting '{}', app: {}", label, app_to_run.display()));
 
-        let app_key = app_to_run.get_key();
+        self.log_manager.add_entry(format!("Starting '{}', app: {}", label, app_to_run.display()));
         match OS::run(app_to_run.bin_path, app_to_run.args, &group.cores, app_to_run.priority) {
             Ok(pid) => {
-                self.add_running_app(&app_key, pid, group_index, prog_index);
+                if !is_app_exist {
+                    self.add_running_app(&app_key, pid, group_index, prog_index);
+                    self.log_manager.add_entry(format!("App started with PID: {}", pid));
+                } else {
+                    self.log_manager.add_entry(format!("Existed app was started with pid: {}", pid));
+                }
             },
             Err(e) => self.log_manager.add_entry(format!("ERROR: {}", e)),
         }
@@ -210,14 +237,18 @@ pub async fn run_running_app_monitor(running_apps: Arc<RwLock<RunningApps>>) {
         };
 
         for app_key in app_keys {
-            let pid = {
-                let apps = running_apps.read().await;
-                apps.apps.get(&app_key).map(|app| app.pid).unwrap_or(0)
-            };
+            let mut apps = running_apps.write().await;
 
-            if !OS::is_pid_live(pid) {
-                let mut apps = running_apps.write().await;
-                apps.remove_app(&app_key);
+            if let Some(app) = apps.apps.get_mut(&app_key) {
+                OS::find_all_descendants(app.pids[0], &mut app.pids);
+
+                app.pids.retain(|&pid| {
+                    OS::is_pid_live(pid)
+                });
+
+                if app.pids.is_empty() {
+                    apps.remove_app(&app_key);
+                }
             }
         }
     }
