@@ -4,6 +4,7 @@ use crate::app::models::app_to_run::{RunAppEditState, AppToRun};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
 use crate::app::models::LogManager;
 use crate::app::models::running_app::RunningApps;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use os_api::OS;
@@ -21,6 +22,7 @@ pub struct AffinityAppState {
     pub dropped_files: Option<Vec<PathBuf>>,
     pub log_manager: LogManager,
     pub running_apps: Arc<RwLock<RunningApps>>,
+    pub running_apps_statuses: HashMap<String, bool>,
 }
 
 impl AffinityAppState {
@@ -43,6 +45,7 @@ impl AffinityAppState {
             dropped_files: None,
             log_manager: LogManager { entries: vec![] },
             running_apps: Arc::new(RwLock::new(RunningApps::default())),
+            running_apps_statuses: HashMap::new(),
         };
 
         let visuals = match app.persistent_state.theme_index {
@@ -162,7 +165,7 @@ impl AffinityAppState {
         let is_running_app = self.is_running_app(&app_to_run.get_key());
         let mut is_app_exist = false;
         if is_running_app {
-            let lock_result = self.running_apps.try_read(); // не await
+            let lock_result = self.running_apps.try_read();
             let mut was_focused = false;
             if let Ok(apps) = lock_result {
                 apps.apps.iter().find(|(key, app)| {
@@ -212,12 +215,16 @@ impl AffinityAppState {
         } 
     }
 
-    pub fn is_running_app(&self, app_key: &str) -> bool {
+    pub fn is_running_app(&mut self, app_key: &str) -> bool {
         let lock_result = self.running_apps.try_read(); // не await
-        if let Ok(apps) = lock_result {
-            apps.apps.contains_key(app_key)
-        } else {
-            false
+        match lock_result {
+            Ok(apps) => {
+                self.running_apps_statuses.insert(app_key.to_string(), true);
+                apps.apps.contains_key(app_key)
+            },
+            Err(_) => {
+                self.running_apps_statuses.contains_key(app_key)
+            }
         }
     }
 }

@@ -103,13 +103,14 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
                     let len = app.persistent_state.groups[g_i].programs.len();
                     for prog_index in 0..len {
                         ui.horizontal(|ui| {
+                            let is_app_run = app.is_running_app(&app.persistent_state.groups[g_i].programs[prog_index].get_key());
                             let prog = &app.persistent_state.groups[g_i].programs[prog_index];
                             let label = prog.name.clone();
                             // Set a fixed width for the entire row
                             let available_width = ui.available_width();
 
                             let (rect, _) = ui.allocate_exact_size(Vec2::splat(15.0), egui::Sense::hover());
-                            let color = if app.is_running_app(&prog.get_key()) { Color32::GREEN } else { Color32::RED };
+                            let color = if is_app_run { Color32::GREEN } else { Color32::RED };
                             let painter = Painter::new(ui.ctx().clone(), ui.layer_id(), rect);
                             painter.circle_filled(rect.center(), 4.0, color);
 
