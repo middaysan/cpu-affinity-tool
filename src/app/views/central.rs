@@ -67,7 +67,7 @@ fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Cont
 
                     // TODO: add linux support
                     if ui.button("📁Add").on_hover_text("Add executables...").clicked() {
-                        if let Some(paths) = rfd::FileDialog::new().add_filter("Executables", &["exe", "lnk"]).pick_files() {
+                        if let Some(paths) = rfd::FileDialog::new().add_filter("Executables", &["exe", "lnk", "url"]).pick_files() {
                             app.log_manager.add_entry(format!("Adding executables to group: {}, paths: {:?}", app.persistent_state.groups[g_i].name, paths));
                             let res = app.persistent_state.groups[g_i].add_app_to_group(paths);
                             if let Err(err) = res {

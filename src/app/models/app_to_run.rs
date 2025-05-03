@@ -14,11 +14,13 @@ pub struct AppToRun {
     pub dropped_path: PathBuf,
     pub args: Vec<String>,
     pub bin_path: PathBuf,
+    // Start app on init startup
+    pub autorun: bool,
     pub priority: PriorityClass,
 }
 
 impl AppToRun {
-    pub fn new(dropped_path: PathBuf, args: Vec<String>, bin_path: PathBuf, priority: PriorityClass) -> Self {
+    pub fn new(dropped_path: PathBuf, args: Vec<String>, bin_path: PathBuf, priority: PriorityClass, autorun: bool) -> Self {
         let name = dropped_path.file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("Unknown")
@@ -31,7 +33,8 @@ impl AppToRun {
             dropped_path, 
             args, 
             bin_path,
-            priority,
+            autorun,
+            priority
         }
     }
 

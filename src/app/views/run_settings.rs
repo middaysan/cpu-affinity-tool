@@ -41,6 +41,11 @@ pub fn draw_app_run_settings(app: &mut AffinityAppState, ctx: &Context) {
 
             ui.add_space(5.0);
 
+            ui.checkbox(&mut selected_app.autorun, "Start this app on startup")
+                .on_hover_text("This app will be started when the group is started.");
+
+            ui.add_space(5.0);
+
             ui.horizontal(|ui| {
                 ui.label("Binary path:");
                 let mut bin_path_str = selected_app.bin_path.to_string_lossy().to_string();

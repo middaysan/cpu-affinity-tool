@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Child, Stdio};
 use std::os::windows::io::AsRawHandle;
@@ -8,6 +9,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible,
     SW_RESTORE,
 };
+
+use winreg::enums::*;
+use winreg::RegKey;
 
 use ntapi::ntpsapi::{NtQueryInformationProcess, ProcessBasicInformation, PROCESS_BASIC_INFORMATION};
 use windows_sys::Win32::System::Threading::{
@@ -40,9 +44,34 @@ impl OS {
         }
     }
 
+    fn parse_url_file(path: &PathBuf) -> Result<String, String> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read file: {}", e))?;
+    
+        for line in content.lines() {
+            if let Some(url) = line.strip_prefix("URL=") {
+                return Ok(url.trim().to_string());
+            }
+        }
+    
+        Err("URL= not found".into())
+    }
+
+    fn resolve_url(path: &PathBuf) -> Result<(PathBuf, Vec<String>), String> {
+        let url_path = Self::parse_url_file(path)?;
+        let parced_path = OS::get_program_path_for_uri(&url_path.split(':').nth(0).unwrap_or(""));
+        if parced_path.is_ok() {
+            let parced_path = parced_path.unwrap();
+            return Ok((parced_path, vec![url_path]));
+        } else {
+            return Err(format!("Failed to parse URL: {}", parced_path.unwrap_err()));
+        }
+    }
+
     fn resolve_lnk(path: &PathBuf) -> Result<(PathBuf, Vec<String>), String> {
         let link = Lnk::try_from(path.as_path())
             .map_err(|e| format!("parse LNK failed {:?}: {}", path, e))?;
+    
         let target = link
             .link_info
             .local_base_path
@@ -139,16 +168,18 @@ impl OS {
     }
 
     pub fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, Vec<String>), String> {
-        if file_path
-            .extension()
+        let file_ext = file_path.extension()
             .and_then(|e| e.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("lnk"))
-            .unwrap_or(false)
-        {
-            Self::resolve_lnk(&file_path)
-        } else {
-            Ok((file_path, Vec::new()))
+            .ok_or_else(|| format!("Failed to get file extension for {:?}", file_path))?;
+
+        if file_ext == "url" {
+            return Self::resolve_url(&file_path);
+        } else if file_ext == "lnk" {
+            return Self::resolve_lnk(&file_path);
         }
+
+        // If the file is not a URL or LNK, return the file path as is
+        Ok((file_path, Vec::new()))
     }
 
     pub fn is_pid_live(pid: u32) -> bool {
@@ -218,5 +249,31 @@ impl OS {
         Self::set_affinity(&child, mask)?;
         Self::set_priority(&child, priority)?;
         Ok(child.id())
+    }
+
+    pub fn get_program_path_for_uri(uri_scheme: &str) -> Result<PathBuf, String> {
+        let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
+
+        let scheme_key = hkcr.open_subkey(uri_scheme)
+            .map_err(|e| format!("Scheme {} not found: {}", uri_scheme, e))?;
+
+        let _: String = scheme_key.get_value("URL Protocol")
+            .map_err(|_| "Not a valid URI protocol".to_string())?;
+
+        let command_key_path = format!(r"{}\shell\open\command", uri_scheme);
+        let command_key = hkcr.open_subkey(command_key_path)
+            .map_err(|e| format!("Command key not found: {}", e))?;
+    
+        let command: String = command_key.get_value("")
+            .map_err(|e| format!("Failed to get command string: {}", e))?;
+
+        let exe_path = if command.starts_with('"') {
+            // Вырезаем из кавычек
+            command.split('"').nth(1).ok_or("Failed to parse command path")?
+        } else {
+            command.split_whitespace().next().ok_or("Failed to parse command path")?
+        };
+    
+        Ok(PathBuf::from(exe_path))
     }
 }

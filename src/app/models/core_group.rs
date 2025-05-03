@@ -46,6 +46,7 @@ impl CoreGroup {
                         args, 
                         target,
                         PriorityClass::Normal,
+                        false,
                     );
 
                     self.programs.push(app_to_run);

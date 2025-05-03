@@ -63,6 +63,17 @@ impl AffinityAppState {
 }
 
 impl AffinityAppState {
+    pub fn start_app_with_autorun(&mut self) {
+        let groups = self.persistent_state.groups.clone();
+        for (gi, group) in groups.iter().enumerate() {
+            for (pi, app) in group.programs.iter().enumerate() {
+                if app.autorun {
+                    self.run_app_with_affinity(gi, pi, app.clone());
+                }
+            }
+        }
+    }
+
     /// Resets the group form state.
     pub fn reset_group_form(&mut self) {
         self.group_form.reset();

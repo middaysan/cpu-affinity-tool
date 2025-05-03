@@ -13,8 +13,9 @@ pub struct AffinityApp {
 
 impl AffinityApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let state = AffinityAppState::new(&cc.egui_ctx);
+        let mut state = AffinityAppState::new(&cc.egui_ctx);
         let main_controller = controllers::MainController::new();
+        state.start_app_with_autorun();
  
         Self { state, main_controller: main_controller }
     }
