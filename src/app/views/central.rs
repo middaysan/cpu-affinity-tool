@@ -1,9 +1,9 @@
 use eframe::egui::{Color32, Painter, Vec2};
 use eframe::egui::{self, RichText, CentralPanel, ScrollArea, Frame, Layout};
-use crate::app::models::AffinityAppState;
+use crate::app::models::AppState;
 use crate::app::models::AppToRun;
 
-pub fn draw_central_panel(app: &mut AffinityAppState, ctx: &egui::Context) {
+pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
     CentralPanel::default().show(ctx, |ui| {
         let mut dropped_assigned = false;
         ScrollArea::vertical().show(ui, |ui| {
@@ -14,7 +14,7 @@ pub fn draw_central_panel(app: &mut AffinityAppState, ctx: &egui::Context) {
     });
 }
 
-fn render_groups(app: &mut AffinityAppState, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
+fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
     let mut dropped_assigned = false;
     let mut modified = false;
 

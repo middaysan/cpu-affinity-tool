@@ -1,6 +1,6 @@
 use eframe::egui::{self, CentralPanel,Frame};
 use std::collections::HashSet;
-use crate::app::models::AffinityAppState;
+use crate::app::models::AppState;
 use crate::app::models::GroupFormState;
 
 /// Form for creating/editing a group: divided into rendering the name and the section with cores and clusters.
@@ -167,7 +167,7 @@ fn draw_core_buttons(
 
 /// Group creation window.
 /// Uses the refactored draw_group_form_ui and updated state (clusters instead of cluster_cores_indexes).
-pub fn create_group_window(app: &mut AffinityAppState, ctx: &egui::Context) {
+pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
     let mut create_clicked = false;
     let mut cancel_clicked = false;
 
@@ -208,7 +208,7 @@ pub fn create_group_window(app: &mut AffinityAppState, ctx: &egui::Context) {
 
 /// Group editing window.
 /// The logic is similar to creation but with loading group data, and the final state of cores is formed as a union of clusters and free cores.
-pub fn edit_group_window(app: &mut AffinityAppState, ctx: &egui::Context) {
+pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
     let index = app.group_form.editing_index.unwrap();
 
     CentralPanel::default().show(ctx, |ui| {

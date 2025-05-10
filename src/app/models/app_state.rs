@@ -1,4 +1,4 @@
-use crate::app::models::affinity_app_state_storage::AffinityAppStateStorage;
+use crate::app::models::app_state_storage::AppStateStorage;
 use crate::app::controllers;
 use crate::app::models::app_to_run::{RunAppEditState, AppToRun};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
@@ -13,10 +13,10 @@ use std::path::PathBuf;
 use num_cpus;
 use eframe::egui;
 
-pub struct AffinityAppState {
+pub struct AppState {
     pub current_window: controllers::WindowController,
     pub controller_changed: bool,
-    pub persistent_state: AffinityAppStateStorage,
+    pub persistent_state: AppStateStorage,
     pub group_form: GroupFormState,
     pub app_edit_state: RunAppEditState,
     pub dropped_files: Option<Vec<PathBuf>>,
@@ -25,10 +25,10 @@ pub struct AffinityAppState {
     pub running_apps_statuses: HashMap<String, bool>,
 }
 
-impl AffinityAppState {
+impl AppState {
     pub fn new(ctx: &egui::Context) -> Self {
         let app = Self {
-            persistent_state: AffinityAppStateStorage::load_state(),
+            persistent_state: AppStateStorage::load_state(),
             current_window: controllers::WindowController::Groups(controllers::Group::ListGroups),
             controller_changed: false,
             group_form: GroupFormState {
@@ -56,13 +56,13 @@ impl AffinityAppState {
         ctx.set_visuals(visuals);
         let apps_clone = Arc::clone(&app.running_apps);
         
-        tokio::spawn(run_running_app_monitor(apps_clone ));
+        tokio::spawn(run_running_app_monitor(apps_clone));
 
         app
     }
 }
 
-impl AffinityAppState {
+impl AppState {
     pub fn start_app_with_autorun(&mut self) {
         let groups = self.persistent_state.groups.clone();
         for (gi, group) in groups.iter().enumerate() {

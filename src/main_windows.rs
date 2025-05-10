@@ -2,7 +2,7 @@
 
 mod app;
 
-use app::models::AffinityApp;
+use app::models::App;
 use eframe::{run_native, NativeOptions};
 use tokio::runtime::Runtime;
 
@@ -22,7 +22,7 @@ fn main() {
                     .with_maximize_button(false), // Disable maximize button
                 ..Default::default()
             },
-            Box::new(|cc| Ok(Box::new(AffinityApp::new(cc)))),
+            Box::new(|cc| Ok(Box::new(App::new(cc)))),
         );
     
         if let Err(_) = res {

@@ -1,19 +1,19 @@
 use crate::app::views::{run_settings, central, group_editor, header, logs};
 
 use crate::app::controllers;
-use crate::app::models::AffinityAppState;
+use crate::app::models::AppState;
 
 use std::path::PathBuf;
 use eframe::egui;
 
-pub struct AffinityApp {
-    pub state: AffinityAppState,
+pub struct App {
+    pub state: AppState,
     pub main_controller: controllers::MainController,
 }
 
-impl AffinityApp {
+impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut state = AffinityAppState::new(&cc.egui_ctx);
+        let mut state = AppState::new(&cc.egui_ctx);
         let main_controller = controllers::MainController::new();
         state.start_app_with_autorun();
  
@@ -21,7 +21,7 @@ impl AffinityApp {
     }
 }
 
-impl eframe::App for AffinityApp {
+impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 

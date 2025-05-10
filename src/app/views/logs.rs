@@ -1,7 +1,7 @@
 use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
-use crate::app::models::AffinityAppState;
+use crate::app::models::AppState;
 
-pub fn draw_logs_window(app: &mut AffinityAppState, ctx: &egui::Context) {
+pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {
     CentralPanel::default().show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.heading("Logs");

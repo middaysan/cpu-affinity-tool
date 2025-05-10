@@ -3,23 +3,23 @@ use crate::app::models::core_group::CoreGroup;
 
 
 #[derive(Serialize, Deserialize)]
-pub struct AffinityAppStateStorage {
+pub struct AppStateStorage {
     pub groups: Vec<CoreGroup>,
     pub clusters: Vec<Vec<usize>>,
     pub theme_index: usize,
 }
 
-impl AffinityAppStateStorage {
-    pub fn load_state() -> AffinityAppStateStorage {
+impl AppStateStorage {
+    pub fn load_state() -> AppStateStorage {
         let path = std::env::current_exe().map(|mut p| {
             p.set_file_name("state.json");
             p
         }).unwrap_or_else(|_| "state.json".into());
 
         std::fs::read_to_string(&path).ok()
-            .and_then(|data| serde_json::from_str::<AffinityAppStateStorage>(&data).ok())
+            .and_then(|data| serde_json::from_str::<AppStateStorage>(&data).ok())
             .unwrap_or_else(|| {
-                let default_state = AffinityAppStateStorage { groups: Vec::new(), clusters: Vec::new(), theme_index: 0 };
+                let default_state = AppStateStorage { groups: Vec::new(), clusters: Vec::new(), theme_index: 0 };
                 let _ = std::fs::write(&path, serde_json::to_string_pretty(&default_state).unwrap_or_default());
                 default_state
             })

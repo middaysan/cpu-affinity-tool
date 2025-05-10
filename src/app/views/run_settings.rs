@@ -1,8 +1,8 @@
 use eframe::egui::{self, CentralPanel, ComboBox, Context, Frame, Layout, Align};
-use crate::app::models::AffinityAppState;
+use crate::app::models::AppState;
 use os_api::PriorityClass;
 
-pub fn draw_app_run_settings(app: &mut AffinityAppState, ctx: &Context) {
+pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
 
     CentralPanel::default().show(ctx, |ui| {
         let mut is_close = false;

@@ -1,7 +1,7 @@
 use eframe::egui::{self, Layout, RichText, TopBottomPanel};
-use crate::app::models::AffinityAppState;
+use crate::app::models::AppState;
 
-pub fn draw_top_panel(app: &mut AffinityAppState, ctx: &egui::Context) {
+pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
     TopBottomPanel::top("top_panel").show(ctx, |ui| {
         ui.horizontal(|ui| {
             let (icon, label) = match app.persistent_state.theme_index {
