@@ -1,5 +1,5 @@
-- Обрабатывать поведение подсказок если запущена от админа
-- Мониторинг ресурсов запущенного процесса
-- Устанавливать ядра всем процессам и даже дочерним, изучить управление спавном процессов
-- Можно ли при запуске получить процесс и потом найти всех его детей
-- Поправить сохранения приоритета в state.json
+- Handle tooltip behavior when running as admin
+- Monitor resources of running processes
+- Set cores for all processes including child processes, study process spawn management
+- Check if it's possible to get a process at startup and then find all its children
+- Fix priority saving in state.json

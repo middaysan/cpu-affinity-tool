@@ -7,10 +7,10 @@ use eframe::{run_native, NativeOptions};
 use tokio::runtime::Runtime;
 
 fn main() {
-    // Создаём tokio runtime вручную
+    // Creating tokio runtime manually
     let rt = Runtime::new().expect("failed to create tokio runtime");
 
-    // Запускаем eframe внутри runtime
+    // Running eframe inside the runtime
     rt.block_on(async {
         let res = run_native(
             "CPU Affinity Tool",

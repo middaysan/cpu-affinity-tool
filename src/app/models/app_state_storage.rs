@@ -22,7 +22,7 @@ impl AppStateStorage {
     /// 
     /// # Returns
     /// 
-    /// An `AppStateStorage` instance either loaded from the file or created with default values.
+    /// An `AppStateStorage` instance is either loaded from the file or created with default values.
     pub fn load_state() -> AppStateStorage {
         let path = std::env::current_exe().map(|mut p| {
             p.set_file_name("state.json");

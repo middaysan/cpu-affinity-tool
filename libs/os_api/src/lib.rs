@@ -7,7 +7,7 @@ mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 
-// Экспорт нужной реализации под общим интерфейсом
+// Export the necessary implementation under a common interface
 #[cfg(target_os = "windows")]
 pub use windows::OS;
 #[cfg(target_os = "linux")]

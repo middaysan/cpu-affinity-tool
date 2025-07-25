@@ -39,8 +39,8 @@ impl RunningApps {
     pub fn add_app(&mut self, app_key: &str, pid: u32, group_index: usize, prog_index: usize) {
         self.apps.insert(app_key.to_string(), RunningApp {
             pids: vec![pid],
-            group_index: group_index,
-            prog_index: prog_index,
+            group_index,
+            prog_index,
             created_at: std::time::SystemTime::now(),
         });
     }

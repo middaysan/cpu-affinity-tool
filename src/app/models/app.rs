@@ -33,7 +33,7 @@ impl App {
         let main_controller = controllers::MainController::new();
         state.start_app_with_autorun();
  
-        Self { state, main_controller: main_controller }
+        Self { state, main_controller }
     }
 }
 
@@ -42,7 +42,7 @@ impl eframe::App for App {
     ///
     /// This method is responsible for:
     /// 1. Requesting periodic repaints
-    /// 2. Setting the UI theme based on the theme index
+    /// 2. Setting the UI theme based on theme index
     /// 3. Processing file drop events
     /// 4. Rendering the UI based on the current window controller
     /// 5. Handling controller changes
@@ -81,7 +81,7 @@ impl eframe::App for App {
         self.main_controller.render_with(ctx, |controller, ui_ctx| {
             // Draw the top panel (common for all views)
             header::draw_top_panel(app_state, ui_ctx);
-            // Branch into different views based on current window controller.
+            // Branch into different views based on the current window controller.
             match &controller.window_controller {
                 controllers::WindowController::Groups(group_view) => match group_view {
                     controllers::Group::ListGroups => {

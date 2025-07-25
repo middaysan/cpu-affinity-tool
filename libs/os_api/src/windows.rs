@@ -268,7 +268,7 @@ impl OS {
             .map_err(|e| format!("Failed to get command string: {}", e))?;
 
         let exe_path = if command.starts_with('"') {
-            // Вырезаем из кавычек
+            // Extract from quotes
             command.split('"').nth(1).ok_or("Failed to parse command path")?
         } else {
             command.split_whitespace().next().ok_or("Failed to parse command path")?

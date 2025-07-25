@@ -103,7 +103,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                     let len = app.persistent_state.groups[g_i].programs.len();
                     for prog_index in 0..len {
                         ui.horizontal(|ui| {
-                            let is_app_run = app.is_running_app(&app.persistent_state.groups[g_i].programs[prog_index].get_key());
+                            let is_app_run = app.is_app_running(&app.persistent_state.groups[g_i].programs[prog_index].get_key());
                             let prog = &app.persistent_state.groups[g_i].programs[prog_index];
                             let label = prog.name.clone();
                             // Set a fixed width for the entire row

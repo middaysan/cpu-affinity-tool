@@ -14,14 +14,14 @@ use num_cpus;
 use eframe::egui;
 
 /// The central state management component of the application.
-/// This structure holds all the application state, including persistent data,
+/// This structure holds all the application states, including persistent data,
 /// UI state, and runtime information about running applications.
 pub struct AppState {
     /// The current window controller that determines which view is displayed
     pub current_window: controllers::WindowController,
     /// Flag indicating whether the controller has been changed and needs to be updated
     pub controller_changed: bool,
-    /// Persistent state that is saved to and loaded from disk
+    /// Persistent state that is saved to and loaded from the disk
     pub persistent_state: AppStateStorage,
     /// State of the group form for creating or editing core groups
     pub group_form: GroupFormState,
@@ -42,10 +42,10 @@ impl AppState {
     ///
     /// Initializes the application state by:
     /// 1. Loading persistent state from disk
-    /// 2. Setting up default UI state
+    /// 2. Setting up the default UI state 
     /// 3. Initializing the group form with empty values
-    /// 4. Setting up the application edit state
-    /// 5. Initializing the log manager
+    /// 4. Setting up application edit state
+    /// 5. Initializing log manager
     /// 6. Creating a thread-safe reference to running applications
     /// 7. Setting the UI theme based on the persistent state
     /// 8. Spawning a background task to monitor running applications
@@ -160,7 +160,7 @@ impl AppState {
             return;
         }
 
-        // Add new group to the persistent application state.
+        // Add a new group to the persistent application state.
         self.persistent_state.groups.push(CoreGroup {
             name: group_name_trimmed.to_string(),
             cores: selected_cores,
@@ -222,7 +222,7 @@ impl AppState {
     /// Logs the start of the app and any resulting errors.
     pub fn run_app_with_affinity(&mut self, group_index: usize, prog_index: usize, app_to_run: AppToRun) {
         let app_key = app_to_run.get_key();
-        let is_running_app = self.is_running_app(&app_to_run.get_key());
+        let is_running_app = self.is_app_running(&app_to_run.get_key());
         let mut is_app_exist = false;
         if is_running_app {
             let lock_result = self.running_apps.try_read();
@@ -275,7 +275,7 @@ impl AppState {
         } 
     }
 
-    pub fn is_running_app(&mut self, app_key: &str) -> bool {
+    pub fn is_app_running(&mut self, app_key: &str) -> bool {
         let lock_result = self.running_apps.try_read(); // не await
         match lock_result {
             Ok(apps) => {

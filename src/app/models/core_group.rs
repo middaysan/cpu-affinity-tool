@@ -35,7 +35,7 @@ impl GroupFormState {
 /// This structure is used to organize applications by the CPU cores they should run on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreGroup {
-    /// Display name of the group
+    /// Display the name of the group
     pub name: String,
     /// Indices of the CPU cores that belong to this group
     pub cores: Vec<usize>,
