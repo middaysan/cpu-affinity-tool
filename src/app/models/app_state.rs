@@ -13,19 +13,50 @@ use std::path::PathBuf;
 use num_cpus;
 use eframe::egui;
 
+/// The central state management component of the application.
+/// This structure holds all the application state, including persistent data,
+/// UI state, and runtime information about running applications.
 pub struct AppState {
+    /// The current window controller that determines which view is displayed
     pub current_window: controllers::WindowController,
+    /// Flag indicating whether the controller has been changed and needs to be updated
     pub controller_changed: bool,
+    /// Persistent state that is saved to and loaded from disk
     pub persistent_state: AppStateStorage,
+    /// State of the group form for creating or editing core groups
     pub group_form: GroupFormState,
+    /// State for editing applications to run
     pub app_edit_state: RunAppEditState,
+    /// Files that have been dropped onto the application, if any
     pub dropped_files: Option<Vec<PathBuf>>,
+    /// Manager for application logs
     pub log_manager: LogManager,
+    /// Thread-safe reference to running applications
     pub running_apps: Arc<RwLock<RunningApps>>,
+    /// Cache of running application statuses for quick access
     pub running_apps_statuses: HashMap<String, bool>,
 }
 
 impl AppState {
+    /// Creates a new instance of AppState with default values.
+    ///
+    /// Initializes the application state by:
+    /// 1. Loading persistent state from disk
+    /// 2. Setting up default UI state
+    /// 3. Initializing the group form with empty values
+    /// 4. Setting up the application edit state
+    /// 5. Initializing the log manager
+    /// 6. Creating a thread-safe reference to running applications
+    /// 7. Setting the UI theme based on the persistent state
+    /// 8. Spawning a background task to monitor running applications
+    ///
+    /// # Parameters
+    ///
+    /// * `ctx` - The egui context used to set the UI theme
+    ///
+    /// # Returns
+    ///
+    /// A new `AppState` instance with initialized values
     pub fn new(ctx: &egui::Context) -> Self {
         let app = Self {
             persistent_state: AppStateStorage::load_state(),
@@ -48,14 +79,18 @@ impl AppState {
             running_apps_statuses: HashMap::new(),
         };
 
+        // Set the UI theme based on the theme index in the persistent state
         let visuals = match app.persistent_state.theme_index {
             0 => egui::Visuals::default(),
             1 => egui::Visuals::light(),
             _ => egui::Visuals::dark(),
         };
         ctx.set_visuals(visuals);
+        
+        // Create a clone of the running apps reference for the background monitor
         let apps_clone = Arc::clone(&app.running_apps);
         
+        // Spawn a background task to monitor running applications
         tokio::spawn(run_running_app_monitor(apps_clone));
 
         app
@@ -63,6 +98,13 @@ impl AppState {
 }
 
 impl AppState {
+    /// Starts all applications marked for automatic startup.
+    ///
+    /// Iterates through all groups and their programs, and for each program
+    /// that has the `autorun` flag set to true, calls `run_app_with_affinity()`
+    /// to launch the application with the appropriate CPU affinity.
+    ///
+    /// This method is typically called during application initialization.
     pub fn start_app_with_autorun(&mut self) {
         let groups = self.persistent_state.groups.clone();
         for (gi, group) in groups.iter().enumerate() {
@@ -74,7 +116,14 @@ impl AppState {
         }
     }
 
-    /// Resets the group form state.
+    /// Resets the group form state to its default values.
+    ///
+    /// This method delegates to the `reset()` method of the `GroupFormState` structure,
+    /// which clears the editing state, disables the "run all" button, clears the group name,
+    /// and deselects all cores.
+    ///
+    /// This is typically called after a group is created or edited, or when the user
+    /// cancels the group creation/editing process.
     pub fn reset_group_form(&mut self) {
         self.group_form.reset();
     }

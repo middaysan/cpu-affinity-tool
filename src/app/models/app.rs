@@ -6,12 +6,28 @@ use crate::app::models::AppState;
 use std::path::PathBuf;
 use eframe::egui;
 
+/// The main application structure that implements the eframe::App trait.
+/// This is the core of the application that connects the state with controllers and views.
 pub struct App {
+    /// The application state that holds all data and configuration
     pub state: AppState,
+    /// The main controller that handles the application's control flow
     pub main_controller: controllers::MainController,
 }
 
 impl App {
+    /// Creates a new instance of the App with initialized state and controller.
+    ///
+    /// Initializes the application state with the provided context, creates a new
+    /// main controller, and starts any applications marked for autorun.
+    ///
+    /// # Parameters
+    ///
+    /// * `cc` - The creation context provided by the eframe framework
+    ///
+    /// # Returns
+    ///
+    /// A new `App` instance with initialized state and controller
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut state = AppState::new(&cc.egui_ctx);
         let main_controller = controllers::MainController::new();
@@ -22,16 +38,30 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// The main update method called by the eframe framework on each frame.
+    ///
+    /// This method is responsible for:
+    /// 1. Requesting periodic repaints
+    /// 2. Setting the UI theme based on the theme index
+    /// 3. Processing file drop events
+    /// 4. Rendering the UI based on the current window controller
+    /// 5. Handling controller changes
+    ///
+    /// # Parameters
+    ///
+    /// * `ctx` - The egui context for this frame
+    /// * `_frame` - The eframe frame (unused in this implementation)
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Request a repaint after 1 second to ensure the UI stays responsive
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
+        // Set the UI theme based on the theme index in the persistent state
         let visuals = match self.state.persistent_state.theme_index {
             0 => egui::Visuals::default(),
             1 => egui::Visuals::light(),
             _ => egui::Visuals::dark(),
         };
         ctx.set_visuals(visuals);
-
 
         // Handle file drop events; check OS events and update dropped_files if any.
         if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
