@@ -1,17 +1,17 @@
-use crate::app::models::app_state_storage::AppStateStorage;
 use crate::app::controllers;
-use crate::app::models::app_to_run::{RunAppEditState, AppToRun};
+use crate::app::models::app_state_storage::AppStateStorage;
+use crate::app::models::app_to_run::{AppToRun, RunAppEditState};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
-use crate::app::models::LogManager;
 use crate::app::models::running_app::RunningApps;
+use crate::app::models::LogManager;
+use os_api::OS;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use os_api::OS;
 
-use std::path::PathBuf;
-use num_cpus;
 use eframe::egui;
+use num_cpus;
+use std::path::PathBuf;
 
 /// The central state management component of the application.
 /// This structure holds all the application states, including persistent data,
@@ -46,7 +46,7 @@ impl AppState {
     ///
     /// Initializes the application state by:
     /// 1. Loading persistent state from disk
-    /// 2. Setting up the default UI state 
+    /// 2. Setting up the default UI state
     /// 3. Initializing the group form with empty values
     /// 4. Setting up application edit state
     /// 5. Initializing log manager
@@ -87,10 +87,10 @@ impl AppState {
 
         // Set the UI theme based on the theme index in the persistent state
         app.apply_theme(ctx);
-        
+
         // Create a clone of the running apps reference for the background monitor
         let apps_clone = Arc::clone(&app.running_apps);
-        
+
         // Spawn a background task to monitor running applications
         tokio::spawn(run_running_app_monitor(apps_clone));
 
@@ -159,18 +159,23 @@ impl AppState {
     pub fn create_group(&mut self) {
         let group_name_trimmed = self.group_form.group_name.trim();
         if group_name_trimmed.is_empty() {
-            self.log_manager.add_entry("Group name cannot be empty".into());
+            self.log_manager
+                .add_entry("Group name cannot be empty".into());
             return;
         }
 
         // Gather indices of selected cores.
-        let selected_cores: Vec<usize> = self.group_form.core_selection.iter()
+        let selected_cores: Vec<usize> = self
+            .group_form
+            .core_selection
+            .iter()
             .enumerate()
             .filter_map(|(i, &selected)| if selected { Some(i) } else { None })
             .collect();
 
         if selected_cores.is_empty() {
-            self.log_manager.add_entry("At least one core must be selected".into());
+            self.log_manager
+                .add_entry("At least one core must be selected".into());
             return;
         }
 
@@ -198,7 +203,8 @@ impl AppState {
         if let Some(group) = self.persistent_state.groups.get_mut(group_index) {
             if programm_index < group.programs.len() {
                 let app = &group.programs[programm_index];
-                self.log_manager.add_entry(format!("Removing app: {}", app.bin_path.display()));
+                self.log_manager
+                    .add_entry(format!("Removing app: {}", app.bin_path.display()));
                 group.programs.remove(programm_index);
             }
         }
@@ -225,58 +231,73 @@ impl AppState {
 
         // Map the cores to their corresponding clusters.
         // This is a critical operation that ensures UI consistency.
-        self.persistent_state.clusters = self.persistent_state.groups[group_index].cores.iter()
-            .map(|&ci| self.persistent_state.clusters.get(ci).cloned().unwrap_or_default())
+        self.persistent_state.clusters = self.persistent_state.groups[group_index]
+            .cores
+            .iter()
+            .map(|&ci| {
+                self.persistent_state
+                    .clusters
+                    .get(ci)
+                    .cloned()
+                    .unwrap_or_default()
+            })
             .collect();
 
-        self.set_current_window(controllers::WindowController::Groups(controllers::Group::EditGroup));
+        self.set_current_window(controllers::WindowController::Groups(
+            controllers::Group::Edit,
+        ));
     }
 
     /// Runs an application with a specified CPU affinity based on the provided group.
     /// Logs the start of the app and any resulting errors.
     /// Attempts to focus an existing running application window.
-    /// 
+    ///
     /// # Parameters
-    /// 
+    ///
     /// * `app_key` - The unique key identifying the application
     /// * `app_display_name` - A human-readable name for logging purposes
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A tuple containing:
     /// - Whether the app exists
     /// - Whether the window was successfully focused
     fn try_focus_existing_app(&mut self, app_key: &str, app_display_name: &str) -> (bool, bool) {
         let lock_result = self.running_apps.try_read();
-        
+
         if let Ok(apps) = lock_result {
             if let Some(app) = apps.apps.get(app_key) {
                 // Try to focus any window belonging to this app
-                let was_focused = app.pids.iter()
-                    .any(|pid| OS::focus_window_by_pid(*pid));
-                
+                let was_focused = app.pids.iter().any(|pid| OS::focus_window_by_pid(*pid));
+
                 self.log_manager.add_entry(format!(
-                    "App already running: {}, pids: {:?}", 
+                    "App already running: {}, pids: {:?}",
                     app_display_name, app.pids
                 ));
-                
+
                 return (true, was_focused);
             }
         }
-        
+
         (false, false)
     }
 
     /// Runs an application with a specified CPU affinity based on the provided group.
     /// If the application is already running, attempts to focus its window instead.
     /// Logs the start of the app and any resulting errors.
-    pub fn run_app_with_affinity(&mut self, group_index: usize, prog_index: usize, app_to_run: AppToRun) {
+    pub fn run_app_with_affinity(
+        &mut self,
+        group_index: usize,
+        prog_index: usize,
+        app_to_run: AppToRun,
+    ) {
         let app_key = app_to_run.get_key();
-        
+
         // Check if app is already running and try to focus its window
         if self.is_app_running(&app_key) {
-            let (app_exists, was_focused) = self.try_focus_existing_app(&app_key, &app_to_run.display());
-            
+            let (app_exists, was_focused) =
+                self.try_focus_existing_app(&app_key, &app_to_run.display());
+
             // If app exists and was successfully focused, we're done
             if app_exists && was_focused {
                 return;
@@ -287,39 +308,58 @@ impl AppState {
         let group = match self.persistent_state.groups.get(group_index) {
             Some(g) => g,
             None => {
-                self.log_manager.add_entry(format!("Error: Group index {} not found", group_index));
+                self.log_manager
+                    .add_entry(format!("Error: Group index {group_index} not found"));
                 return;
-            },
+            }
         };
 
         // Extract a human-readable label from the binary path
-        let label = app_to_run.bin_path.file_name()
+        let label = app_to_run
+            .bin_path
+            .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| app_to_run.bin_path.display().to_string());
 
         // Log the attempt to start the application
-        self.log_manager.add_entry(format!("Starting '{}', app: {}", label, app_to_run.display()));
-        
+        self.log_manager.add_entry(format!(
+            "Starting '{}', app: {}",
+            label,
+            app_to_run.display()
+        ));
+
         // Try to run the application with the specified affinity
-        match OS::run(app_to_run.bin_path, app_to_run.args, &group.cores, app_to_run.priority) {
+        match OS::run(
+            app_to_run.bin_path,
+            app_to_run.args,
+            &group.cores,
+            app_to_run.priority,
+        ) {
             Ok(pid) => {
                 // Check if we need to add this as a new app or it's a new instance of existing app
-                let is_new_app = !self.running_apps.try_read()
+                let is_new_app = !self
+                    .running_apps
+                    .try_read()
                     .map(|apps| apps.apps.contains_key(&app_key))
                     .unwrap_or(false);
-                
+
                 if is_new_app {
                     let added = self.add_running_app(&app_key, pid, group_index, prog_index);
                     if added {
-                        self.log_manager.add_entry(format!("App started with PID: {}", pid));
+                        self.log_manager
+                            .add_entry(format!("App started with PID: {pid}"));
                     } else {
-                        self.log_manager.add_entry(format!("App started with PID: {} but couldn't be tracked (lock busy)", pid));
+                        self.log_manager.add_entry(format!(
+                            "App started with PID: {pid} but couldn't be tracked (lock busy)"
+                        ));
                     }
                 } else {
-                    self.log_manager.add_entry(format!("New instance of existing app started with PID: {}", pid));
+                    self.log_manager.add_entry(format!(
+                        "New instance of existing app started with PID: {pid}"
+                    ));
                 }
-            },
-            Err(e) => self.log_manager.add_entry(format!("ERROR: {}", e)),
+            }
+            Err(e) => self.log_manager.add_entry(format!("ERROR: {e}")),
         }
     }
 
@@ -339,12 +379,18 @@ impl AppState {
     /// # Returns
     ///
     /// `true` if the application was successfully added, `false` if the lock couldn't be acquired
-    pub fn add_running_app(&self, app_key: &str, pid: u32, group_index: usize, prog_index: usize) -> bool {
+    pub fn add_running_app(
+        &self,
+        app_key: &str,
+        pid: u32,
+        group_index: usize,
+        prog_index: usize,
+    ) -> bool {
         match self.running_apps.try_write() {
             Ok(mut apps) => {
                 apps.add_app(app_key, pid, group_index, prog_index);
                 true
-            },
+            }
             Err(_) => {
                 // Log the failure to acquire the lock
                 // This is a silent failure in the original code, but we could log it
@@ -378,7 +424,7 @@ impl AppState {
                     self.running_apps_statuses.insert(app_key.to_string(), true);
                 }
                 is_running
-            },
+            }
             Err(_) => {
                 // Couldn't get the lock, fall back to the cached status
                 self.running_apps_statuses.contains_key(app_key)
@@ -414,7 +460,7 @@ pub async fn run_running_app_monitor(running_apps: Arc<RwLock<RunningApps>>) {
         if let Ok(mut apps) = running_apps.try_write() {
             // Get a list of keys to avoid borrowing issues
             let app_keys: Vec<String> = apps.apps.keys().cloned().collect();
-            
+
             // Process each application
             for app_key in app_keys {
                 if let Some(app) = apps.apps.get_mut(&app_key) {
@@ -422,10 +468,10 @@ pub async fn run_running_app_monitor(running_apps: Arc<RwLock<RunningApps>>) {
                     if !app.pids.is_empty() {
                         // Find all child processes of the first PID
                         OS::find_all_descendants(app.pids[0], &mut app.pids);
-                        
+
                         // Remove PIDs that are no longer running
                         app.pids.retain(|&pid| OS::is_pid_live(pid));
-                        
+
                         // If no PIDs are left, remove the application
                         if app.pids.is_empty() {
                             apps.remove_app(&app_key);
@@ -437,7 +483,7 @@ pub async fn run_running_app_monitor(running_apps: Arc<RwLock<RunningApps>>) {
                 }
             }
         }
-        
+
         // If we couldn't acquire the lock, just wait for the next interval
         // This is more efficient than blocking or retrying
     }

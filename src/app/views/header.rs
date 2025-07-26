@@ -1,5 +1,5 @@
-use eframe::egui::{self, Layout, RichText, TopBottomPanel};
 use crate::app::models::AppState;
+use eframe::egui::{self, Layout, RichText, TopBottomPanel};
 
 /// Static array of tips to display in the application header
 /// These tips rotate every 3 minutes
@@ -25,33 +25,38 @@ pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
             ui.separator();
             ui.label(RichText::new("Core Groups").heading());
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(format!("📄 View Logs({})", app.log_manager.entries.len())).clicked() {
+                if ui
+                    .button(format!("📄 View Logs({})", app.log_manager.entries.len()))
+                    .clicked()
+                {
                     app.set_current_window(crate::app::controllers::WindowController::Logs);
                 }
                 if ui.button("➕ Create Core Group").clicked() {
-                    app.set_current_window(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::CreateGroup));
+                    app.set_current_window(crate::app::controllers::WindowController::Groups(
+                        crate::app::controllers::Group::Create,
+                    ));
                 }
             });
         });
         ui.separator();
-        
+
         // Tip rotation logic
         let current_time = ctx.input(|i| i.time);
         let time_since_last_change = current_time - app.last_tip_change_time;
-        
+
         // Check if it's time to change the tip (every 3 minutes = 180 seconds)
         const TIP_CHANGE_INTERVAL: f64 = 120.0; // 3 minutes in seconds
-        
+
         if time_since_last_change >= TIP_CHANGE_INTERVAL {
             // Update to the next tip
             app.current_tip_index = (app.current_tip_index + 1) % TIPS.len();
             app.last_tip_change_time = current_time;
         }
-        
+
         // Display the current tip without any transition
         let current_tip = TIPS[app.current_tip_index];
         ui.label(current_tip);
-        
+
         ui.separator();
         ui.add_space(3.0);
     });

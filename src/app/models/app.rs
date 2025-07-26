@@ -1,10 +1,10 @@
-use crate::app::views::{run_settings, central, group_editor, header, logs};
+use crate::app::views::{central, group_editor, header, logs, run_settings};
 
 use crate::app::controllers;
 use crate::app::models::AppState;
 
-use std::path::PathBuf;
 use eframe::egui;
+use std::path::PathBuf;
 
 /// The main application structure that implements the eframe::App trait.
 /// This is the core of the application that connects the state with controllers and views.
@@ -32,8 +32,11 @@ impl App {
         let mut state = AppState::new(&cc.egui_ctx);
         let main_controller = controllers::MainController::new();
         state.start_app_with_autorun();
- 
-        Self { state, main_controller }
+
+        Self {
+            state,
+            main_controller,
+        }
     }
 }
 
@@ -66,7 +69,8 @@ impl eframe::App for App {
         // Handle file drop events; check OS events and update dropped_files if any.
         if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
             let files: Vec<PathBuf> = ctx.input(|i| {
-                i.raw.dropped_files
+                i.raw
+                    .dropped_files
                     .iter()
                     .filter_map(|f| f.path.clone())
                     .collect()
@@ -87,10 +91,10 @@ impl eframe::App for App {
                     controllers::Group::ListGroups => {
                         central::draw_central_panel(app_state, ui_ctx);
                     }
-                    controllers::Group::CreateGroup => {
+                    controllers::Group::Create => {
                         group_editor::create_group_window(app_state, ui_ctx);
                     }
-                    controllers::Group::EditGroup => {
+                    controllers::Group::Edit => {
                         group_editor::edit_group_window(app_state, ui_ctx);
                     }
                 },
@@ -106,7 +110,8 @@ impl eframe::App for App {
         // If the window controller has been updated, notify the main panel.
         if app_state.controller_changed {
             app_state.controller_changed = false;
-            self.main_controller.set_window(app_state.current_window.clone());
+            self.main_controller
+                .set_window(app_state.current_window.clone());
         }
     }
 }

@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
-use os_api::{OS, PriorityClass};
 use crate::app::models::app_to_run::AppToRun;
+use os_api::{PriorityClass, OS};
+use serde::{Deserialize, Serialize};
 
 /// Represents the state of the form used for creating or editing a core group.
 /// This structure tracks the form's input fields and editing state.
@@ -68,7 +68,10 @@ impl CoreGroup {
     /// If the input vector is empty, the function returns `Ok(())` without making any changes.
     /// If any application fails to parse, the function returns immediately with the error,
     /// and any applications that were already added remain in the group.
-    pub fn add_app_to_group(&mut self, dropped_paths: Vec<std::path::PathBuf>) -> Result<(), String> {
+    pub fn add_app_to_group(
+        &mut self,
+        dropped_paths: Vec<std::path::PathBuf>,
+    ) -> Result<(), String> {
         if dropped_paths.is_empty() {
             return Ok(());
         }
@@ -78,16 +81,11 @@ impl CoreGroup {
 
             match parsed_app_file {
                 Ok((target, args)) => {
-                    let app_to_run = AppToRun::new(
-                        path, 
-                        args, 
-                        target,
-                        PriorityClass::Normal,
-                        false,
-                    );
+                    let app_to_run =
+                        AppToRun::new(path, args, target, PriorityClass::Normal, false);
 
                     self.programs.push(app_to_run);
-                },
+                }
                 Err(err) => return Err(err),
             }
         }

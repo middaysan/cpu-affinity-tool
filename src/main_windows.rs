@@ -24,8 +24,8 @@ fn main() {
             },
             Box::new(|cc| Ok(Box::new(App::new(cc)))),
         );
-    
-        if let Err(_) = res {
+
+        if res.is_err() {
             std::process::exit(1);
         }
     });

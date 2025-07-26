@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
 use os_api::PriorityClass;
+use serde::{Deserialize, Serialize};
 
 /// State for editing an application that will be run with a specific CPU affinity.
 /// This structure is used to track the current application being edited and its run settings.
@@ -48,21 +48,30 @@ impl AppToRun {
     /// # Returns
     ///
     /// A new `AppToRun` instance with the specified parameters and extracted name
-    pub fn new(dropped_path: PathBuf, args: Vec<String>, bin_path: PathBuf, priority: PriorityClass, autorun: bool) -> Self {
-        let name = dropped_path.file_name()
+    pub fn new(
+        dropped_path: PathBuf,
+        args: Vec<String>,
+        bin_path: PathBuf,
+        priority: PriorityClass,
+        autorun: bool,
+    ) -> Self {
+        let name = dropped_path
+            .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("Unknown")
             .to_string()
             .rsplit('.')
-            .next_back().unwrap().to_string();
+            .next_back()
+            .unwrap()
+            .to_string();
 
-        Self { 
+        Self {
             name,
-            dropped_path, 
-            args, 
+            dropped_path,
+            args,
             bin_path,
             autorun,
-            priority
+            priority,
         }
     }
 
@@ -74,7 +83,13 @@ impl AppToRun {
     ///
     /// A formatted string representation of the application
     pub fn display(&self) -> String {
-        format!("{} {}(src: {}) P({:?})", self.bin_path.display(), self.args.join(" "), self.dropped_path.display(), self.priority)
+        format!(
+            "{} {}(src: {}) P({:?})",
+            self.bin_path.display(),
+            self.args.join(" "),
+            self.dropped_path.display(),
+            self.priority
+        )
     }
 
     /// Generates a unique key for the application based on its path, arguments, and priority.
@@ -85,6 +100,11 @@ impl AppToRun {
     ///
     /// A string that uniquely identifies the application
     pub fn get_key(&self) -> String {
-        format!("{} {} {:?}", self.bin_path.display(), self.args.join(" "), self.priority)
+        format!(
+            "{} {} {:?}",
+            self.bin_path.display(),
+            self.args.join(" "),
+            self.priority
+        )
     }
 }

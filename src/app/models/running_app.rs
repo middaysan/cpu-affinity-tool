@@ -37,12 +37,15 @@ impl RunningApps {
     /// * `group_index` - The index of the group the application belongs to
     /// * `prog_index` - The index of the program within the group
     pub fn add_app(&mut self, app_key: &str, pid: u32, group_index: usize, prog_index: usize) {
-        self.apps.insert(app_key.to_string(), RunningApp {
-            pids: vec![pid],
-            group_index,
-            prog_index,
-            created_at: std::time::SystemTime::now(),
-        });
+        self.apps.insert(
+            app_key.to_string(),
+            RunningApp {
+                pids: vec![pid],
+                group_index,
+                prog_index,
+                created_at: std::time::SystemTime::now(),
+            },
+        );
     }
 
     /// Removes an application from the collection.

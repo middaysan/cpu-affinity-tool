@@ -28,16 +28,16 @@ impl LogManager {
         let duration = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        
+
         // Format time as [HH:MM:SS] using simple time calculations
         let secs = duration.as_secs();
         let ts = format!(
             "[{:02}:{:02}:{:02}]",
-            (secs % 86400) / 3600,  // hours
-            (secs % 3600) / 60,     // minutes
-            secs % 60               // seconds
+            (secs % 86400) / 3600, // hours
+            (secs % 3600) / 60,    // minutes
+            secs % 60              // seconds
         );
-        
-        self.entries.push(format!("{} :: {}", ts, message));
+
+        self.entries.push(format!("{ts} :: {message}"));
     }
 }

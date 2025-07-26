@@ -1,9 +1,8 @@
-use eframe::egui::{self, CentralPanel, ComboBox, Context, Frame, Layout, Align};
 use crate::app::models::AppState;
+use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Frame, Layout};
 use os_api::PriorityClass;
 
 pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
-
     CentralPanel::default().show(ctx, |ui| {
         let mut is_close = false;
 
@@ -30,7 +29,8 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
             }
 
             let selected_app = app
-                .app_edit_state.current_edit
+                .app_edit_state
+                .current_edit
                 .as_mut()
                 .expect("edit_app_clone must be initialized");
 
@@ -53,9 +53,16 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                     selected_app.bin_path = std::path::PathBuf::from(bin_path_str);
                 }
 
-                if ui.button("📁add").on_hover_text("Add executables...").clicked() {
+                if ui
+                    .button("📁add")
+                    .on_hover_text("Add executables...")
+                    .clicked()
+                {
                     // TODO: add linux support
-                    if let Some(paths) = rfd::FileDialog::new().add_filter("Executables", &["exe"]).pick_file() {
+                    if let Some(paths) = rfd::FileDialog::new()
+                        .add_filter("Executables", &["exe"])
+                        .pick_file()
+                    {
                         selected_app.bin_path = paths.clone();
                     }
                 }
@@ -68,12 +75,36 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                 ComboBox::from_label("")
                     .selected_text(format!("{:?}", selected_app.priority))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut selected_app.priority, PriorityClass::Idle, "Idle");
-                        ui.selectable_value(&mut selected_app.priority, PriorityClass::BelowNormal, "Below Normal");
-                        ui.selectable_value(&mut selected_app.priority, PriorityClass::Normal, "Normal");
-                        ui.selectable_value(&mut selected_app.priority, PriorityClass::AboveNormal, "Above Normal");
-                        ui.selectable_value(&mut selected_app.priority, PriorityClass::High, "High");
-                        ui.selectable_value(&mut selected_app.priority, PriorityClass::Realtime, "RealTime");
+                        ui.selectable_value(
+                            &mut selected_app.priority,
+                            PriorityClass::Idle,
+                            "Idle",
+                        );
+                        ui.selectable_value(
+                            &mut selected_app.priority,
+                            PriorityClass::BelowNormal,
+                            "Below Normal",
+                        );
+                        ui.selectable_value(
+                            &mut selected_app.priority,
+                            PriorityClass::Normal,
+                            "Normal",
+                        );
+                        ui.selectable_value(
+                            &mut selected_app.priority,
+                            PriorityClass::AboveNormal,
+                            "Above Normal",
+                        );
+                        ui.selectable_value(
+                            &mut selected_app.priority,
+                            PriorityClass::High,
+                            "High",
+                        );
+                        ui.selectable_value(
+                            &mut selected_app.priority,
+                            PriorityClass::Realtime,
+                            "RealTime",
+                        );
                     });
             });
 
@@ -109,25 +140,31 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
 
             ui.separator();
 
-
             ui.horizontal(|ui| {
-                if ui.add_sized(egui::vec2(100.0, 30.0), egui::Button::new("Save")).clicked() {
-                    app.persistent_state.groups[*group_idx].programs[*prog_idx] = selected_app.clone();
+                if ui
+                    .add_sized(egui::vec2(100.0, 30.0), egui::Button::new("Save"))
+                    .clicked()
+                {
+                    app.persistent_state.groups[*group_idx].programs[*prog_idx] =
+                        selected_app.clone();
                     app.persistent_state.save_state();
                     is_close = true;
                 }
-                if ui.add_sized(egui::vec2(100.0, 30.0), egui::Button::new("Cancel")).clicked() {
+                if ui
+                    .add_sized(egui::vec2(100.0, 30.0), egui::Button::new("Cancel"))
+                    .clicked()
+                {
                     is_close = true;
                 }
             });
-
-
         });
 
         if is_close {
             app.app_edit_state.current_edit = None;
             app.app_edit_state.run_settings = None;
-            app.set_current_window(crate::app::controllers::WindowController::Groups(crate::app::controllers::Group::ListGroups));
+            app.set_current_window(crate::app::controllers::WindowController::Groups(
+                crate::app::controllers::Group::ListGroups,
+            ));
         }
     });
 }

@@ -3,8 +3,8 @@ use eframe::egui;
 #[derive(Clone)]
 pub enum Group {
     ListGroups,
-    CreateGroup,
-    EditGroup,
+    Create,
+    Edit,
 }
 
 #[derive(Clone)]
@@ -42,7 +42,7 @@ impl MainController {
     where
         F: FnMut(&MainController, &egui::Context),
     {
-        dispatch_fn(&self, ctx);
+        dispatch_fn(self, ctx);
     }
 
     pub fn set_window(&mut self, controller: WindowController) {
