@@ -8,7 +8,7 @@ on:
 jobs:
   check:
     name: Check and Build
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -25,8 +25,8 @@ jobs:
         uses: actions/cache@v3
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~\.cargo\registry
+            ~\.cargo\git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
@@ -62,8 +62,8 @@ jobs:
         uses: actions/cache@v3
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~\.cargo\registry
+            ~\.cargo\git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
@@ -80,52 +80,53 @@ jobs:
           path: target/release/cpu-affinity-tool.exe
           if-no-files-found: error
 
-  build-linux:
-    name: Build Linux Binary
-    needs: check
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-          target: x86_64-unknown-linux-gnu
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
-
-      - name: Cache dependencies
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build Linux binary
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --release --bin cpu-affinity-tool-linux --features linux
-
-      - name: Upload Linux binary
-        uses: actions/upload-artifact@v3
-        with:
-          name: linux-binary
-          path: target/release/cpu-affinity-tool-linux
-          if-no-files-found: error
+# Linux build temporarily disabled - will be implemented later
+#  build-linux:
+#    name: Build Linux Binary
+#    needs: check
+#    runs-on: ubuntu-latest
+#    steps:
+#      - name: Checkout code
+#        uses: actions/checkout@v4
+#
+#      - name: Setup Rust
+#        uses: actions-rs/toolchain@v1
+#        with:
+#          profile: minimal
+#          toolchain: stable
+#          override: true
+#          target: x86_64-unknown-linux-gnu
+#
+#      - name: Install dependencies
+#        run: |
+#          sudo apt-get update
+#          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
+#
+#      - name: Cache dependencies
+#        uses: actions/cache@v3
+#        with:
+#          path: |
+#            ~/.cargo/registry
+#            ~/.cargo/git
+#            target
+#          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+#
+#      - name: Build Linux binary
+#        uses: actions-rs/cargo@v1
+#        with:
+#          command: build
+#          args: --release --bin cpu-affinity-tool-linux --features linux
+#
+#      - name: Upload Linux binary
+#        uses: actions/upload-artifact@v3
+#        with:
+#          name: linux-binary
+#          path: target/release/cpu-affinity-tool-linux
+#          if-no-files-found: error
 
   create-release:
     name: Create Release
-    needs: [build-windows, build-linux]
+    needs: [build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -137,11 +138,12 @@ jobs:
           name: windows-binary
           path: ./artifacts/windows
 
-      - name: Download Linux binary
-        uses: actions/download-artifact@v3
-        with:
-          name: linux-binary
-          path: ./artifacts/linux
+# Linux binary download temporarily disabled
+#      - name: Download Linux binary
+#        uses: actions/download-artifact@v3
+#        with:
+#          name: linux-binary
+#          path: ./artifacts/linux
 
       - name: Get version from tag
         id: get_version
@@ -157,4 +159,5 @@ jobs:
           generate_release_notes: true
           files: |
             ./artifacts/windows/cpu-affinity-tool.exe
-            ./artifacts/linux/cpu-affinity-tool-linux
+            # Linux binary temporarily disabled
+            # ./artifacts/linux/cpu-affinity-tool-linux

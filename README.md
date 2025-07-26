@@ -134,7 +134,7 @@ This project uses GitHub Actions for continuous integration and deployment:
 
 - **Continuous Deployment (CD)**: When a new version tag (e.g., `v1.0.0`) is pushed, GitHub Actions automatically:
   1. Runs all checks and tests
-  2. Builds Windows and Linux binaries
+  2. Builds Windows binaries (Linux support coming later)
   3. Creates a GitHub Release with the binaries attached
   4. Generates release notes
 
