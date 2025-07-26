@@ -35,6 +35,10 @@ pub struct AppState {
     pub running_apps: Arc<RwLock<RunningApps>>,
     /// Cache of running application statuses for quick access
     pub running_apps_statuses: HashMap<String, bool>,
+    /// Index of the currently displayed tip
+    pub current_tip_index: usize,
+    /// Time when the tip was last changed (in seconds since app start)
+    pub last_tip_change_time: f64,
 }
 
 impl AppState {
@@ -77,6 +81,8 @@ impl AppState {
             log_manager: LogManager { entries: vec![] },
             running_apps: Arc::new(RwLock::new(RunningApps::default())),
             running_apps_statuses: HashMap::new(),
+            current_tip_index: 0,
+            last_tip_change_time: 0.0,
         };
 
         // Set the UI theme based on the theme index in the persistent state

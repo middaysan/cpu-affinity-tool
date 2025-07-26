@@ -1,5 +1,16 @@
 use eframe::egui::{self, Layout, RichText, TopBottomPanel};
 use crate::app::models::AppState;
+use std::time::Duration;
+
+/// Static array of tips to display in the application header
+/// These tips rotate every 3 minutes
+pub static TIPS: [&str; 5] = [
+    "💡 Tip: Drag & drop executable files (.exe/.lnk) onto a group to add them, then click ▶ to run with the assigned CPU cores",
+    "💡 Tip: Create different core groups for different types of applications to optimize performance",
+    "💡 Tip: You can enable autorun for applications to start them automatically when the tool launches",
+    "💡 Tip: Check the logs to see the history of application launches and their CPU affinity settings",
+    "💡 Tip: Use the theme toggle button in the top-left corner to switch between light, dark, and system themes",
+];
 
 pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
     TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -24,7 +35,24 @@ pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
             });
         });
         ui.separator();
-        ui.label("💡 Tip: Drag & drop executable files (.exe/.lnk) onto a group to add them, then click ▶ to run with the assigned CPU cores");
+        
+        // Tip rotation logic
+        let current_time = ctx.input(|i| i.time);
+        let time_since_last_change = current_time - app.last_tip_change_time;
+        
+        // Check if it's time to change the tip (every 3 minutes = 180 seconds)
+        const TIP_CHANGE_INTERVAL: f64 = 120.0; // 3 minutes in seconds
+        
+        if time_since_last_change >= TIP_CHANGE_INTERVAL {
+            // Update to the next tip
+            app.current_tip_index = (app.current_tip_index + 1) % TIPS.len();
+            app.last_tip_change_time = current_time;
+        }
+        
+        // Display the current tip without any transition
+        let current_tip = TIPS[app.current_tip_index];
+        ui.label(current_tip);
+        
         ui.separator();
         ui.add_space(3.0);
     });
