@@ -31,6 +31,10 @@ A cross-platform GUI application for managing CPU affinity of processes. This to
 - For Windows: Windows 10/11 with Visual Studio build tools
 - For Linux: X11 development libraries
 
+### Download Prebuilt Binaries
+
+You can download the latest prebuilt binaries from the [Releases](https://github.com/yourusername/cpu-affinity-tool/releases) page.
+
 ### Building from Source
 
 1. Clone the repository:
@@ -118,6 +122,34 @@ This project is licensed under a Non-Commercial Use License. You may use this so
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+### CI/CD Pipeline
+
+This project uses GitHub Actions for continuous integration and deployment:
+
+- **Continuous Integration (CI)**: All pull requests and commits to the main branch are automatically checked for:
+  - Code formatting (rustfmt)
+  - Code quality (clippy)
+  - Passing tests
+
+- **Continuous Deployment (CD)**: When a new version tag (e.g., `v1.0.0`) is pushed, GitHub Actions automatically:
+  1. Runs all checks and tests
+  2. Builds Windows and Linux binaries
+  3. Creates a GitHub Release with the binaries attached
+  4. Generates release notes
+
+### Creating a Release
+
+To create a new release:
+
+1. Update the version in `Cargo.toml`
+2. Commit the changes: `git commit -am "Bump version to X.Y.Z"`
+3. Create and push a new tag:
+   ```
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+4. GitHub Actions will automatically build and publish the release
 
 ## Roadmap
 
