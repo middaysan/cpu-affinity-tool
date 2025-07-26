@@ -1,6 +1,5 @@
 use eframe::egui::{self, Layout, RichText, TopBottomPanel};
 use crate::app::models::AppState;
-use std::time::Duration;
 
 /// Static array of tips to display in the application header
 /// These tips rotate every 3 minutes
