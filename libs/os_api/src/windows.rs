@@ -297,19 +297,27 @@ impl OS {
             .map_err(|_| "Not a valid URI protocol".to_string())?;
 
         let command_key_path = format!(r"{}\shell\open\command", uri_scheme);
-        let command_key = hkcr.open_subkey(command_key_path)
+        let command_key = hkcr
+            .open_subkey(command_key_path)
             .map_err(|e| format!("Command key not found: {}", e))?;
-    
-        let command: String = command_key.get_value("")
+
+        let command: String = command_key
+            .get_value("")
             .map_err(|e| format!("Failed to get command string: {}", e))?;
 
         let exe_path = if command.starts_with('"') {
             // Extract from quotes
-            command.split('"').nth(1).ok_or("Failed to parse command path")?
+            command
+                .split('"')
+                .nth(1)
+                .ok_or("Failed to parse command path")?
         } else {
-            command.split_whitespace().next().ok_or("Failed to parse command path")?
+            command
+                .split_whitespace()
+                .next()
+                .ok_or("Failed to parse command path")?
         };
-    
+
         Ok(PathBuf::from(exe_path))
     }
 }
