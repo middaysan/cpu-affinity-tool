@@ -1,0 +1,17 @@
+[tasks.fmt]
+command = "cargo"
+args = ["fmt", "--all", "--", "--check"]
+
+[tasks.lint]
+command = "cargo"
+args = ["clippy", "--", "-D", "warnings"]
+
+[tasks.build-release]
+command = "cargo"
+args = ["build", "--release"]
+
+[tasks.check]
+dependencies = ["fmt", "lint"]
+
+[tasks.release]
+dependencies = ["check", "build-release"]
