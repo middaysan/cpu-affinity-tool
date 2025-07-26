@@ -157,12 +157,48 @@ impl OS {
             .collect()
     }
 
-    #[allow(dead_code)]
+    /// Finds all descendant processes of a given parent process.
+    ///
+    /// This method uses an iterative breadth-first search approach to find all
+    /// child processes and their descendants. It avoids recursion to prevent
+    /// potential stack overflow with deep process trees.
+    ///
+    /// # Parameters
+    ///
+    /// * `parent_pid` - The parent process ID to find descendants for
+    /// * `descendants` - A mutable vector to store the found descendant PIDs
+    ///
+    /// # Implementation Details
+    ///
+    /// - Uses a queue to track processes to check
+    /// - Uses a HashSet to efficiently track which PIDs have been processed
+    /// - Performs a breadth-first traversal of the process tree
     pub fn find_all_descendants(parent_pid: u32, descendants: &mut Vec<u32>) {
-        for &child in &Self::find_child_pids(parent_pid) {
-            if !descendants.contains(&child) {
-                descendants.push(child);
-                Self::find_all_descendants(child, descendants);
+        use std::collections::{HashSet, VecDeque};
+        
+        // Use a queue for breadth-first traversal
+        let mut queue = VecDeque::new();
+        queue.push_back(parent_pid);
+        
+        // Use a HashSet to efficiently track processed PIDs
+        let mut processed = HashSet::new();
+        processed.insert(parent_pid);
+        
+        while let Some(current_pid) = queue.pop_front() {
+            // Find immediate children of the current process
+            let children = Self::find_child_pids(current_pid);
+            
+            for child in children {
+                // Skip if we've already processed this PID
+                if processed.insert(child) {
+                    // Add to descendants list
+                    if !descendants.contains(&child) {
+                        descendants.push(child);
+                    }
+                    
+                    // Add to queue to process its children
+                    queue.push_back(child);
+                }
             }
         }
     }
