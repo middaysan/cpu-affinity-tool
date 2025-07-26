@@ -90,6 +90,18 @@ The application stores its configuration in `state.json` in the application dire
 - Core groups
 - Application settings
 - UI preferences
+- State version information
+
+### State Migration
+
+The application implements a robust state migration mechanism that ensures backward compatibility when the application is updated:
+
+- **Version Tracking**: Each state file includes a version number that identifies its schema
+- **Automatic Migration**: When loading a state file with an older version, the application automatically migrates it to the current format
+- **Data Preservation**: User data (groups, applications, settings) is preserved during migration
+- **Legacy Support**: The application can load state files from versions that don't include version information
+
+This approach ensures that users never lose their configuration or settings when updating to a new version of the application, even if the internal data structure changes significantly.
 
 ## Dependencies
 
@@ -101,7 +113,7 @@ The application stores its configuration in `state.json` in the application dire
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under a Non-Commercial Use License. You may use this software for non-commercial purposes only. For any commercial use, you must contact the author for explicit permission and licensing terms. See the LICENSE file for details.
 
 ## Contributing
 
