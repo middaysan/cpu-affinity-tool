@@ -33,7 +33,7 @@ A cross-platform GUI application for managing CPU affinity of processes. This to
 
 ### Download Prebuilt Binaries
 
-You can download the latest prebuilt binaries from the [Releases](https://github.com/yourusername/cpu-affinity-tool/releases) page.
+You can download the latest prebuilt binaries from the [Releases](https://github.com/middaysan/cpu-affinity-tool/releases) page.
 
 ### Building from Source
 
