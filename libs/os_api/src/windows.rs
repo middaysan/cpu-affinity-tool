@@ -18,9 +18,10 @@ use ntapi::ntpsapi::{
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::ProcessStatus::K32EnumProcesses;
 use windows_sys::Win32::System::Threading::{
-    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetPriorityClass, HIGH_PRIORITY_CLASS,
-    IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, OpenProcess, PROCESS_QUERY_INFORMATION,
-    PROCESS_SET_INFORMATION, REALTIME_PRIORITY_CLASS, SetPriorityClass, GetProcessAffinityMask, SetProcessAffinityMask,
+    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetPriorityClass,
+    GetProcessAffinityMask, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
+    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SET_INFORMATION, REALTIME_PRIORITY_CLASS,
+    SetPriorityClass, SetProcessAffinityMask,
 };
 
 use parselnk::Lnk;
@@ -42,7 +43,7 @@ impl OS {
             PriorityClass::Realtime => REALTIME_PRIORITY_CLASS,
         }
     }
-    
+
     // helper: map WinAPI priority constant to our PriorityClass
     fn from_win_priority(p: u32) -> PriorityClass {
         match p {
@@ -55,7 +56,7 @@ impl OS {
             _ => PriorityClass::Normal, // Default to Normal if unknown
         }
     }
-    
+
     /// Gets the current CPU affinity mask for a process.
     ///
     /// # Parameters
@@ -71,18 +72,18 @@ impl OS {
             if handle.is_null() {
                 return Err(format!("Failed to open process {}", pid));
             }
-            
+
             let mut process_mask: usize = 0;
             let mut system_mask: usize = 0;
-            
+
             let result = GetProcessAffinityMask(
                 handle,
                 &mut process_mask as *mut usize,
-                &mut system_mask as *mut usize
+                &mut system_mask as *mut usize,
             );
-            
+
             windows_sys::Win32::Foundation::CloseHandle(handle);
-            
+
             if result == 0 {
                 Err(format!("Failed to get affinity mask for process {}", pid))
             } else {
@@ -90,7 +91,7 @@ impl OS {
             }
         }
     }
-    
+
     /// Gets the current priority class for a process.
     ///
     /// # Parameters
@@ -106,11 +107,11 @@ impl OS {
             if handle.is_null() {
                 return Err(format!("Failed to open process {}", pid));
             }
-            
+
             let priority = GetPriorityClass(handle);
-            
+
             windows_sys::Win32::Foundation::CloseHandle(handle);
-            
+
             if priority == 0 {
                 Err(format!("Failed to get priority for process {}", pid))
             } else {
@@ -118,7 +119,7 @@ impl OS {
             }
         }
     }
-    
+
     /// Sets the CPU affinity mask for a process by PID.
     ///
     /// # Parameters
@@ -135,11 +136,11 @@ impl OS {
             if handle.is_null() {
                 return Err(format!("Failed to open process {}", pid));
             }
-            
+
             let result = SetProcessAffinityMask(handle, mask);
-            
+
             windows_sys::Win32::Foundation::CloseHandle(handle);
-            
+
             if result == 0 {
                 Err(format!("Failed to set affinity mask for process {}", pid))
             } else {
@@ -147,7 +148,7 @@ impl OS {
             }
         }
     }
-    
+
     /// Sets the priority class for a process by PID.
     ///
     /// # Parameters
@@ -164,11 +165,11 @@ impl OS {
             if handle.is_null() {
                 return Err(format!("Failed to open process {}", pid));
             }
-            
+
             let result = SetPriorityClass(handle, Self::to_win_priority(priority));
-            
+
             windows_sys::Win32::Foundation::CloseHandle(handle);
-            
+
             if result == 0 {
                 Err(format!("Failed to set priority for process {}", pid))
             } else {

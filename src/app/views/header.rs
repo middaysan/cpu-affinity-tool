@@ -14,7 +14,7 @@ pub static TIPS: [&str; 5] = [
 pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
     TopBottomPanel::top("top_panel").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            let (icon, label) = match app.persistent_state.theme_index {
+            let (icon, label) = match app.get_theme_index() {
                 0 => ("💻", "System theme"),
                 1 => ("☀", "Light theme"),
                 _ => ("🌙", "Dark theme"),

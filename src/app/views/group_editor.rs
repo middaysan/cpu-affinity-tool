@@ -246,15 +246,19 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
 
         Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                // Get clusters using helper method
+                let mut clusters = app.get_clusters().unwrap_or_default();
                 draw_group_form_ui(
                     ui,
                     &mut app.group_form,
-                    &mut app.persistent_state.clusters,
+                    &mut clusters,
                     false,
                     &mut || create_clicked = true,
                     &mut || cancel_clicked = true,
                     None,
                 );
+                // Update clusters if needed
+                app.set_clusters(clusters);
             });
         });
     });
@@ -279,7 +283,9 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
         let mut save_clicked = false;
         let mut delete_clicked = false;
         let mut cancel_clicked = false;
-        let selected_group = &mut app.persistent_state.groups[index];
+
+        // Get a group name for display (unused currently)
+        let _group_name = app.get_group_name(index).unwrap_or_default();
 
         ui.horizontal(|ui| {
             ui.heading("Edit Group");
@@ -290,39 +296,44 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
             });
         });
 
+        // Get clusters using helper method
+        let mut clusters = app.get_clusters().unwrap_or_default();
         draw_group_form_ui(
             ui,
             &mut app.group_form,
-            &mut app.persistent_state.clusters,
+            &mut clusters,
             true,
             &mut || save_clicked = true,
             &mut || cancel_clicked = true,
             Some(&mut || delete_clicked = true),
         );
+        // Update clusters if needed
+        app.set_clusters(clusters);
 
         if save_clicked {
-            let mut assigned: HashSet<usize> = app
-                .persistent_state
-                .clusters
-                .iter()
-                .flatten()
-                .copied()
-                .collect();
+            // Get updated clusters
+            let clusters = app.get_clusters().unwrap_or_default();
+            let mut assigned: HashSet<usize> = clusters.iter().flatten().copied().collect();
+
             for (i, &selected) in app.group_form.core_selection.iter().enumerate() {
                 if selected {
                     assigned.insert(i);
                 }
             }
-            selected_group.cores = assigned.into_iter().collect();
-            selected_group.run_all_button = app.group_form.run_all_enabled;
-            selected_group.name = app.group_form.group_name.clone();
-            app.persistent_state.save_state();
+
+            // Update group properties
+            app.update_group_properties(
+                index,
+                app.group_form.group_name.clone(),
+                assigned.into_iter().collect(),
+                app.group_form.run_all_enabled,
+            );
+
             app.reset_group_form();
         }
 
         if delete_clicked {
-            app.persistent_state.groups.remove(index);
-            app.persistent_state.save_state();
+            app.remove_group(index);
             app.reset_group_form();
         }
 

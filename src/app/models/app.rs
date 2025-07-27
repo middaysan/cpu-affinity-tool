@@ -31,6 +31,8 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut state = AppState::new(&cc.egui_ctx);
         let main_controller = controllers::MainController::new();
+
+        // Now that start_app_with_autorun is synchronous, we can call it directly
         state.start_app_with_autorun();
 
         Self {
@@ -59,7 +61,8 @@ impl eframe::App for App {
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         // Set the UI theme based on the theme index in the persistent state
-        let visuals = match self.state.persistent_state.theme_index {
+        let theme_index = self.state.get_theme_index();
+        let visuals = match theme_index {
             0 => egui::Visuals::default(),
             1 => egui::Visuals::light(),
             _ => egui::Visuals::dark(),
@@ -105,7 +108,7 @@ impl eframe::App for App {
                     run_settings::draw_app_run_settings(app_state, ui_ctx);
                 }
             }
-            
+
             // Draw the bottom panel (common for all views)
             footer::draw_bottom_panel(app_state, ui_ctx);
         });

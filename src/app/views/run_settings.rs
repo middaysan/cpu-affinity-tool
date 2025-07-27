@@ -3,9 +3,40 @@ use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Frame, Layout};
 use os_api::PriorityClass;
 
 pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
-    CentralPanel::default().show(ctx, |ui| {
-        let mut is_close = false;
+    // Extract group_idx and prog_idx early to avoid borrow checker issues
+    let (group_idx, prog_idx) = match app.app_edit_state.run_settings {
+        Some((g, p)) => (g, p), // Copy the values
+        None => {
+            // If no run settings, return to groups view
+            app.set_current_window(crate::app::controllers::WindowController::Groups(
+                crate::app::controllers::Group::ListGroups,
+            ));
+            return;
+        }
+    };
 
+    // Initialize the current_edit if needed
+    if app.app_edit_state.current_edit.is_none() {
+        // Get program using helper method
+        if let Some(original) = app.get_group_program(group_idx, prog_idx) {
+            app.app_edit_state.current_edit = Some(original);
+        } else {
+            // If program not found, return to groups view
+            app.app_edit_state.current_edit = None;
+            app.app_edit_state.run_settings = None;
+            app.set_current_window(crate::app::controllers::WindowController::Groups(
+                crate::app::controllers::Group::ListGroups,
+            ));
+            return;
+        }
+    }
+
+    // Variables to track UI state
+    let mut is_close = false;
+    let mut save_clicked = false;
+    let mut updated_app = None;
+
+    CentralPanel::default().show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.heading("Edit App Run Settings");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -18,16 +49,6 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
         ui.separator();
 
         Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
-            let (group_idx, prog_idx) = match app.app_edit_state.run_settings {
-                Some((ref mut g, ref mut p)) => (g, p),
-                None => return,
-            };
-
-            if app.app_edit_state.current_edit.is_none() {
-                let original = app.persistent_state.groups[*group_idx].programs[*prog_idx].clone();
-                app.app_edit_state.current_edit = Some(original);
-            }
-
             let selected_app = app
                 .app_edit_state
                 .current_edit
@@ -36,7 +57,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
 
             ui.horizontal(|ui| {
                 ui.label("App name:");
-                ui.text_edit_singleline(&mut selected_app.name).changed()
+                ui.text_edit_singleline(&mut selected_app.name).changed();
             });
 
             ui.add_space(5.0);
@@ -145,9 +166,9 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                     .add_sized(egui::vec2(100.0, 30.0), egui::Button::new("Save"))
                     .clicked()
                 {
-                    app.persistent_state.groups[*group_idx].programs[*prog_idx] =
-                        selected_app.clone();
-                    app.persistent_state.save_state();
+                    // Store the updated app for later use
+                    updated_app = Some(selected_app.clone());
+                    save_clicked = true;
                     is_close = true;
                 }
                 if ui
@@ -158,13 +179,21 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                 }
             });
         });
-
-        if is_close {
-            app.app_edit_state.current_edit = None;
-            app.app_edit_state.run_settings = None;
-            app.set_current_window(crate::app::controllers::WindowController::Groups(
-                crate::app::controllers::Group::ListGroups,
-            ));
-        }
     });
+
+    // Handle save outside of any closures
+    if save_clicked {
+        if let Some(updated) = updated_app {
+            app.update_program(group_idx, prog_idx, updated);
+        }
+    }
+
+    // Handle close outside of any closures
+    if is_close {
+        app.app_edit_state.current_edit = None;
+        app.app_edit_state.run_settings = None;
+        app.set_current_window(crate::app::controllers::WindowController::Groups(
+            crate::app::controllers::Group::ListGroups,
+        ));
+    }
 }
