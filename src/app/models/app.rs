@@ -1,4 +1,4 @@
-use crate::app::views::{central, group_editor, header, logs, run_settings};
+use crate::app::views::{central, footer, group_editor, header, logs, run_settings};
 
 use crate::app::controllers;
 use crate::app::models::AppState;
@@ -105,6 +105,9 @@ impl eframe::App for App {
                     run_settings::draw_app_run_settings(app_state, ui_ctx);
                 }
             }
+            
+            // Draw the bottom panel (common for all views)
+            footer::draw_bottom_panel(app_state, ui_ctx);
         });
 
         // If the window controller has been updated, notify the main panel.

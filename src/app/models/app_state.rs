@@ -88,11 +88,17 @@ impl AppState {
         // Set the UI theme based on the theme index in the persistent state
         app.apply_theme(ctx);
 
-        // Create a clone of the running apps reference for the background monitor
+        // Create a clone of the running apps reference for the background monitors
         let apps_clone = Arc::clone(&app.running_apps);
 
         // Spawn a background task to monitor running applications
-        tokio::spawn(run_running_app_monitor(apps_clone));
+        tokio::spawn(run_running_app_monitor(apps_clone.clone()));
+        
+        // Create a clone of the persistent state for the process settings monitor
+        let persistent_state_clone = Arc::new(RwLock::new(app.persistent_state.clone()));
+        
+        // Spawn a background task to monitor and enforce process settings
+        tokio::spawn(run_process_settings_monitor(apps_clone, persistent_state_clone));
 
         app
     }
@@ -152,6 +158,21 @@ impl AppState {
         self.persistent_state.theme_index = (self.persistent_state.theme_index + 1) % 3;
         self.apply_theme(ctx);
         self.persistent_state.save_state();
+    }
+    
+    /// Toggles the process monitoring feature on or off and saves the state.
+    pub fn toggle_process_monitoring(&mut self) {
+        self.persistent_state.process_monitoring_enabled = !self.persistent_state.process_monitoring_enabled;
+        self.persistent_state.save_state();
+    }
+    
+    /// Checks if the process monitoring feature is enabled.
+    ///
+    /// # Returns
+    ///
+    /// `true` if process monitoring is enabled, `false` otherwise
+    pub fn is_process_monitoring_enabled(&self) -> bool {
+        self.persistent_state.process_monitoring_enabled
     }
 
     /// Creates a new core group from the group form data.
@@ -486,5 +507,88 @@ pub async fn run_running_app_monitor(running_apps: Arc<RwLock<RunningApps>>) {
 
         // If we couldn't acquire the lock, just wait for the next interval
         // This is more efficient than blocking or retrying
+    }
+}
+
+/// Monitors and enforces CPU affinity and priority settings for running processes.
+///
+/// This function runs in a separate tokio task and periodically:
+/// 1. Checks if the monitoring feature is enabled
+/// 2. For each running application and its child processes:
+///    a. Checks if the current CPU affinity matches the expected affinity from the group
+///    b. Checks if the current priority matches the expected priority from the app configuration
+///    c. Resets the CPU affinity and priority if they've been changed
+///
+/// # Parameters
+///
+/// * `running_apps` - Thread-safe reference to the running applications collection
+/// * `app_state` - Thread-safe reference to the application state
+pub async fn run_process_settings_monitor(
+    running_apps: Arc<RwLock<RunningApps>>,
+    app_state: Arc<RwLock<AppStateStorage>>,
+) {
+    // Create a 3-second interval for periodic checking
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+
+    loop {
+        // Wait for the next interval tick
+        interval.tick().await;
+
+        // Check if monitoring is enabled
+        let monitoring_enabled = if let Ok(state) = app_state.try_read() {
+            state.process_monitoring_enabled
+        } else {
+            false // Default to disabled if we can't read the state
+        };
+
+        // Skip processing if monitoring is disabled
+        if !monitoring_enabled {
+            continue;
+        }
+
+        // Get the groups configuration
+        let groups = if let Ok(state) = app_state.try_read() {
+            state.groups.clone()
+        } else {
+            continue; // Skip this iteration if we can't read the state
+        };
+
+        // Process all applications in a single read lock to minimize contention
+        if let Ok(apps) = running_apps.try_read() {
+            // Process each application
+            for (_app_key, app) in &apps.apps {
+                // Get the group for this application
+                if let Some(group) = groups.get(app.group_index) {
+                    // Get the expected CPU affinity mask from the group
+                    let expected_mask = group.cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
+                    
+                    // Get the expected priority from the app configuration
+                    let expected_priority = if let Some(program) = group.programs.get(app.prog_index) {
+                        program.priority
+                    } else {
+                        continue; // Skip if we can't find the program
+                    };
+                    
+                    // Check and reset CPU affinity and priority for each process
+                    for &pid in &app.pids {
+                        // Check and reset CPU affinity
+                        if let Ok(current_mask) = OS::get_process_affinity(pid) {
+                            if current_mask != expected_mask {
+                                // The CPU affinity has been changed, reset it
+                                let _ = OS::set_process_affinity_by_pid(pid, expected_mask);
+                            }
+                        }
+                        
+                        // Check and reset priority
+                        if let Ok(current_priority) = OS::get_process_priority(pid) {
+                            if current_priority != expected_priority {
+                                // The priority has been changed, reset it
+                                let _ = OS::set_process_priority_by_pid(pid, expected_priority);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

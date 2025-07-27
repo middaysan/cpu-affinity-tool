@@ -2,11 +2,11 @@ use crate::app::models::core_group::CoreGroup;
 use serde::{Deserialize, Serialize};
 
 /// Current version of the application state schema
-pub const CURRENT_APP_STATE_VERSION: u32 = 1;
+pub const CURRENT_APP_STATE_VERSION: u32 = 2;
 
 /// Storage for persistent application state that can be serialized to and deserialized from JSON.
 /// This structure is responsible for saving and loading the application state between sessions.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct AppStateStorage {
     /// Version of the application state schema
     /// Used for migrations between different versions
@@ -17,6 +17,9 @@ pub struct AppStateStorage {
     pub clusters: Vec<Vec<usize>>,
     /// Index of the currently selected UI theme (0: default, 1: light, 2: dark)
     pub theme_index: usize,
+    /// Flag indicating whether process monitoring is enabled
+    #[serde(default)]
+    pub process_monitoring_enabled: bool,
 }
 
 impl AppStateStorage {
@@ -74,6 +77,7 @@ impl AppStateStorage {
                             groups: legacy_state.groups,
                             clusters: legacy_state.clusters,
                             theme_index: legacy_state.theme_index,
+                            process_monitoring_enabled: false, // Default to disabled for migrated states
                         };
 
                         // Save the migrated state back to disk
@@ -94,6 +98,7 @@ impl AppStateStorage {
                     groups: Vec::new(),
                     clusters: Vec::new(),
                     theme_index: 0,
+                    process_monitoring_enabled: false, // Default to disabled
                 };
 
                 // Save the default state to disk

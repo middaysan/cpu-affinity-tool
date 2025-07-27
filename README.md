@@ -9,6 +9,7 @@ A cross-platform GUI application for managing CPU affinity of processes. This to
 - **CPU Core Group Management**: Create and manage groups of CPU cores for different applications
 - **Process Affinity Control**: Launch applications with specific CPU core affinities
 - **Process Monitoring**: Track running processes launched through the tool
+- **Settings Enforcement**: Automatically restore CPU affinity and priority settings if processes change them
 - **Autorun Support**: Configure applications to automatically start with specific CPU affinities
 - **Priority Control**: Set process priority when launching applications
 - **Theme Support**: Choose between light, dark, and default themes
@@ -87,6 +88,18 @@ You can download the latest prebuilt binaries from the [Releases](https://github
 - If an application is already running, the tool will focus its window
 - Use the "Run All" button (if enabled) to launch all applications in a group
 
+### Process Monitoring and Settings Enforcement
+
+The tool includes a feature to monitor running processes and ensure they maintain their assigned CPU affinity and priority settings:
+
+1. Toggle the monitoring feature using the button in the footer
+2. When enabled, the tool will:
+   - Monitor all running processes launched through the tool, including child processes
+   - Check if processes have changed their CPU affinity or priority settings
+   - Automatically restore the original settings if they've been changed
+3. The monitoring status is displayed in the footer
+4. This feature is useful for applications that might change their own CPU affinity or priority during execution
+
 ## Configuration
 
 The application stores its configuration in `state.json` in the application directory. This file contains:
@@ -94,6 +107,7 @@ The application stores its configuration in `state.json` in the application dire
 - Core groups
 - Application settings
 - UI preferences
+- Process monitoring state
 - State version information
 
 ### State Migration
@@ -156,6 +170,5 @@ To create a new release:
 Future plans for the application include:
 
 - Resource monitoring for running processes
-- Improved handling of child processes
 - Better administrator mode support
 - Enhanced process priority management
