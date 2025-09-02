@@ -1,6 +1,8 @@
 # CPU Affinity Tool
 
-A cross-platform GUI application for managing CPU affinity of processes. This tool allows you to control which CPU cores your applications run on, helping to optimize performance, manage resource allocation, and improve system responsiveness.
+A windows GUI application for managing CPU affinity of processes. This tool allows you to control which CPU cores your applications run on, helping to optimize performance, manage resource allocation, and improve system responsiveness.
+
+LINUX PLATFORM - WIP!
 
 ![CPU Affinity Tool](assets/screenshot.png)
 
