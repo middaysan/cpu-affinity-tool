@@ -34,6 +34,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
     // Variables to track UI state
     let mut is_close = false;
     let mut save_clicked = false;
+    let mut run_clicked = false;
     let mut updated_app = None;
 
     CentralPanel::default().show(ctx, |ui| {
@@ -58,6 +59,14 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
             ui.horizontal(|ui| {
                 ui.label("App name:");
                 ui.text_edit_singleline(&mut selected_app.name).changed();
+                if ui
+                    .button("▶")
+                    .on_hover_text("Test run the command")
+                    .clicked()
+                {
+                    updated_app = Some(selected_app.clone());
+                    run_clicked = true;
+                };
             });
 
             ui.add_space(5.0);
@@ -141,7 +150,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                         ui.horizontal(|ui| {
                             ui.label(format!("Arg {}:", i + 1));
                             ui.text_edit_singleline(arg);
-                            if ui.button("❌").clicked() {
+                            if ui.button("remove 🗑").clicked() {
                                 arg_to_remove = Some(i);
                             }
                         });
@@ -180,6 +189,19 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
             });
         });
     });
+
+
+
+    // Handle save outside of any closures
+    if run_clicked {
+        run_clicked = false;
+        if updated_app.is_some() {
+            // app.update_program(group_idx, prog_idx, updated);
+            app.run_app_with_affinity_sync(group_idx, prog_idx, updated_app.clone().unwrap());
+
+        }
+    }
+
 
     // Handle save outside of any closures
     if save_clicked {
