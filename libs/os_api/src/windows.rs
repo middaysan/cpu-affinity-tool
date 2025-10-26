@@ -15,25 +15,23 @@ use winreg::enums::*;
 use ntapi::ntpsapi::{
     NtQueryInformationProcess, PROCESS_BASIC_INFORMATION, ProcessBasicInformation,
 };
-use windows::core::{HSTRING, PCWSTR, Interface};
-use windows::Win32::Foundation::{HANDLE, CloseHandle, HWND, STILL_ACTIVE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, STILL_ACTIVE};
 use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
 use windows::Win32::System::Com::{
-    CoInitializeEx, CoCreateInstance, CoUninitialize, IPersistFile,
-    COINIT_APARTMENTTHREADED, CLSCTX_INPROC_SERVER, STGM_READ,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoUninitialize, IPersistFile, STGM_READ,
 };
 use windows::Win32::System::ProcessStatus::K32EnumProcesses;
 use windows::Win32::System::Threading::{
-    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetPriorityClass,
+    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetExitCodeProcess, GetPriorityClass,
     GetProcessAffinityMask, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
-    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SET_INFORMATION, REALTIME_PRIORITY_CLASS,
-    SetPriorityClass, SetProcessAffinityMask, GetExitCodeProcess,
-    PROCESS_CREATION_FLAGS,
+    OpenProcess, PROCESS_CREATION_FLAGS, PROCESS_QUERY_INFORMATION, PROCESS_SET_INFORMATION,
+    REALTIME_PRIORITY_CLASS, SetPriorityClass, SetProcessAffinityMask,
 };
 use windows::Win32::UI::Shell::{
-    IShellLinkW, ShellLink, CommandLineToArgvW, 
-    SLR_NO_UI, SLGP_UNCPRIORITY,
+    CommandLineToArgvW, IShellLinkW, SLGP_UNCPRIORITY, SLR_NO_UI, ShellLink,
 };
+use windows::core::{HSTRING, Interface, PCWSTR};
 
 use crate::PriorityClass;
 
@@ -193,13 +191,20 @@ impl OS {
     }
 
     fn split_windows_args(args: &str) -> Vec<String> {
-        if args.is_empty() { return Vec::new(); }
+        if args.is_empty() {
+            return Vec::new();
+        }
         use std::os::windows::ffi::OsStrExt;
-        let wide: Vec<u16> = std::ffi::OsStr::new(args).encode_wide().chain([0]).collect();
+        let wide: Vec<u16> = std::ffi::OsStr::new(args)
+            .encode_wide()
+            .chain([0])
+            .collect();
         let mut argc: i32 = 0;
         unsafe {
             let ptrs = CommandLineToArgvW(PCWSTR(wide.as_ptr()), &mut argc);
-            if ptrs.is_null() || argc <= 0 { return vec![args.to_string()]; }
+            if ptrs.is_null() || argc <= 0 {
+                return vec![args.to_string()];
+            }
             let mut out = Vec::with_capacity(argc as usize);
             for i in 0..argc {
                 let p = (*ptrs.add(i as usize)).0;
@@ -223,10 +228,12 @@ impl OS {
             // Создаём ShellLink и грузим .lnk
             let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
                 .map_err(|e| format!("CoCreateInstance(ShellLink) failed: {e}"))?;
-            let persist: IPersistFile = link.cast()
+            let persist: IPersistFile = link
+                .cast()
                 .map_err(|e| format!("IPersistFile cast failed: {e}"))?;
             let h = HSTRING::from(path.as_os_str());
-            persist.Load(PCWSTR(h.as_ptr()), STGM_READ)
+            persist
+                .Load(PCWSTR(h.as_ptr()), STGM_READ)
                 .map_err(|e| format!("Load {:?} failed: {e}", path))?;
 
             // Разрешаем ярлык без UI, по умолчанию таймаут 3 сек
@@ -236,11 +243,8 @@ impl OS {
             // Получаем путь к цели
             let mut wbuf = [0u16; 32768];
             let mut find = WIN32_FIND_DATAW::default();
-            link.GetPath(
-                &mut wbuf,
-                &mut find as *mut _,
-                SLGP_UNCPRIORITY.0 as u32,
-            ).map_err(|e| format!("GetPath failed: {e}"))?;
+            link.GetPath(&mut wbuf, &mut find as *mut _, SLGP_UNCPRIORITY.0 as u32)
+                .map_err(|e| format!("GetPath failed: {e}"))?;
             let n = wbuf.iter().position(|&c| c == 0).unwrap_or(wbuf.len());
             let target = PathBuf::from(String::from_utf16_lossy(&wbuf[..n]));
 
@@ -306,7 +310,9 @@ impl OS {
         let mut buf = vec![0u32; 1024];
         let mut ret = 0;
         unsafe {
-            if K32EnumProcesses(buf.as_mut_ptr(), (buf.len() * 4) as u32, &mut ret).as_bool() == false {
+            if K32EnumProcesses(buf.as_mut_ptr(), (buf.len() * 4) as u32, &mut ret).as_bool()
+                == false
+            {
                 panic!("K32EnumProcesses failed");
             }
         }
@@ -408,10 +414,7 @@ impl OS {
         static mut FOUND_HWND: HWND = HWND(null_mut());
         static TARGET_PID: AtomicU32 = AtomicU32::new(0);
 
-        unsafe extern "system" fn enum_windows_proc(
-            hwnd: HWND,
-            _: LPARAM,
-        ) -> BOOL {
+        unsafe extern "system" fn enum_windows_proc(hwnd: HWND, _: LPARAM) -> BOOL {
             let mut window_pid = 0u32;
             unsafe {
                 GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
