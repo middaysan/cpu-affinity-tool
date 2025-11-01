@@ -15,6 +15,8 @@ mod core_group;
 mod log_manager;
 /// Running application tracking
 mod running_app;
+// Task progress 
+mod task_progress_state;
 
 // Public re-exports of key structures for use in other modules
 pub use app::App;

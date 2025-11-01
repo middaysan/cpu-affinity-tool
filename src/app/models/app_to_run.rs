@@ -25,6 +25,10 @@ pub struct AppToRun {
     pub args: Vec<String>,
     /// Actual path to the binary executable
     pub bin_path: PathBuf,
+    /// Execution location of the executable
+    pub working_dir: PathBuf,
+    /// Whether the application should from a user specified directory.
+    pub custom_working_dir: bool,
     /// Whether the application should start automatically on application startup
     pub autorun: bool,
     /// Process priority class to assign to the application
@@ -52,6 +56,8 @@ impl AppToRun {
         dropped_path: PathBuf,
         args: Vec<String>,
         bin_path: PathBuf,
+        working_dir: PathBuf,
+        custom_working_dir: bool,
         priority: PriorityClass,
         autorun: bool,
     ) -> Self {
@@ -70,6 +76,8 @@ impl AppToRun {
             dropped_path,
             args,
             bin_path,
+            working_dir,
+            custom_working_dir,
             autorun,
             priority,
         }

@@ -5,33 +5,33 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::ptr::null_mut;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, IsWindowVisible, SW_RESTORE, SetForegroundWindow,
-    ShowWindow,
+    EnumWindows, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, ShowWindow,
+    SW_RESTORE,
 };
 
-use winreg::RegKey;
 use winreg::enums::*;
+use winreg::RegKey;
 
 use ntapi::ntpsapi::{
-    NtQueryInformationProcess, PROCESS_BASIC_INFORMATION, ProcessBasicInformation,
+    NtQueryInformationProcess, ProcessBasicInformation, PROCESS_BASIC_INFORMATION,
 };
+use windows::core::{Interface, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, STILL_ACTIVE};
 use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-    CoUninitialize, IPersistFile, STGM_READ,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
 };
 use windows::Win32::System::ProcessStatus::K32EnumProcesses;
 use windows::Win32::System::Threading::{
-    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetExitCodeProcess, GetPriorityClass,
-    GetProcessAffinityMask, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
-    OpenProcess, PROCESS_CREATION_FLAGS, PROCESS_QUERY_INFORMATION, PROCESS_SET_INFORMATION,
-    REALTIME_PRIORITY_CLASS, SetPriorityClass, SetProcessAffinityMask,
+    GetExitCodeProcess, GetPriorityClass, GetProcessAffinityMask, OpenProcess,
+    SetPriorityClass, SetProcessAffinityMask, ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS,
+    HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_CREATION_FLAGS,
+    PROCESS_QUERY_INFORMATION, PROCESS_SET_INFORMATION, REALTIME_PRIORITY_CLASS,
 };
 use windows::Win32::UI::Shell::{
-    CommandLineToArgvW, IShellLinkW, SLGP_UNCPRIORITY, SLR_NO_UI, ShellLink,
+    CommandLineToArgvW, IShellLinkW, ShellLink, SLGP_UNCPRIORITY, SLR_NO_UI,
 };
-use windows::core::{HSTRING, Interface, PCWSTR};
 
 use crate::PriorityClass;
 
@@ -218,7 +218,7 @@ impl OS {
         }
     }
 
-    fn resolve_lnk(path: &PathBuf) -> Result<(PathBuf, Vec<String>), String> {
+    fn resolve_lnk(path: &PathBuf) -> Result<(PathBuf, PathBuf, Vec<String>), String> {
         unsafe {
             // COM init (STA достаточно для IShellLink)
             CoInitializeEx(None, COINIT_APARTMENTTHREADED)
@@ -245,8 +245,15 @@ impl OS {
             let mut find = WIN32_FIND_DATAW::default();
             link.GetPath(&mut wbuf, &mut find as *mut _, SLGP_UNCPRIORITY.0 as u32)
                 .map_err(|e| format!("GetPath failed: {e}"))?;
+
             let n = wbuf.iter().position(|&c| c == 0).unwrap_or(wbuf.len());
             let target = PathBuf::from(String::from_utf16_lossy(&wbuf[..n]));
+
+            let mut wdbuf = [0u16; 32768];
+            let _ = link.GetWorkingDirectory(&mut wdbuf);
+
+            let nwd = wdbuf.iter().position(|&c| c == 0).unwrap_or(wdbuf.len());
+            let working_directory = PathBuf::from(String::from_utf16_lossy(&wdbuf[..nwd]));
 
             // Получаем строку аргументов и парсим по правилам Windows
             let mut abuf = [0u16; 32768];
@@ -257,15 +264,19 @@ impl OS {
             let args_vec = Self::split_windows_args(&args_str);
 
             CoUninitialize();
-            Ok((target, args_vec))
+            Ok((target, working_directory, args_vec))
         }
     }
 
-    fn spawn(target: &PathBuf, args: &[String]) -> Result<Child, String> {
+    fn spawn(target: &PathBuf, working_dir: Option<PathBuf>, args: &[String]) -> Result<Child, String> {
         let mut cmd = Command::new(target);
         if !args.is_empty() {
             cmd.args(args);
         }
+        if let Some(w_d) = working_dir && w_d.is_dir() {
+            cmd.current_dir(w_d);
+        }
+
         cmd.stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
@@ -375,20 +386,22 @@ impl OS {
         }
     }
 
-    pub fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, Vec<String>), String> {
+    pub fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, PathBuf, Vec<String>), String> {
         let file_ext = file_path
             .extension()
             .and_then(|e| e.to_str())
             .ok_or_else(|| format!("Failed to get file extension for {:?}", file_path))?;
 
         if file_ext == "url" {
-            return Self::resolve_url(&file_path);
+            return Self::resolve_url(&file_path).map(|e| {
+                return (e.0, PathBuf::new(), e.1);
+            });
         } else if file_ext == "lnk" {
             return Self::resolve_lnk(&file_path);
         }
 
         // If the file is not a URL or LNK, return the file path as is
-        Ok((file_path, Vec::new()))
+        Ok((file_path, PathBuf::new(), Vec::new()))
     }
 
     pub fn is_pid_live(pid: u32) -> bool {
@@ -454,11 +467,26 @@ impl OS {
         priority: PriorityClass,
     ) -> Result<u32, String> {
         let mask = cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
-        let child = Self::spawn(&file_path, &args)?;
+        let child = Self::spawn(&file_path, None, &args)?;
         Self::set_affinity(&child, mask)?;
         Self::set_priority(&child, priority)?;
         Ok(child.id())
     }
+
+    pub fn run_with_working_dir(
+        file_path: PathBuf,
+        working_dir: PathBuf,
+        args: Vec<String>,
+        cores: &[usize],
+        priority: PriorityClass,
+    ) -> Result<u32, String> {
+        let mask = cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
+        let child = Self::spawn(&file_path, Some(working_dir), &args)?;
+        Self::set_affinity(&child, mask)?;
+        Self::set_priority(&child, priority)?;
+        Ok(child.id())
+    }
+
 
     pub fn get_program_path_for_uri(uri_scheme: &str) -> Result<PathBuf, String> {
         let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);

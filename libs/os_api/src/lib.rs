@@ -5,6 +5,7 @@ pub use process::PriorityClass;
 mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
+mod common_os;
 
 // Export the necessary implementation under a common interface
 #[cfg(target_os = "linux")]
