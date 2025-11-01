@@ -80,9 +80,9 @@ impl CoreGroup {
             let parsed_app_file = OS::parse_dropped_file(path.clone());
 
             match parsed_app_file {
-                Ok((target, args)) => {
+                Ok((target, working_dir, args)) => {
                     let app_to_run =
-                        AppToRun::new(path, args, target, PriorityClass::Normal, false);
+                        AppToRun::new(path, args, target, working_dir, false, PriorityClass::Normal, false);
 
                     self.programs.push(app_to_run);
                 }

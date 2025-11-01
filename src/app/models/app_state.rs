@@ -3,6 +3,7 @@ use crate::app::models::app_state_storage::AppStateStorage;
 use crate::app::models::app_to_run::{AppToRun, RunAppEditState};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
 use crate::app::models::running_app::RunningApps;
+use crate::app::models::task_progress_state::TaskProgressState;
 use crate::app::models::LogManager;
 use os_api::OS;
 use std::collections::HashMap;
@@ -39,6 +40,8 @@ pub struct AppState {
     pub current_tip_index: usize,
     /// Time when the tip was last changed (in seconds since app start)
     pub last_tip_change_time: f64,
+    /// Tracks if the user is executing an action.
+    pub task_progress: Option<TaskProgressState>,
 }
 
 impl AppState {
@@ -83,6 +86,7 @@ impl AppState {
             running_apps_statuses: HashMap::new(),
             current_tip_index: 0,
             last_tip_change_time: 0.0,
+            task_progress: None,
         };
 
         // Set the UI theme based on the theme index in the persistent state

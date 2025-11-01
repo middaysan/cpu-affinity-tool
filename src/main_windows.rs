@@ -1,12 +1,26 @@
 #![windows_subsystem = "windows"]
 
+extern crate single_instance;
+
+
 mod app;
 
 use app::models::App;
 use eframe::{run_native, NativeOptions};
 use tokio::runtime::Runtime;
 
+use os_api::OS;
+
+
 fn main() {
+
+    //Validate if there is an instance of the application running.
+    let already_running = OS::is_already_running();
+
+    if (already_running) {
+        return;
+    }
+
     // Creating tokio runtime manually
     let rt = Runtime::new().expect("failed to create tokio runtime");
 

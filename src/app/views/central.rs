@@ -3,6 +3,8 @@ use crate::app::models::AppToRun;
 use eframe::egui::{self, CentralPanel, Frame, Layout, RichText, ScrollArea};
 use eframe::egui::{Color32, Painter, Vec2};
 
+use egui_circular_progress_bar::CircularProgressBarExt;
+
 pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
     CentralPanel::default().show(ctx, |ui| {
         let mut dropped_assigned = false;
@@ -27,6 +29,20 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
     for g_i in 0..groups_len {
         Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
+            // if let Err(err) = res {
+            if let Some(progress) = app.task_progress.as_mut() {
+                ui.horizontal(|ui| {
+                    ui.label("Progress:");
+                    ui.add(egui::Slider::new(&mut progress.progress, 0.0..=1.0));
+                });
+                ui.heading("Basic Examples");
+                ui.horizontal(|ui| {
+                    ui.label("Default size:");
+                    ui.circular_progress_bar_with_size(progress.progress, 80f32);
+                });
+            }
+
+
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
