@@ -8,7 +8,7 @@ use std::ptr::null_mut;
 
 use windows::core::{Interface, PCWSTR, BOOL};
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HWND, LPARAM, STILL_ACTIVE, INVALID_HANDLE_VALUE, HLOCAL, LocalFree,
+    CloseHandle, HANDLE, HWND, LPARAM, STILL_ACTIVE, HLOCAL, LocalFree,
 };
 use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
 use windows::Win32::System::Com::{
@@ -363,6 +363,7 @@ impl OS {
             .map_err(|e: OsError| format!("resolve_lnk {:?} failed: {}", path, e))
     }
 
+    #[allow(dead_code)]
     fn spawn(target: &PathBuf, args: &[String]) -> Result<Child, String> {
         let mut cmd = Command::new(target);
         if !args.is_empty() {
@@ -374,12 +375,14 @@ impl OS {
             .map_err(|e| format!("spawn {:?} failed: {}", target, e))
     }
 
+    #[allow(dead_code)]
     fn set_affinity(child: &Child, mask: usize) -> Result<(), String> {
         let h = HANDLE(child.as_raw_handle());
         unsafe { SetProcessAffinityMask(h, mask) }
             .map_err(|e| format!("SetProcessAffinityMask failed: {}", e))
     }
 
+    #[allow(dead_code)]
     fn set_priority(child: &Child, p: PriorityClass) -> Result<(), String> {
         let h = HANDLE(child.as_raw_handle());
         unsafe { SetPriorityClass(h, Self::transform_to_win_priority(p)) }
@@ -502,12 +505,13 @@ impl OS {
         }
 
         unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-            let ctx = &mut *(lparam.0 as *mut Ctx);
+            // Explicitly wrap raw pointer deref in an unsafe block (Rust 2024 requires this)
+            let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
 
             let mut window_pid = 0u32;
-            GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)); }
 
-            if window_pid == ctx.target_pid && IsWindowVisible(hwnd).as_bool() {
+            if window_pid == ctx.target_pid && unsafe { IsWindowVisible(hwnd).as_bool() } {
                 ctx.found = hwnd;
                 return BOOL(0); // stop enumeration
             }
