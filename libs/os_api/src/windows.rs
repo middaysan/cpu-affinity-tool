@@ -6,10 +6,12 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::ptr::null_mut;
 
-use windows::core::{Interface, PCWSTR, BOOL};
+use windows::core::{Interface, PCWSTR, PWSTR, BOOL};
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HWND, LPARAM, STILL_ACTIVE, HLOCAL, LocalFree,
+    CloseHandle, HANDLE, HWND, LPARAM, STILL_ACTIVE, HLOCAL, LocalFree, INVALID_HANDLE_VALUE,
 };
+use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+use windows::Win32::Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
 use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
@@ -26,7 +28,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, SW_RESTORE,
-    SetForegroundWindow, ShowWindow,
+    SetForegroundWindow, ShowWindowAsync, AllowSetForegroundWindow, ASFW_ANY,
 };
 
 use winreg::enums::*;
@@ -61,7 +63,7 @@ struct HandleGuard(HANDLE);
 impl Drop for HandleGuard {
     fn drop(&mut self) {
         unsafe {
-            if self.0 .0 != std::ptr::null_mut() {
+            if self.0 .0 != std::ptr::null_mut() && self.0 != INVALID_HANDLE_VALUE {
                 let _ = CloseHandle(self.0);
             }
         }
@@ -174,6 +176,52 @@ impl OS {
         parts.join(" ")
     }
 
+    fn expand_env(s: &str) -> String {
+        // Convert to wide with trailing NUL
+        let wide = Self::to_wide_z_str(s);
+        // First call with zero buffer to get required size (includes terminating NUL)
+        unsafe {
+            let needed = ExpandEnvironmentStringsW(PCWSTR(wide.as_ptr()), None);
+            if needed == 0 {
+                return s.to_string();
+            }
+            let mut buf = vec![0u16; needed as usize];
+            let written = ExpandEnvironmentStringsW(PCWSTR(wide.as_ptr()), Some(&mut buf));
+            if written == 0 {
+                return s.to_string();
+            }
+            // Remove trailing NUL if present
+            if let Some(pos) = buf.iter().position(|&c| c == 0) { buf.truncate(pos); }
+            String::from_utf16_lossy(&buf)
+        }
+    }
+
+    fn decode_ansi(bytes: &[u8]) -> Option<String> {
+        // Fallback: decode using system ANSI code page (CP_ACP = 0)
+        unsafe {
+            let needed = MultiByteToWideChar(
+                0, // CP_ACP
+                MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), // flags
+                bytes,
+                None,
+            );
+            if needed <= 0 {
+                return None;
+            }
+            let mut buf = vec![0u16; needed as usize];
+            let written = MultiByteToWideChar(
+                0,
+                MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
+                bytes,
+                Some(&mut buf),
+            );
+            if written <= 0 {
+                return None;
+            }
+            Some(String::from_utf16_lossy(&buf[..written as usize]))
+        }
+    }
+
     fn snapshot_process_tree() -> Result<ProcessTree, OsError> {
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
@@ -272,7 +320,28 @@ impl OS {
     }
 
     fn parse_url_file(path: &PathBuf) -> Result<String, String> {
-        let content = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        // Try to read .url with BOM handling (UTF-16LE/BE) then UTF-8 fallback
+        let bytes = fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        let content = if bytes.starts_with(&[0xFF, 0xFE]) && bytes.len() >= 2 {
+            // UTF-16 LE with BOM
+            let u16s: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&u16s)
+        } else if bytes.starts_with(&[0xFE, 0xFF]) && bytes.len() >= 2 {
+            // UTF-16 BE with BOM
+            let u16s: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&u16s)
+        } else {
+            match String::from_utf8(bytes.clone()) {
+                Ok(s) => s,
+                Err(_) => Self::decode_ansi(&bytes).ok_or("Failed to decode .url file using UTF-8 or ANSI")?,
+            }
+        };
 
         for line in content.lines() {
             if let Some(url) = line.strip_prefix("URL=") {
@@ -350,13 +419,15 @@ impl OS {
             let mut find = WIN32_FIND_DATAW::default();
             link.GetPath(&mut wbuf, &mut find as *mut _, SLGP_UNCPRIORITY.0 as u32)?;
             let n = wbuf.iter().position(|&c| c == 0).unwrap_or(wbuf.len());
-            let target = PathBuf::from(String::from_utf16_lossy(&wbuf[..n]));
+            let target_raw = String::from_utf16_lossy(&wbuf[..n]);
+            let target = PathBuf::from(Self::expand_env(&target_raw));
 
             let mut abuf = [0u16; 32768];
             link.GetArguments(&mut abuf)?;
             let an = abuf.iter().position(|&c| c == 0).unwrap_or(abuf.len());
             let args_str = String::from_utf16_lossy(&abuf[..an]);
-            let args_vec = Self::split_windows_args(&args_str);
+            let args_expanded = Self::expand_env(&args_str);
+            let args_vec = Self::split_windows_args(&args_expanded);
 
             Ok((target, args_vec))
         })()
@@ -407,8 +478,8 @@ impl OS {
                 .as_bool();
 
             if !ok {
-                // keep old behavior (panic) to avoid silent changes for existing callers
-                panic!("K32EnumProcesses failed");
+                // Avoid panicking from a library method; return empty result on error.
+                return Vec::new();
             }
 
             let count = needed as usize / 4;
@@ -532,7 +603,8 @@ impl OS {
                 return false;
             }
 
-            let _ = ShowWindow(ctx.found, SW_RESTORE);
+            let _ = AllowSetForegroundWindow(ASFW_ANY);
+            let _ = ShowWindowAsync(ctx.found, SW_RESTORE);
             let _ = SetForegroundWindow(ctx.found);
 
             // Return actual status, not “we called the function”.
@@ -556,9 +628,12 @@ impl OS {
             mask |= bit;
         }
 
+        if mask == 0 {
+            return Err("affinity mask is empty".into());
+        }
+
         // Create process suspended, set affinity/priority, then resume.
         (|| unsafe {
-            let exe_w = Self::to_wide_z(file_path.as_os_str());
             let cmdline = Self::build_command_line(&file_path, &args);
             let mut cmd_w = Self::to_wide_z_str(&cmdline);
 
@@ -570,8 +645,8 @@ impl OS {
             // NOTE: not inheriting handles explicitly here to avoid new feature deps.
             // In most cases child will still share the same console/default std handles.
             CreateProcessW(
-                PCWSTR(exe_w.as_ptr()),
-                Option::from(windows::core::PWSTR(cmd_w.as_mut_ptr())),
+                PCWSTR(null_mut()),
+                Option::from(PWSTR(cmd_w.as_mut_ptr())),
                 None,
                 None,
                 false,
@@ -623,19 +698,10 @@ impl OS {
         let command: String = command_key
             .get_value("")
             .map_err(|e| format!("Failed to get command string: {}", e))?;
-
-        let exe_path = if command.starts_with('"') {
-            command
-                .split('"')
-                .nth(1)
-                .ok_or("Failed to parse command path")?
-        } else {
-            command
-                .split_whitespace()
-                .next()
-                .ok_or("Failed to parse command path")?
-        };
-
-        Ok(PathBuf::from(exe_path))
+        // Expand environment variables and parse command line to extract executable path
+        let expanded = Self::expand_env(&command);
+        let parts = Self::split_windows_args(&expanded);
+        let first = parts.first().ok_or("Command string is empty")?;
+        Ok(PathBuf::from(first))
     }
 }

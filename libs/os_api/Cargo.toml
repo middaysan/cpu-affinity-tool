@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ntapi = "0.4.1"
 serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+ntapi = "0.4.1"
 winreg = "0.55.0"
 windows = { version = "0.62.2", features = [
     "Win32_System_Threading",
@@ -13,6 +15,8 @@ windows = { version = "0.62.2", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Environment",
+    "Win32_Globalization",
     "Win32_UI",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Com",
@@ -21,3 +25,9 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Memory",
     "Win32_Security"
 ] }
+
+[target.'cfg(unix)'.dependencies]
+nix = "0.29"
+libc = "0.2.171"
+shlex = "1.3.0"
+errno = "0.3"
