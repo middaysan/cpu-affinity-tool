@@ -738,6 +738,24 @@ impl AppState {
                 .unwrap_or(false)
         }
     }
+
+    /// Gets the PIDs of a running application.
+    /// Synchronous version.
+    ///
+    /// # Parameters
+    ///
+    /// * `app_key` - The unique key identifying the application
+    ///
+    /// # Returns
+    ///
+    /// An Option containing a vector of PIDs if the application is running
+    pub fn get_running_app_pids(&self, app_key: &str) -> Option<Vec<u32>> {
+        if let Ok(apps) = self.running_apps.try_read() {
+            apps.apps.get(app_key).map(|app| app.pids.clone())
+        } else {
+            None
+        }
+    }
 }
 
 /// Monitors running applications in the background.

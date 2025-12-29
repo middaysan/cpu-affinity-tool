@@ -8,7 +8,7 @@ use std::ptr::null_mut;
 
 use windows::core::{Interface, PCWSTR, PWSTR, BOOL};
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HWND, LPARAM, STILL_ACTIVE, HLOCAL, LocalFree, INVALID_HANDLE_VALUE,
+    CloseHandle, HANDLE, HWND, LPARAM, STILL_ACTIVE, HLOCAL, LocalFree,
 };
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
@@ -63,7 +63,7 @@ struct HandleGuard(HANDLE);
 impl Drop for HandleGuard {
     fn drop(&mut self) {
         unsafe {
-            if self.0 .0 != std::ptr::null_mut() && self.0 != INVALID_HANDLE_VALUE {
+            if !self.0.is_invalid() {
                 let _ = CloseHandle(self.0);
             }
         }
@@ -149,19 +149,15 @@ impl OS {
                     backslashes = 0;
                 }
                 _ => {
-                    if backslashes != 0 {
-                        out.push_str(&"\\".repeat(backslashes));
-                        backslashes = 0;
-                    }
+                    // if it's not a quote, backslashes are NOT escaped (unless they're at the end)
+                    out.push_str(&"\\".repeat(backslashes));
                     out.push(ch);
+                    backslashes = 0;
                 }
             }
         }
-        if backslashes != 0 {
-            // escape trailing backslashes before closing quote
-            out.push_str(&"\\".repeat(backslashes * 2));
-        }
-
+        // escape trailing backslashes before closing quote
+        out.push_str(&"\\".repeat(backslashes * 2));
         out.push('"');
         out
     }
@@ -262,7 +258,9 @@ impl OS {
     // ---- public API (unchanged signatures) ----
 
     /// Gets the current CPU affinity mask for a process.
-    /// Note: On systems with processor groups (>64 logical CPUs), this mask can be incomplete.
+    ///
+    /// **Note:** On systems with more than 64 logical CPUs (Processor Groups),
+    /// this function only returns the affinity mask for the current processor group.
     pub fn get_process_affinity(pid: u32) -> Result<usize, String> {
         (|| unsafe {
             let handle = Self::open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
@@ -296,6 +294,9 @@ impl OS {
     }
 
     /// Sets the CPU affinity mask for a process by PID.
+    ///
+    /// **Note:** On systems with more than 64 logical CPUs (Processor Groups),
+    /// this function only sets the affinity for the current processor group.
     pub fn set_process_affinity_by_pid(pid: u32, mask: usize) -> Result<(), String> {
         (|| unsafe {
             let handle = Self::open_process(pid, PROCESS_SET_INFORMATION)?;
@@ -403,7 +404,8 @@ impl OS {
 
     fn resolve_lnk(path: &PathBuf) -> Result<(PathBuf, Vec<String>), String> {
         (|| unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()
+                .map_err(|e| OsError::Win(e))?;
             let _com = ComGuard;
 
             let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
@@ -542,9 +544,9 @@ impl OS {
             .and_then(|e| e.to_str())
             .ok_or_else(|| format!("Failed to get file extension for {:?}", file_path))?;
 
-        if file_ext == "url" {
+        if file_ext.eq_ignore_ascii_case("url") {
             return Self::resolve_url(&file_path);
-        } else if file_ext == "lnk" {
+        } else if file_ext.eq_ignore_ascii_case("lnk") {
             return Self::resolve_lnk(&file_path);
         }
 
