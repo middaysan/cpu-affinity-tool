@@ -50,9 +50,6 @@ pub struct AppState {
     #[cfg(target_os = "windows")]
     pub tray_icon_guard: Option<tray_icon::TrayIcon>,
 
-    /// Flag to request hiding the window to tray
-    pub hide_requested: bool,
-
     /// Handle to the main window (Windows only)
     #[cfg(target_os = "windows")]
     pub hwnd: Option<windows::Win32::Foundation::HWND>,
@@ -105,7 +102,6 @@ impl AppState {
             tray_rx: None,
             #[cfg(target_os = "windows")]
             tray_icon_guard: None,
-            hide_requested: false,
             #[cfg(target_os = "windows")]
             hwnd: None,
         };

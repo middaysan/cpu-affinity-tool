@@ -4,7 +4,6 @@ use std::sync::mpsc::Receiver;
 #[derive(Debug, Clone)]
 pub enum TrayCmd {
     Show,
-    Hide,
 }
 
 #[cfg(target_os = "windows")]
@@ -39,11 +38,9 @@ mod sys {
         // Построим меню
         let menu = Menu::new();
         let show = MenuItem::with_id(MenuId::new("1"), "Restore", true, None);
-        let hide = MenuItem::with_id(MenuId::new("2"), "Hide", true, None);
         let quit = MenuItem::with_id(MenuId::new("3"), "Quit", true, None);
         
         menu.append(&show).map_err(|e| e.to_string())?;
-        menu.append(&hide).map_err(|e| e.to_string())?;
         menu.append(&quit).map_err(|e| e.to_string())?;
 
         // Иконка: грузим PNG 32x32 RGBA из assets/icon.ico
@@ -79,12 +76,6 @@ mod sys {
                         println!("DEBUG: [Tray Thread] Calling OS::restore_and_focus");
                         os_api::OS::restore_and_focus(hwnd);
                         let _ = tx.send(TrayCmd::Show); 
-                    }
-                    "2" => { 
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: [Tray Thread] Calling OS::hide_window");
-                        os_api::OS::hide_window(hwnd);
-                        let _ = tx.send(TrayCmd::Hide); 
                     }
                     "3" => { 
                         #[cfg(debug_assertions)]

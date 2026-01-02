@@ -124,27 +124,18 @@ impl eframe::App for App {
                         println!("DEBUG: [Main Thread] Executing Show (focus only)");
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
-                    TrayCmd::Hide => {
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: [Main Thread] Executing Hide (noop)");
-                    }
                 }
             }
         }
 
-        // Обработаем запрос на скрытие окна
-        if self.state.hide_requested {
-            #[cfg(debug_assertions)]
-            println!("DEBUG: Hide requested from UI");
-            self.state.hide_requested = false;
-
+        // Перехватываем системную кнопку сворачивания для скрытия в трей
+        if ctx.input(|i| i.viewport().minimized == Some(true)) {
             #[cfg(target_os = "windows")]
             if let Some(hwnd) = self.state.hwnd {
+                #[cfg(debug_assertions)]
+                println!("DEBUG: [Main Thread] Window minimized by system, hiding to tray");
                 os_api::OS::hide_window(hwnd);
             }
-            
-            #[cfg(not(target_os = "windows"))]
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
 
         // Set the UI theme based on the theme index in the persistent state

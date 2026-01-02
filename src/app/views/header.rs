@@ -36,9 +36,6 @@ pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
                         crate::app::controllers::Group::Create,
                     ));
                 }
-                if ui.button("🧙 Hide").on_hover_text("Hide to system tray").clicked() {
-                    app.hide_requested = true;
-                }
             });
         });
         ui.separator();
