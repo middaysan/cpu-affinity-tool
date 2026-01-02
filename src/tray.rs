@@ -5,7 +5,6 @@ use std::sync::mpsc::Receiver;
 pub enum TrayCmd {
     Show,
     Hide,
-    Quit,
 }
 
 #[cfg(target_os = "windows")]
@@ -13,7 +12,7 @@ mod sys {
     use super::{Receiver, TrayCmd};
     use tray_icon::{
         menu::{Menu, MenuEvent, MenuId, MenuItem},
-        Icon, TrayIcon, TrayIconBuilder, TrayIconEvent,
+        Icon, TrayIcon, TrayIconBuilder, TrayIconEvent, ClickType,
     };
     use std::sync::mpsc;
 
@@ -39,7 +38,7 @@ mod sys {
 
         // Построим меню
         let menu = Menu::new();
-        let show = MenuItem::with_id(MenuId::new("1"), "Show", true, None);
+        let show = MenuItem::with_id(MenuId::new("1"), "Restore", true, None);
         let hide = MenuItem::with_id(MenuId::new("2"), "Hide", true, None);
         let quit = MenuItem::with_id(MenuId::new("3"), "Quit", true, None);
         
@@ -89,8 +88,8 @@ mod sys {
                     }
                     "3" => { 
                         #[cfg(debug_assertions)]
-                        println!("DEBUG: [Tray Thread] Sending TrayCmd::Quit");
-                        let _ = tx.send(TrayCmd::Quit); 
+                        println!("DEBUG: [Tray Thread] Executing immediate exit (Quit)");
+                        std::process::exit(0);
                     }
                     _ => {
                         #[cfg(debug_assertions)]
@@ -102,27 +101,25 @@ mod sys {
             }));
         }
 
-        // ЛКМ по иконке — тоже Show
+        // Обработка кликов по иконке
         {
             let tx = tx.clone();
             let ctx = ctx.clone();
             TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
                 let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as *mut core::ffi::c_void);
+                
                 #[cfg(debug_assertions)]
                 println!("DEBUG: TrayIconEvent received: {:?}", event);
                 
-                // Простое поведение: любая активация иконки — Show
-                #[cfg(debug_assertions)]
-                println!("DEBUG: [Tray Thread] Calling OS::restore_and_focus (IconEvent)");
-                os_api::OS::restore_and_focus(hwnd);
-
-                #[cfg(debug_assertions)]
-                println!("DEBUG: Sending TrayCmd::Show (IconEvent)");
-                let _ = tx.send(TrayCmd::Show);
-                
-                #[cfg(debug_assertions)]
-                println!("DEBUG: Requesting repaint (IconEvent)");
-                ctx.request_repaint();
+                // Реагируем только на двойной клик (обычно это ЛКМ на Windows)
+                if event.click_type == ClickType::Double {
+                    #[cfg(debug_assertions)]
+                    println!("DEBUG: [Tray Thread] Double click detected. Calling OS::restore_and_focus");
+                    
+                    os_api::OS::restore_and_focus(hwnd);
+                    let _ = tx.send(TrayCmd::Show);
+                    ctx.request_repaint();
+                }
             }));
         }
 
@@ -153,4 +150,3 @@ mod sys {
 }
 
 pub use sys::init_tray;
-pub use sys::TrayHandle;

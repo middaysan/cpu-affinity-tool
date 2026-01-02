@@ -128,12 +128,6 @@ impl eframe::App for App {
                         #[cfg(debug_assertions)]
                         println!("DEBUG: [Main Thread] Executing Hide (noop)");
                     }
-                    TrayCmd::Quit => {
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: [Main Thread] Executing Quit");
-                        // Простой и надёжный способ завершить процесс
-                        std::process::exit(0);
-                    }
                 }
             }
         }
