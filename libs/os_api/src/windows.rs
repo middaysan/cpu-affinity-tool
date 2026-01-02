@@ -29,6 +29,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, SW_RESTORE,
     SetForegroundWindow, ShowWindowAsync, AllowSetForegroundWindow, ASFW_ANY,
+    ShowWindow, SW_HIDE, SW_SHOW,
 };
 
 use winreg::enums::*;
@@ -705,5 +706,20 @@ impl OS {
         let parts = Self::split_windows_args(&expanded);
         let first = parts.first().ok_or("Command string is empty")?;
         Ok(PathBuf::from(first))
+    }
+
+    pub fn hide_window(hwnd: HWND) {
+        unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+    }
+
+    pub fn show_window(hwnd: HWND) {
+        unsafe { let _ = ShowWindow(hwnd, SW_SHOW); }
+    }
+
+    pub fn restore_and_focus(hwnd: HWND) {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = SetForegroundWindow(hwnd);
+        }
     }
 }

@@ -5,6 +5,7 @@ use crate::app::models::AppState;
 
 use eframe::egui;
 use std::path::PathBuf;
+use crate::tray::{init_tray, TrayCmd};
 
 /// The main application structure that implements the eframe::App trait.
 /// This is the core of the application that connects the state with controllers and views.
@@ -32,8 +33,54 @@ impl App {
         let mut state = AppState::new(&cc.egui_ctx);
         let main_controller = controllers::MainController::new();
 
+        // Get HWND on Windows
+        #[cfg(target_os = "windows")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = cc.window_handle() {
+                let raw = handle.as_raw();
+                match raw {
+                    RawWindowHandle::Win32(h) => {
+                        state.hwnd = Some(windows::Win32::Foundation::HWND(h.hwnd.get() as *mut core::ffi::c_void));
+                    }
+                    _ => {
+                        #[cfg(debug_assertions)]
+                        println!("DEBUG: Not a Win32 window handle");
+                    }
+                }
+            }
+        }
+
         // Now that start_app_with_autorun is synchronous, we can call it directly
         state.start_app_with_autorun();
+
+        // Инициализируем системный трей (Windows). На других ОС init_tray() вернёт заглушку.
+        #[cfg(target_os = "windows")]
+        let tray_res = if let Some(hwnd) = state.hwnd {
+            init_tray(cc.egui_ctx.clone(), hwnd)
+        } else {
+            Err("HWND not found".to_string())
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let tray_res = init_tray(cc.egui_ctx.clone());
+
+        match tray_res {
+            Ok(handle) => {
+                // Канал получателя сохраняем в состояние
+                state.tray_rx = Some(handle.rx);
+
+                // На Windows надо держать TrayIcon живым
+                #[cfg(target_os = "windows")]
+                {
+                    state.tray_icon_guard = Some(handle.tray_icon);
+                }
+            }
+            Err(e) => {
+                // Логируем ошибку, но не падаем — приложение продолжит работать и без трея.
+                state.log_manager.add_entry(format!("Tray init failed: {e}"));
+            }
+        }
 
         Self {
             state,
@@ -57,8 +104,54 @@ impl eframe::App for App {
     /// * `ctx` - The egui context for this frame
     /// * `_frame` - The eframe frame (unused in this implementation)
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Request a repaint after 1 second to ensure the UI stays responsive
-        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        // Лог раз в ~5 секунд для проверки живучести
+        #[cfg(debug_assertions)]
+        {
+            let current_time = ctx.input(|i| i.time);
+            if current_time % 5.0 < 0.02 { // Грубая проверка
+                println!("DEBUG: [Main Thread] update() is running. Time: {:.1}s", current_time);
+            }
+        }
+
+        // Обработаем команды из трея перед отрисовкой
+        if let Some(rx) = &self.state.tray_rx {
+            while let Ok(cmd) = rx.try_recv() {
+                #[cfg(debug_assertions)]
+                println!("DEBUG: [Main Thread] Received command from tray: {:?}", cmd);
+                match cmd {
+                    TrayCmd::Show => {
+                        #[cfg(debug_assertions)]
+                        println!("DEBUG: [Main Thread] Executing Show (focus only)");
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    TrayCmd::Hide => {
+                        #[cfg(debug_assertions)]
+                        println!("DEBUG: [Main Thread] Executing Hide (noop)");
+                    }
+                    TrayCmd::Quit => {
+                        #[cfg(debug_assertions)]
+                        println!("DEBUG: [Main Thread] Executing Quit");
+                        // Простой и надёжный способ завершить процесс
+                        std::process::exit(0);
+                    }
+                }
+            }
+        }
+
+        // Обработаем запрос на скрытие окна
+        if self.state.hide_requested {
+            #[cfg(debug_assertions)]
+            println!("DEBUG: Hide requested from UI");
+            self.state.hide_requested = false;
+
+            #[cfg(target_os = "windows")]
+            if let Some(hwnd) = self.state.hwnd {
+                os_api::OS::hide_window(hwnd);
+            }
+            
+            #[cfg(not(target_os = "windows"))]
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
 
         // Set the UI theme based on the theme index in the persistent state
         let theme_index = self.state.get_theme_index();

@@ -8,6 +8,8 @@ use os_api::OS;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use std::sync::mpsc::Receiver;
+use crate::tray::TrayCmd;
 
 use eframe::egui;
 use num_cpus;
@@ -39,6 +41,21 @@ pub struct AppState {
     pub current_tip_index: usize,
     /// Time when the tip was last changed (in seconds since app start)
     pub last_tip_change_time: f64,
+
+    // ---- tray integration ----
+    /// Receiver for tray events (Show/Hide/Quit)
+    pub tray_rx: Option<Receiver<TrayCmd>>,
+
+    /// Keep tray icon alive for Windows (drop = removes icon)
+    #[cfg(target_os = "windows")]
+    pub tray_icon_guard: Option<tray_icon::TrayIcon>,
+
+    /// Flag to request hiding the window to tray
+    pub hide_requested: bool,
+
+    /// Handle to the main window (Windows only)
+    #[cfg(target_os = "windows")]
+    pub hwnd: Option<windows::Win32::Foundation::HWND>,
 }
 
 impl AppState {
@@ -62,7 +79,7 @@ impl AppState {
     ///
     /// A new `AppState` instance with initialized values
     pub fn new(ctx: &egui::Context) -> Self {
-        let app = Self {
+        let mut app = Self {
             persistent_state: Arc::new(RwLock::new(AppStateStorage::load_state())),
             current_window: controllers::WindowController::Groups(controllers::Group::ListGroups),
             controller_changed: false,
@@ -83,7 +100,17 @@ impl AppState {
             running_apps_statuses: HashMap::new(),
             current_tip_index: 0,
             last_tip_change_time: 0.0,
+
+            // ---- tray integration ----
+            tray_rx: None,
+            #[cfg(target_os = "windows")]
+            tray_icon_guard: None,
+            hide_requested: false,
+            #[cfg(target_os = "windows")]
+            hwnd: None,
         };
+
+        app.log_manager.add_entry("Application started".into());
 
         // Set the UI theme based on the theme index in the persistent state
         // Explicitly drop the future to avoid the "let-underscore-future" warning
