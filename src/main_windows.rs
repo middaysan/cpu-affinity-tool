@@ -7,31 +7,52 @@ use app::models::App;
 use eframe::{run_native, NativeOptions};
 use tokio::runtime::Runtime;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     #[cfg(debug_assertions)]
-    println!("DEBUG: Application starting...");
+    {
+        println!("========================================================");
+        println!("DEBUG: Application starting...");
+        println!("DEBUG: OS: {} {}", std::env::consts::OS, std::env::consts::ARCH);
+        println!("DEBUG: Reactive mode: YES (Wait-based event loop)");
+        println!("========================================================");
+    }
     // Creating tokio runtime manually
     let rt = Runtime::new().expect("failed to create tokio runtime");
+    let _guard = rt.enter();
 
     #[cfg(debug_assertions)]
-    println!("DEBUG: Tokio runtime created, entering block_on...");
-    // Running eframe inside the runtime
-    rt.block_on(async {
-        let res = run_native(
-            "CPU Affinity Tool",
-            NativeOptions {
-                run_and_return: true,
-                viewport: eframe::egui::ViewportBuilder::default()
-                    .with_min_inner_size([470.0, 600.0])
-                    .with_max_inner_size([470.0, 1000.0])
-                    .with_maximize_button(false), // Disable maximize button
-                ..Default::default()
-            },
-            Box::new(|cc| Ok(Box::new(App::new(cc)))),
-        );
+    println!("DEBUG: Tokio runtime created and entered.");
 
-        if res.is_err() {
-            std::process::exit(1);
-        }
-    });
+    let options = NativeOptions {
+        run_and_return: true,
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_min_inner_size([470.0, 600.0])
+            .with_max_inner_size([470.0, 1000.0])
+            .with_maximize_button(false), // Disable maximize button
+        ..Default::default()
+    };
+
+    #[cfg(debug_assertions)]
+    {
+        println!("DEBUG: NativeOptions initialized:");
+        println!("  - Renderer: {:?}", options.renderer);
+        println!("  - V-Sync: {}", options.vsync);
+        println!("  - Run and return: {}", options.run_and_return);
+        println!("========================================================");
+    }
+
+    // Running eframe on the main thread
+    let res = run_native(
+        "CPU Affinity Tool",
+        options,
+        Box::new(|cc| Ok(Box::new(App::new(cc)))),
+    );
+
+    if let Err(e) = res {
+        eprintln!("Application error: {}", e);
+        std::process::exit(1);
+    }
 }

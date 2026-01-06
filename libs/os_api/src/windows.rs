@@ -8,7 +8,7 @@ use std::ptr::null_mut;
 
 use windows::core::{Interface, PCWSTR, PWSTR, BOOL};
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HWND, LPARAM, STILL_ACTIVE, HLOCAL, LocalFree,
+    CloseHandle, HANDLE, HWND, LPARAM, STILL_ACTIVE, HLOCAL, LocalFree, WPARAM,
 };
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
@@ -29,7 +29,8 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, SW_RESTORE,
     SetForegroundWindow, ShowWindowAsync, AllowSetForegroundWindow, ASFW_ANY,
-    ShowWindow, SW_HIDE, SW_SHOW,
+    ShowWindow, SW_HIDE, SW_SHOW, PostMessageW, WM_NULL,
+    GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW,
 };
 
 use winreg::enums::*;
@@ -708,6 +709,28 @@ impl OS {
         Ok(PathBuf::from(first))
     }
 
+    /// Toggles the window's visibility in the taskbar.
+    /// show = true: Standard application window (AppWindow).
+    /// show = false: Tool window (hidden from taskbar/Alt-Tab).
+    pub fn set_taskbar_visible(hwnd: HWND, show: bool) {
+        unsafe {
+            let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+            let mut new_style = style;
+
+            if show {
+                new_style &= !(WS_EX_TOOLWINDOW.0 as i32);
+                new_style |= WS_EX_APPWINDOW.0 as i32;
+            } else {
+                new_style |= WS_EX_TOOLWINDOW.0 as i32;
+                new_style &= !(WS_EX_APPWINDOW.0 as i32);
+            }
+
+            if new_style != style {
+                SetWindowLongW(hwnd, GWL_EXSTYLE, new_style);
+            }
+        }
+    }
+
     pub fn hide_window(hwnd: HWND) {
         unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
     }
@@ -720,6 +743,15 @@ impl OS {
         unsafe {
             let _ = ShowWindow(hwnd, SW_RESTORE);
             let _ = SetForegroundWindow(hwnd);
+        }
+    }
+
+    pub fn poke_window(hwnd: HWND) {
+        unsafe {
+            // Post to the window
+            let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            // Also post to the thread message queue to ensure GetMessage/PeekMessage wakes up
+            let _ = PostMessageW(None, WM_NULL, WPARAM(0), LPARAM(0));
         }
     }
 }

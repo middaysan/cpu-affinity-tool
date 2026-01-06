@@ -5,6 +5,8 @@ use crate::app::models::AppState;
 
 use eframe::egui;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 use crate::tray::{init_tray, TrayCmd};
 
 /// The main application structure that implements the eframe::App trait.
@@ -30,6 +32,16 @@ impl App {
     ///
     /// A new `App` instance with initialized state and controller
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            println!("========================================================");
+            println!("DEBUG: [Main Thread] App::new started");
+            println!("DEBUG: [Eframe] Backend: {}", if cc.gl.is_some() { "Glow (OpenGL)" } else { "WGPU" });
+            println!("DEBUG: [Eframe] Integration Info: {:?}", cc.integration_info);
+            cc.egui_ctx.options(|o| println!("DEBUG: [Egui] Context Options: {:?}", o));
+            println!("========================================================");
+        }
+        
         let mut state = AppState::new(&cc.egui_ctx);
         let main_controller = controllers::MainController::new();
 
@@ -91,54 +103,99 @@ impl App {
 
 impl eframe::App for App {
     /// The main update method called by the eframe framework on each frame.
-    ///
-    /// This method is responsible for:
-    /// 1. Requesting periodic repaints
-    /// 2. Setting the UI theme based on theme index
-    /// 3. Processing file drop events
-    /// 4. Rendering the UI based on the current window controller
-    /// 5. Handling controller changes
-    ///
-    /// # Parameters
-    ///
-    /// * `ctx` - The egui context for this frame
-    /// * `_frame` - The eframe frame (unused in this implementation)
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Лог раз в ~5 секунд для проверки живучести
-        #[cfg(debug_assertions)]
-        {
-            let current_time = ctx.input(|i| i.time);
-            if current_time % 5.0 < 0.02 { // Грубая проверка
-                println!("DEBUG: [Main Thread] update() is running. Time: {:.1}s", current_time);
-            }
+        // 1. Обработка команд из системного трея
+        self.handle_tray_events(ctx);
+
+        // 2. Проверка видимости и обработка сворачивания
+        if !self.should_render(ctx) {
+            return;
         }
 
-        // Обработаем команды из трея перед отрисовкой
+        // 3. Применение темы оформления
+        self.apply_theme(ctx);
+
+        // 4. Обработка перетаскивания файлов
+        self.handle_file_drops(ctx);
+
+        // 5. Отрисовка основного интерфейса
+        self.render_main_ui(ctx);
+
+        // 6. Синхронизация состояния контроллеров
+        self.sync_controller_state();
+    }
+}
+
+impl App {
+    /// Обрабатывает команды, поступающие из системного трея.
+    fn handle_tray_events(&mut self, ctx: &egui::Context) {
+        let mut show_requested = false;
+        
         if let Some(rx) = &self.state.tray_rx {
             while let Ok(cmd) = rx.try_recv() {
-                #[cfg(debug_assertions)]
-                println!("DEBUG: [Main Thread] Received command from tray: {:?}", cmd);
                 match cmd {
-                    TrayCmd::Show => {
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: [Main Thread] Executing Show (focus only)");
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    }
+                    TrayCmd::Show => show_requested = true,
                 }
             }
         }
 
-        // Перехватываем системную кнопку сворачивания для скрытия в трей
-        if ctx.input(|i| i.viewport().minimized == Some(true)) {
-            #[cfg(target_os = "windows")]
-            if let Some(hwnd) = self.state.hwnd {
-                #[cfg(debug_assertions)]
-                println!("DEBUG: [Main Thread] Window minimized by system, hiding to tray");
-                os_api::OS::hide_window(hwnd);
-            }
+        if show_requested {
+            self.show_from_tray(ctx);
+        }
+    }
+
+    /// Проверяет, нужно ли отрисовывать UI в данный момент.
+    /// Также обрабатывает логику скрытия приложения при сворачивании.
+    fn should_render(&mut self, ctx: &egui::Context) -> bool {
+        // Если приложение скрыто — ограничиваем частоту обновлений для экономии CPU
+        if self.state.is_hidden {
+            thread::sleep(Duration::from_millis(100));
+            ctx.request_repaint();
+            return false;
         }
 
-        // Set the UI theme based on the theme index in the persistent state
+        // Если пользователь свернул окно — скрываем его в трей
+        if ctx.input(|i| i.viewport().minimized == Some(true)) {
+            self.hide_to_tray(ctx);
+            return false;
+        }
+
+        true
+    }
+
+    /// Скрывает окно приложения и переводит его в режим работы из трея.
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        self.state.is_hidden = true;
+
+        #[cfg(target_os = "windows")]
+        if let Some(hwnd) = self.state.hwnd {
+            os_api::OS::set_taskbar_visible(hwnd, false);
+            // Восстанавливаем окно перед перемещением, так как минимизированные окна нельзя программно двигать в Windows
+            os_api::OS::restore_and_focus(hwnd);
+        }
+
+        // Убираем окно далеко за пределы экрана вместо Visible(false), чтобы избежать проблем с восстановлением
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(-10000.0, -10000.0)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    }
+
+    /// Восстанавливает окно приложения из трея.
+    fn show_from_tray(&mut self, ctx: &egui::Context) {
+        self.state.is_hidden = false;
+
+        #[cfg(target_os = "windows")]
+        if let Some(hwnd) = self.state.hwnd {
+            os_api::OS::set_taskbar_visible(hwnd, true);
+            os_api::OS::restore_and_focus(hwnd);
+        }
+
+        // Возвращаем окно в видимую область
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(100.0, 100.0)));
+        ctx.request_repaint();
+    }
+
+    /// Применяет выбранную тему оформления (светлая/темная).
+    fn apply_theme(&self, ctx: &egui::Context) {
         let theme_index = self.state.get_theme_index();
         let visuals = match theme_index {
             0 => egui::Visuals::default(),
@@ -146,56 +203,65 @@ impl eframe::App for App {
             _ => egui::Visuals::dark(),
         };
         ctx.set_visuals(visuals);
+    }
 
-        // Handle file drop events; check OS events and update dropped_files if any.
-        if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
-            let files: Vec<PathBuf> = ctx.input(|i| {
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .filter_map(|f| f.path.clone())
-                    .collect()
-            });
-            if !files.is_empty() {
-                self.state.dropped_files = Some(files);
-            }
+    /// Обрабатывает событие сброса файлов в окно приложения.
+    fn handle_file_drops(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.raw.dropped_files.is_empty()) {
+            return;
         }
 
-        // Render UI based on the current window controller.
-        let app_state = &mut self.state;
-        self.main_controller.render_with(ctx, |controller, ui_ctx| {
-            // Draw the top panel (common for all views)
-            header::draw_top_panel(app_state, ui_ctx);
-            // Branch into different views based on the current window controller.
-            match &controller.window_controller {
-                controllers::WindowController::Groups(group_view) => match group_view {
-                    controllers::Group::ListGroups => {
-                        central::draw_central_panel(app_state, ui_ctx);
-                    }
-                    controllers::Group::Create => {
-                        group_editor::create_group_window(app_state, ui_ctx);
-                    }
-                    controllers::Group::Edit => {
-                        group_editor::edit_group_window(app_state, ui_ctx);
-                    }
-                },
-                controllers::WindowController::Logs => {
-                    logs::draw_logs_window(app_state, ui_ctx);
-                }
-                controllers::WindowController::AppRunSettings => {
-                    run_settings::draw_app_run_settings(app_state, ui_ctx);
-                }
-            }
-
-            // Draw the bottom panel (common for all views)
-            footer::draw_bottom_panel(app_state, ui_ctx);
+        let files: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
         });
 
-        // If the window controller has been updated, notify the main panel.
-        if app_state.controller_changed {
-            app_state.controller_changed = false;
-            self.main_controller
-                .set_window(app_state.current_window.clone());
+        if !files.is_empty() {
+            self.state.dropped_files = Some(files);
+        }
+    }
+
+    /// Отрисовывает основной интерфейс приложения.
+    fn render_main_ui(&mut self, ctx: &egui::Context) {
+        let app_state = &mut self.state;
+        self.main_controller.render_with(ctx, |controller, ui_ctx| {
+            header::draw_top_panel(app_state, ui_ctx);
+            
+            // Отрисовываем содержимое в зависимости от активного контроллера
+            Self::draw_active_view(app_state, ui_ctx, controller);
+
+            footer::draw_bottom_panel(app_state, ui_ctx);
+        });
+    }
+
+    /// Выбирает и отрисовывает нужный вид (view) в зависимости от состояния контроллера.
+    fn draw_active_view(
+        app_state: &mut AppState,
+        ctx: &egui::Context,
+        controller: &controllers::MainController,
+    ) {
+        match &controller.window_controller {
+            controllers::WindowController::Groups(group_view) => match group_view {
+                controllers::Group::ListGroups => central::draw_central_panel(app_state, ctx),
+                controllers::Group::Create => group_editor::create_group_window(app_state, ctx),
+                controllers::Group::Edit => group_editor::edit_group_window(app_state, ctx),
+            },
+            controllers::WindowController::Logs => logs::draw_logs_window(app_state, ctx),
+            controllers::WindowController::AppRunSettings => {
+                run_settings::draw_app_run_settings(app_state, ctx)
+            }
+        }
+    }
+
+    /// Синхронизирует состояние контроллеров, если оно было изменено.
+    fn sync_controller_state(&mut self) {
+        if self.state.controller_changed {
+            self.state.controller_changed = false;
+            let current_window = self.state.current_window.clone();
+            self.main_controller.set_window(current_window);
         }
     }
 }

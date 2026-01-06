@@ -10,7 +10,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::sync::mpsc::Receiver;
 use crate::tray::TrayCmd;
-
 use eframe::egui;
 use num_cpus;
 use std::path::PathBuf;
@@ -53,6 +52,9 @@ pub struct AppState {
     /// Handle to the main window (Windows only)
     #[cfg(target_os = "windows")]
     pub hwnd: Option<windows::Win32::Foundation::HWND>,
+
+    /// Флаг, указывающий, что окно в данный момент скрыто в трей
+    pub is_hidden: bool,
 }
 
 impl AppState {
@@ -104,6 +106,7 @@ impl AppState {
             tray_icon_guard: None,
             #[cfg(target_os = "windows")]
             hwnd: None,
+            is_hidden: false,
         };
 
         app.log_manager.add_entry("Application started".into());

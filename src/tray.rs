@@ -11,14 +11,9 @@ mod sys {
     use super::{Receiver, TrayCmd};
     use tray_icon::{
         menu::{Menu, MenuEvent, MenuId, MenuItem},
-        Icon, TrayIcon, TrayIconBuilder, TrayIconEvent, ClickType,
+        Icon, TrayIcon, TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState,
     };
     use std::sync::mpsc;
-
-    // ID пунктов меню - больше не используются как константы, но оставим для справки или удалим
-    // const ID_SHOW: &str = "1";
-    // const ID_HIDE: &str = "2";
-    // const ID_QUIT: &str = "3";
 
     pub struct TrayHandle {
         pub tray_icon: TrayIcon,
@@ -58,60 +53,50 @@ mod sys {
             .build()
             .map_err(|e| format!("Failed to build tray icon: {e}"))?;
 
-        let hwnd = SendHwnd(hwnd.0 as isize);
+        let hwnd_val = SendHwnd(hwnd.0 as isize);
 
-        // Подписываемся на клики по меню — шлём в наш tx
+        // Обработка событий через Tokio
         {
             let tx = tx.clone();
             let ctx = ctx.clone();
-            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-                let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as *mut core::ffi::c_void);
-                let id = event.id.0.as_str();
-                #[cfg(debug_assertions)]
-                println!("DEBUG: [Tray Thread] MenuEvent received: id={}", id);
-                
-                match id {
-                    "1" => { 
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: [Tray Thread] Calling OS::restore_and_focus");
-                        os_api::OS::restore_and_focus(hwnd);
-                        let _ = tx.send(TrayCmd::Show); 
-                    }
-                    "3" => { 
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: [Tray Thread] Executing immediate exit (Quit)");
-                        std::process::exit(0);
-                    }
-                    _ => {
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: [Tray Thread] Unknown MenuId: {}", id);
-                    }
-                }
+            tokio::spawn(async move {
+                let menu_channel = MenuEvent::receiver();
+                let tray_channel = TrayIconEvent::receiver();
 
-                ctx.request_repaint();
-            }));
-        }
+                loop {
+                    // Опрос событий меню
+                    while let Ok(event) = menu_channel.try_recv() {
+                        let id = event.id.0.as_str();
+                        match id {
+                            "1" => { 
+                                let hwnd = windows::Win32::Foundation::HWND(hwnd_val.0 as *mut core::ffi::c_void);
+                                os_api::OS::restore_and_focus(hwnd);
+                                let _ = tx.send(TrayCmd::Show); 
+                            }
+                            "3" => { 
+                                std::process::exit(0);
+                            }
+                            _ => {}
+                        }
+                        ctx.request_repaint();
+                    }
 
-        // Обработка кликов по иконке
-        {
-            let tx = tx.clone();
-            let ctx = ctx.clone();
-            TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-                let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as *mut core::ffi::c_void);
-                
-                #[cfg(debug_assertions)]
-                println!("DEBUG: TrayIconEvent received: {:?}", event);
-                
-                // Реагируем только на двойной клик (обычно это ЛКМ на Windows)
-                if event.click_type == ClickType::Double {
-                    #[cfg(debug_assertions)]
-                    println!("DEBUG: [Tray Thread] Double click detected. Calling OS::restore_and_focus");
-                    
-                    os_api::OS::restore_and_focus(hwnd);
-                    let _ = tx.send(TrayCmd::Show);
-                    ctx.request_repaint();
+                    // Опрос событий иконки
+                    while let Ok(event) = tray_channel.try_recv() {
+                        match event {
+                            TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
+                                 let hwnd = windows::Win32::Foundation::HWND(hwnd_val.0 as *mut core::ffi::c_void);
+                                 os_api::OS::restore_and_focus(hwnd);
+                                 let _ = tx.send(TrayCmd::Show);
+                                 ctx.request_repaint();
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_millis(16)).await;
                 }
-            }));
+            });
         }
 
         Ok(TrayHandle { tray_icon, rx })
