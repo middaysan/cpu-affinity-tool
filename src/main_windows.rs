@@ -15,7 +15,11 @@ fn main() {
     {
         println!("========================================================");
         println!("DEBUG: Application starting...");
-        println!("DEBUG: OS: {} {}", std::env::consts::OS, std::env::consts::ARCH);
+        println!(
+            "DEBUG: OS: {} {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
         println!("DEBUG: Reactive mode: YES (Wait-based event loop)");
         println!("========================================================");
     }

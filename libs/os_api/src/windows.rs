@@ -6,35 +6,42 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::ptr::null_mut;
 
-use windows::core::{Interface, PCWSTR, PWSTR, BOOL};
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HWND, LPARAM, STILL_ACTIVE, HLOCAL, LocalFree, WPARAM,
+    CloseHandle, HANDLE, HLOCAL, HWND, LPARAM, LocalFree, STILL_ACTIVE, WPARAM,
 };
-use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
-use windows::Win32::Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
+use windows::Win32::Globalization::{MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar};
 use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
-    IPersistFile, STGM_READ,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoUninitialize, IPersistFile, STGM_READ,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
+use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+use windows::core::{BOOL, Interface, PCWSTR, PWSTR};
 // LocalFree is in Foundation for this windows crate version
 use windows::Win32::System::ProcessStatus::K32EnumProcesses;
-use windows::Win32::System::Threading::{ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, CreateProcessW, GetExitCodeProcess, GetPriorityClass, GetProcessAffinityMask, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, OpenProcess, PROCESS_CREATION_FLAGS, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_INFORMATION, REALTIME_PRIORITY_CLASS, ResumeThread, SetPriorityClass, SetProcessAffinityMask, STARTUPINFOW, CREATE_SUSPENDED, PROCESS_ACCESS_RIGHTS};
+use windows::Win32::System::Threading::{
+    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, CREATE_SUSPENDED, CreateProcessW,
+    GetExitCodeProcess, GetPriorityClass, GetProcessAffinityMask, HIGH_PRIORITY_CLASS,
+    IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, OpenProcess, PROCESS_ACCESS_RIGHTS,
+    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, PROCESS_QUERY_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, REALTIME_PRIORITY_CLASS,
+    ResumeThread, STARTUPINFOW, SetPriorityClass, SetProcessAffinityMask,
+};
 use windows::Win32::UI::Shell::{
     CommandLineToArgvW, IShellLinkW, SLGP_UNCPRIORITY, SLR_NO_UI, ShellLink,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, SW_RESTORE,
-    SetForegroundWindow, ShowWindowAsync, AllowSetForegroundWindow, ASFW_ANY,
-    ShowWindow, SW_HIDE, SW_SHOW, PostMessageW, WM_NULL,
-    GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW,
+    ASFW_ANY, AllowSetForegroundWindow, EnumWindows, GWL_EXSTYLE, GetForegroundWindow,
+    GetWindowLongW, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SW_HIDE, SW_RESTORE,
+    SW_SHOW, SetForegroundWindow, SetWindowLongW, ShowWindow, ShowWindowAsync, WM_NULL,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
-use winreg::enums::*;
 use winreg::RegKey;
+use winreg::enums::*;
 
 use crate::PriorityClass;
 
@@ -132,7 +139,9 @@ impl OS {
         if arg.is_empty() {
             return "\"\"".to_string();
         }
-        let needs_quotes = arg.bytes().any(|b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r');
+        let needs_quotes = arg
+            .bytes()
+            .any(|b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r');
         if !needs_quotes && !arg.contains('"') {
             return arg.to_string();
         }
@@ -189,7 +198,9 @@ impl OS {
                 return s.to_string();
             }
             // Remove trailing NUL if present
-            if let Some(pos) = buf.iter().position(|&c| c == 0) { buf.truncate(pos); }
+            if let Some(pos) = buf.iter().position(|&c| c == 0) {
+                buf.truncate(pos);
+            }
             String::from_utf16_lossy(&buf)
         }
     }
@@ -198,7 +209,7 @@ impl OS {
         // Fallback: decode using system ANSI code page (CP_ACP = 0)
         unsafe {
             let needed = MultiByteToWideChar(
-                0, // CP_ACP
+                0,                                // CP_ACP
                 MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), // flags
                 bytes,
                 None,
@@ -207,12 +218,8 @@ impl OS {
                 return None;
             }
             let mut buf = vec![0u16; needed as usize];
-            let written = MultiByteToWideChar(
-                0,
-                MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
-                bytes,
-                Some(&mut buf),
-            );
+            let written =
+                MultiByteToWideChar(0, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, Some(&mut buf));
             if written <= 0 {
                 return None;
             }
@@ -233,7 +240,8 @@ impl OS {
             }
 
             let mut parent_of = std::collections::HashMap::new();
-            let mut children_of: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+            let mut children_of: std::collections::HashMap<u32, Vec<u32>> =
+                std::collections::HashMap::new();
 
             loop {
                 let pid = pe.th32ProcessID;
@@ -253,7 +261,10 @@ impl OS {
                 }
             }
 
-            Ok(ProcessTree { parent_of, children_of })
+            Ok(ProcessTree {
+                parent_of,
+                children_of,
+            })
         }
     }
 
@@ -272,11 +283,15 @@ impl OS {
             let mut process_mask: usize = 0;
             let mut system_mask: usize = 0;
 
-            GetProcessAffinityMask(handle, &mut process_mask as *mut _, &mut system_mask as *mut _)?;
+            GetProcessAffinityMask(
+                handle,
+                &mut process_mask as *mut _,
+                &mut system_mask as *mut _,
+            )?;
             // Do NOT change behavior by erroring on multi-group systems. Keep returning the mask.
             Ok(process_mask)
         })()
-            .map_err(|e: OsError| format!("Failed to get affinity mask for process {}: {}", pid, e))
+        .map_err(|e: OsError| format!("Failed to get affinity mask for process {}: {}", pid, e))
     }
 
     /// Gets the current priority class for a process.
@@ -292,7 +307,7 @@ impl OS {
             }
             Ok(Self::from_win_priority(priority))
         })()
-            .map_err(|e: OsError| format!("Failed to get priority for process {}: {}", pid, e))
+        .map_err(|e: OsError| format!("Failed to get priority for process {}: {}", pid, e))
     }
 
     /// Sets the CPU affinity mask for a process by PID.
@@ -307,7 +322,7 @@ impl OS {
             SetProcessAffinityMask(handle, mask)?;
             Ok(())
         })()
-            .map_err(|e: OsError| format!("Failed to set affinity mask for process {}: {}", pid, e))
+        .map_err(|e: OsError| format!("Failed to set affinity mask for process {}: {}", pid, e))
     }
 
     /// Sets the priority class for a process by PID.
@@ -319,7 +334,7 @@ impl OS {
             SetPriorityClass(handle, Self::transform_to_win_priority(priority))?;
             Ok(())
         })()
-            .map_err(|e: OsError| format!("Failed to set priority for process {}: {}", pid, e))
+        .map_err(|e: OsError| format!("Failed to set priority for process {}: {}", pid, e))
     }
 
     fn parse_url_file(path: &PathBuf) -> Result<String, String> {
@@ -342,7 +357,8 @@ impl OS {
         } else {
             match String::from_utf8(bytes.clone()) {
                 Ok(s) => s,
-                Err(_) => Self::decode_ansi(&bytes).ok_or("Failed to decode .url file using UTF-8 or ANSI")?,
+                Err(_) => Self::decode_ansi(&bytes)
+                    .ok_or("Failed to decode .url file using UTF-8 or ANSI")?,
             }
         };
 
@@ -374,7 +390,10 @@ impl OS {
             return Vec::new();
         }
 
-        let wide: Vec<u16> = std::ffi::OsStr::new(args).encode_wide().chain([0]).collect();
+        let wide: Vec<u16> = std::ffi::OsStr::new(args)
+            .encode_wide()
+            .chain([0])
+            .collect();
         let mut argc: i32 = 0;
 
         unsafe {
@@ -406,7 +425,8 @@ impl OS {
 
     fn resolve_lnk(path: &PathBuf) -> Result<(PathBuf, Vec<String>), String> {
         (|| unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                .ok()
                 .map_err(|e| OsError::Win(e))?;
             let _com = ComGuard;
 
@@ -435,7 +455,7 @@ impl OS {
 
             Ok((target, args_vec))
         })()
-            .map_err(|e: OsError| format!("resolve_lnk {:?} failed: {}", path, e))
+        .map_err(|e: OsError| format!("resolve_lnk {:?} failed: {}", path, e))
     }
 
     #[allow(dead_code)]
@@ -478,8 +498,9 @@ impl OS {
             let mut buf = vec![0u32; cap];
             let mut needed: u32 = 0;
 
-            let ok = unsafe { K32EnumProcesses(buf.as_mut_ptr(), (buf.len() * 4) as u32, &mut needed) }
-                .as_bool();
+            let ok =
+                unsafe { K32EnumProcesses(buf.as_mut_ptr(), (buf.len() * 4) as u32, &mut needed) }
+                    .as_bool();
 
             if !ok {
                 // Avoid panicking from a library method; return empty result on error.
@@ -584,7 +605,9 @@ impl OS {
             let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
 
             let mut window_pid = 0u32;
-            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)); }
+            unsafe {
+                GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
+            }
 
             if window_pid == ctx.target_pid && unsafe { IsWindowVisible(hwnd).as_bool() } {
                 ctx.found = hwnd;
@@ -675,7 +698,7 @@ impl OS {
 
             Ok(pi.dwProcessId)
         })()
-            .map_err(|e: OsError| format!("run {:?} failed: {}", file_path, e))
+        .map_err(|e: OsError| format!("run {:?} failed: {}", file_path, e))
     }
 
     pub fn get_program_path_for_uri(uri_scheme: &str) -> Result<PathBuf, String> {
@@ -732,11 +755,15 @@ impl OS {
     }
 
     pub fn hide_window(hwnd: HWND) {
-        unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
     }
 
     pub fn show_window(hwnd: HWND) {
-        unsafe { let _ = ShowWindow(hwnd, SW_SHOW); }
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
     }
 
     pub fn restore_and_focus(hwnd: HWND) {

@@ -3,11 +3,11 @@ use crate::app::views::{central, footer, group_editor, header, logs, run_setting
 use crate::app::controllers;
 use crate::app::models::AppState;
 
+use crate::tray::{init_tray, TrayCmd};
 use eframe::egui;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
-use crate::tray::{init_tray, TrayCmd};
 
 /// The main application structure that implements the eframe::App trait.
 /// This is the core of the application that connects the state with controllers and views.
@@ -36,12 +36,23 @@ impl App {
         {
             println!("========================================================");
             println!("DEBUG: [Main Thread] App::new started");
-            println!("DEBUG: [Eframe] Backend: {}", if cc.gl.is_some() { "Glow (OpenGL)" } else { "WGPU" });
-            println!("DEBUG: [Eframe] Integration Info: {:?}", cc.integration_info);
-            cc.egui_ctx.options(|o| println!("DEBUG: [Egui] Context Options: {:?}", o));
+            println!(
+                "DEBUG: [Eframe] Backend: {}",
+                if cc.gl.is_some() {
+                    "Glow (OpenGL)"
+                } else {
+                    "WGPU"
+                }
+            );
+            println!(
+                "DEBUG: [Eframe] Integration Info: {:?}",
+                cc.integration_info
+            );
+            cc.egui_ctx
+                .options(|o| println!("DEBUG: [Egui] Context Options: {:?}", o));
             println!("========================================================");
         }
-        
+
         let mut state = AppState::new(&cc.egui_ctx);
         let main_controller = controllers::MainController::new();
 
@@ -53,7 +64,9 @@ impl App {
                 let raw = handle.as_raw();
                 match raw {
                     RawWindowHandle::Win32(h) => {
-                        state.hwnd = Some(windows::Win32::Foundation::HWND(h.hwnd.get() as *mut core::ffi::c_void));
+                        state.hwnd = Some(windows::Win32::Foundation::HWND(
+                            h.hwnd.get() as *mut core::ffi::c_void
+                        ));
                     }
                     _ => {
                         #[cfg(debug_assertions)]
@@ -90,7 +103,9 @@ impl App {
             }
             Err(e) => {
                 // Логируем ошибку, но не падаем — приложение продолжит работать и без трея.
-                state.log_manager.add_entry(format!("Tray init failed: {e}"));
+                state
+                    .log_manager
+                    .add_entry(format!("Tray init failed: {e}"));
             }
         }
 
@@ -130,7 +145,7 @@ impl App {
     /// Обрабатывает команды, поступающие из системного трея.
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
         let mut show_requested = false;
-        
+
         if let Some(rx) = &self.state.tray_rx {
             while let Ok(cmd) = rx.try_recv() {
                 match cmd {
@@ -175,7 +190,9 @@ impl App {
         }
 
         // Убираем окно далеко за пределы экрана вместо Visible(false), чтобы избежать проблем с восстановлением
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(-10000.0, -10000.0)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            -10000.0, -10000.0,
+        )));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
     }
 
@@ -190,7 +207,9 @@ impl App {
         }
 
         // Возвращаем окно в видимую область
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(100.0, 100.0)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            100.0, 100.0,
+        )));
         ctx.request_repaint();
     }
 
@@ -229,7 +248,7 @@ impl App {
         let app_state = &mut self.state;
         self.main_controller.render_with(ctx, |controller, ui_ctx| {
             header::draw_top_panel(app_state, ui_ctx);
-            
+
             // Отрисовываем содержимое в зависимости от активного контроллера
             Self::draw_active_view(app_state, ui_ctx, controller);
 

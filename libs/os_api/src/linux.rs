@@ -7,10 +7,10 @@ use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 
 use libc::{
-    getpriority, sched_getscheduler, setpriority, sched_param, sched_setscheduler, pid_t,
-    PRIO_PROCESS, SCHED_FIFO, SCHED_RR,
+    PRIO_PROCESS, SCHED_FIFO, SCHED_RR, getpriority, pid_t, sched_getscheduler, sched_param,
+    sched_setscheduler, setpriority,
 };
-use nix::sched::{CpuSet, sched_setaffinity, sched_getaffinity};
+use nix::sched::{CpuSet, sched_getaffinity, sched_setaffinity};
 use shlex;
 
 use crate::PriorityClass;
@@ -27,12 +27,16 @@ impl OS {
                 .ok_or_else(|| format!("core index {} out of range for affinity mask", i))?;
             mask |= bit;
         }
-        if mask == 0 { return Err("affinity mask is empty".into()); }
+        if mask == 0 {
+            return Err("affinity mask is empty".into());
+        }
         Ok(mask)
     }
 
     fn cpuset_from_mask(mask: usize) -> Result<CpuSet, String> {
-        if mask == 0 { return Err("affinity mask is empty".into()); }
+        if mask == 0 {
+            return Err("affinity mask is empty".into());
+        }
         let mut cpu_set = CpuSet::new();
         for i in 0..usize::BITS {
             if (mask & (1usize << i)) != 0 {
@@ -57,12 +61,20 @@ impl OS {
             PriorityClass::Realtime => {
                 let param = sched_param { sched_priority: 50 };
                 let ret = unsafe { sched_setscheduler(pid, SCHED_FIFO, &param) };
-                if ret == 0 { Ok(()) } else { Err(io::Error::last_os_error().to_string()) }
+                if ret == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error().to_string())
+                }
             }
             _ => {
                 let nice = Self::to_nice(p);
                 let ret = unsafe { setpriority(PRIO_PROCESS, pid, nice) };
-                if ret == 0 { Ok(()) } else { Err(io::Error::last_os_error().to_string()) }
+                if ret == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error().to_string())
+                }
             }
         }
     }

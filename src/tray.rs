@@ -9,11 +9,11 @@ pub enum TrayCmd {
 #[cfg(target_os = "windows")]
 mod sys {
     use super::{Receiver, TrayCmd};
+    use std::sync::mpsc;
     use tray_icon::{
         menu::{Menu, MenuEvent, MenuId, MenuItem},
-        Icon, TrayIcon, TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState,
+        Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent,
     };
-    use std::sync::mpsc;
 
     pub struct TrayHandle {
         pub tray_icon: TrayIcon,
@@ -26,7 +26,10 @@ mod sys {
     unsafe impl Sync for SendHwnd {}
 
     /// Инициализирует трей. Не требует WindowHandle — создаёт собственное скрытое окно для сообщений.
-    pub fn init_tray(ctx: eframe::egui::Context, hwnd: windows::Win32::Foundation::HWND) -> Result<TrayHandle, String> {
+    pub fn init_tray(
+        ctx: eframe::egui::Context,
+        hwnd: windows::Win32::Foundation::HWND,
+    ) -> Result<TrayHandle, String> {
         // Канал команд
         let (tx, rx) = mpsc::channel::<TrayCmd>();
 
@@ -34,14 +37,14 @@ mod sys {
         let menu = Menu::new();
         let show = MenuItem::with_id(MenuId::new("1"), "Restore", true, None);
         let quit = MenuItem::with_id(MenuId::new("3"), "Quit", true, None);
-        
+
         menu.append(&show).map_err(|e| e.to_string())?;
         menu.append(&quit).map_err(|e| e.to_string())?;
 
         // Иконка: грузим PNG 32x32 RGBA из assets/icon.ico
         let icon_rgba = include_bytes!("../assets/icon.ico");
-        let (rgba, width, height) = decode_png_rgba(icon_rgba)
-            .map_err(|e| format!("Failed to decode tray icon: {e}"))?;
+        let (rgba, width, height) =
+            decode_png_rgba(icon_rgba).map_err(|e| format!("Failed to decode tray icon: {e}"))?;
         let icon = Icon::from_rgba(rgba, width, height)
             .map_err(|e| format!("Failed to create tray icon: {e}"))?;
 
@@ -50,6 +53,7 @@ mod sys {
             .with_tooltip("CPU Affinity Tool")
             .with_menu(Box::new(menu))
             .with_icon(icon)
+            .with_menu_on_left_click(false)
             .build()
             .map_err(|e| format!("Failed to build tray icon: {e}"))?;
 
@@ -68,29 +72,34 @@ mod sys {
                     while let Ok(event) = menu_channel.try_recv() {
                         let id = event.id.0.as_str();
                         match id {
-                            "1" => { 
-                                let hwnd = windows::Win32::Foundation::HWND(hwnd_val.0 as *mut core::ffi::c_void);
+                            "1" => {
+                                let hwnd = windows::Win32::Foundation::HWND(
+                                    hwnd_val.0 as *mut core::ffi::c_void,
+                                );
                                 os_api::OS::restore_and_focus(hwnd);
-                                let _ = tx.send(TrayCmd::Show); 
+                                let _ = tx.send(TrayCmd::Show);
+                                ctx.request_repaint();
                             }
-                            "3" => { 
+                            "3" => {
                                 std::process::exit(0);
                             }
                             _ => {}
                         }
-                        ctx.request_repaint();
                     }
 
                     // Опрос событий иконки
                     while let Ok(event) = tray_channel.try_recv() {
-                        match event {
-                            TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
-                                 let hwnd = windows::Win32::Foundation::HWND(hwnd_val.0 as *mut core::ffi::c_void);
-                                 os_api::OS::restore_and_focus(hwnd);
-                                 let _ = tx.send(TrayCmd::Show);
-                                 ctx.request_repaint();
-                            }
-                            _ => {}
+                        if let TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        } = event
+                        {
+                            let hwnd = windows::Win32::Foundation::HWND(
+                                hwnd_val.0 as *mut core::ffi::c_void,
+                            );
+                            os_api::OS::restore_and_focus(hwnd);
+                            let _ = tx.send(TrayCmd::Show);
+                            ctx.request_repaint();
                         }
                     }
 

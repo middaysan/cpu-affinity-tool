@@ -39,7 +39,7 @@ impl LogManager {
         );
 
         let entry = format!("{ts} :: {message}");
-        
+
         #[cfg(debug_assertions)]
         println!("{entry}");
 
