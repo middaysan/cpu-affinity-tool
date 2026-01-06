@@ -79,7 +79,7 @@ impl App {
         // Now that start_app_with_autorun is synchronous, we can call it directly
         state.start_app_with_autorun();
 
-        // Инициализируем системный трей (Windows). На других ОС init_tray() вернёт заглушку.
+        // Initialize the system tray (Windows). On other OSes, init_tray() will return a stub.
         #[cfg(target_os = "windows")]
         let tray_res = if let Some(hwnd) = state.hwnd {
             init_tray(cc.egui_ctx.clone(), hwnd)
@@ -92,17 +92,17 @@ impl App {
 
         match tray_res {
             Ok(handle) => {
-                // Канал получателя сохраняем в состояние
+                // Save the receiver channel to the state
                 state.tray_rx = Some(handle.rx);
 
-                // На Windows надо держать TrayIcon живым
+                // On Windows, the TrayIcon must be kept alive
                 #[cfg(target_os = "windows")]
                 {
                     state.tray_icon_guard = Some(handle.tray_icon);
                 }
             }
             Err(e) => {
-                // Логируем ошибку, но не падаем — приложение продолжит работать и без трея.
+                // Log the error but don't crash — the application will continue to work without the tray.
                 state
                     .log_manager
                     .add_entry(format!("Tray init failed: {e}"));
@@ -119,30 +119,30 @@ impl App {
 impl eframe::App for App {
     /// The main update method called by the eframe framework on each frame.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 1. Обработка команд из системного трея
+        // 1. Handle commands from the system tray
         self.handle_tray_events(ctx);
 
-        // 2. Проверка видимости и обработка сворачивания
+        // 2. Visibility check and minimization handling
         if !self.should_render(ctx) {
             return;
         }
 
-        // 3. Применение темы оформления
+        // 3. Apply UI theme
         self.apply_theme(ctx);
 
-        // 4. Обработка перетаскивания файлов
+        // 4. Handle file drops
         self.handle_file_drops(ctx);
 
-        // 5. Отрисовка основного интерфейса
+        // 5. Render main UI
         self.render_main_ui(ctx);
 
-        // 6. Синхронизация состояния контроллеров
+        // 6. Synchronize controller state
         self.sync_controller_state();
     }
 }
 
 impl App {
-    /// Обрабатывает команды, поступающие из системного трея.
+    /// Handles commands coming from the system tray.
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
         let mut show_requested = false;
 
@@ -159,17 +159,17 @@ impl App {
         }
     }
 
-    /// Проверяет, нужно ли отрисовывать UI в данный момент.
-    /// Также обрабатывает логику скрытия приложения при сворачивании.
+    /// Checks if the UI should be rendered at the moment.
+    /// Also handles the logic for hiding the application when minimized.
     fn should_render(&mut self, ctx: &egui::Context) -> bool {
-        // Если приложение скрыто — ограничиваем частоту обновлений для экономии CPU
+        // If the application is hidden — limit the update frequency to save CPU
         if self.state.is_hidden {
             thread::sleep(Duration::from_millis(100));
             ctx.request_repaint();
             return false;
         }
 
-        // Если пользователь свернул окно — скрываем его в трей
+        // If the user minimized the window — hide it to the tray
         if ctx.input(|i| i.viewport().minimized == Some(true)) {
             self.hide_to_tray(ctx);
             return false;
@@ -178,25 +178,25 @@ impl App {
         true
     }
 
-    /// Скрывает окно приложения и переводит его в режим работы из трея.
+    /// Hides the application window and switches it to tray mode.
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         self.state.is_hidden = true;
 
         #[cfg(target_os = "windows")]
         if let Some(hwnd) = self.state.hwnd {
             os_api::OS::set_taskbar_visible(hwnd, false);
-            // Восстанавливаем окно перед перемещением, так как минимизированные окна нельзя программно двигать в Windows
+            // Restore the window before moving, as minimized windows cannot be moved programmatically in Windows
             os_api::OS::restore_and_focus(hwnd);
         }
 
-        // Убираем окно далеко за пределы экрана вместо Visible(false), чтобы избежать проблем с восстановлением
+        // Move the window far off-screen instead of Visible(false) to avoid issues with restoration
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
             -10000.0, -10000.0,
         )));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
     }
 
-    /// Восстанавливает окно приложения из трея.
+    /// Restores the application window from the tray.
     fn show_from_tray(&mut self, ctx: &egui::Context) {
         self.state.is_hidden = false;
 
@@ -206,14 +206,14 @@ impl App {
             os_api::OS::restore_and_focus(hwnd);
         }
 
-        // Возвращаем окно в видимую область
+        // Return the window to the visible area
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
             100.0, 100.0,
         )));
         ctx.request_repaint();
     }
 
-    /// Применяет выбранную тему оформления (светлая/темная).
+    /// Applies the selected UI theme (light/dark).
     fn apply_theme(&self, ctx: &egui::Context) {
         let theme_index = self.state.get_theme_index();
         let visuals = match theme_index {
@@ -224,7 +224,7 @@ impl App {
         ctx.set_visuals(visuals);
     }
 
-    /// Обрабатывает событие сброса файлов в окно приложения.
+    /// Handles file drops into the application window.
     fn handle_file_drops(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.raw.dropped_files.is_empty()) {
             return;
@@ -243,20 +243,20 @@ impl App {
         }
     }
 
-    /// Отрисовывает основной интерфейс приложения.
+    /// Renders the main application interface.
     fn render_main_ui(&mut self, ctx: &egui::Context) {
         let app_state = &mut self.state;
         self.main_controller.render_with(ctx, |controller, ui_ctx| {
             header::draw_top_panel(app_state, ui_ctx);
 
-            // Отрисовываем содержимое в зависимости от активного контроллера
+            // Render content depending on the active controller
             Self::draw_active_view(app_state, ui_ctx, controller);
 
             footer::draw_bottom_panel(app_state, ui_ctx);
         });
     }
 
-    /// Выбирает и отрисовывает нужный вид (view) в зависимости от состояния контроллера.
+    /// Selects and renders the appropriate view depending on the controller state.
     fn draw_active_view(
         app_state: &mut AppState,
         ctx: &egui::Context,
@@ -275,7 +275,7 @@ impl App {
         }
     }
 
-    /// Синхронизирует состояние контроллеров, если оно было изменено.
+    /// Synchronizes the controller state if it has been changed.
     fn sync_controller_state(&mut self) {
         if self.state.controller_changed {
             self.state.controller_changed = false;

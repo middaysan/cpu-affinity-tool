@@ -1,6 +1,6 @@
 use std::sync::mpsc::Receiver;
 
-/// Простые команды от трея к приложению
+/// Simple commands from the tray to the application
 #[derive(Debug, Clone)]
 pub enum TrayCmd {
     Show,
@@ -25,15 +25,15 @@ mod sys {
     unsafe impl Send for SendHwnd {}
     unsafe impl Sync for SendHwnd {}
 
-    /// Инициализирует трей. Не требует WindowHandle — создаёт собственное скрытое окно для сообщений.
+    /// Initializes the tray. Does not require WindowHandle — creates its own hidden window for messages.
     pub fn init_tray(
         ctx: eframe::egui::Context,
         hwnd: windows::Win32::Foundation::HWND,
     ) -> Result<TrayHandle, String> {
-        // Канал команд
+        // Command channel
         let (tx, rx) = mpsc::channel::<TrayCmd>();
 
-        // Построим меню
+        // Build menu
         let menu = Menu::new();
         let show = MenuItem::with_id(MenuId::new("1"), "Restore", true, None);
         let quit = MenuItem::with_id(MenuId::new("3"), "Quit", true, None);
@@ -41,14 +41,14 @@ mod sys {
         menu.append(&show).map_err(|e| e.to_string())?;
         menu.append(&quit).map_err(|e| e.to_string())?;
 
-        // Иконка: грузим PNG 32x32 RGBA из assets/icon.ico
+        // Icon: load PNG 32x32 RGBA from assets/icon.ico
         let icon_rgba = include_bytes!("../assets/icon.ico");
         let (rgba, width, height) =
             decode_png_rgba(icon_rgba).map_err(|e| format!("Failed to decode tray icon: {e}"))?;
         let icon = Icon::from_rgba(rgba, width, height)
             .map_err(|e| format!("Failed to create tray icon: {e}"))?;
 
-        // Создаём трей
+        // Create tray
         let tray_icon = TrayIconBuilder::new()
             .with_tooltip("CPU Affinity Tool")
             .with_menu(Box::new(menu))
@@ -59,7 +59,7 @@ mod sys {
 
         let hwnd_val = SendHwnd(hwnd.0 as isize);
 
-        // Обработка событий через Tokio
+        // Event handling via Tokio
         {
             let tx = tx.clone();
             let ctx = ctx.clone();
@@ -68,7 +68,7 @@ mod sys {
                 let tray_channel = TrayIconEvent::receiver();
 
                 loop {
-                    // Опрос событий меню
+                    // Poll menu events
                     while let Ok(event) = menu_channel.try_recv() {
                         let id = event.id.0.as_str();
                         match id {
@@ -87,7 +87,7 @@ mod sys {
                         }
                     }
 
-                    // Опрос событий иконки
+                    // Poll icon events
                     while let Ok(event) = tray_channel.try_recv() {
                         if let TrayIconEvent::DoubleClick {
                             button: MouseButton::Left,

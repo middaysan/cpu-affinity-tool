@@ -53,7 +53,7 @@ pub struct AppState {
     #[cfg(target_os = "windows")]
     pub hwnd: Option<windows::Win32::Foundation::HWND>,
 
-    /// Флаг, указывающий, что окно в данный момент скрыто в трей
+    /// Flag indicating that the window is currently hidden in the tray
     pub is_hidden: bool,
 }
 
