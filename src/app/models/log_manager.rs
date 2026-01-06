@@ -38,6 +38,11 @@ impl LogManager {
             secs % 60              // seconds
         );
 
-        self.entries.push(format!("{ts} :: {message}"));
+        let entry = format!("{ts} :: {message}");
+
+        #[cfg(debug_assertions)]
+        println!("{entry}");
+
+        self.entries.push(entry);
     }
 }

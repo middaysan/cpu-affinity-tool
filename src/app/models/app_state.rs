@@ -4,14 +4,15 @@ use crate::app::models::app_to_run::{AppToRun, RunAppEditState};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
 use crate::app::models::running_app::RunningApps;
 use crate::app::models::LogManager;
-use os_api::OS;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-
+use crate::tray::TrayCmd;
 use eframe::egui;
 use num_cpus;
+use os_api::OS;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// The central state management component of the application.
 /// This structure holds all the application states, including persistent data,
@@ -39,6 +40,21 @@ pub struct AppState {
     pub current_tip_index: usize,
     /// Time when the tip was last changed (in seconds since app start)
     pub last_tip_change_time: f64,
+
+    // ---- tray integration ----
+    /// Receiver for tray events (Show/Hide/Quit)
+    pub tray_rx: Option<Receiver<TrayCmd>>,
+
+    /// Keep tray icon alive for Windows (drop = removes icon)
+    #[cfg(target_os = "windows")]
+    pub tray_icon_guard: Option<tray_icon::TrayIcon>,
+
+    /// Handle to the main window (Windows only)
+    #[cfg(target_os = "windows")]
+    pub hwnd: Option<windows::Win32::Foundation::HWND>,
+
+    /// Flag indicating that the window is currently hidden in the tray
+    pub is_hidden: bool,
 }
 
 impl AppState {
@@ -62,7 +78,7 @@ impl AppState {
     ///
     /// A new `AppState` instance with initialized values
     pub fn new(ctx: &egui::Context) -> Self {
-        let app = Self {
+        let mut app = Self {
             persistent_state: Arc::new(RwLock::new(AppStateStorage::load_state())),
             current_window: controllers::WindowController::Groups(controllers::Group::ListGroups),
             controller_changed: false,
@@ -83,7 +99,17 @@ impl AppState {
             running_apps_statuses: HashMap::new(),
             current_tip_index: 0,
             last_tip_change_time: 0.0,
+
+            // ---- tray integration ----
+            tray_rx: None,
+            #[cfg(target_os = "windows")]
+            tray_icon_guard: None,
+            #[cfg(target_os = "windows")]
+            hwnd: None,
+            is_hidden: false,
         };
+
+        app.log_manager.add_entry("Application started".into());
 
         // Set the UI theme based on the theme index in the persistent state
         // Explicitly drop the future to avoid the "let-underscore-future" warning
@@ -736,6 +762,24 @@ impl AppState {
                 .get(app_key)
                 .copied()
                 .unwrap_or(false)
+        }
+    }
+
+    /// Gets the PIDs of a running application.
+    /// Synchronous version.
+    ///
+    /// # Parameters
+    ///
+    /// * `app_key` - The unique key identifying the application
+    ///
+    /// # Returns
+    ///
+    /// An Option containing a vector of PIDs if the application is running
+    pub fn get_running_app_pids(&self, app_key: &str) -> Option<Vec<u32>> {
+        if let Ok(apps) = self.running_apps.try_read() {
+            apps.apps.get(app_key).map(|app| app.pids.clone())
+        } else {
+            None
         }
     }
 }

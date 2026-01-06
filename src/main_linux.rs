@@ -1,6 +1,7 @@
 mod app;
-use app::CpuAffinityApp;
+mod tray;
 
+use app::models::App;
 use eframe::{run_native, NativeOptions};
 
 fn main() {
@@ -11,6 +12,11 @@ fn main() {
             viewport: eframe::egui::ViewportBuilder::default().with_min_inner_size([450.0, 200.0]),
             ..Default::default()
         },
-        Box::new(|_cc| Ok(Box::new(CpuAffinityApp::default()))),
+        Box::new(|cc| Ok(Box::new(App::new(cc)))),
     );
+
+    if let Err(e) = res {
+        eprintln!("Application error: {}", e);
+        std::process::exit(1);
+    }
 }

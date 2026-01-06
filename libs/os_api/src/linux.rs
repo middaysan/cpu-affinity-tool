@@ -7,9 +7,10 @@ use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 
 use libc::{
-    PRIO_PROCESS, SCHED_FIFO, SCHED_RR, pid_t, sched_param, sched_setscheduler, setpriority,
+    PRIO_PROCESS, SCHED_FIFO, SCHED_RR, getpriority, pid_t, sched_getscheduler, sched_param,
+    sched_setscheduler, setpriority,
 };
-use nix::sched::{CpuSet, sched_setaffinity};
+use nix::sched::{CpuSet, sched_getaffinity, sched_setaffinity};
 use shlex;
 
 use crate::PriorityClass;
@@ -17,6 +18,66 @@ use crate::PriorityClass;
 pub struct OS;
 
 impl OS {
+    // ---- helpers to reduce duplication ----
+    fn compose_mask_from_cores(cores: &[usize]) -> Result<usize, String> {
+        let mut mask = 0usize;
+        for &i in cores {
+            let bit = 1usize
+                .checked_shl(i as u32)
+                .ok_or_else(|| format!("core index {} out of range for affinity mask", i))?;
+            mask |= bit;
+        }
+        if mask == 0 {
+            return Err("affinity mask is empty".into());
+        }
+        Ok(mask)
+    }
+
+    fn cpuset_from_mask(mask: usize) -> Result<CpuSet, String> {
+        if mask == 0 {
+            return Err("affinity mask is empty".into());
+        }
+        let mut cpu_set = CpuSet::new();
+        for i in 0..usize::BITS {
+            if (mask & (1usize << i)) != 0 {
+                cpu_set.set(i as usize).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(cpu_set)
+    }
+
+    fn mask_from_cpuset(set: &CpuSet) -> usize {
+        let mut mask: usize = 0;
+        for i in 0..usize::BITS as usize {
+            if set.is_set(i).unwrap_or(false) {
+                mask |= 1usize << i;
+            }
+        }
+        mask
+    }
+
+    fn set_priority_for_pid(pid: pid_t, p: PriorityClass) -> Result<(), String> {
+        match p {
+            PriorityClass::Realtime => {
+                let param = sched_param { sched_priority: 50 };
+                let ret = unsafe { sched_setscheduler(pid, SCHED_FIFO, &param) };
+                if ret == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error().to_string())
+                }
+            }
+            _ => {
+                let nice = Self::to_nice(p);
+                let ret = unsafe { setpriority(PRIO_PROCESS, pid, nice) };
+                if ret == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error().to_string())
+                }
+            }
+        }
+    }
     fn to_nice(p: PriorityClass) -> i32 {
         match p {
             PriorityClass::Idle => 19,
@@ -41,37 +102,62 @@ impl OS {
 
     fn set_affinity(child: &Child, mask: usize) -> Result<(), String> {
         let pid = child.id() as pid_t;
-        let mut cpu_set = CpuSet::new();
-        for i in 0..usize::BITS {
-            if (mask & (1 << i)) != 0 {
-                cpu_set.set(i as usize).map_err(|e| e.to_string())?;
-            }
-        }
+        let cpu_set = Self::cpuset_from_mask(mask)?;
         sched_setaffinity(pid, &cpu_set).map_err(|e| e.to_string())
     }
 
     fn set_priority(child: &Child, p: PriorityClass) -> Result<(), String> {
         let pid = child.id() as pid_t;
-        match p {
-            PriorityClass::Realtime => {
-                let param = sched_param { sched_priority: 50 };
-                let ret = unsafe { sched_setscheduler(pid, SCHED_FIFO, &param) };
-                if ret == 0 {
-                    Ok(())
-                } else {
-                    Err(io::Error::last_os_error().to_string())
-                }
-            }
-            _ => {
-                let nice = Self::to_nice(p);
-                let ret = unsafe { setpriority(PRIO_PROCESS, pid, nice) };
-                if ret == 0 {
-                    Ok(())
-                } else {
-                    Err(io::Error::last_os_error().to_string())
-                }
-            }
+        Self::set_priority_for_pid(pid, p)
+    }
+
+    /// Gets the current CPU affinity mask for a process.
+    /// Note: Only the lowest `usize::BITS` CPUs are represented in the returned mask.
+    pub fn get_process_affinity(pid: u32) -> Result<usize, String> {
+        let pid = pid as pid_t;
+        let mut set = CpuSet::new();
+        sched_getaffinity(pid, &mut set).map_err(|e| e.to_string())?;
+        Ok(Self::mask_from_cpuset(&set))
+    }
+
+    /// Gets the current priority class for a process.
+    pub fn get_process_priority(pid: u32) -> Result<PriorityClass, String> {
+        let pid_t = pid as pid_t;
+        // Realtime if scheduled with FIFO or RR
+        let policy = unsafe { sched_getscheduler(pid_t) };
+        if policy == SCHED_FIFO || policy == SCHED_RR {
+            return Ok(PriorityClass::Realtime);
         }
+
+        // Otherwise map nice value to our classes
+        // getpriority returns value in range -20..19; on error it returns -1 but errno must be checked.
+        errno::set_errno(errno::Errno(0));
+        let prio = unsafe { getpriority(PRIO_PROCESS, pid_t) };
+        let err = errno::errno().0;
+        if prio == -1 && err != 0 {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        let p = match prio {
+            n if n >= 15 => PriorityClass::Idle,
+            n if n >= 5 => PriorityClass::BelowNormal,
+            n if n >= -4 => PriorityClass::Normal,
+            n if n >= -9 => PriorityClass::AboveNormal,
+            _ /* <= -10 */ => PriorityClass::High,
+        };
+        Ok(p)
+    }
+
+    /// Sets the CPU affinity mask for a process by PID.
+    pub fn set_process_affinity_by_pid(pid: u32, mask: usize) -> Result<(), String> {
+        let pid = pid as pid_t;
+        let cpu_set = Self::cpuset_from_mask(mask)?;
+        sched_setaffinity(pid, &cpu_set).map_err(|e| e.to_string())
+    }
+
+    /// Sets the priority class for a process by PID.
+    pub fn set_process_priority_by_pid(pid: u32, priority: PriorityClass) -> Result<(), String> {
+        let pid = pid as pid_t;
+        Self::set_priority_for_pid(pid, priority)
     }
 
     pub fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, Vec<String>), String> {
@@ -114,7 +200,8 @@ impl OS {
         cores: &[usize],
         priority: PriorityClass,
     ) -> Result<u32, String> {
-        let mask = cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
+        // Compose mask with validation similar to Windows implementation
+        let mask = Self::compose_mask_from_cores(cores)?;
         let child = Self::spawn(&file_path, &args)?;
         let pid = child.id();
         Self::set_affinity(&child, mask)?;

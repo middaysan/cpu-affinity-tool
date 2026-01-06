@@ -172,9 +172,12 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                             // Set a fixed width for the entire row
                             let available_width = ui.available_width();
 
-                            let (rect, _) =
+                            let (rect, response) =
                                 ui.allocate_exact_size(Vec2::splat(15.0), egui::Sense::hover());
                             let color = if is_app_run {
+                                if let Some(pids) = app.get_running_app_pids(&prog.get_key()) {
+                                    response.on_hover_text(format!("Tracking PIDs: {:?}", pids));
+                                }
                                 Color32::GREEN
                             } else {
                                 Color32::RED
