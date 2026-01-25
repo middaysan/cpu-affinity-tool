@@ -1,5 +1,5 @@
 use crate::app::models::AppState;
-use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Frame, Layout};
+use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Frame, Layout, RichText, Vec2};
 use os_api::PriorityClass;
 
 pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
@@ -37,146 +37,122 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
     let mut updated_app = None;
 
     CentralPanel::default().show(ctx, |ui| {
+        ui.add_space(5.0);
         ui.horizontal(|ui| {
-            ui.heading("Edit App Run Settings");
+            ui.heading(RichText::new("⚙ Edit App Settings").strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("❌").on_hover_text("Close").clicked() {
                     is_close = true;
                 }
             });
         });
+        ui.add_space(10.0);
 
-        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let frame = Frame::group(ui.style())
+                .fill(ui.visuals().faint_bg_color)
+                .corner_radius(5.0)
+                .inner_margin(15.0);
 
-        Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
-            let selected_app = app
-                .app_edit_state
-                .current_edit
-                .as_mut()
-                .expect("edit_app_clone must be initialized");
+            frame.show(ui, |ui| {
+                let selected_app = app
+                    .app_edit_state
+                    .current_edit
+                    .as_mut()
+                    .expect("edit_app_clone must be initialized");
 
-            ui.horizontal(|ui| {
-                ui.label("App name:");
-                ui.text_edit_singleline(&mut selected_app.name).changed();
-            });
+                egui::Grid::new("app_settings_grid")
+                    .spacing(Vec2::new(10.0, 10.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("App Name:").strong());
+                        ui.text_edit_singleline(&mut selected_app.name);
+                        ui.end_row();
 
-            ui.add_space(5.0);
+                        ui.label(RichText::new("Binary Path:").strong());
+                        ui.horizontal(|ui| {
+                            let mut bin_path_str = selected_app.bin_path.to_string_lossy().to_string();
+                            if ui.text_edit_singleline(&mut bin_path_str).changed() {
+                                selected_app.bin_path = std::path::PathBuf::from(bin_path_str);
+                            }
 
-            ui.checkbox(&mut selected_app.autorun, "Start this app on startup")
-                .on_hover_text("This app will be started when the group is started.");
+                            if ui.button("📂").on_hover_text("Select executable...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("Executables", &["exe"])
+                                    .pick_file()
+                                {
+                                    selected_app.bin_path = path;
+                                }
+                            }
+                        });
+                        ui.end_row();
 
-            ui.add_space(5.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Binary path:");
-                let mut bin_path_str = selected_app.bin_path.to_string_lossy().to_string();
-                if ui.text_edit_singleline(&mut bin_path_str).changed() {
-                    selected_app.bin_path = std::path::PathBuf::from(bin_path_str);
-                }
-
-                if ui
-                    .button("📁add")
-                    .on_hover_text("Add executables...")
-                    .clicked()
-                {
-                    // TODO: add linux support
-                    if let Some(paths) = rfd::FileDialog::new()
-                        .add_filter("Executables", &["exe"])
-                        .pick_file()
-                    {
-                        selected_app.bin_path = paths.clone();
-                    }
-                }
-            });
-
-            ui.add_space(5.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Priority:");
-                ComboBox::from_label("")
-                    .selected_text(format!("{:?}", selected_app.priority))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut selected_app.priority,
-                            PriorityClass::Idle,
-                            "Idle",
-                        );
-                        ui.selectable_value(
-                            &mut selected_app.priority,
-                            PriorityClass::BelowNormal,
-                            "Below Normal",
-                        );
-                        ui.selectable_value(
-                            &mut selected_app.priority,
-                            PriorityClass::Normal,
-                            "Normal",
-                        );
-                        ui.selectable_value(
-                            &mut selected_app.priority,
-                            PriorityClass::AboveNormal,
-                            "Above Normal",
-                        );
-                        ui.selectable_value(
-                            &mut selected_app.priority,
-                            PriorityClass::High,
-                            "High",
-                        );
-                        ui.selectable_value(
-                            &mut selected_app.priority,
-                            PriorityClass::Realtime,
-                            "RealTime",
-                        );
+                        ui.label(RichText::new("Priority:").strong());
+                        ComboBox::from_id_salt("priority_combo")
+                            .selected_text(format!("{:?}", selected_app.priority))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut selected_app.priority, PriorityClass::Idle, "Idle");
+                                ui.selectable_value(&mut selected_app.priority, PriorityClass::BelowNormal, "Below Normal");
+                                ui.selectable_value(&mut selected_app.priority, PriorityClass::Normal, "Normal");
+                                ui.selectable_value(&mut selected_app.priority, PriorityClass::AboveNormal, "Above Normal");
+                                ui.selectable_value(&mut selected_app.priority, PriorityClass::High, "High");
+                                ui.selectable_value(&mut selected_app.priority, PriorityClass::Realtime, "RealTime");
+                            });
+                        ui.end_row();
                     });
-            });
 
-            ui.add_space(5.0);
+                ui.add_space(10.0);
+                ui.checkbox(&mut selected_app.autorun, RichText::new("Start this app on startup").strong());
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
 
-            ui.label("Arguments:");
-            let mut arg_to_remove: Option<usize> = None;
-            if selected_app.args.is_empty() {
-                ui.label("No arguments. Add one below.");
-            } else {
-                Frame::group(ui.style()).show(ui, |ui| {
+                ui.label(RichText::new("Command Line Arguments:").strong());
+                ui.add_space(5.0);
+
+                let mut arg_to_remove: Option<usize> = None;
+                if selected_app.args.is_empty() {
+                    ui.label(RichText::new("No arguments defined.").weak().italics());
+                } else {
                     for (i, arg) in selected_app.args.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label(format!("Arg {}:", i + 1));
+                            ui.label(format!("{}:", i + 1));
                             ui.text_edit_singleline(arg);
                             if ui.button("❌").clicked() {
                                 arg_to_remove = Some(i);
                             }
                         });
                     }
+                }
+
+                if let Some(idx) = arg_to_remove {
+                    selected_app.args.remove(idx);
+                }
+
+                ui.add_space(5.0);
+                if ui.button("➕ Add Argument").clicked() {
+                    selected_app.args.push(String::new());
+                }
+
+                ui.add_space(15.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(RichText::new("💾 Save Changes").strong()).min_size(egui::vec2(120.0, 32.0)))
+                        .clicked()
+                    {
+                        updated_app = Some(selected_app.clone());
+                        save_clicked = true;
+                        is_close = true;
+                    }
+                    if ui
+                        .add(egui::Button::new("❌ Cancel").min_size(egui::vec2(100.0, 32.0)))
+                        .clicked()
+                    {
+                        is_close = true;
+                    }
                 });
-            }
-
-            if let Some(idx) = arg_to_remove {
-                selected_app.args.remove(idx);
-            }
-
-            ui.separator();
-
-            if ui.button("Add Argument").clicked() {
-                selected_app.args.push(String::new());
-            }
-
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                if ui
-                    .add_sized(egui::vec2(100.0, 30.0), egui::Button::new("Save"))
-                    .clicked()
-                {
-                    // Store the updated app for later use
-                    updated_app = Some(selected_app.clone());
-                    save_clicked = true;
-                    is_close = true;
-                }
-                if ui
-                    .add_sized(egui::vec2(100.0, 30.0), egui::Button::new("Cancel"))
-                    .clicked()
-                {
-                    is_close = true;
-                }
             });
         });
     });

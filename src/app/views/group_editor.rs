@@ -1,6 +1,6 @@
 use crate::app::models::AppState;
 use crate::app::models::GroupFormState;
-use eframe::egui::{self, CentralPanel, Frame};
+use eframe::egui::{self, CentralPanel, Frame, RichText};
 use std::collections::HashSet;
 
 /// Form for creating/editing a group: divided into rendering the name and the section with cores and clusters.
@@ -15,56 +15,66 @@ fn draw_group_form_ui(
 ) {
     clusters.retain(|cluster| !cluster.is_empty());
 
-    ui.spacing_mut().item_spacing.y = 10.0;
+    let frame = Frame::group(ui.style())
+        .fill(ui.visuals().faint_bg_color)
+        .corner_radius(5.0)
+        .inner_margin(15.0);
 
-    draw_group_name_ui(ui, &mut groups.group_name);
+    frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Group name:").strong());
+            ui.text_edit_singleline(&mut groups.group_name).request_focus();
+        });
 
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.label("Enable run all button:");
-        ui.checkbox(&mut groups.run_all_enabled, "Run all apps in group");
-    });
+        ui.add_space(8.0);
 
-    ui.separator();
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut groups.run_all_enabled, "");
+            ui.label(RichText::new("Enable \"Run All\" button").strong());
+        });
 
-    draw_cpu_cores_ui(ui, &mut groups.core_selection, clusters);
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
 
-    ui.separator();
+        draw_cpu_cores_ui(ui, &mut groups.core_selection, clusters);
 
-    ui.horizontal(|ui| {
-        if ui
-            .add(egui::Button::new("💾 Save").min_size(egui::vec2(100.0, 30.0)))
-            .clicked()
-            || ui.input(|i| i.key_pressed(egui::Key::Enter))
-        {
-            on_save();
-        }
-        if ui
-            .add(egui::Button::new("❌ Cancel").min_size(egui::vec2(100.0, 30.0)))
-            .clicked()
-        {
-            on_cancel();
-        }
-        if is_edit {
-            if let Some(delete_fn) = on_delete {
-                if ui
-                    .add(egui::Button::new("❌ Delete Group").min_size(egui::vec2(100.0, 30.0)))
-                    .clicked()
-                {
-                    delete_fn();
-                }
+        ui.add_space(15.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::Button::new(RichText::new("💾 Save Changes").strong()).min_size(egui::vec2(120.0, 32.0)))
+                .clicked()
+                || ui.input(|i| i.key_pressed(egui::Key::Enter))
+            {
+                on_save();
             }
-        }
+            
+            if ui
+                .add(egui::Button::new("❌ Cancel").min_size(egui::vec2(100.0, 32.0)))
+                .clicked()
+            {
+                on_cancel();
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if is_edit {
+                    if let Some(delete_fn) = on_delete {
+                        if ui
+                            .add(egui::Button::new(RichText::new("🗑 Delete Group").color(egui::Color32::RED)).min_size(egui::vec2(120.0, 32.0)))
+                            .clicked()
+                        {
+                            delete_fn();
+                        }
+                    }
+                }
+            });
+        });
     });
 }
 
-/// Rendering the group name input field
-fn draw_group_name_ui(ui: &mut egui::Ui, group_name: &mut String) {
-    ui.horizontal(|ui| {
-        ui.label("Group name:");
-        ui.text_edit_singleline(group_name).request_focus();
-    });
-}
 
 /// Rendering the CPU cores section: a list of already created clusters and a panel of free cores.
 /// Using HashSet for optimal calculation of free cores.
@@ -234,18 +244,20 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
     let mut cancel_clicked = false;
 
     CentralPanel::default().show(ctx, |ui| {
+        ui.add_space(5.0);
         ui.horizontal(|ui| {
-            let res = ui.heading("Create New Group");
-            res.on_hover_text("Create a new group of CPU cores");
+            ui.heading(RichText::new("➕ Create New Group").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                if ui.button("❌").on_hover_text("Close").clicked() {
+                if ui.button("Back").on_hover_text("Close").clicked() {
                     cancel_clicked = true;
                 }
             });
         });
+        ui.add_space(10.0);
 
-        Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
                 // Get clusters using helper method
                 let mut clusters = app.get_clusters().unwrap_or_default();
                 draw_group_form_ui(
@@ -260,7 +272,6 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
                 // Update clusters if needed
                 app.set_clusters(clusters);
             });
-        });
     });
 
     if create_clicked || cancel_clicked {
@@ -284,31 +295,34 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
         let mut delete_clicked = false;
         let mut cancel_clicked = false;
 
-        // Get a group name for display (unused currently)
-        let _group_name = app.get_group_name(index).unwrap_or_default();
-
+        ui.add_space(5.0);
         ui.horizontal(|ui| {
-            ui.heading("Edit Group");
+            ui.heading(RichText::new("⚙ Edit Group").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                 if ui.button("❌").on_hover_text("Close").clicked() {
                     cancel_clicked = true;
                 }
             });
         });
+        ui.add_space(10.0);
 
-        // Get clusters using helper method
-        let mut clusters = app.get_clusters().unwrap_or_default();
-        draw_group_form_ui(
-            ui,
-            &mut app.group_form,
-            &mut clusters,
-            true,
-            &mut || save_clicked = true,
-            &mut || cancel_clicked = true,
-            Some(&mut || delete_clicked = true),
-        );
-        // Update clusters if needed
-        app.set_clusters(clusters);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Get clusters using helper method
+                let mut clusters = app.get_clusters().unwrap_or_default();
+                draw_group_form_ui(
+                    ui,
+                    &mut app.group_form,
+                    &mut clusters,
+                    true,
+                    &mut || save_clicked = true,
+                    &mut || cancel_clicked = true,
+                    Some(&mut || delete_clicked = true),
+                );
+                // Update clusters if needed
+                app.set_clusters(clusters);
+            });
 
         if save_clicked {
             // Get updated clusters

@@ -1,0 +1,24 @@
+### v1.0.6 (2026-01-07)
+
+This release focuses on improving system integration, enhancing code quality, and preparing the codebase for future Rust standards.
+
+#### ✨ Features
+- **System Tray Integration**: Added initial system tray support for Windows, providing better application lifecycle management and accessibility.
+- **Enhanced UI Tooltips**: Running applications now show a hover tooltip containing their Process IDs (PIDs), making it easier to identify and manage specific instances.
+
+#### 🛠️ Refactoring & Improvements
+- **Windows API Refinement**: Extensive overhaul of the `os_api` for Windows. This includes modularizing utilities, improving process management logic, and extracting reusable helpers to reduce code duplication.
+- **Modern Rust Standards**: Applied safety annotations and updated code patterns to adhere to upcoming Rust 2024 standards.
+- **Tray Interaction Logic**: Simplified tray commands and refined double-click behavior for a more intuitive user experience.
+- **Localization**: All internal comments in core modules (`app.rs`, `tray.rs`) have been translated to English for better community collaboration.
+- **Code Consistency**: Improved overall code readability and formatting across the project.
+
+#### 🚀 Performance
+- **Memory Allocation**: Integrated `mimalloc` as the default allocator to improve performance and memory efficiency.
+
+#### 📦 Chore & Dependencies
+- **Dependency Update**: Updated `windows` crate to version `0.62.2`.
+- **Platform Support**: Added platform-specific dependencies to ensure smoother builds and runtime behavior.
+
+---
+*For more details on changes, see the [full diff](https://github.com/middaysan/cpu-affinity-tool/compare/v1.0.5...v1.0.6).*
