@@ -1,0 +1,19 @@
+### Changes in Version 1.0.8
+
+#### User Interface (UI/UX)
+
+* **Design unification**: Introduced a new “glass” panel style (`glass_frame`). All primary UI elements (logs, group settings, app settings) now use a consistent visual style with transparency and blur.
+* **App management refactor**: The app removal button (“Remove from group”) was moved from the main list into the app settings window (`⚙ Edit App Settings`). This reduces clutter in the main UI and helps prevent accidental deletions.
+* **Improved navigation**: In the app settings window, the delete button is now highlighted in red to make destructive actions more visible.
+
+#### Internal Logic and Stability
+
+* **Centralized tips logic**: The mechanism for toggling helpful tips in the header was moved from the view layer into `AppState`. This provides more reliable state handling when switching between windows.
+* **Group handling optimization**: Added helper methods for safely retrieving group and program data, reducing the risk of state access errors.
+* **Borrow checker fix**: Refactored `run_settings.rs` to eliminate potential borrowing conflicts when rendering the UI and modifying state at the same time.
+
+#### Technical Changes
+
+* Added `src/app/views/shared_elements.rs` to host shared UI components.
+* Updated the `AppState` structure to support tip rotation intervals.
+* Removed unused imports and obsolete `Frame` definitions across the project.
