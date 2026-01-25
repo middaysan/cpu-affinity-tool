@@ -1,6 +1,6 @@
 use crate::app::models::AppState;
 use crate::app::models::GroupFormState;
-use eframe::egui::{self, CentralPanel, Frame, RichText};
+use eframe::egui::{self, CentralPanel, Color32, Frame, RichText, Shadow, Stroke};
 use std::collections::HashSet;
 
 /// Form for creating/editing a group: divided into rendering the name and the section with cores and clusters.
@@ -15,12 +15,7 @@ fn draw_group_form_ui(
 ) {
     clusters.retain(|cluster| !cluster.is_empty());
 
-    let frame = Frame::group(ui.style())
-        .fill(ui.visuals().faint_bg_color)
-        .corner_radius(5.0)
-        .inner_margin(15.0);
-
-    frame.show(ui, |ui| {
+    glass_frame(ui).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Group name:").strong());
             ui.text_edit_singleline(&mut groups.group_name).request_focus();
@@ -75,6 +70,40 @@ fn draw_group_form_ui(
     });
 }
 
+fn glass_frame(ui: &egui::Ui) -> Frame {
+    let v = ui.visuals();
+    let dark_mode = v.dark_mode;
+
+    let tint = if dark_mode {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 28)
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 12)
+    };
+
+    let fill = tint;
+
+    let stroke_color = if dark_mode {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 55)
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 35)
+    };
+    let stroke = Stroke::new(1.0, stroke_color);
+
+    let shadow_alpha = if dark_mode { 80 } else { 10 };
+    let shadow = Shadow {
+        offset: [0, 3],
+        blur: 16,
+        spread: 0,
+        color: Color32::from_black_alpha(shadow_alpha),
+    };
+
+    Frame::NONE
+        .fill(fill)
+        .stroke(stroke)
+        .shadow(shadow)
+        .corner_radius(7.0)
+        .inner_margin(egui::Margin::same(15))
+}
 
 /// Rendering the CPU cores section: a list of already created clusters and a panel of free cores.
 /// Using HashSet for optimal calculation of free cores.
@@ -123,7 +152,6 @@ fn draw_cpu_cores_ui(
     }
 
     if !free_core_indexes.is_empty() {
-        ui.separator();
         ui.group(|ui| {
             ui.label("Free Cores");
             draw_core_buttons(
@@ -248,7 +276,7 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.heading(RichText::new("➕ Create New Group").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                if ui.button("Back").on_hover_text("Close").clicked() {
+                if ui.button("Close").on_hover_text("Close").clicked() {
                     cancel_clicked = true;
                 }
             });

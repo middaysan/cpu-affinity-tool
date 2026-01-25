@@ -1,6 +1,6 @@
 use crate::app::models::AppState;
 use crate::app::models::AppToRun;
-use eframe::egui::{self, CentralPanel, Frame, Layout, RichText, ScrollArea};
+use eframe::egui::{self, Align, CentralPanel, Frame, Layout, RichText, ScrollArea};
 use eframe::egui::{Color32, Vec2};
 
 pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
@@ -68,10 +68,16 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&group_name).heading().strong());
-                    ui.label(RichText::new(format!("Cores: {:?}", group_cores)).small().weak());
+
+                    ui.add_sized(
+                        [350.0, 0.0],
+                        egui::Label::new(
+                            RichText::new(format!("Cores: {:?}", group_cores)).small().weak()
+                        ),
+                    );
                 });
 
-                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
                     if ui
                         .button("⚙")
                         .on_hover_text("Edit group settings")
@@ -198,20 +204,22 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         ui.add_space(4.0);
 
                         let label = &prog.name;
-                        let app_button = egui::Button::new(RichText::new(label).strong())
-                            .frame(false);
+                        let app_button = egui::Button::new(RichText::new(label).strong());
                         
                         let response = ui.add_sized(
                             [ui.available_width() - 60.0, 20.0],
                             app_button
                         );
 
-                        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("❌").on_hover_text("Remove from group").clicked() {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let delete_button  = ui.button("❌").on_hover_text("Remove from group");
+                            let edit_button = ui.button("⚙").on_hover_text("Edit app settings");
+
+                            if delete_button.clicked() {
                                 remove_program = Some((g_i, prog_index));
                                 modified = true;
                             }
-                            if ui.button("⚙").on_hover_text("Edit app settings").clicked() {
+                            if edit_button.clicked() {
                                 app.app_edit_state.run_settings = Some((g_i, prog_index));
                                 app.set_current_window(
                                     crate::app::controllers::WindowController::AppRunSettings,

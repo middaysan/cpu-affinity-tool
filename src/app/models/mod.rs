@@ -15,6 +15,7 @@ mod core_group;
 mod log_manager;
 /// Running application tracking
 mod running_app;
+mod meta;
 
 // Public re-exports of key structures for use in other modules
 pub use app::App;
@@ -22,3 +23,4 @@ pub use app_state::AppState;
 pub use app_to_run::AppToRun;
 pub use core_group::GroupFormState;
 pub use log_manager::LogManager;
+pub use meta::{APP_VERSION};

@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use crate::app::views::header::TIPS;
 
 /// The central state management component of the application.
 /// This structure holds all the application states, including persistent data,
@@ -38,6 +39,8 @@ pub struct AppState {
     pub running_apps_statuses: HashMap<String, bool>,
     /// Index of the currently displayed tip
     pub current_tip_index: usize,
+    //TIP_CHANGE_INTERVAL
+    pub tip_change_interval: f64,
     /// Time when the tip was last changed (in seconds since app start)
     pub last_tip_change_time: f64,
 
@@ -94,12 +97,12 @@ impl AppState {
                 run_settings: None,
             },
             dropped_files: None,
-            log_manager: LogManager { entries: vec![] },
+            log_manager: LogManager::default(),
             running_apps: Arc::new(RwLock::new(RunningApps::default())),
             running_apps_statuses: HashMap::new(),
             current_tip_index: 0,
             last_tip_change_time: 0.0,
-
+            tip_change_interval: 120.0, // Default to 2 minutes
             // ---- tray integration ----
             tray_rx: None,
             #[cfg(target_os = "windows")]
@@ -113,7 +116,7 @@ impl AppState {
 
         // Set the UI theme based on the theme index in the persistent state
         // Explicitly drop the future to avoid the "let-underscore-future" warning
-        std::mem::drop(app.apply_theme(ctx));
+        drop(app.apply_theme(ctx));
 
         // Create a clone of the running apps reference for the background monitors
         let apps_clone = Arc::clone(&app.running_apps);
@@ -781,6 +784,25 @@ impl AppState {
         } else {
             None
         }
+    }
+
+    /// Updates the current tip based on the time elapsed.
+    /// Returns true if the tip was updated, false otherwise.
+    pub fn get_tip(&mut self, current_time: f64) -> &str {
+        let time_since_last_change = current_time - self.last_tip_change_time;
+
+        if time_since_last_change >= self.tip_change_interval {
+            // Update to the next tip
+            // We use the TIPS length from header.rs, but since TIPS is public there,
+            // we might need to be careful about imports.
+            // However, the issue description suggests just moving the logic.
+            // Given TIPS is in header.rs, we'll need to reference it.
+            let tips_len = crate::app::views::header::TIPS.len();
+            self.current_tip_index = (self.current_tip_index + 1) % tips_len;
+            self.last_tip_change_time = current_time;
+        }
+
+        TIPS[self.current_tip_index]
     }
 }
 

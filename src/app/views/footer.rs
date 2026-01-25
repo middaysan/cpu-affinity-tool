@@ -1,5 +1,6 @@
 use crate::app::models::AppState;
 use eframe::egui::{self, Color32, Layout, Margin, RichText, TopBottomPanel};
+use crate::app::models::APP_VERSION;
 
 /// Draws the bottom panel (footer) of the application.
 ///
@@ -23,22 +24,25 @@ pub fn draw_bottom_panel(app: &mut AppState, ctx: &egui::Context) {
 
                         // Create the toggle button with appropriate icon and label
                         let (icon, label, color) = if monitoring_enabled {
-                            ("🔄", "Process Monitoring: ACTIVE", Color32::from_rgb(0, 200, 0))
+                            ("🔄", "ACTIVE", Color32::from_rgb(0, 200, 0))
                         } else {
-                            ("⏹", "Process Monitoring: DISABLED", ui.visuals().widgets.noninteractive.fg_stroke.color)
+                            ("⏹", "DISABLED", ui.visuals().widgets.noninteractive.fg_stroke.color)
                         };
 
                         // Add the toggle button with hover text
-                        if ui.button(icon).on_hover_text("💡 When enabled, automatically restores CPU affinity and priority settings if processes change them").clicked() {
+                        if ui.button(icon).on_hover_text("Automatically restores CPU affinity and priority\n settings if processes change them").clicked() {
                             app.toggle_process_monitoring();
                         }
 
                         ui.add_space(4.0);
                         // Add a label explaining the feature
-                        ui.label(RichText::new(label).color(color).small().strong());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Process Monitoring: ").color(ui.visuals().widgets.noninteractive.fg_stroke.color).small().strong());
+                            ui.label(RichText::new(label).color(color).small().strong());
+                        });
 
                         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new("v1.0.7").small().weak());
+                            ui.label(egui::RichText::new(format!("v{APP_VERSION}")).small().weak());
                         });
                     });
                 });

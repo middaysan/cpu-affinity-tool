@@ -41,7 +41,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
         ui.horizontal(|ui| {
             ui.heading(RichText::new("⚙ Edit App Settings").strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("❌").on_hover_text("Close").clicked() {
+                if ui.button("Close").on_hover_text("Close").clicked() {
                     is_close = true;
                 }
             });
@@ -90,12 +90,12 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                         ComboBox::from_id_salt("priority_combo")
                             .selected_text(format!("{:?}", selected_app.priority))
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut selected_app.priority, PriorityClass::Idle, "Idle");
-                                ui.selectable_value(&mut selected_app.priority, PriorityClass::BelowNormal, "Below Normal");
-                                ui.selectable_value(&mut selected_app.priority, PriorityClass::Normal, "Normal");
-                                ui.selectable_value(&mut selected_app.priority, PriorityClass::AboveNormal, "Above Normal");
-                                ui.selectable_value(&mut selected_app.priority, PriorityClass::High, "High");
                                 ui.selectable_value(&mut selected_app.priority, PriorityClass::Realtime, "RealTime");
+                                ui.selectable_value(&mut selected_app.priority, PriorityClass::High, "High");
+                                ui.selectable_value(&mut selected_app.priority, PriorityClass::AboveNormal, "Above Normal");
+                                ui.selectable_value(&mut selected_app.priority, PriorityClass::Normal, "Normal");
+                                ui.selectable_value(&mut selected_app.priority, PriorityClass::BelowNormal, "Below Normal");
+                                ui.selectable_value(&mut selected_app.priority, PriorityClass::Idle, "Low");
                             });
                         ui.end_row();
                     });
