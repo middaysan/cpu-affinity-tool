@@ -13,47 +13,65 @@ pub static TIPS: [&str; 5] = [
 
 pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
     TopBottomPanel::top("top_panel").show(ctx, |ui| {
-        egui::Frame::NONE.inner_margin(Margin::same(4)).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let (icon, label) = match app.get_theme_index() {
-                    0 => ("💻", "System theme"),
-                    1 => ("☀", "Light theme"),
-                    _ => ("🌙", "Dark theme"),
-                };
-                if ui.button(RichText::new(icon).size(16.0)).on_hover_text(label).clicked() {
-                    app.toggle_theme(ctx);
-                }
-                ui.separator();
-                ui.label(RichText::new("CPU Affinity Tool").heading().strong());
-
-                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+        egui::Frame::NONE
+            .inner_margin(Margin::same(4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (icon, label) = match app.get_theme_index() {
+                        0 => ("💻", "System theme"),
+                        1 => ("☀", "Light theme"),
+                        _ => ("🌙", "Dark theme"),
+                    };
                     if ui
-                        .button(RichText::new(format!("📄 Logs ({})", app.log_manager.entries.len())).strong())
+                        .button(RichText::new(icon).size(16.0))
+                        .on_hover_text(label)
                         .clicked()
                     {
-                        app.set_current_window(crate::app::controllers::WindowController::Logs);
+                        app.toggle_theme(ctx);
                     }
-                    if ui.button(RichText::new("➕ Create Group").strong()).clicked() {
-                        app.set_current_window(crate::app::controllers::WindowController::Groups(
-                            crate::app::controllers::Group::Create,
-                        ));
-                    }
+                    ui.separator();
+                    ui.label(RichText::new("CPU Affinity Tool").heading().strong());
+
+                    ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(
+                                RichText::new(format!(
+                                    "📄 Logs ({})",
+                                    app.log_manager.entries.len()
+                                ))
+                                .strong(),
+                            )
+                            .clicked()
+                        {
+                            app.set_current_window(crate::app::controllers::WindowController::Logs);
+                        }
+                        if ui
+                            .button(RichText::new("➕ Create Group").strong())
+                            .clicked()
+                        {
+                            app.set_current_window(
+                                crate::app::controllers::WindowController::Groups(
+                                    crate::app::controllers::Group::Create,
+                                ),
+                            );
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                ui.separator();
+
+                // Display the current tip
+                ui.vertical(|ui| {
+                    ui.add_sized(
+                        [450.0, 25.0],
+                        egui::Label::new(
+                            RichText::new(app.get_tip(ctx.input(|i| i.time)))
+                                .small()
+                                .weak()
+                                .italics(),
+                        ),
+                    )
                 });
             });
-            ui.add_space(4.0);
-            ui.separator();
-
-            // Display the current tip
-            ui.vertical(|ui| {
-                ui.add_sized(
-                    [450.0, 25.0],
-                    egui::Label::new(
-                        RichText::new(
-                            app.get_tip(ctx.input(|i| i.time))
-                        ).small().weak().italics()
-                    )
-                )
-            });
-        });
     });
 }

@@ -4,6 +4,7 @@ use crate::app::models::app_to_run::{AppToRun, RunAppEditState};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
 use crate::app::models::running_app::RunningApps;
 use crate::app::models::LogManager;
+use crate::app::views::header::TIPS;
 use crate::tray::TrayCmd;
 use eframe::egui;
 use num_cpus;
@@ -13,7 +14,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::app::views::header::TIPS;
 
 /// The central state management component of the application.
 /// This structure holds all the application states, including persistent data,

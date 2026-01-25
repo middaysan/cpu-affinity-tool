@@ -19,7 +19,8 @@ fn draw_group_form_ui(
     glass_frame(ui).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Group name:").strong());
-            ui.text_edit_singleline(&mut groups.group_name).request_focus();
+            ui.text_edit_singleline(&mut groups.group_name)
+                .request_focus();
         });
 
         ui.add_space(8.0);
@@ -41,13 +42,16 @@ fn draw_group_form_ui(
 
         ui.horizontal(|ui| {
             if ui
-                .add(egui::Button::new(RichText::new("💾 Save Changes").strong()).min_size(egui::vec2(120.0, 32.0)))
+                .add(
+                    egui::Button::new(RichText::new("💾 Save Changes").strong())
+                        .min_size(egui::vec2(120.0, 32.0)),
+                )
                 .clicked()
                 || ui.input(|i| i.key_pressed(egui::Key::Enter))
             {
                 on_save();
             }
-            
+
             if ui
                 .add(egui::Button::new("❌ Cancel").min_size(egui::vec2(100.0, 32.0)))
                 .clicked()
@@ -59,7 +63,12 @@ fn draw_group_form_ui(
                 if is_edit {
                     if let Some(delete_fn) = on_delete {
                         if ui
-                            .add(egui::Button::new(RichText::new("🗑 Delete Group").color(egui::Color32::RED)).min_size(egui::vec2(120.0, 32.0)))
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("🗑 Delete Group").color(egui::Color32::RED),
+                                )
+                                .min_size(egui::vec2(120.0, 32.0)),
+                            )
                             .clicked()
                         {
                             delete_fn();

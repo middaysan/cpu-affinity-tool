@@ -31,10 +31,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     if g_i > 0 {
-                        if ui.button("⏶")
-                            .on_hover_text("Move group up")
-                            .clicked()
-                        {
+                        if ui.button("⏶").on_hover_text("Move group up").clicked() {
                             swap_step = Some((g_i, true));
                         }
                     } else {
@@ -42,10 +39,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                     }
 
                     if g_i < groups_len - 1 {
-                        if ui.button("⏷")
-                            .on_hover_text("Move group down")
-                            .clicked()
-                        {
+                        if ui.button("⏷").on_hover_text("Move group down").clicked() {
                             swap_step = Some((g_i, false));
                         }
                     } else {
@@ -65,7 +59,9 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                     ui.add_sized(
                         [350.0, 0.0],
                         egui::Label::new(
-                            RichText::new(format!("Cores: {:?}", group_cores)).small().weak()
+                            RichText::new(format!("Cores: {:?}", group_cores))
+                                .small()
+                                .weak(),
                         ),
                     );
                 });
@@ -148,8 +144,9 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                                 // Get group name using helper method
                                 let group_name = app.get_group_name(g_i).unwrap_or_default();
 
-                                app.log_manager
-                                    .add_entry(format!("No executables to run in group: {group_name}"));
+                                app.log_manager.add_entry(format!(
+                                    "No executables to run in group: {group_name}"
+                                ));
                             } else {
                                 for (prog_index, prog) in programs.iter().enumerate() {
                                     run_program.get_or_insert_with(Vec::new).push((
@@ -174,7 +171,11 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                 if programs.is_empty() {
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("No executables. Drag & drop files here to add.").weak().italics());
+                        ui.label(
+                            RichText::new("No executables. Drag & drop files here to add.")
+                                .weak()
+                                .italics(),
+                        );
                     });
                 } else {
                     let len = programs.len();
@@ -182,43 +183,45 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         let prog = app.get_group_program(g_i, prog_index).unwrap();
                         let is_app_run = app.is_app_running_sync(&prog.get_key());
 
-                    ui.horizontal(|ui| {
-                        let (rect, response) = ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
-                        let color = if is_app_run {
-                            if let Some(pids) = app.get_running_app_pids(&prog.get_key()) {
-                                response.on_hover_text(format!("Tracking PIDs: {:?}", pids));
-                            }
-                            Color32::from_rgb(0, 255, 0)
-                        } else {
-                            Color32::from_rgb(200, 0, 0)
-                        };
-                        ui.painter().circle_filled(rect.center(), 5.0, color);
+                        ui.horizontal(|ui| {
+                            let (rect, response) =
+                                ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
+                            let color = if is_app_run {
+                                if let Some(pids) = app.get_running_app_pids(&prog.get_key()) {
+                                    response.on_hover_text(format!("Tracking PIDs: {:?}", pids));
+                                }
+                                Color32::from_rgb(0, 255, 0)
+                            } else {
+                                Color32::from_rgb(200, 0, 0)
+                            };
+                            ui.painter().circle_filled(rect.center(), 5.0, color);
 
-                        ui.add_space(4.0);
+                            ui.add_space(4.0);
 
-                        let label = &prog.name;
-                        let app_button = egui::Button::new(RichText::new(label).strong());
-                        
-                        let response = ui.add_sized(
-                            [ui.available_width() - 30.0, 20.0],
-                            app_button
-                        );
+                            let label = &prog.name;
+                            let app_button = egui::Button::new(RichText::new(label).strong());
 
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let edit_button = ui.button("⚙").on_hover_text("Edit app settings");
+                            let response =
+                                ui.add_sized([ui.available_width() - 30.0, 20.0], app_button);
 
-                            if edit_button.clicked() {
-                                app.app_edit_state.run_settings = Some((g_i, prog_index));
-                                app.set_current_window(
-                                    crate::app::controllers::WindowController::AppRunSettings,
-                                );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let edit_button = ui.button("⚙").on_hover_text("Edit app settings");
+
+                                if edit_button.clicked() {
+                                    app.app_edit_state.run_settings = Some((g_i, prog_index));
+                                    app.set_current_window(
+                                        crate::app::controllers::WindowController::AppRunSettings,
+                                    );
+                                }
+                            });
+
+                            if response
+                                .on_hover_text(prog.bin_path.to_string_lossy().to_string())
+                                .clicked()
+                            {
+                                run_program = Some(vec![(g_i, prog_index, prog.clone())]);
                             }
                         });
-
-                        if response.on_hover_text(prog.bin_path.to_string_lossy().to_string()).clicked() {
-                            run_program = Some(vec![(g_i, prog_index, prog.clone())]);
-                        }
-                    });
                         if prog_index < len - 1 {
                             ui.add_space(2.0);
                         }

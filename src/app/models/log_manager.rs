@@ -7,7 +7,8 @@ pub struct LogEntry {
 impl LogEntry {
     /// Formats the log entry as a string: "[HH:MM:SS] :: message"
     pub fn format(&self) -> String {
-        let duration = self.timestamp
+        let duration = self
+            .timestamp
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
 

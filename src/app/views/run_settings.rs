@@ -67,12 +67,17 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
 
                         ui.label(RichText::new("Binary Path:").strong());
                         ui.horizontal(|ui| {
-                            let mut bin_path_str = selected_app.bin_path.to_string_lossy().to_string();
+                            let mut bin_path_str =
+                                selected_app.bin_path.to_string_lossy().to_string();
                             if ui.text_edit_singleline(&mut bin_path_str).changed() {
                                 selected_app.bin_path = std::path::PathBuf::from(bin_path_str);
                             }
 
-                            if ui.button("📂").on_hover_text("Select executable...").clicked() {
+                            if ui
+                                .button("📂")
+                                .on_hover_text("Select executable...")
+                                .clicked()
+                            {
                                 if let Some(path) = rfd::FileDialog::new()
                                     .add_filter("Executables", &["exe"])
                                     .pick_file()
@@ -87,18 +92,45 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                         ComboBox::from_id_salt("priority_combo")
                             .selected_text(format!("{:?}", selected_app.priority))
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut selected_app.priority, PriorityClass::Realtime, "RealTime");
-                                ui.selectable_value(&mut selected_app.priority, PriorityClass::High, "High");
-                                ui.selectable_value(&mut selected_app.priority, PriorityClass::AboveNormal, "Above Normal");
-                                ui.selectable_value(&mut selected_app.priority, PriorityClass::Normal, "Normal");
-                                ui.selectable_value(&mut selected_app.priority, PriorityClass::BelowNormal, "Below Normal");
-                                ui.selectable_value(&mut selected_app.priority, PriorityClass::Idle, "Low");
+                                ui.selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::Realtime,
+                                    "RealTime",
+                                );
+                                ui.selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::High,
+                                    "High",
+                                );
+                                ui.selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::AboveNormal,
+                                    "Above Normal",
+                                );
+                                ui.selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::Normal,
+                                    "Normal",
+                                );
+                                ui.selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::BelowNormal,
+                                    "Below Normal",
+                                );
+                                ui.selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::Idle,
+                                    "Low",
+                                );
                             });
                         ui.end_row();
                     });
 
                 ui.add_space(10.0);
-                ui.checkbox(&mut selected_app.autorun, RichText::new("Start this app on startup").strong());
+                ui.checkbox(
+                    &mut selected_app.autorun,
+                    RichText::new("Start this app on startup").strong(),
+                );
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(10.0);
@@ -136,7 +168,10 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
 
                 ui.horizontal(|ui| {
                     if ui
-                        .add(egui::Button::new(RichText::new("💾 Save Changes").strong()).min_size(egui::vec2(120.0, 32.0)))
+                        .add(
+                            egui::Button::new(RichText::new("💾 Save Changes").strong())
+                                .min_size(egui::vec2(120.0, 32.0)),
+                        )
                         .clicked()
                     {
                         updated_app = Some(selected_app.clone());
@@ -152,7 +187,12 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .add(egui::Button::new(RichText::new("🗑 Remove from group").color(egui::Color32::RED)).min_size(egui::vec2(150.0, 32.0)))
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("🗑 Remove from group").color(egui::Color32::RED),
+                                )
+                                .min_size(egui::vec2(150.0, 32.0)),
+                            )
                             .on_hover_text("Remove this application from the group")
                             .clicked()
                         {
