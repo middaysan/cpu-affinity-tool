@@ -1,6 +1,6 @@
 [package]
 name = "cpu-affinity-tool" 
-version = "0.1.0"
+version = "1.0.8"
 edition = "2021"
 default-run = "cpu-affinity-tool"
 
@@ -23,7 +23,7 @@ debug = true
 
 [dependencies]
 mimalloc = "0.1.48"
-tokio = { version = "1.44.2", features = ["time", "sync", "rt", "macros", "full"] }
+tokio = { version = "1.49.0", features = ["time", "sync", "rt", "macros", "full"] }
 [target.'cfg(windows)'.dependencies]
 os_api = { path = "libs/os_api" }
 eframe = { version = "0.33.3", default-features = false, features = ["accesskit", "default_fonts", "glow"] }

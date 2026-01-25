@@ -1,7 +1,8 @@
 use crate::app::models::AppState;
 use crate::app::models::AppToRun;
-use eframe::egui::{self, CentralPanel, Frame, Layout, RichText, ScrollArea};
-use eframe::egui::{Color32, Painter, Vec2};
+use crate::app::views::shared_elements::glass_frame;
+use eframe::egui::{self, Align, CentralPanel, Layout, RichText, ScrollArea};
+use eframe::egui::{Color32, Vec2};
 
 pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
     CentralPanel::default().show(ctx, |ui| {
@@ -19,42 +20,52 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
     let mut modified = false;
 
     let mut run_program: Option<Vec<(usize, usize, AppToRun)>> = None;
-    let mut remove_program: Option<(usize, usize)> = None;
 
     let mut swap_step: Option<(usize, bool)> = None;
     let groups = app.get_groups().unwrap_or_default();
     let groups_len = groups.len();
 
     for g_i in 0..groups_len {
-        Frame::group(ui.style()).outer_margin(5.0).show(ui, |ui| {
+        glass_frame(ui).outer_margin(5.0).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.spacing_mut().item_spacing.y = 2.0;
                     if g_i > 0 {
-                        ui.small_button("⬆")
-                            .on_hover_text("Move group up")
-                            .clicked()
-                            .then(|| {
-                                swap_step = Some((g_i, true));
-                            });
+                        if ui.button("⏶").on_hover_text("Move group up").clicked() {
+                            swap_step = Some((g_i, true));
+                        }
+                    } else {
+                        ui.add_enabled(false, egui::Button::new("⏶"));
                     }
 
                     if g_i < groups_len - 1 {
-                        ui.small_button("⬇")
-                            .on_hover_text("Move group down")
-                            .clicked()
-                            .then(|| {
-                                swap_step = Some((g_i, false));
-                            });
+                        if ui.button("⏷").on_hover_text("Move group down").clicked() {
+                            swap_step = Some((g_i, false));
+                        }
+                    } else {
+                        ui.add_enabled(false, egui::Button::new("⏷"));
                     }
                 });
+
+                ui.add_space(8.0);
 
                 // Get group name and cores using helper methods
                 let group_name = app.get_group_name(g_i).unwrap_or_default();
                 let group_cores = app.get_group_cores(g_i).unwrap_or_default();
 
-                ui.label(RichText::new(&group_name).heading())
-                    .on_hover_text(RichText::new(format!("cores: {group_cores:?}")).weak());
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(&group_name).heading().strong());
+
+                    ui.add_sized(
+                        [350.0, 0.0],
+                        egui::Label::new(
+                            RichText::new(format!("Cores: {:?}", group_cores))
+                                .small()
+                                .weak(),
+                        ),
+                    );
+                });
+
                 ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
                     if ui
                         .button("⚙")
@@ -64,13 +75,15 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         app.start_editing_group(g_i);
                     }
 
+                    ui.separator();
+
                     // Get is_hidden using helper method
                     let is_hidden = app.get_group_is_hidden(g_i).unwrap_or(false);
 
                     let button_text = if is_hidden {
-                        RichText::new("\u{1F441}").strikethrough()
+                        RichText::new("👁").strikethrough()
                     } else {
-                        RichText::new("\u{1F441}").strong()
+                        RichText::new("👁")
                     };
 
                     let hover_text = if is_hidden {
@@ -87,7 +100,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                     // TODO: add linux support
                     if ui
-                        .button("📁Add")
+                        .button("➕ Add App")
                         .on_hover_text("Add executables...")
                         .clicked()
                     {
@@ -120,7 +133,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                     if run_all_button
                         && ui
-                            .button("▶ Run all")
+                            .button(RichText::new("▶ Run All").color(Color32::from_rgb(0, 200, 0)))
                             .on_hover_text("Run all apps in group")
                             .clicked()
                     {
@@ -146,80 +159,70 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                 });
             });
 
-            ui.separator();
+            if !app.get_group_is_hidden(g_i).unwrap_or(false) {
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
 
-            // Get is_hidden using helper method
-            let is_hidden = app.get_group_is_hidden(g_i).unwrap_or(false);
-
-            if !is_hidden {
                 // Get programs using helper method
                 let programs = app.get_group_programs(g_i).unwrap_or_default();
 
                 if programs.is_empty() {
-                    ui.label("No executables. Drag & drop a file here to add.");
-                    ui.add_space(15.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("No executables. Drag & drop files here to add.")
+                                .weak()
+                                .italics(),
+                        );
+                    });
                 } else {
                     let len = programs.len();
                     for prog_index in 0..len {
+                        let prog = app.get_group_program(g_i, prog_index).unwrap();
+                        let is_app_run = app.is_app_running_sync(&prog.get_key());
+
                         ui.horizontal(|ui| {
-                            // Get program using helper method
-                            let prog = app.get_group_program(g_i, prog_index).unwrap();
-
-                            // Use is_app_running_sync instead of is_app_running
-                            let is_app_run = app.is_app_running_sync(&prog.get_key());
-
-                            let label = prog.name.clone();
-                            // Set a fixed width for the entire row
-                            let available_width = ui.available_width();
-
                             let (rect, response) =
-                                ui.allocate_exact_size(Vec2::splat(15.0), egui::Sense::hover());
+                                ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
                             let color = if is_app_run {
                                 if let Some(pids) = app.get_running_app_pids(&prog.get_key()) {
                                     response.on_hover_text(format!("Tracking PIDs: {:?}", pids));
                                 }
-                                Color32::GREEN
+                                Color32::from_rgb(0, 255, 0)
                             } else {
-                                Color32::RED
+                                Color32::from_rgb(200, 0, 0)
                             };
-                            let painter = Painter::new(ui.ctx().clone(), ui.layer_id(), rect);
-                            painter.circle_filled(rect.center(), 4.0, color);
+                            ui.painter().circle_filled(rect.center(), 5.0, color);
 
-                            let app_title = RichText::new(format!("▶  {label}"));
-                            let button = egui::Button::new(app_title);
-                            let response = ui.add_sized(
-                                [
-                                    available_width - 90.0, // Reserve space for the two buttons
-                                    24.0,
-                                ],
-                                button,
-                            );
+                            ui.add_space(4.0);
 
-                            // Add the two action buttons with fixed widths
-                            let edit_settings = ui
-                                .add_sized([24.0, 24.0], egui::Button::new("⚙"))
-                                .on_hover_text("Edit app settings");
-                            let delete = ui
-                                .add_sized([24.0, 24.0], egui::Button::new("❌"))
-                                .on_hover_text("Remove from group");
+                            let label = &prog.name;
+                            let app_button = egui::Button::new(RichText::new(label).strong());
+
+                            let response =
+                                ui.add_sized([ui.available_width() - 30.0, 20.0], app_button);
+
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let edit_button = ui.button("⚙").on_hover_text("Edit app settings");
+
+                                if edit_button.clicked() {
+                                    app.app_edit_state.run_settings = Some((g_i, prog_index));
+                                    app.set_current_window(
+                                        crate::app::controllers::WindowController::AppRunSettings,
+                                    );
+                                }
+                            });
 
                             if response
-                                .on_hover_text(prog.bin_path.to_str().unwrap_or(""))
+                                .on_hover_text(prog.bin_path.to_string_lossy().to_string())
                                 .clicked()
                             {
                                 run_program = Some(vec![(g_i, prog_index, prog.clone())]);
                             }
-                            if delete.clicked() {
-                                remove_program = Some((g_i, prog_index));
-                                modified = true;
-                            }
-                            if edit_settings.clicked() {
-                                app.app_edit_state.run_settings = Some((g_i, prog_index));
-                                app.set_current_window(
-                                    crate::app::controllers::WindowController::AppRunSettings,
-                                );
-                            }
                         });
+                        if prog_index < len - 1 {
+                            ui.add_space(2.0);
+                        }
                     }
                 }
             }
@@ -269,10 +272,6 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
             // Use run_app_with_affinity_sync instead of run_app_with_affinity
             app.run_app_with_affinity_sync(g_index, p_index, prog);
         }
-    }
-
-    if let Some((g_i, p_i)) = remove_program {
-        app.remove_app_from_group(g_i, p_i);
     }
 
     if modified {

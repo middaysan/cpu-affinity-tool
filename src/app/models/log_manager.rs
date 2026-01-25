@@ -1,35 +1,17 @@
-/// Manages application log entries with timestamps.
-/// This structure is responsible for storing and formatting log messages
-/// that can be displayed to the user for debugging and informational purposes.
-pub struct LogManager {
-    /// Vector of log entries, each formatted with a timestamp
-    pub entries: Vec<String>,
+/// Represents a single log entry with a message and a timestamp.
+pub struct LogEntry {
+    pub message: String,
+    pub timestamp: std::time::SystemTime,
 }
 
-impl LogManager {
-    /// Adds a new log entry with a timestamp in the format [HH:MM:SS].
-    ///
-    /// Gets the current system time, formats it as a timestamp, and
-    /// prepends it to the message before adding it to the entry list.
-    ///
-    /// # Parameters
-    ///
-    /// * `message` - The log message to add
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let mut log_manager = LogManager { entries: vec![] };
-    /// log_manager.add_entry("Application started".to_string());
-    /// // Adds an entry like "[12:34:56] :: Application started"
-    /// ```
-    pub fn add_entry(&mut self, message: String) {
-        // Get current time since UNIX epoch
-        let duration = std::time::SystemTime::now()
+impl LogEntry {
+    /// Formats the log entry as a string: "[HH:MM:SS] :: message"
+    pub fn format(&self) -> String {
+        let duration = self
+            .timestamp
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
 
-        // Format time as [HH:MM:SS] using simple time calculations
         let secs = duration.as_secs();
         let ts = format!(
             "[{:02}:{:02}:{:02}]",
@@ -38,11 +20,39 @@ impl LogManager {
             secs % 60              // seconds
         );
 
-        let entry = format!("{ts} :: {message}");
+        format!("{ts} :: {}", self.message)
+    }
+}
+
+/// Manages application log entries with timestamps.
+/// This structure is responsible for storing and formatting log messages
+/// that can be displayed to the user for debugging and informational purposes.
+#[derive(Default)]
+pub struct LogManager {
+    /// Vector of log entries
+    pub entries: Vec<LogEntry>,
+}
+
+impl LogManager {
+    /// Adds a new log entry.
+    ///
+    /// # Parameters
+    ///
+    /// * `message` - The log message to add
+    pub fn add_entry(&mut self, message: String) {
+        let entry = LogEntry {
+            message,
+            timestamp: std::time::SystemTime::now(),
+        };
 
         #[cfg(debug_assertions)]
-        println!("{entry}");
+        println!("{}", entry.format());
 
         self.entries.push(entry);
+    }
+
+    /// Returns an iterator that yields formatted log strings.
+    pub fn formatted_entries(&self) -> impl DoubleEndedIterator<Item = String> + '_ {
+        self.entries.iter().map(|entry| entry.format())
     }
 }
