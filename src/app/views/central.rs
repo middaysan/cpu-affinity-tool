@@ -131,30 +131,29 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                     // Get run_all_button using helper method
                     let run_all_button = app.get_group_run_all_button(g_i).unwrap_or(false);
 
-                    if run_all_button {
-                        if ui
+                    if run_all_button
+                        && ui
                             .button(RichText::new("▶ Run All").color(Color32::from_rgb(0, 200, 0)))
                             .on_hover_text("Run all apps in group")
                             .clicked()
-                        {
-                            // Get programs using helper method
-                            let programs = app.get_group_programs(g_i).unwrap_or_default();
+                    {
+                        // Get programs using helper method
+                        let programs = app.get_group_programs(g_i).unwrap_or_default();
 
-                            if programs.is_empty() {
-                                // Get group name using helper method
-                                let group_name = app.get_group_name(g_i).unwrap_or_default();
+                        if programs.is_empty() {
+                            // Get group name using helper method
+                            let group_name = app.get_group_name(g_i).unwrap_or_default();
 
-                                app.log_manager.add_entry(format!(
-                                    "No executables to run in group: {group_name}"
+                            app.log_manager.add_entry(format!(
+                                "No executables to run in group: {group_name}"
+                            ));
+                        } else {
+                            for (prog_index, prog) in programs.iter().enumerate() {
+                                run_program.get_or_insert_with(Vec::new).push((
+                                    g_i,
+                                    prog_index,
+                                    prog.clone(),
                                 ));
-                            } else {
-                                for (prog_index, prog) in programs.iter().enumerate() {
-                                    run_program.get_or_insert_with(Vec::new).push((
-                                        g_i,
-                                        prog_index,
-                                        prog.clone(),
-                                    ));
-                                }
                             }
                         }
                     }
