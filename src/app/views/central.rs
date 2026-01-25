@@ -144,9 +144,8 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                             // Get group name using helper method
                             let group_name = app.get_group_name(g_i).unwrap_or_default();
 
-                            app.log_manager.add_entry(format!(
-                                "No executables to run in group: {group_name}"
-                            ));
+                            app.log_manager
+                                .add_entry(format!("No executables to run in group: {group_name}"));
                         } else {
                             for (prog_index, prog) in programs.iter().enumerate() {
                                 run_program.get_or_insert_with(Vec::new).push((
