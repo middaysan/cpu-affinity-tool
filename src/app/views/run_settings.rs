@@ -1,5 +1,6 @@
 use crate::app::models::AppState;
-use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Frame, Layout, RichText, Vec2};
+use crate::app::views::shared_elements::glass_frame;
+use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Layout, RichText, Vec2};
 use os_api::PriorityClass;
 
 pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
@@ -34,6 +35,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
     // Variables to track UI state
     let mut is_close = false;
     let mut save_clicked = false;
+    let mut delete_clicked = false;
     let mut updated_app = None;
 
     CentralPanel::default().show(ctx, |ui| {
@@ -49,12 +51,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
         ui.add_space(10.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            let frame = Frame::group(ui.style())
-                .fill(ui.visuals().faint_bg_color)
-                .corner_radius(5.0)
-                .inner_margin(15.0);
-
-            frame.show(ui, |ui| {
+            glass_frame(ui).show(ui, |ui| {
                 let selected_app = app
                     .app_edit_state
                     .current_edit
@@ -152,6 +149,17 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                     {
                         is_close = true;
                     }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(RichText::new("🗑 Remove from group").color(egui::Color32::RED)).min_size(egui::vec2(150.0, 32.0)))
+                            .on_hover_text("Remove this application from the group")
+                            .clicked()
+                        {
+                            delete_clicked = true;
+                            is_close = true;
+                        }
+                    });
                 });
             });
         });
@@ -162,6 +170,10 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
         if let Some(updated) = updated_app {
             app.update_program(group_idx, prog_idx, updated);
         }
+    }
+
+    if delete_clicked {
+        app.remove_app_from_group(group_idx, prog_idx);
     }
 
     // Handle close outside of any closures

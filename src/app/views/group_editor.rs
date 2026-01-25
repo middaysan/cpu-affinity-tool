@@ -1,6 +1,7 @@
 use crate::app::models::AppState;
 use crate::app::models::GroupFormState;
-use eframe::egui::{self, CentralPanel, Color32, Frame, RichText, Shadow, Stroke};
+use crate::app::views::shared_elements::glass_frame;
+use eframe::egui::{self, CentralPanel, RichText};
 use std::collections::HashSet;
 
 /// Form for creating/editing a group: divided into rendering the name and the section with cores and clusters.
@@ -68,41 +69,6 @@ fn draw_group_form_ui(
             });
         });
     });
-}
-
-fn glass_frame(ui: &egui::Ui) -> Frame {
-    let v = ui.visuals();
-    let dark_mode = v.dark_mode;
-
-    let tint = if dark_mode {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 28)
-    } else {
-        Color32::from_rgba_unmultiplied(0, 0, 0, 12)
-    };
-
-    let fill = tint;
-
-    let stroke_color = if dark_mode {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 55)
-    } else {
-        Color32::from_rgba_unmultiplied(0, 0, 0, 35)
-    };
-    let stroke = Stroke::new(1.0, stroke_color);
-
-    let shadow_alpha = if dark_mode { 80 } else { 10 };
-    let shadow = Shadow {
-        offset: [0, 3],
-        blur: 16,
-        spread: 0,
-        color: Color32::from_black_alpha(shadow_alpha),
-    };
-
-    Frame::NONE
-        .fill(fill)
-        .stroke(stroke)
-        .shadow(shadow)
-        .corner_radius(7.0)
-        .inner_margin(egui::Margin::same(15))
 }
 
 /// Rendering the CPU cores section: a list of already created clusters and a panel of free cores.

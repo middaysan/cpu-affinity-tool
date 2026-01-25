@@ -1,13 +1,9 @@
 use crate::app::models::AppState;
-use eframe::egui::{self, CentralPanel, Frame, RichText, ScrollArea};
+use crate::app::views::shared_elements::glass_frame;
+use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
 
 pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {
     CentralPanel::default().show(ctx, |ui| {
-        let frame = Frame::group(ui.style())
-            .fill(ui.visuals().faint_bg_color)
-            .corner_radius(5.0)
-            .inner_margin(15.0);
-
         ui.horizontal(|ui| {
             ui.heading("Logs");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -22,7 +18,7 @@ pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {
             });
         });
 
-        frame.show(ui, |ui| {
+        glass_frame(ui).show(ui, |ui| {
             ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {

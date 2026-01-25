@@ -1,6 +1,7 @@
 use crate::app::models::AppState;
 use crate::app::models::AppToRun;
-use eframe::egui::{self, Align, CentralPanel, Frame, Layout, RichText, ScrollArea};
+use crate::app::views::shared_elements::glass_frame;
+use eframe::egui::{self, Align, CentralPanel, Layout, RichText, ScrollArea};
 use eframe::egui::{Color32, Vec2};
 
 pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
@@ -19,21 +20,13 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
     let mut modified = false;
 
     let mut run_program: Option<Vec<(usize, usize, AppToRun)>> = None;
-    let mut remove_program: Option<(usize, usize)> = None;
 
     let mut swap_step: Option<(usize, bool)> = None;
     let groups = app.get_groups().unwrap_or_default();
     let groups_len = groups.len();
 
     for g_i in 0..groups_len {
-        let group_frame = Frame::group(ui.style())
-            .fill(ui.visuals().faint_bg_color)
-            .corner_radius(5.0)
-            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-            .outer_margin(5.0)
-            .inner_margin(10.0);
-
-        group_frame.show(ui, |ui| {
+        glass_frame(ui).outer_margin(5.0).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
@@ -207,18 +200,13 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         let app_button = egui::Button::new(RichText::new(label).strong());
                         
                         let response = ui.add_sized(
-                            [ui.available_width() - 60.0, 20.0],
+                            [ui.available_width() - 30.0, 20.0],
                             app_button
                         );
 
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let delete_button  = ui.button("❌").on_hover_text("Remove from group");
                             let edit_button = ui.button("⚙").on_hover_text("Edit app settings");
 
-                            if delete_button.clicked() {
-                                remove_program = Some((g_i, prog_index));
-                                modified = true;
-                            }
                             if edit_button.clicked() {
                                 app.app_edit_state.run_settings = Some((g_i, prog_index));
                                 app.set_current_window(
@@ -283,10 +271,6 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
             // Use run_app_with_affinity_sync instead of run_app_with_affinity
             app.run_app_with_affinity_sync(g_index, p_index, prog);
         }
-    }
-
-    if let Some((g_i, p_i)) = remove_program {
-        app.remove_app_from_group(g_i, p_i);
     }
 
     if modified {
