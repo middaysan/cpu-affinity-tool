@@ -5,9 +5,9 @@ pub fn glass_frame(ui: &egui::Ui) -> Frame {
     let dark_mode = v.dark_mode;
 
     let tint = if dark_mode {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 28)
+        Color32::from_rgba_unmultiplied(255, 255, 255, 14)
     } else {
-        Color32::from_rgba_unmultiplied(0, 0, 0, 28)
+        Color32::from_rgba_unmultiplied(0, 0, 0, 20)
     };
 
     let fill = tint;
