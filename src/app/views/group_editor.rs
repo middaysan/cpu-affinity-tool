@@ -234,7 +234,10 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 // Get cpu schema using helper method
-                let mut schema = app.get_cpu_schema().unwrap_or(CpuSchema { model: "Generic".into(), clusters: vec![] });
+                let mut schema = app.get_cpu_schema().unwrap_or_else(|| {
+                    let cpu_model = crate::app::models::AppStateStorage::get_effective_cpu_model();
+                    CpuSchema { model: cpu_model, clusters: vec![] }
+                });
                 draw_group_form_ui(
                     ui,
                     &mut app.group_form,
@@ -284,7 +287,10 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 // Get cpu schema using helper method
-                let mut schema = app.get_cpu_schema().unwrap_or(CpuSchema { model: "Generic".into(), clusters: vec![] });
+                let mut schema = app.get_cpu_schema().unwrap_or_else(|| {
+                    let cpu_model = crate::app::models::AppStateStorage::get_effective_cpu_model();
+                    CpuSchema { model: cpu_model, clusters: vec![] }
+                });
                 draw_group_form_ui(
                     ui,
                     &mut app.group_form,
@@ -300,7 +306,10 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
 
         if save_clicked {
             // Get updated schema
-            let schema = app.get_cpu_schema().unwrap_or(CpuSchema { model: "Generic".into(), clusters: vec![] });
+            let schema = app.get_cpu_schema().unwrap_or_else(|| {
+                let cpu_model = crate::app::models::AppStateStorage::get_effective_cpu_model();
+                CpuSchema { model: cpu_model, clusters: vec![] }
+            });
             let mut assigned = schema.get_assigned_cores();
 
             for (i, &selected) in app.group_form.core_selection.iter().enumerate() {

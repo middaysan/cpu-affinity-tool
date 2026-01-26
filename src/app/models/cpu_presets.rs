@@ -1,5 +1,6 @@
 use crate::app::models::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 use serde::Deserialize;
+use once_cell::sync::Lazy;
 
 #[derive(Deserialize)]
 struct SchemesRoot {
@@ -46,11 +47,15 @@ fn default_repeat() -> usize { 1 }
 
 const PRESETS_JSON: &str = include_str!("../../../assets/cpu_presets.json");
 
+static PRESETS: Lazy<Option<SchemesRoot>> = Lazy::new(|| {
+    serde_json::from_str(PRESETS_JSON).ok()
+});
+
 pub fn get_preset_for_model(model: &str, total_threads: usize) -> Option<CpuSchema> {
     let model_lower = model.to_lowercase();
-    let root: SchemesRoot = serde_json::from_str(PRESETS_JSON).ok()?;
+    let root = PRESETS.as_ref()?;
 
-    for scheme in root.schemes {
+    for scheme in &root.schemes {
         // Match logic
         let threads_match = scheme
             .match_config
@@ -71,7 +76,7 @@ pub fn get_preset_for_model(model: &str, total_threads: usize) -> Option<CpuSche
             let mut clusters = Vec::new();
             let mut current_thread_idx = 0;
 
-            for entry in scheme.layout {
+            for entry in &scheme.layout {
                 let cores_in_group = entry.cores.or(entry.cores_per_group).unwrap_or(0);
 
                 for r in 0..entry.repeat {

@@ -24,6 +24,7 @@ mod running_app;
 // Public re-exports of key structures for use in other modules
 pub use app::App;
 pub use app_state::AppState;
+pub use app_state_storage::AppStateStorage;
 pub use app_to_run::AppToRun;
 pub use cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 pub use core_group::GroupFormState;

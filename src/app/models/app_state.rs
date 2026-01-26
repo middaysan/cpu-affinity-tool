@@ -8,7 +8,6 @@ use crate::app::models::LogManager;
 use crate::app::views::header::TIPS;
 use crate::tray::TrayCmd;
 use eframe::egui;
-use num_cpus;
 use os_api::OS;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -89,7 +88,7 @@ impl AppState {
             group_form: GroupFormState {
                 editing_index: None,
                 editing_selection: None,
-                core_selection: vec![false; num_cpus::get()],
+                core_selection: vec![false; AppStateStorage::get_effective_total_threads()],
                 group_name: String::new(),
                 run_all_enabled: false,
             },
