@@ -1,5 +1,5 @@
-use crate::app::models::{AppState, CoreInfo, CoreType, CpuSchema};
 use crate::app::models::GroupFormState;
+use crate::app::models::{AppState, CoreInfo, CoreType, CpuSchema};
 use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, CentralPanel, RichText};
 
@@ -78,11 +78,7 @@ fn draw_group_form_ui(
 }
 
 /// Rendering the CPU cores section: a list of already created clusters and a panel of free cores.
-fn draw_cpu_cores_ui(
-    ui: &mut egui::Ui,
-    core_selection: &mut [bool],
-    cpu_schema: &mut CpuSchema,
-) {
+fn draw_cpu_cores_ui(ui: &mut egui::Ui, core_selection: &mut [bool], cpu_schema: &mut CpuSchema) {
     ui.with_layout(
         egui::Layout::top_down_justified(egui::Align::Center),
         |ui| {
@@ -101,48 +97,63 @@ fn draw_cpu_cores_ui(
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&cluster.name).strong());
             });
-            draw_core_buttons(
-                ui,
-                core_selection,
-                &mut cluster.cores,
-            );
+            draw_core_buttons(ui, core_selection, &mut cluster.cores);
         });
     }
 
     if !free_core_indexes.is_empty() {
         ui.group(|ui| {
             ui.label(RichText::new("Free Cores").strong());
-            
-            // Temporary CoreInfo for drawing buttons of free cores
-            let mut free_cores: Vec<CoreInfo> = free_core_indexes.iter().map(|&i| CoreInfo {
-                index: i,
-                core_type: CoreType::Other,
-                label: format!("{i}"),
-            }).collect();
 
-            draw_core_buttons(
-                ui,
-                core_selection,
-                &mut free_cores,
-            );
+            // Temporary CoreInfo for drawing buttons of free cores
+            let mut free_cores: Vec<CoreInfo> = free_core_indexes
+                .iter()
+                .map(|&i| CoreInfo {
+                    index: i,
+                    core_type: CoreType::Other,
+                    label: format!("{i}"),
+                })
+                .collect();
+
+            draw_core_buttons(ui, core_selection, &mut free_cores);
         });
     }
 }
 
 fn get_core_color(core_type: CoreType, dark_mode: bool) -> egui::Color32 {
     match core_type {
-        CoreType::Performance => if dark_mode { egui::Color32::from_rgb(100, 150, 250) } else { egui::Color32::from_rgb(50, 100, 200) },
-        CoreType::Efficient => if dark_mode { egui::Color32::from_rgb(100, 200, 100) } else { egui::Color32::from_rgb(50, 150, 50) },
-        CoreType::HyperThreading => if dark_mode { egui::Color32::from_rgb(200, 150, 100) } else { egui::Color32::from_rgb(150, 100, 50) },
-        CoreType::Other => if dark_mode { egui::Color32::DARK_GRAY } else { egui::Color32::GRAY },
+        CoreType::Performance => {
+            if dark_mode {
+                egui::Color32::from_rgb(100, 150, 250)
+            } else {
+                egui::Color32::from_rgb(50, 100, 200)
+            }
+        }
+        CoreType::Efficient => {
+            if dark_mode {
+                egui::Color32::from_rgb(100, 200, 100)
+            } else {
+                egui::Color32::from_rgb(50, 150, 50)
+            }
+        }
+        CoreType::HyperThreading => {
+            if dark_mode {
+                egui::Color32::from_rgb(200, 150, 100)
+            } else {
+                egui::Color32::from_rgb(150, 100, 50)
+            }
+        }
+        CoreType::Other => {
+            if dark_mode {
+                egui::Color32::DARK_GRAY
+            } else {
+                egui::Color32::GRAY
+            }
+        }
     }
 }
 
-fn draw_core_buttons(
-    ui: &mut egui::Ui,
-    core_selection: &mut [bool],
-    cores: &mut [CoreInfo],
-) {
+fn draw_core_buttons(ui: &mut egui::Ui, core_selection: &mut [bool], cores: &mut [CoreInfo]) {
     let dark_mode = ui.visuals().dark_mode;
     let all_selected_color = if dark_mode {
         egui::Color32::from_rgb(61, 79, 3)
@@ -182,7 +193,7 @@ fn draw_core_buttons(
                 };
 
                 let response = ui.add_sized(size, egui::Button::new("").fill(fill_color));
-                
+
                 let rect = response.rect;
                 let visuals = ui.style().interact(&response);
                 let text_color = visuals.fg_stroke.color;
@@ -236,7 +247,10 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
                 // Get cpu schema using helper method
                 let mut schema = app.get_cpu_schema().unwrap_or_else(|| {
                     let cpu_model = crate::app::models::AppStateStorage::get_effective_cpu_model();
-                    CpuSchema { model: cpu_model, clusters: vec![] }
+                    CpuSchema {
+                        model: cpu_model,
+                        clusters: vec![],
+                    }
                 });
                 draw_group_form_ui(
                     ui,
@@ -289,7 +303,10 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
                 // Get cpu schema using helper method
                 let mut schema = app.get_cpu_schema().unwrap_or_else(|| {
                     let cpu_model = crate::app::models::AppStateStorage::get_effective_cpu_model();
-                    CpuSchema { model: cpu_model, clusters: vec![] }
+                    CpuSchema {
+                        model: cpu_model,
+                        clusters: vec![],
+                    }
                 });
                 draw_group_form_ui(
                     ui,
@@ -308,7 +325,10 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
             // Get updated schema
             let schema = app.get_cpu_schema().unwrap_or_else(|| {
                 let cpu_model = crate::app::models::AppStateStorage::get_effective_cpu_model();
-                CpuSchema { model: cpu_model, clusters: vec![] }
+                CpuSchema {
+                    model: cpu_model,
+                    clusters: vec![],
+                }
             });
             let mut assigned = schema.get_assigned_cores();
 

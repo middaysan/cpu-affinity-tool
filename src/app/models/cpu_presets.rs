@@ -1,6 +1,6 @@
 use crate::app::models::{CoreInfo, CoreType, CpuCluster, CpuSchema};
-use serde::Deserialize;
 use once_cell::sync::Lazy;
+use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct SchemesRoot {
@@ -26,7 +26,7 @@ struct MatchConfig {
 struct LayoutEntry {
     #[serde(rename = "type")]
     entry_type: String,
-    
+
     #[serde(default = "default_threads_per_core")]
     threads_per_core: usize,
 
@@ -42,14 +42,16 @@ struct LayoutEntry {
     cores_per_group: Option<usize>,
 }
 
-fn default_threads_per_core() -> usize { 1 }
-fn default_repeat() -> usize { 1 }
+fn default_threads_per_core() -> usize {
+    1
+}
+fn default_repeat() -> usize {
+    1
+}
 
 const PRESETS_JSON: &str = include_str!("../../../assets/cpu_presets.json");
 
-static PRESETS: Lazy<Option<SchemesRoot>> = Lazy::new(|| {
-    serde_json::from_str(PRESETS_JSON).ok()
-});
+static PRESETS: Lazy<Option<SchemesRoot>> = Lazy::new(|| serde_json::from_str(PRESETS_JSON).ok());
 
 pub fn get_preset_for_model(model: &str, total_threads: usize) -> Option<CpuSchema> {
     let model_lower = model.to_lowercase();
@@ -60,8 +62,8 @@ pub fn get_preset_for_model(model: &str, total_threads: usize) -> Option<CpuSche
         let threads_match = scheme
             .match_config
             .total_threads
-            .map_or(true, |t| t == total_threads);
-        
+            .is_none_or(|t| t == total_threads);
+
         let keywords_match = if scheme.match_config.keywords.is_empty() {
             true
         } else {
@@ -87,15 +89,16 @@ pub fn get_preset_for_model(model: &str, total_threads: usize) -> Option<CpuSche
                     };
 
                     let mut core_infos = Vec::new();
-                    let label_prefix = entry.label_prefix.as_deref().unwrap_or(match entry
-                        .entry_type
-                        .as_str()
-                    {
-                        "performance" => "P",
-                        "efficient" => "E",
-                        "ccd" => "C",
-                        _ => "",
-                    });
+                    let label_prefix =
+                        entry
+                            .label_prefix
+                            .as_deref()
+                            .unwrap_or(match entry.entry_type.as_str() {
+                                "performance" => "P",
+                                "efficient" => "E",
+                                "ccd" => "C",
+                                _ => "",
+                            });
 
                     for c in 0..cores_in_group {
                         // Labeling

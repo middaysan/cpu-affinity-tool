@@ -1,8 +1,8 @@
 use crate::app::controllers;
 use crate::app::models::app_state_storage::AppStateStorage;
-use crate::app::models::cpu_schema::CpuSchema;
 use crate::app::models::app_to_run::{AppToRun, RunAppEditState};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
+use crate::app::models::cpu_schema::CpuSchema;
 use crate::app::models::running_app::RunningApps;
 use crate::app::models::LogManager;
 use crate::app::views::header::TIPS;
@@ -538,13 +538,13 @@ impl AppState {
                 self.group_form.run_all_enabled = group.run_all_button;
 
                 // Prepare clusters data based on the new schema
-                
+
                 // For now, let's keep the schema as is, or update it if needed.
-                // The original code was: 
+                // The original code was:
                 // let clusters_data: Vec<Vec<usize>> = group.cores.iter()
                 //    .map(|&ci| state_read.clusters.get(ci).cloned().unwrap_or_default()).collect();
                 // state_write.clusters = clusters_data;
-                
+
                 // If we want to maintain similar behavior (though it looks suspicious):
                 drop(state_read);
                 // No changes to schema here for now, we'll handle it in the UI.

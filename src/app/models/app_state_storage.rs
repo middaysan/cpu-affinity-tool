@@ -1,6 +1,6 @@
 use crate::app::models::core_group::CoreGroup;
-use crate::app::models::cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 use crate::app::models::cpu_presets::get_preset_for_model;
+use crate::app::models::cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 use crate::app::models::meta::{TEST_CPU_MODEL, TEST_TOTAL_THREADS};
 use os_api::OS;
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,7 @@ pub const CURRENT_APP_STATE_VERSION: u32 = 3;
 impl AppStateStorage {
     /// Helper to get the CPU model, respecting test overrides.
     pub fn get_effective_cpu_model() -> String {
+        #[allow(clippy::const_is_empty)]
         if !TEST_CPU_MODEL.is_empty() {
             TEST_CPU_MODEL.to_string()
         } else {
@@ -20,6 +21,7 @@ impl AppStateStorage {
 
     /// Helper to get the total threads, respecting test overrides.
     pub fn get_effective_total_threads() -> usize {
+        #[allow(clippy::absurd_extreme_comparisons)]
         if TEST_TOTAL_THREADS > 0 {
             TEST_TOTAL_THREADS
         } else {
@@ -82,21 +84,24 @@ impl AppStateStorage {
                         let cpu_model = Self::get_effective_cpu_model();
                         let total_threads = Self::get_effective_total_threads();
 
-                        if state.cpu_schema.model == "Generic CPU" 
-                            || state.cpu_schema.clusters.is_empty() 
-                            || !TEST_CPU_MODEL.is_empty() 
+                        if state.cpu_schema.model == "Generic CPU"
+                            || state.cpu_schema.clusters.is_empty()
+                            || {
+                                #[allow(clippy::const_is_empty)]
+                                !TEST_CPU_MODEL.is_empty()
+                            }
                             || (state.cpu_schema.model != cpu_model && !cpu_model.is_empty())
                         {
-                             if let Some(preset) = get_preset_for_model(&cpu_model, total_threads) {
-                                 state.cpu_schema = preset;
-                                 state.save_state();
-                             } else {
-                                 // If no preset found but we have a custom model name, at least update the name
-                                 if state.cpu_schema.model != cpu_model {
-                                     state.cpu_schema.model = cpu_model;
-                                     state.save_state();
-                                 }
-                             }
+                            if let Some(preset) = get_preset_for_model(&cpu_model, total_threads) {
+                                state.cpu_schema = preset;
+                                state.save_state();
+                            } else {
+                                // If no preset found but we have a custom model name, at least update the name
+                                if state.cpu_schema.model != cpu_model {
+                                    state.cpu_schema.model = cpu_model;
+                                    state.save_state();
+                                }
+                            }
                         }
                         Some(state)
                     }
@@ -143,7 +148,9 @@ impl AppStateStorage {
                         let num_threads = Self::get_effective_total_threads();
                         if let Some(preset) = get_preset_for_model(&cpu_model, num_threads) {
                             migrated.cpu_schema = preset;
-                        } else if migrated.cpu_schema.clusters.is_empty() || migrated.cpu_schema.model == "Generic CPU" {
+                        } else if migrated.cpu_schema.clusters.is_empty()
+                            || migrated.cpu_schema.model == "Generic CPU"
+                        {
                             migrated.cpu_schema.model = cpu_model;
                         }
 
@@ -192,7 +199,9 @@ impl AppStateStorage {
                         let total_threads = Self::get_effective_total_threads();
                         if let Some(preset) = get_preset_for_model(&cpu_model, total_threads) {
                             migrated.cpu_schema = preset;
-                        } else if migrated.cpu_schema.clusters.is_empty() || migrated.cpu_schema.model == "Generic CPU" {
+                        } else if migrated.cpu_schema.clusters.is_empty()
+                            || migrated.cpu_schema.model == "Generic CPU"
+                        {
                             migrated.cpu_schema.model = cpu_model;
                         }
 
@@ -205,10 +214,11 @@ impl AppStateStorage {
                 // Create a new default state with the current version
                 let cpu_model = Self::get_effective_cpu_model();
                 let total_threads = Self::get_effective_total_threads();
-                let cpu_schema = get_preset_for_model(&cpu_model, total_threads).unwrap_or(CpuSchema {
-                    model: cpu_model,
-                    clusters: Vec::new(),
-                });
+                let cpu_schema =
+                    get_preset_for_model(&cpu_model, total_threads).unwrap_or(CpuSchema {
+                        model: cpu_model,
+                        clusters: Vec::new(),
+                    });
 
                 let default_state = AppStateStorage {
                     version: CURRENT_APP_STATE_VERSION,
