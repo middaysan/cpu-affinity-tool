@@ -439,4 +439,17 @@ impl OS {
 
         Err(format!("Desktop file not found: {}", desktop_file))
     }
+
+    pub fn get_cpu_model() -> String {
+        std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|content| {
+                content
+                    .lines()
+                    .find(|line| line.starts_with("model name"))
+                    .and_then(|line| line.split(':').nth(1))
+                    .map(|s| s.trim().to_string())
+            })
+            .unwrap_or_else(|| "Unknown CPU".to_string())
+    }
 }

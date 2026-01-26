@@ -1,8 +1,11 @@
 use crate::app::models::core_group::CoreGroup;
+use crate::app::models::cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
+use crate::app::models::cpu_presets::get_preset_for_model;
+use os_api::OS;
 use serde::{Deserialize, Serialize};
 
 /// Current version of the application state schema
-pub const CURRENT_APP_STATE_VERSION: u32 = 2;
+pub const CURRENT_APP_STATE_VERSION: u32 = 3;
 
 /// Storage for persistent application state that can be serialized to and deserialized from JSON.
 /// This structure is responsible for saving and loading the application state between sessions.
@@ -13,8 +16,8 @@ pub struct AppStateStorage {
     pub version: u32,
     /// List of core groups defined by the user
     pub groups: Vec<CoreGroup>,
-    /// CPU clusters configuration (groups of cores that belong to the same physical CPU)
-    pub clusters: Vec<Vec<usize>>,
+    /// CPU schema configuration
+    pub cpu_schema: CpuSchema,
     /// Index of the currently selected UI theme (0: default, 1: light, 2: dark)
     pub theme_index: usize,
     /// Flag indicating whether process monitoring is enabled
@@ -43,62 +46,142 @@ impl AppStateStorage {
         std::fs::read_to_string(&path)
             .ok()
             .and_then(|data| {
-                // Try to parse as the current version
-                let parsed_result = serde_json::from_str::<AppStateStorage>(&data);
+                // Try to parse with version check
+                #[derive(Deserialize)]
+                struct VersionCheck {
+                    pub version: Option<u32>,
+                }
 
-                if let Ok(mut state) = parsed_result {
-                    // Check if we need to migrate from an older version
-                    if state.version < CURRENT_APP_STATE_VERSION {
-                        // Currently we're just updating the version number
-                        // In the future, more complex migrations can be added here
-                        state.version = CURRENT_APP_STATE_VERSION;
+                let v_check: VersionCheck = serde_json::from_str(&data).ok()?;
 
-                        // Save the migrated state back to disk
-                        if let Ok(json) = serde_json::to_string_pretty(&state) {
-                            let _ = std::fs::write(&path, json);
+                match v_check.version {
+                    Some(3) => {
+                        let mut state: AppStateStorage = serde_json::from_str(&data).ok()?;
+                        // Always try to refresh schema if it looks generic, to catch new presets
+                        if state.cpu_schema.model == "Generic CPU" || state.cpu_schema.clusters.is_empty() {
+                             let cpu_model = OS::get_cpu_model();
+                             if let Some(preset) = get_preset_for_model(&cpu_model, num_cpus::get()) {
+                                 state.cpu_schema = preset;
+                                 let _ = state.save_to_path(&path);
+                             }
                         }
+                        Some(state)
                     }
-                    Some(state)
-                } else {
-                    // Try to parse as a legacy version (without version field)
-                    #[derive(Deserialize)]
-                    struct LegacyAppStateStorage {
-                        pub groups: Vec<CoreGroup>,
-                        pub clusters: Vec<Vec<usize>>,
-                        pub theme_index: usize,
-                    }
+                    Some(2) => {
+                        #[derive(Deserialize)]
+                        struct V2AppStateStorage {
+                            pub _version: u32,
+                            pub groups: Vec<CoreGroup>,
+                            pub clusters: Vec<Vec<usize>>,
+                            pub theme_index: usize,
+                            pub process_monitoring_enabled: bool,
+                        }
 
-                    let legacy_result = serde_json::from_str::<LegacyAppStateStorage>(&data);
+                        let v2: V2AppStateStorage = serde_json::from_str(&data).ok()?;
+                        let mut schema_clusters = Vec::new();
+                        for (i, cluster_cores) in v2.clusters.into_iter().enumerate() {
+                            let cores = cluster_cores
+                                .into_iter()
+                                .map(|ci| CoreInfo {
+                                    index: ci,
+                                    core_type: CoreType::Other,
+                                    label: format!("Core {ci}"),
+                                })
+                                .collect();
+                            schema_clusters.push(CpuCluster {
+                                name: format!("Cluster {}", i + 1),
+                                cores,
+                            });
+                        }
 
-                    if let Ok(legacy_state) = legacy_result {
-                        // Migrate from legacy to current version
-                        let migrated_state = AppStateStorage {
+                        let mut migrated = AppStateStorage {
                             version: CURRENT_APP_STATE_VERSION,
-                            groups: legacy_state.groups,
-                            clusters: legacy_state.clusters,
-                            theme_index: legacy_state.theme_index,
-                            process_monitoring_enabled: false, // Default to disabled for migrated states
+                            groups: v2.groups,
+                            cpu_schema: CpuSchema {
+                                model: "Generic CPU".to_string(),
+                                clusters: schema_clusters,
+                            },
+                            theme_index: v2.theme_index,
+                            process_monitoring_enabled: v2.process_monitoring_enabled,
                         };
 
-                        // Save the migrated state back to disk
-                        if let Ok(json) = serde_json::to_string_pretty(&migrated_state) {
-                            let _ = std::fs::write(&path, json);
+                        // Try to get a better schema
+                        let cpu_model = OS::get_cpu_model();
+                        let num_threads = num_cpus::get();
+                        if let Some(preset) = get_preset_for_model(&cpu_model, num_threads) {
+                            migrated.cpu_schema = preset;
+                        } else if migrated.cpu_schema.clusters.is_empty() || migrated.cpu_schema.model == "Generic CPU" {
+                            migrated.cpu_schema.model = cpu_model;
                         }
 
-                        Some(migrated_state)
-                    } else {
-                        None
+                        let _ = migrated.save_to_path(&path);
+                        Some(migrated)
+                    }
+                    _ => {
+                        // Legacy or V1
+                        #[derive(Deserialize)]
+                        struct LegacyAppStateStorage {
+                            pub groups: Vec<CoreGroup>,
+                            pub clusters: Vec<Vec<usize>>,
+                            pub theme_index: usize,
+                        }
+
+                        let legacy: LegacyAppStateStorage = serde_json::from_str(&data).ok()?;
+                        let mut schema_clusters = Vec::new();
+                        for (i, cluster_cores) in legacy.clusters.into_iter().enumerate() {
+                            let cores = cluster_cores
+                                .into_iter()
+                                .map(|ci| CoreInfo {
+                                    index: ci,
+                                    core_type: CoreType::Other,
+                                    label: format!("Core {ci}"),
+                                })
+                                .collect();
+                            schema_clusters.push(CpuCluster {
+                                name: format!("Cluster {}", i + 1),
+                                cores,
+                            });
+                        }
+
+                        let mut migrated = AppStateStorage {
+                            version: CURRENT_APP_STATE_VERSION,
+                            groups: legacy.groups,
+                            cpu_schema: CpuSchema {
+                                model: "Generic CPU".to_string(),
+                                clusters: schema_clusters,
+                            },
+                            theme_index: legacy.theme_index,
+                            process_monitoring_enabled: false,
+                        };
+
+                        // Try to get a better schema
+                        let cpu_model = OS::get_cpu_model();
+                        if let Some(preset) = get_preset_for_model(&cpu_model, num_cpus::get()) {
+                            migrated.cpu_schema = preset;
+                        } else if migrated.cpu_schema.clusters.is_empty() || migrated.cpu_schema.model == "Generic CPU" {
+                            migrated.cpu_schema.model = cpu_model;
+                        }
+
+                        let _ = migrated.save_to_path(&path);
+                        Some(migrated)
                     }
                 }
             })
             .unwrap_or_else(|| {
                 // Create a new default state with the current version
+                let cpu_model = OS::get_cpu_model();
+                let total_threads = num_cpus::get();
+                let cpu_schema = get_preset_for_model(&cpu_model, total_threads).unwrap_or(CpuSchema {
+                    model: cpu_model,
+                    clusters: Vec::new(),
+                });
+
                 let default_state = AppStateStorage {
                     version: CURRENT_APP_STATE_VERSION,
                     groups: Vec::new(),
-                    clusters: Vec::new(),
+                    cpu_schema,
                     theme_index: 0,
-                    process_monitoring_enabled: false, // Default to disabled
+                    process_monitoring_enabled: false,
                 };
 
                 // Save the default state to disk
@@ -109,6 +192,12 @@ impl AppStateStorage {
 
                 default_state
             })
+    }
+
+    fn save_to_path(&self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
     }
 
     /// Saves the current application state to a JSON file.

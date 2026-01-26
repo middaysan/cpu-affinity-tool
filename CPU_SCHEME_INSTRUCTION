@@ -1,0 +1,114 @@
+### Инструкция по настройке схем процессоров (CPU Presets) v2
+
+Этот проект использует JSON-файл для описания архитектуры процессоров. Новая версия (v2) позволяет автоматически рассчитывать индексы потоков и легко описывать сложные многочиплетные системы.
+
+#### Файл конфигурации
+Путь: `assets/cpu_presets.json`
+Файл вкомпилируется в приложение. После правок требуется пересборка (`cargo build`).
+
+---
+
+#### Структура JSON
+
+```json
+{
+  "schemes": [
+    {
+      "name": "Название пресета",
+      "match": {
+        "keywords": ["intel", "ultra"],
+        "total_threads": 24
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 8,
+          "threads_per_core": 2
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+#### Логика поиска (`match`)
+
+Программа выбирает первый пресет из массива `schemes`, который удовлетворяет условиям:
+- `keywords`: **Все** слова из массива должны присутствовать в названии модели CPU (регистр не важен).
+- `total_threads`: (Опционально) Общее количество потоков в системе должно совпадать.
+
+---
+
+#### Описание топологии (`layout`)
+
+Массив `layout` описывает группы ядер по порядку. Индексы потоков (0, 1, 2...) присваиваются автоматически сверху вниз.
+
+**Поля группы:**
+
+1.  **`type`**: Тип ядер (влияет на цвет в UI):
+    - `performance`: Синий (P-ядра).
+    - `efficient`: Зеленый (E-ядра).
+    - `ccd`: Оранжевый (AMD чиплеты).
+2.  **`threads_per_core`**: Количество потоков на одно физическое ядро:
+    - `2`: Стандартно для P-ядер и AMD (с Hyper-Threading/SMT).
+    - `1`: Для Intel E-cores или новых Intel P-cores без HT (Arrow Lake).
+3.  **`cores`**: Количество физических ядер в этой группе.
+4.  **`label_prefix`**: Буква для кнопок (P0, E1, C2...).
+
+**Поля для повторителей (AMD Threadripper/EPYC):**
+
+Если нужно описать много одинаковых блоков (CCD), используйте:
+- **`repeat`**: Сколько раз повторить группу.
+- **`group_name_pattern`**: Название с переменной `{i}` (например, `"CCD {i}"`).
+- **`cores_per_group`**: Количество физических ядер в одном блоке.
+
+---
+
+#### Примеры
+
+**1. Intel Core i5-13600K (6P + 8E = 20 потоков)**
+```json
+{
+  "group_name": "P-Cores",
+  "type": "performance",
+  "cores": 6,
+  "threads_per_core": 2
+},
+{
+  "group_name": "E-Cores",
+  "type": "efficient",
+  "cores": 8,
+  "threads_per_core": 1
+}
+```
+
+**2. AMD Ryzen 9 5950X (2 CCD по 8 ядер = 32 потока)**
+```json
+{
+  "group_name_pattern": "CCD {i}",
+  "type": "ccd",
+  "repeat": 2,
+  "cores_per_group": 8,
+  "threads_per_core": 2
+}
+```
+
+**3. Intel Core Ultra 9 285K (Arrow Lake - нет Hyper-Threading)**
+```json
+{
+  "group_name": "P-Cores",
+  "type": "performance",
+  "cores": 8,
+  "threads_per_core": 1 // HT отключен на уровне архитектуры
+},
+{
+  "group_name": "E-Cores",
+  "type": "efficient",
+  "cores": 16,
+  "threads_per_core": 1
+}
+```
