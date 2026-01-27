@@ -305,7 +305,7 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.heading(RichText::new("⚙ Edit Group").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                if ui.button("❌").on_hover_text("Close").clicked() {
+                if ui.button("Close").on_hover_text("Close").clicked() {
                     cancel_clicked = true;
                 }
             });
