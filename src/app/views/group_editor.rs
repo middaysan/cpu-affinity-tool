@@ -31,7 +31,7 @@ fn draw_group_form_ui(
         ui.separator();
         ui.add_space(8.0);
 
-        draw_cpu_cores_ui(ui, &mut groups.core_selection, cpu_schema);
+        draw_cpu_cores_ui(ui, groups, cpu_schema);
 
         ui.add_space(15.0);
         ui.separator();
@@ -78,7 +78,7 @@ fn draw_group_form_ui(
 }
 
 /// Rendering the CPU cores section: a list of already created clusters and a panel of free cores.
-fn draw_cpu_cores_ui(ui: &mut egui::Ui, core_selection: &mut [bool], cpu_schema: &mut CpuSchema) {
+fn draw_cpu_cores_ui(ui: &mut egui::Ui, groups: &mut GroupFormState, cpu_schema: &mut CpuSchema) {
     ui.with_layout(
         egui::Layout::top_down_justified(egui::Align::Center),
         |ui| {
@@ -88,7 +88,7 @@ fn draw_cpu_cores_ui(ui: &mut egui::Ui, core_selection: &mut [bool], cpu_schema:
     ui.separator();
 
     let assigned = cpu_schema.get_assigned_cores();
-    let total_cores = core_selection.len();
+    let total_cores = groups.core_selection.len();
     let free_core_indexes: Vec<usize> =
         (0..total_cores).filter(|i| !assigned.contains(i)).collect();
 
@@ -97,7 +97,7 @@ fn draw_cpu_cores_ui(ui: &mut egui::Ui, core_selection: &mut [bool], cpu_schema:
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&cluster.name).strong());
             });
-            draw_core_buttons(ui, core_selection, &mut cluster.cores);
+            draw_core_buttons(ui, groups, &mut cluster.cores);
         });
     }
 
@@ -115,7 +115,7 @@ fn draw_cpu_cores_ui(ui: &mut egui::Ui, core_selection: &mut [bool], cpu_schema:
                 })
                 .collect();
 
-            draw_core_buttons(ui, core_selection, &mut free_cores);
+            draw_core_buttons(ui, groups, &mut free_cores);
         });
     }
 }
@@ -153,7 +153,7 @@ fn get_core_color(core_type: CoreType, dark_mode: bool) -> egui::Color32 {
     }
 }
 
-fn draw_core_buttons(ui: &mut egui::Ui, core_selection: &mut [bool], cores: &mut [CoreInfo]) {
+fn draw_core_buttons(ui: &mut egui::Ui, groups: &mut GroupFormState, cores: &mut [CoreInfo]) {
     let dark_mode = ui.visuals().dark_mode;
     let all_selected_color = if dark_mode {
         egui::Color32::from_rgb(61, 79, 3)
@@ -162,7 +162,7 @@ fn draw_core_buttons(ui: &mut egui::Ui, core_selection: &mut [bool], cores: &mut
     };
 
     ui.horizontal(|ui| {
-        let all_selected = cores.iter().all(|c| core_selection[c.index]);
+        let all_selected = cores.iter().all(|c| groups.core_selection[c.index]);
         if ui
             .add(egui::Button::new("All").fill(if all_selected {
                 all_selected_color
@@ -172,15 +172,16 @@ fn draw_core_buttons(ui: &mut egui::Ui, core_selection: &mut [bool], cores: &mut
             .clicked()
         {
             for c in cores.iter() {
-                core_selection[c.index] = !all_selected;
+                groups.core_selection[c.index] = !all_selected;
             }
+            groups.last_clicked_core = None;
         }
 
         ui.add_space(4.0);
 
         ui.horizontal_wrapped(|ui| {
             for core in cores.iter() {
-                let is_selected = core_selection[core.index];
+                let is_selected = groups.core_selection[core.index];
                 let fill_color = if is_selected {
                     get_core_color(core.core_type, dark_mode)
                 } else {
@@ -217,7 +218,21 @@ fn draw_core_buttons(ui: &mut egui::Ui, core_selection: &mut [bool], cores: &mut
                 );
 
                 if response.clicked() {
-                    core_selection[core.index] = !is_selected;
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    if shift && groups.last_clicked_core.is_some() {
+                        let last_idx = groups.last_clicked_core.unwrap();
+                        let start = last_idx.min(core.index);
+                        let end = last_idx.max(core.index);
+                        let target_state = groups.core_selection[last_idx];
+                        for i in start..=end {
+                            if i < groups.core_selection.len() {
+                                groups.core_selection[i] = target_state;
+                            }
+                        }
+                    } else {
+                        groups.core_selection[core.index] = !is_selected;
+                        groups.last_clicked_core = Some(core.index);
+                    }
                 }
             }
         });

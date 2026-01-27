@@ -91,6 +91,7 @@ impl AppState {
                 core_selection: vec![false; AppStateStorage::get_effective_total_threads()],
                 group_name: String::new(),
                 run_all_enabled: false,
+                last_clicked_core: None,
             },
             app_edit_state: RunAppEditState {
                 current_edit: None,
@@ -561,6 +562,7 @@ impl AppState {
         }
 
         self.group_form.editing_index = Some(group_index);
+        self.group_form.last_clicked_core = None;
 
         self.set_current_window(controllers::WindowController::Groups(
             controllers::Group::Edit,
