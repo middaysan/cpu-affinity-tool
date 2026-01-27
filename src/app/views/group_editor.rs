@@ -219,8 +219,7 @@ fn draw_core_buttons(ui: &mut egui::Ui, groups: &mut GroupFormState, cores: &mut
 
                 if response.clicked() {
                     let shift = ui.input(|i| i.modifiers.shift);
-                    if shift && groups.last_clicked_core.is_some() {
-                        let last_idx = groups.last_clicked_core.unwrap();
+                    if let (true, Some(last_idx)) = (shift, groups.last_clicked_core) {
                         let start = last_idx.min(core.index);
                         let end = last_idx.max(core.index);
                         let target_state = groups.core_selection[last_idx];
