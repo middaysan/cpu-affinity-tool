@@ -179,7 +179,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                     let len = programs.len();
                     for prog_index in 0..len {
                         let prog = app.get_group_program(g_i, prog_index).unwrap();
-                        let is_app_run = app.is_app_running_sync(&prog.get_key());
+                        let is_app_run = app.does_app_running_sync(&prog.get_key());
 
                         ui.horizontal(|ui| {
                             let (rect, response) =

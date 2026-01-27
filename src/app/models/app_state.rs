@@ -616,7 +616,7 @@ impl AppState {
         let app_key = app_to_run.get_key();
 
         // Check if app is already running and try to focus its window
-        if self.is_app_running_sync(&app_key) {
+        if self.does_app_running_sync(&app_key) {
             let (app_exists, was_focused) =
                 self.try_focus_existing_app(&app_key, &app_to_run.display());
 
@@ -744,7 +744,7 @@ impl AppState {
     /// # Returns
     ///
     /// `true` if the application is running, `false` otherwise
-    pub fn is_app_running_sync(&mut self, app_key: &str) -> bool {
+    pub fn does_app_running_sync(&mut self, app_key: &str) -> bool {
         // Try to get a read lock on the running apps
         if let Ok(apps) = self.running_apps.try_read() {
             // Check if the app is running and update the cache
