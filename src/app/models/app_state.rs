@@ -8,6 +8,7 @@ use crate::app::views::header::TIPS;
 use crate::tray::TrayCmd;
 use eframe::egui;
 use os_api::OS;
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
@@ -130,22 +131,24 @@ impl AppState {
                 app.log_manager
                     .add_entry("CPU layout: Generic (no clusters)".into());
 
-                // Try to find if any keywords matched but threads didn't
-                let model_lower = model.to_lowercase();
-                let model_trimmed = model_lower.trim();
-                for (name, keywords, p_threads) in presets_info {
-                    let kw_match = if keywords.is_empty() {
+                // Try to find if any regexes matched but threads didn't
+                for (name, regexes, p_threads) in presets_info {
+                    let re_match = if regexes.is_empty() {
                         false
                     } else {
-                        keywords
-                            .iter()
-                            .all(|kw| model_trimmed.contains(kw.to_lowercase().trim()))
+                        regexes.iter().any(|re_str| {
+                            if let Ok(re) = Regex::new(re_str) {
+                                re.is_match(&model)
+                            } else {
+                                false
+                            }
+                        })
                     };
 
-                    if kw_match {
+                    if re_match {
                         if let Some(t) = p_threads {
                             if t != threads {
-                                app.log_manager.add_entry(format!("Note: Preset \"{}\" matches keywords but expects {} threads (you have {})", name, t, threads));
+                                app.log_manager.add_entry(format!("Note: Preset \"{}\" matches regex but expects {} threads (you have {})", name, t, threads));
                             }
                         }
                     }

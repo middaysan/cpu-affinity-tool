@@ -1,5 +1,6 @@
 use crate::app::models::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -9,16 +10,16 @@ struct SchemesRoot {
 
 #[derive(Deserialize)]
 struct SchemeConfig {
-    #[allow(dead_code)]
     name: String,
-    #[serde(rename = "match")]
-    match_config: MatchConfig,
+    #[serde(rename = "rules")]
+    match_rules: Vec<MatchRule>,
     layout: Vec<LayoutEntry>,
 }
 
 #[derive(Deserialize)]
-struct MatchConfig {
-    keywords: Vec<String>,
+struct MatchRule {
+    #[serde(default)]
+    regexes: Vec<String>,
     total_threads: Option<usize>,
 }
 
@@ -57,41 +58,47 @@ static PRESETS: Lazy<SchemesRoot> = Lazy::new(|| {
 
 pub fn get_all_presets_info() -> Vec<(String, Vec<String>, Option<usize>)> {
     let root = &*PRESETS;
-    root.schemes
-        .iter()
-        .map(|s| {
-            (
+    let mut info = Vec::new();
+    for s in &root.schemes {
+        for rule in &s.match_rules {
+            info.push((
                 s.name.clone(),
-                s.match_config.keywords.clone(),
-                s.match_config.total_threads,
-            )
-        })
-        .collect()
+                rule.regexes.clone(),
+                rule.total_threads,
+            ));
+        }
+    }
+    info
 }
 
 pub fn get_preset_for_model(model: &str, total_threads: usize) -> Option<CpuSchema> {
-    let model_lower = model.to_lowercase();
-    let model_trimmed = model_lower.trim();
     let root = &*PRESETS;
 
     for scheme in &root.schemes {
-        // Match logic
-        let threads_match = scheme
-            .match_config
-            .total_threads
-            .is_none_or(|t| t == total_threads);
+        let mut matched = false;
 
-        let keywords_match = if scheme.match_config.keywords.is_empty() {
-            true
-        } else {
-            scheme
-                .match_config
-                .keywords
-                .iter()
-                .all(|kw| model_trimmed.contains(kw.to_lowercase().trim()))
-        };
+        for rule in &scheme.match_rules {
+            let threads_match = rule.total_threads.is_none_or(|t| t == total_threads);
 
-        if threads_match && keywords_match {
+            let regex_match = if rule.regexes.is_empty() {
+                true
+            } else {
+                rule.regexes.iter().any(|re_str| {
+                    if let Ok(re) = Regex::new(re_str) {
+                        re.is_match(model)
+                    } else {
+                        false
+                    }
+                })
+            };
+
+            if threads_match && regex_match {
+                matched = true;
+                break;
+            }
+        }
+
+        if matched {
             let mut clusters = Vec::new();
             let mut current_thread_idx = 0;
 
@@ -200,5 +207,28 @@ mod tests {
         assert_eq!(schema.clusters[0].cores.len(), 12);
         // 8 E-cores * 1 thread = 8 threads in second cluster
         assert_eq!(schema.clusters[1].cores.len(), 8);
+    }
+
+    #[test]
+    fn test_amd_ryzen_9_matching() {
+        let model = "AMD Ryzen 9 7950X3D 16-Core Processor";
+        let preset = get_preset_for_model(model, 32);
+        assert!(preset.is_some(), "Should match Ryzen 9 7950X3D");
+        let schema = preset.unwrap();
+        assert_eq!(schema.clusters.len(), 2);
+        assert_eq!(schema.clusters[0].name, "CCD 0");
+        assert_eq!(schema.clusters[1].name, "CCD 1");
+    }
+
+    #[test]
+    fn test_intel_ultra_matching() {
+        let model = "Intel(R) Core(TM) Ultra 9 285K";
+        let preset = get_preset_for_model(model, 24);
+        assert!(preset.is_some(), "Should match Ultra 9 285K");
+        let schema = preset.unwrap();
+        assert_eq!(schema.clusters.len(), 2);
+        assert_eq!(schema.clusters[0].cores[0].core_type, crate::app::models::CoreType::Performance);
+        // Arrow Lake doesn't have HT on P-cores
+        assert_eq!(schema.clusters[0].cores.len(), 8); 
     }
 }
