@@ -9,7 +9,7 @@ use crate::app::views::header::TIPS;
 use crate::tray::TrayCmd;
 use eframe::egui;
 use os_api::OS;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -169,6 +169,7 @@ impl AppState {
         tokio::spawn(run_running_app_monitor(
             apps_clone.clone(),
             persistent_state_clone.clone(),
+            ctx.clone(),
         ));
 
         // Spawn a background task to monitor and enforce process settings
@@ -792,10 +793,7 @@ impl AppState {
         if let Ok(apps) = self.running_apps.try_read() {
             // Check if the app is running and update the cache
             let is_running = apps.apps.contains_key(app_key);
-            if is_running {
-                // Update the cache only if the app is running
-                self.running_apps_statuses.insert(app_key.to_string(), true);
-            }
+            self.running_apps_statuses.insert(app_key.to_string(), is_running);
             is_running
         } else {
             // Fall back to the cached status if we can't get a lock
@@ -864,70 +862,129 @@ impl AppState {
 pub async fn run_running_app_monitor(
     running_apps: Arc<RwLock<RunningApps>>,
     app_state: Arc<RwLock<AppStateStorage>>,
+    ctx: egui::Context,
 ) {
     // Create a 2-second interval for periodic checking
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
 
     loop {
-        // Wait for the next interval tick
+        // Wait for the next interval tick (fires immediately the first time)
         interval.tick().await;
 
-        // Process all applications in a single write lock to minimize contention
-        if let Ok(mut apps) = running_apps.try_write() {
-            // Get a list of keys to avoid borrowing issues
-            let app_keys: Vec<String> = apps.apps.keys().cloned().collect();
-
-            // Process each application
-            for app_key in app_keys {
-                if let Some(app) = apps.apps.get_mut(&app_key) {
-                    // Only process apps that have at least one PID
-                    if !app.pids.is_empty() {
-                        // Find all child processes of the first PID
-                        OS::find_all_descendants(app.pids[0], &mut app.pids);
-
-                        // Try to find processes by name matching the executable file name
-                        let mut name_to_match = None;
-                        if let Ok(state) = app_state.try_read() {
-                            if let Some(group) = state.groups.get(app.group_index) {
-                                if let Some(program) = group.programs.get(app.prog_index) {
-                                    // Extract the executable name without extension for matching
-                                    name_to_match = program
-                                        .bin_path
-                                        .file_name()
-                                        .and_then(|n| n.to_str())
-                                        .map(|s| s.split('.').next().unwrap_or("").to_string());
-                                }
-                            }
-                        }
-
-                        if let Some(name) = name_to_match {
-                            if !name.is_empty() {
-                                let pids_by_name = OS::find_pids_by_name(&name);
-                                for pid in pids_by_name {
-                                    if !app.pids.contains(&pid) {
-                                        app.pids.push(pid);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Remove PIDs that are no longer running
-                        app.pids.retain(|&pid| OS::is_pid_live(pid));
-
-                        // If no PIDs are left, remove the application
-                        if app.pids.is_empty() {
-                            apps.remove_app(&app_key);
-                        }
-                    } else {
-                        // Remove apps with no PIDs
-                        apps.remove_app(&app_key);
+        // 1. Get all configured programs and their names to match from AppStateStorage
+        let configured_programs = if let Ok(state) = app_state.try_read() {
+            let mut programs = Vec::new();
+            for (g_idx, group) in state.groups.iter().enumerate() {
+                for (p_idx, program) in group.programs.iter().enumerate() {
+                    // Use program.name as it's extracted from the original file name (e.g. "Discord" from "Discord.exe" or "Discord.lnk")
+                    // This is more reliable for name matching than bin_path which might be a launcher like Update.exe
+                    let name = program.name.split('.').next().unwrap_or("").to_string();
+                    if !name.is_empty() {
+                        programs.push((program.get_key(), name, g_idx, p_idx));
                     }
                 }
             }
+            programs
+        } else {
+            continue; // Skip this iteration if we can't read the state
+        };
+
+        // 2. Get all running processes once for efficient matching
+        let all_processes = OS::get_all_process_names();
+        let mut name_to_pids: HashMap<String, Vec<u32>> = HashMap::new();
+        for (pid, full_name) in all_processes {
+            // Extract part before the first dot for matching
+            let name = full_name.split('.').next().unwrap_or("").to_string();
+            name_to_pids
+                .entry(name.to_lowercase())
+                .or_default()
+                .push(pid);
         }
 
-        // If we couldn't acquire the lock, just wait for the next interval
-        // This is more efficient than blocking or retrying
+        // 3. Update tracked apps and find new ones
+        if let Ok(mut apps) = running_apps.try_write() {
+            let mut processed_keys = HashSet::new();
+            let mut changed = false;
+
+            for (key, name, g_idx, p_idx) in configured_programs {
+                processed_keys.insert(key.clone());
+                let pids_by_name = name_to_pids
+                    .get(&name.to_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
+
+                if let Some(app) = apps.apps.get_mut(&key) {
+                    // Update existing tracked application
+                    let old_pid_count = app.pids.len();
+
+                    // Find all child processes of the first PID (main process)
+                    if !app.pids.is_empty() {
+                        OS::find_all_descendants(app.pids[0], &mut app.pids);
+                    }
+
+                    // Add processes found by name matching
+                    for pid in pids_by_name {
+                        if !app.pids.contains(&pid) {
+                            app.pids.push(pid);
+                        }
+                    }
+
+                    // Prune dead processes
+                    app.pids.retain(|&pid| OS::is_pid_live(pid));
+
+                    if app.pids.len() != old_pid_count {
+                        changed = true;
+                    }
+
+                    // Remove app if no processes are left
+                    if app.pids.is_empty() {
+                        apps.remove_app(&key);
+                        changed = true;
+                    }
+                } else {
+                    // Search for newly started application
+                    if !pids_by_name.is_empty() {
+                        // Use the first found PID as the "root" for add_app
+                        apps.add_app(&key, pids_by_name[0], g_idx, p_idx);
+                        changed = true;
+
+                        // Add any other instances found by name
+                        if let Some(app) = apps.apps.get_mut(&key) {
+                            for pid in pids_by_name.into_iter().skip(1) {
+                                if !app.pids.contains(&pid) {
+                                    app.pids.push(pid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Optional: Process apps that are still running but were removed from configuration
+            let app_keys: Vec<String> = apps.apps.keys().cloned().collect();
+            for key in app_keys {
+                if !processed_keys.contains(&key) {
+                    if let Some(app) = apps.apps.get_mut(&key) {
+                        let old_pid_count = app.pids.len();
+                        if !app.pids.is_empty() {
+                            OS::find_all_descendants(app.pids[0], &mut app.pids);
+                        }
+                        app.pids.retain(|&pid| OS::is_pid_live(pid));
+                        
+                        if app.pids.is_empty() {
+                            apps.remove_app(&key);
+                            changed = true;
+                        } else if app.pids.len() != old_pid_count {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            if changed {
+                ctx.request_repaint();
+            }
+        }
     }
 }
 

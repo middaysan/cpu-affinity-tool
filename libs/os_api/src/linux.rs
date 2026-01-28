@@ -311,6 +311,23 @@ impl OS {
         pids
     }
 
+    /// Returns all running process IDs and their executable names.
+    pub fn get_all_process_names() -> Vec<(u32, String)> {
+        let mut results = Vec::new();
+        if let Ok(entries) = fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
+                    // Try to read /proc/PID/comm which contains the process name
+                    let comm_path = entry.path().join("comm");
+                    if let Ok(comm) = fs::read_to_string(comm_path) {
+                        results.push((pid, comm.trim().to_string()));
+                    }
+                }
+            }
+        }
+        results
+    }
+
     /// Finds all child process IDs of a given parent process.
     ///
     /// This function uses the `get_all_pids` and `get_parent_pid` functions to find all child processes.

@@ -564,6 +564,41 @@ impl OS {
         pids
     }
 
+    /// Returns all running process IDs and their executable names.
+    pub fn get_all_process_names() -> Vec<(u32, String)> {
+        let mut results = Vec::new();
+        unsafe {
+            let snap = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+                Ok(s) => s,
+                Err(_) => return results,
+            };
+            let _hg = HandleGuard(snap);
+
+            let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+            pe.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+
+            if Process32FirstW(snap, &mut pe).is_err() {
+                return results;
+            }
+
+            loop {
+                let len = pe
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(pe.szExeFile.len());
+                let exe_file = String::from_utf16_lossy(&pe.szExeFile[..len]);
+
+                results.push((pe.th32ProcessID, exe_file));
+
+                if Process32NextW(snap, &mut pe).is_err() {
+                    break;
+                }
+            }
+        }
+        results
+    }
+
     #[allow(dead_code)]
     fn find_child_pids(parent: u32) -> Vec<u32> {
         match Self::snapshot_process_tree() {
