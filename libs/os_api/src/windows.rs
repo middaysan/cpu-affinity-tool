@@ -337,6 +337,15 @@ impl OS {
         .map_err(|e: OsError| format!("Failed to set priority for process {}: {}", pid, e))
     }
 
+    /// Sets the priority class for the current process.
+    pub fn set_current_process_priority(priority: PriorityClass) -> Result<(), String> {
+        unsafe {
+            let handle = windows::Win32::System::Threading::GetCurrentProcess();
+            SetPriorityClass(handle, Self::transform_to_win_priority(priority))
+                .map_err(|e| format!("Failed to set current process priority: {}", e))
+        }
+    }
+
     fn parse_url_file(path: &PathBuf) -> Result<String, String> {
         // Try to read .url with BOM handling (UTF-16LE/BE) then UTF-8 fallback
         let bytes = fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;

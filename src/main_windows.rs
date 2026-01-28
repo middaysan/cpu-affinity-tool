@@ -30,6 +30,13 @@ fn main() {
     #[cfg(debug_assertions)]
     println!("DEBUG: Tokio runtime created and entered.");
 
+    // Set self-priority to Below Normal to avoid interfering with high-load apps
+    #[warn(unused_variables)]
+    if let Err(_e) = os_api::OS::set_current_process_priority(os_api::PriorityClass::BelowNormal) {
+        #[cfg(debug_assertions)]
+        eprintln!("DEBUG: Failed to set self priority: {}", e);
+    }
+
     let options = NativeOptions {
         run_and_return: true,
         viewport: eframe::egui::ViewportBuilder::default()

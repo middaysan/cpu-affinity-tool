@@ -160,6 +160,11 @@ impl OS {
         Self::set_priority_for_pid(pid, priority)
     }
 
+    /// Sets the priority class for the current process.
+    pub fn set_current_process_priority(priority: PriorityClass) -> Result<(), String> {
+        Self::set_priority_for_pid(0, priority)
+    }
+
     pub fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, Vec<String>), String> {
         let path = fs::read_link(&file_path).unwrap_or(file_path.clone());
 
