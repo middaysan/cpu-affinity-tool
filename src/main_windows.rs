@@ -34,7 +34,7 @@ fn main() {
     #[warn(unused_variables)]
     if let Err(_e) = os_api::OS::set_current_process_priority(os_api::PriorityClass::BelowNormal) {
         #[cfg(debug_assertions)]
-        eprintln!("DEBUG: Failed to set self priority: {}", e);
+        eprintln!("DEBUG: Failed to set self priority: {}", _e);
     }
 
     let options = NativeOptions {
