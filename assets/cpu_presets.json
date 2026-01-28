@@ -1,10 +1,61 @@
 {
   "schemes": [
     {
-      "name": "Intel Hybrid (8P + 16E, HT)",
+      "name": "AMD Threadripper/EPYC (96 Cores, 12 CCD)",
       "rules": [
         {
-          "regexes": ["(?i)intel.*i9.*1[234]900"],
+          "regexes": ["(?i)(threadripper|epyc).*995"],
+          "total_threads": 192
+        }
+      ],
+      "layout": [
+        { "group_name_pattern": "CCD {i}", "type": "ccd", "repeat": 12, "cores_per_group": 8, "threads_per_core": 2 }
+      ]
+    },
+    {
+      "name": "AMD Threadripper (64 Cores, 8 CCD)",
+      "rules": [
+        {
+          "regexes": ["(?i)(threadripper|epyc).*(7980|3990|5995)"],
+          "total_threads": 128
+        }
+      ],
+      "layout": [
+        { "group_name_pattern": "CCD {i}", "type": "ccd", "repeat": 8, "cores_per_group": 8, "threads_per_core": 2 }
+      ]
+    },
+    {
+      "name": "AMD Threadripper (32 Cores, 4 CCD)",
+      "rules": [
+        {
+          "regexes": ["(?i)(threadripper|epyc).*(7970|3970|2990)"],
+          "total_threads": 64
+        }
+      ],
+      "layout": [
+        { "group_name_pattern": "CCD {i}", "type": "ccd", "repeat": 4, "cores_per_group": 8, "threads_per_core": 2 }
+      ]
+    },
+    {
+      "name": "AMD Threadripper (24 Cores, 4 CCD)",
+      "rules": [
+        {
+          "regexes": ["(?i)threadripper.*(7960|3960)"],
+          "total_threads": 48
+        }
+      ],
+      "layout": [
+        { "group_name_pattern": "CCD {i}", "type": "ccd", "repeat": 4, "cores_per_group": 6, "threads_per_core": 2 }
+      ]
+    },
+    {
+      "name": "Intel Core i9 Hybrid (8P + 16E, HT)",
+      "rules": [
+        {
+          "regexes": [
+            "(?i)intel.*i9.*1[234]900",
+            "(?i)intel.*i9.*1[234]950"
+          ],
           "total_threads": 32
         }
       ],
@@ -14,7 +65,7 @@
       ]
     },
     {
-      "name": "Intel Hybrid (8P + 12E, HT)",
+      "name": "Intel Core i7 Hybrid (8P + 12E, HT)",
       "rules": [
         {
           "regexes": ["(?i)intel.*i[79].*1[34]700"],
@@ -27,10 +78,10 @@
       ]
     },
     {
-      "name": "Intel Arrow Lake (8P + 16E, No HT)",
+      "name": "Intel Arrow Lake Ultra 9 (8P + 16E, No HT)",
       "rules": [
         {
-          "regexes": ["(?i)ultra.*285"],
+          "regexes": ["(?i)ultra.*9.*285"],
           "total_threads": 24
         }
       ],
@@ -43,7 +94,11 @@
       "name": "Intel Hybrid (8P + 8E, HT)",
       "rules": [
         {
-          "regexes": ["(?i)intel.*(i[79].*12|i[57].*13)"],
+          "regexes": [
+            "(?i)intel.*i9.*12900",
+            "(?i)intel.*i7.*12[78]00",
+            "(?i)intel.*i7.*13850"
+          ],
           "total_threads": 24
         }
       ],
@@ -53,12 +108,26 @@
       ]
     },
     {
+      "name": "Intel Meteor Lake Ultra 7/9 (6P + 8E + 2LPE, HT)",
+      "rules": [
+        {
+          "regexes": ["(?i)ultra.*(155|165|185)"],
+          "total_threads": 22
+        }
+      ],
+      "layout": [
+        { "group_name": "Performance Cores", "type": "performance", "cores": 6, "threads_per_core": 2 },
+        { "group_name": "Efficient Cores (+LPE)", "type": "efficient", "cores": 10, "threads_per_core": 1 }
+      ]
+    },
+    {
       "name": "Intel Hybrid (6P + 8E, HT)",
       "rules": [
         {
           "regexes": [
             "(?i)intel.*i5.*1[34]600",
-            "(?i)intel.*i7.*1[234](65|7|8)0"
+            "(?i)intel.*i7.*1[234](65|7|8)0",
+            "(?i)intel.*i5.*13500"
           ],
           "total_threads": 20
         }
@@ -69,10 +138,10 @@
       ]
     },
     {
-      "name": "Intel Arrow Lake (8P + 12E, No HT)",
+      "name": "Intel Arrow Lake Ultra 7 (8P + 12E, No HT)",
       "rules": [
         {
-          "regexes": ["(?i)ultra.*265"],
+          "regexes": ["(?i)ultra.*7.*265"],
           "total_threads": 20
         }
       ],
@@ -82,10 +151,10 @@
       ]
     },
     {
-      "name": "Intel Legacy (10 Cores, HT)",
+      "name": "Intel Legacy High-End (10 Cores, HT)",
       "rules": [
         {
-          "regexes": ["(?i)intel.*10.*i9"],
+          "regexes": ["(?i)intel.*10.*i9", "(?i)intel.*10(8|9)00"],
           "total_threads": 20
         }
       ],
@@ -94,10 +163,23 @@
       ]
     },
     {
-      "name": "Intel Arrow Lake (6P + 8E, No HT)",
+      "name": "Intel Meteor Lake Ultra 5 (4P + 8E + 2LPE, HT)",
       "rules": [
         {
-          "regexes": ["(?i)ultra.*245"],
+          "regexes": ["(?i)ultra.*5.*(125|135)"],
+          "total_threads": 18
+        }
+      ],
+      "layout": [
+        { "group_name": "Performance Cores", "type": "performance", "cores": 4, "threads_per_core": 2 },
+        { "group_name": "Efficient Cores (+LPE)", "type": "efficient", "cores": 10, "threads_per_core": 1 }
+      ]
+    },
+    {
+      "name": "Intel Arrow Lake Ultra 5 (6P + 8E, No HT)",
+      "rules": [
+        {
+          "regexes": ["(?i)ultra.*5.*245"],
           "total_threads": 14
         }
       ],
@@ -107,11 +189,11 @@
       ]
     },
     {
-      "name": "Intel Legacy (8 Cores, HT)",
+      "name": "Intel Legacy 8-Core (8P, HT)",
       "rules": [
         {
           "regexes": [
-            "(?i)intel.*i[79].*1[01]",
+            "(?i)intel.*i[79].*1[01].*00",
             "(?i)intel.*9900"
           ],
           "total_threads": 16
@@ -122,10 +204,13 @@
       ]
     },
     {
-      "name": "Intel Hybrid (6P + 4E, HT)",
+      "name": "Intel Hybrid Desktop (6P + 4E, HT)",
       "rules": [
         {
-          "regexes": ["(?i)intel.*i5.*1[34]400"],
+          "regexes": [
+            "(?i)intel.*i5.*1[34]400",
+            "(?i)intel.*i5.*12600"
+          ],
           "total_threads": 16
         }
       ],
@@ -135,10 +220,14 @@
       ]
     },
     {
-      "name": "Intel Hybrid (4P + 8E, HT)",
+      "name": "Intel Hybrid Mobile (4P + 8E, HT)",
       "rules": [
         {
-          "regexes": ["(?i)intel.*i[57].*1[23]"],
+          "regexes": [
+            "(?i)intel.*i[57].*12.*h",
+            "(?i)intel.*i[57].*13.*h",
+            "(?i)intel.*i[57].*14.*h"
+          ],
           "total_threads": 16
         }
       ],
@@ -151,7 +240,7 @@
       "name": "Intel Hybrid (4P + 4E, HT)",
       "rules": [
         {
-          "regexes": ["(?i)intel.*i5.*1[23]"],
+          "regexes": ["(?i)intel.*i5.*12450"],
           "total_threads": 12
         }
       ],
@@ -161,10 +250,14 @@
       ]
     },
     {
-      "name": "Intel Legacy (6 Cores, HT)",
+      "name": "Intel Legacy 6-Core (6P, HT)",
       "rules": [
         {
-          "regexes": ["(?i)intel.*(i[579].*[89]|i[57].*10)"],
+          "regexes": [
+            "(?i)intel.*i5.*1[01]400",
+            "(?i)intel.*i5.*1[01]500",
+            "(?i)intel.*8700"
+          ],
           "total_threads": 12
         }
       ],
@@ -173,12 +266,12 @@
       ]
     },
     {
-      "name": "Intel Legacy (4 Cores, HT)",
+      "name": "Intel Legacy 4-Core (4P, HT)",
       "rules": [
         {
           "regexes": [
-            "(?i)intel.*i[357].*[4567]",
-            "(?i)intel.*i3.*12"
+            "(?i)intel.*i[357].*[4567].00",
+            "(?i)intel.*i3.*1[01234]100"
           ],
           "total_threads": 8
         }
@@ -188,15 +281,15 @@
       ]
     },
     {
-      "name": "AMD Ryzen 9 (12 Cores, 2 CCD)",
+      "name": "Intel Legacy Dual Core (2P, HT)",
       "rules": [
         {
-          "regexes": ["(?i)ryzen.*9"],
-          "total_threads": 24
+          "regexes": ["(?i)intel.*(i3|i5|pentium|celeron)"],
+          "total_threads": 4
         }
       ],
       "layout": [
-        { "group_name_pattern": "CCD {i}", "type": "ccd", "repeat": 2, "cores_per_group": 6, "threads_per_core": 2 }
+        { "group_name": "Performance Cores", "type": "performance", "cores": 2, "threads_per_core": 2 }
       ]
     },
     {
@@ -209,6 +302,18 @@
       ],
       "layout": [
         { "group_name_pattern": "CCD {i}", "type": "ccd", "repeat": 2, "cores_per_group": 8, "threads_per_core": 2 }
+      ]
+    },
+    {
+      "name": "AMD Ryzen 9 (12 Cores, 2 CCD)",
+      "rules": [
+        {
+          "regexes": ["(?i)ryzen.*9"],
+          "total_threads": 24
+        }
+      ],
+      "layout": [
+        { "group_name_pattern": "CCD {i}", "type": "ccd", "repeat": 2, "cores_per_group": 6, "threads_per_core": 2 }
       ]
     },
     {
@@ -236,15 +341,15 @@
       ]
     },
     {
-      "name": "AMD Threadripper (64+ Cores)",
+      "name": "AMD Ryzen 3 (4 Cores, 1 CCD)",
       "rules": [
         {
-          "regexes": ["(?i)threadripper.*7980"],
-          "total_threads": 128
+          "regexes": ["(?i)ryzen.*[35]"],
+          "total_threads": 8
         }
       ],
       "layout": [
-        { "group_name_pattern": "CCD {i}", "type": "ccd", "repeat": 8, "cores_per_group": 8, "threads_per_core": 2 }
+        { "group_name": "CCD 0", "type": "ccd", "cores": 4, "threads_per_core": 2 }
       ]
     }
   ]
