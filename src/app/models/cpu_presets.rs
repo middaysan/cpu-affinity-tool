@@ -61,11 +61,7 @@ pub fn get_all_presets_info() -> Vec<(String, Vec<String>, Option<usize>)> {
     let mut info = Vec::new();
     for s in &root.schemes {
         for rule in &s.match_rules {
-            info.push((
-                s.name.clone(),
-                rule.regexes.clone(),
-                rule.total_threads,
-            ));
+            info.push((s.name.clone(), rule.regexes.clone(), rule.total_threads));
         }
     }
     info
@@ -227,8 +223,11 @@ mod tests {
         assert!(preset.is_some(), "Should match Ultra 9 285K");
         let schema = preset.unwrap();
         assert_eq!(schema.clusters.len(), 2);
-        assert_eq!(schema.clusters[0].cores[0].core_type, crate::app::models::CoreType::Performance);
+        assert_eq!(
+            schema.clusters[0].cores[0].core_type,
+            crate::app::models::CoreType::Performance
+        );
         // Arrow Lake doesn't have HT on P-cores
-        assert_eq!(schema.clusters[0].cores.len(), 8); 
+        assert_eq!(schema.clusters[0].cores.len(), 8);
     }
 }
