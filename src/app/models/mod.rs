@@ -9,9 +9,9 @@ mod app_to_run;
 /// CPU core grouping functionality
 mod core_group;
 /// CPU schema presets for popular processors
-mod cpu_presets;
+pub mod cpu_presets;
 /// CPU schema and core types
-mod cpu_schema;
+pub mod cpu_schema;
 /// The models module contains all the data structures and state management components
 /// of the application. This includes the core application state, UI state, and structures
 /// for representing and managing CPU core groups and applications.
@@ -25,8 +25,9 @@ mod running_app;
 pub use app::App;
 pub use app_state::AppState;
 pub use app_state_storage::AppStateStorage;
-pub use app_to_run::AppToRun;
+pub use app_to_run::{AppToRun, RunAppEditState};
 pub use core_group::GroupFormState;
 pub use cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 pub use log_manager::LogManager;
 pub use meta::APP_VERSION;
+pub use running_app::{AppStatus, RunningApps};

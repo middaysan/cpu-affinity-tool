@@ -4,9 +4,11 @@ use crate::app::models::cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 use crate::app::models::meta::{TEST_CPU_MODEL, TEST_TOTAL_THREADS};
 use os_api::OS;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// Current version of the application state schema
 pub const CURRENT_APP_STATE_VERSION: u32 = 3;
+pub const STATE_FILE_NAME: &str = "state.json";
 
 impl AppStateStorage {
     /// Helper to get the CPU model, respecting test overrides.
@@ -27,6 +29,40 @@ impl AppStateStorage {
         } else {
             num_cpus::get()
         }
+    }
+
+    fn get_state_path() -> PathBuf {
+        std::env::current_exe()
+            .map(|mut p| {
+                p.set_file_name(STATE_FILE_NAME);
+                p
+            })
+            .unwrap_or_else(|_| STATE_FILE_NAME.into())
+    }
+
+    fn backup_state_file(path: &Path) {
+        if !path.exists() {
+            return;
+        }
+
+        let mut backup_path = path.to_path_buf();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(STATE_FILE_NAME);
+
+        // Try state.json.old, then state.json.old1, .old2, etc.
+        let mut backup_name = format!("{}.old", file_name);
+        backup_path.set_file_name(&backup_name);
+
+        let mut counter = 1;
+        while backup_path.exists() {
+            backup_name = format!("{}.old{}", file_name, counter);
+            backup_path.set_file_name(&backup_name);
+            counter += 1;
+        }
+
+        let _ = std::fs::rename(path, backup_path);
     }
 }
 
@@ -59,12 +95,7 @@ impl AppStateStorage {
     ///
     /// An `AppStateStorage` instance is either loaded from the file or created with default values.
     pub fn load_state() -> AppStateStorage {
-        let path = std::env::current_exe()
-            .map(|mut p| {
-                p.set_file_name("state.json");
-                p
-            })
-            .unwrap_or_else(|_| "state.json".into());
+        let path = Self::get_state_path();
 
         std::fs::read_to_string(&path)
             .ok()
@@ -80,27 +111,28 @@ impl AppStateStorage {
                 match v_check.version {
                     Some(3) => {
                         let mut state: AppStateStorage = serde_json::from_str(&data).ok()?;
-                        // Always try to refresh schema if it looks generic, to catch new presets
+                        // Always try to refresh schema if it looks generic or model changed
                         let cpu_model = Self::get_effective_cpu_model();
                         let total_threads = Self::get_effective_total_threads();
 
-                        if state.cpu_schema.model == "Generic CPU"
+                        let is_generic = state.cpu_schema.model == "Generic CPU"
                             || state.cpu_schema.clusters.is_empty()
-                            || {
-                                #[allow(clippy::const_is_empty)]
-                                !TEST_CPU_MODEL.is_empty()
-                            }
+                            || state.cpu_schema.clusters.iter().all(|c| {
+                                c.cores.iter().all(|core| core.core_type == CoreType::Other)
+                            });
+
+                        #[allow(clippy::const_is_empty)]
+                        if is_generic
+                            || !TEST_CPU_MODEL.is_empty()
                             || (state.cpu_schema.model != cpu_model && !cpu_model.is_empty())
                         {
                             if let Some(preset) = get_preset_for_model(&cpu_model, total_threads) {
                                 state.cpu_schema = preset;
                                 state.save_state();
-                            } else {
-                                // If no preset found but we have a custom model name, at least update the name
-                                if state.cpu_schema.model != cpu_model {
-                                    state.cpu_schema.model = cpu_model;
-                                    state.save_state();
-                                }
+                            } else if state.cpu_schema.model != cpu_model && !cpu_model.is_empty() {
+                                // If no preset found but we have a new custom model name, at least update the name
+                                state.cpu_schema.model = cpu_model;
+                                state.save_state();
                             }
                         }
                         Some(state)
@@ -154,6 +186,7 @@ impl AppStateStorage {
                             migrated.cpu_schema.model = cpu_model;
                         }
 
+                        Self::backup_state_file(&path);
                         migrated.save_state();
                         Some(migrated)
                     }
@@ -205,12 +238,14 @@ impl AppStateStorage {
                             migrated.cpu_schema.model = cpu_model;
                         }
 
+                        Self::backup_state_file(&path);
                         migrated.save_state();
                         Some(migrated)
                     }
                 }
             })
             .unwrap_or_else(|| {
+                Self::backup_state_file(&path);
                 // Create a new default state with the current version
                 let cpu_model = Self::get_effective_cpu_model();
                 let total_threads = Self::get_effective_total_threads();
@@ -235,7 +270,7 @@ impl AppStateStorage {
             })
     }
 
-    fn save_to_path(&self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn save_to_path(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
         Ok(())
@@ -246,12 +281,57 @@ impl AppStateStorage {
     /// Serializes the current state to JSON and writes it to a file named "state.json"
     /// in the current directory. If serialization or writing fails, the error is silently ignored.
     pub fn save_state(&self) {
-        let path = std::env::current_exe()
-            .map(|mut p| {
-                p.set_file_name("state.json");
-                p
-            })
-            .unwrap_or_else(|_| "state.json".into());
+        let path = Self::get_state_path();
         let _ = self.save_to_path(&path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_backup_rotation() {
+        let temp_dir = std::env::temp_dir().join("cpu_affinity_tool_test");
+        if temp_dir.exists() {
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let state_path = temp_dir.join(STATE_FILE_NAME);
+
+        // 1. First backup
+        fs::write(&state_path, "original").unwrap();
+        AppStateStorage::backup_state_file(&state_path);
+        assert!(!state_path.exists());
+        assert!(temp_dir.join("state.json.old").exists());
+        assert_eq!(
+            fs::read_to_string(temp_dir.join("state.json.old")).unwrap(),
+            "original"
+        );
+
+        // 2. Second backup (should be .old1)
+        fs::write(&state_path, "second").unwrap();
+        AppStateStorage::backup_state_file(&state_path);
+        assert!(!state_path.exists());
+        assert!(temp_dir.join("state.json.old1").exists());
+        assert_eq!(
+            fs::read_to_string(temp_dir.join("state.json.old1")).unwrap(),
+            "second"
+        );
+
+        // 3. Third backup (should be .old2)
+        fs::write(&state_path, "third").unwrap();
+        AppStateStorage::backup_state_file(&state_path);
+        assert!(!state_path.exists());
+        assert!(temp_dir.join("state.json.old2").exists());
+        assert_eq!(
+            fs::read_to_string(temp_dir.join("state.json.old2")).unwrap(),
+            "third"
+        );
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

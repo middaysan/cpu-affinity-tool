@@ -1,5 +1,4 @@
-use crate::app::models::AppState;
-use crate::app::models::AppToRun;
+use crate::app::models::{AppState, AppStatus, AppToRun};
 use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, Align, CentralPanel, Layout, RichText, ScrollArea};
 use eframe::egui::{Color32, Vec2};
@@ -179,18 +178,31 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                     let len = programs.len();
                     for prog_index in 0..len {
                         let prog = app.get_group_program(g_i, prog_index).unwrap();
-                        let is_app_run = app.does_app_running_sync(&prog.get_key());
+                        let app_status = app.get_app_status_sync(&prog.get_key());
 
                         ui.horizontal(|ui| {
                             let (rect, response) =
                                 ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
-                            let color = if is_app_run {
-                                if let Some(pids) = app.get_running_app_pids(&prog.get_key()) {
-                                    response.on_hover_text(format!("Tracking PIDs: {:?}", pids));
+                            let color = match app_status {
+                                AppStatus::Running => {
+                                    if let Some(pids) = app.get_running_app_pids(&prog.get_key()) {
+                                        response.on_hover_text(format!(
+                                            "Tracking PIDs: {:?}\nStatus: All settings applied",
+                                            pids
+                                        ));
+                                    }
+                                    Color32::from_rgb(0, 255, 0)
                                 }
-                                Color32::from_rgb(0, 255, 0)
-                            } else {
-                                Color32::from_rgb(200, 0, 0)
+                                AppStatus::SettingsMismatch => {
+                                    if let Some(pids) = app.get_running_app_pids(&prog.get_key()) {
+                                        response.on_hover_text(format!(
+                                            "Tracking PIDs: {:?}\nStatus: Settings mismatch (CPU affinity or priority)",
+                                            pids
+                                        ));
+                                    }
+                                    Color32::from_rgb(255, 255, 0)
+                                }
+                                AppStatus::NotRunning => Color32::from_rgb(200, 0, 0),
                             };
                             ui.painter().circle_filled(rect.center(), 5.0, color);
 

@@ -160,6 +160,11 @@ impl OS {
         Self::set_priority_for_pid(pid, priority)
     }
 
+    /// Sets the priority class for the current process.
+    pub fn set_current_process_priority(priority: PriorityClass) -> Result<(), String> {
+        Self::set_priority_for_pid(0, priority)
+    }
+
     pub fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, Vec<String>), String> {
         let path = fs::read_link(&file_path).unwrap_or(file_path.clone());
 
@@ -283,6 +288,49 @@ impl OS {
         }
 
         pids
+    }
+
+    /// Finds all process IDs that match the target name (case-insensitive, up to the first dot).
+    pub fn find_pids_by_name(target_name: &str) -> Vec<u32> {
+        let mut pids = Vec::new();
+        if target_name.is_empty() {
+            return pids;
+        }
+
+        if let Ok(entries) = fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
+                    // Try to read /proc/PID/comm which contains the process name
+                    let comm_path = entry.path().join("comm");
+                    if let Ok(comm) = fs::read_to_string(comm_path) {
+                        let comm = comm.trim();
+                        // Extract part before the first dot
+                        let process_name = comm.split('.').next().unwrap_or("");
+                        if process_name.eq_ignore_ascii_case(target_name) {
+                            pids.push(pid);
+                        }
+                    }
+                }
+            }
+        }
+        pids
+    }
+
+    /// Returns all running process IDs and their executable names.
+    pub fn get_all_process_names() -> Vec<(u32, String)> {
+        let mut results = Vec::new();
+        if let Ok(entries) = fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
+                    // Try to read /proc/PID/comm which contains the process name
+                    let comm_path = entry.path().join("comm");
+                    if let Ok(comm) = fs::read_to_string(comm_path) {
+                        results.push((pid, comm.trim().to_string()));
+                    }
+                }
+            }
+        }
+        results
     }
 
     /// Finds all child process IDs of a given parent process.
