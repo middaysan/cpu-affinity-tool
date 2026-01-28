@@ -2,12 +2,12 @@ use crate::app::controllers;
 use crate::app::models::app_state_storage::AppStateStorage;
 use crate::app::models::app_to_run::{AppToRun, RunAppEditState};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
+use crate::app::models::cpu_schema::CpuSchema;
 use crate::app::models::running_app::RunningApps;
 use crate::app::models::LogManager;
 use crate::app::views::header::TIPS;
 use crate::tray::TrayCmd;
 use eframe::egui;
-use num_cpus;
 use os_api::OS;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -88,9 +88,10 @@ impl AppState {
             group_form: GroupFormState {
                 editing_index: None,
                 editing_selection: None,
-                core_selection: vec![false; num_cpus::get()],
+                core_selection: vec![false; AppStateStorage::get_effective_total_threads()],
                 group_name: String::new(),
                 run_all_enabled: false,
+                last_clicked_core: None,
             },
             app_edit_state: RunAppEditState {
                 current_edit: None,
@@ -218,20 +219,20 @@ impl AppState {
             .and_then(|state| state.groups.get(index).map(|group| group.cores.clone()))
     }
 
-    /// Gets the clusters from the persistent state.
+    /// Gets the CPU schema from the persistent state.
     /// Returns None if the lock couldn't be acquired.
-    pub fn get_clusters(&self) -> Option<Vec<Vec<usize>>> {
+    pub fn get_cpu_schema(&self) -> Option<CpuSchema> {
         self.persistent_state
             .try_read()
             .ok()
-            .map(|state| state.clusters.clone())
+            .map(|state| state.cpu_schema.clone())
     }
 
-    /// Sets the clusters in the persistent state.
+    /// Sets the CPU schema in the persistent state.
     /// Returns true if the update was successful, false otherwise.
-    pub fn set_clusters(&mut self, clusters: Vec<Vec<usize>>) -> bool {
+    pub fn set_cpu_schema(&mut self, schema: CpuSchema) -> bool {
         if let Ok(mut state) = self.persistent_state.try_write() {
-            state.clusters = clusters;
+            state.cpu_schema = schema;
             state.save_state();
             return true;
         }
@@ -537,24 +538,17 @@ impl AppState {
                 self.group_form.group_name = group.name.clone();
                 self.group_form.run_all_enabled = group.run_all_button;
 
-                // Prepare clusters data
-                let clusters_data: Vec<Vec<usize>> = group
-                    .cores
-                    .iter()
-                    .map(|&ci| state_read.clusters.get(ci).cloned().unwrap_or_default())
-                    .collect();
+                // Prepare clusters data based on the new schema
 
-                // Drop the read lock before acquiring write lock to avoid deadlock
+                // For now, let's keep the schema as is, or update it if needed.
+                // The original code was:
+                // let clusters_data: Vec<Vec<usize>> = group.cores.iter()
+                //    .map(|&ci| state_read.clusters.get(ci).cloned().unwrap_or_default()).collect();
+                // state_write.clusters = clusters_data;
+
+                // If we want to maintain similar behavior (though it looks suspicious):
                 drop(state_read);
-
-                // Try to get a write lock to update clusters
-                if let Ok(mut state_write) = self.persistent_state.try_write() {
-                    state_write.clusters = clusters_data;
-                } else {
-                    self.log_manager.add_entry(format!(
-                        "Failed to acquire write lock for updating clusters when editing group {group_index}"
-                    ));
-                }
+                // No changes to schema here for now, we'll handle it in the UI.
             } else {
                 // Drop the read lock if group not found
                 drop(state_read);
@@ -568,6 +562,7 @@ impl AppState {
         }
 
         self.group_form.editing_index = Some(group_index);
+        self.group_form.last_clicked_core = None;
 
         self.set_current_window(controllers::WindowController::Groups(
             controllers::Group::Edit,
@@ -621,7 +616,7 @@ impl AppState {
         let app_key = app_to_run.get_key();
 
         // Check if app is already running and try to focus its window
-        if self.is_app_running_sync(&app_key) {
+        if self.does_app_running_sync(&app_key) {
             let (app_exists, was_focused) =
                 self.try_focus_existing_app(&app_key, &app_to_run.display());
 
@@ -749,7 +744,7 @@ impl AppState {
     /// # Returns
     ///
     /// `true` if the application is running, `false` otherwise
-    pub fn is_app_running_sync(&mut self, app_key: &str) -> bool {
+    pub fn does_app_running_sync(&mut self, app_key: &str) -> bool {
         // Try to get a read lock on the running apps
         if let Ok(apps) = self.running_apps.try_read() {
             // Check if the app is running and update the cache

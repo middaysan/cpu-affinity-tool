@@ -781,4 +781,11 @@ impl OS {
             let _ = PostMessageW(None, WM_NULL, WPARAM(0), LPARAM(0));
         }
     }
+
+    pub fn get_cpu_model() -> String {
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        hklm.open_subkey(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+            .and_then(|key| key.get_value("ProcessorNameString"))
+            .unwrap_or_else(|_| "Unknown CPU".to_string())
+    }
 }

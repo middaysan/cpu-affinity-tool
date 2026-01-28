@@ -15,6 +15,8 @@ pub struct GroupFormState {
     pub group_name: String,
     /// Whether the "run all" button should be enabled for this group
     pub run_all_enabled: bool,
+    /// Index of the last clicked core for shift+click range selection
+    pub last_clicked_core: Option<usize>,
 }
 
 impl GroupFormState {
@@ -28,6 +30,7 @@ impl GroupFormState {
         self.run_all_enabled = false;
         self.group_name.clear();
         self.core_selection.fill(false);
+        self.last_clicked_core = None;
     }
 }
 

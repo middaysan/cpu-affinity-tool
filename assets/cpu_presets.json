@@ -1,0 +1,472 @@
+{
+  "schemes": [
+    {
+      "name": "Intel Core i9 (12-14th Gen, 8P+16E)",
+      "match": {
+        "keywords": ["intel", "i9"],
+        "total_threads": 32
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 8,
+          "threads_per_core": 2
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 16,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
+      "name": "Intel Core i7/i9 (12-14th Gen, 8P+12E)",
+      "match": {
+        "keywords": ["intel"],
+        "total_threads": 28
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 8,
+          "threads_per_core": 2
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 12,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
+      "name": "Intel Core Ultra 9 (Arrow Lake, 8P+16E)",
+      "match": {
+        "keywords": ["ultra", "285"],
+        "total_threads": 24
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 8,
+          "threads_per_core": 1
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 16,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
+      "name": "Intel Core i7/i9 (12-14th Gen, 8P+8E)",
+      "match": {
+        "keywords": ["intel"],
+        "total_threads": 24
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 8,
+          "threads_per_core": 2
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 8,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
+      "name": "Intel Core Ultra 7 (Arrow Lake, 8P+12E)",
+      "match": {
+        "keywords": ["ultra", "265"],
+        "total_threads": 20
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 8,
+          "threads_per_core": 1
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 12,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
+      "name": "Intel Legacy High-End (10th Gen, 10P)",
+      "match": {
+        "keywords": ["intel"],
+        "total_threads": 20
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 10,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "Intel Core i7/Ultra 7 (12-14th Gen, 6P+8E)",
+      "match": {
+        "keywords": ["intel"],
+        "total_threads": 20
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 6,
+          "threads_per_core": 2
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 8,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
+      "name": "Intel Core Ultra 5 (Arrow Lake, 6P+8E)",
+      "match": {
+        "keywords": ["ultra", "245"],
+        "total_threads": 14
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 6,
+          "threads_per_core": 1
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 8,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
+      "name": "Intel Legacy i7/i9 (10/11th Gen, 8P)",
+      "match": {
+        "keywords": ["intel", "11"],
+        "total_threads": 16
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 8,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "Intel Legacy i7/i9 (10th Gen, 8P)",
+      "match": {
+        "keywords": ["intel", "10"],
+        "total_threads": 16
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 8,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "Intel Legacy i9 (9th Gen, 8P)",
+      "match": {
+        "keywords": ["intel", "9900"],
+        "total_threads": 16
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 8,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "Intel Core i5 Mainstream (13400/14400, 6P+4E)",
+      "match": {
+        "keywords": ["intel"],
+        "total_threads": 16
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 6,
+          "threads_per_core": 2
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 4,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
+      "name": "Intel Core i5 (12-14th Gen Mobile, 4P+8E)",
+      "match": {
+        "keywords": ["intel"],
+        "total_threads": 16
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 4,
+          "threads_per_core": 2
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 8,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
+      "name": "Intel Core i5 (Mobile, 4P+4E)",
+      "match": {
+        "keywords": ["intel"],
+        "total_threads": 12
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 4,
+          "threads_per_core": 2
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 4,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
+      "name": "Intel Legacy i5/i7 (6P)",
+      "match": {
+        "keywords": ["intel"],
+        "total_threads": 12
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 6,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "Intel Legacy i3/i7 (4P)",
+      "match": {
+        "keywords": ["intel"],
+        "total_threads": 8
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 4,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "Intel Core i3 (12-14th Gen, 4P)",
+      "match": {
+        "keywords": ["intel", "i3"],
+        "total_threads": 8
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 4,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "AMD Ryzen 9 (12 Cores, 2 CCD)",
+      "match": {
+        "keywords": ["ryzen", "9"],
+        "total_threads": 24
+      },
+      "layout": [
+        {
+          "group_name_pattern": "CCD {i}",
+          "type": "ccd",
+          "repeat": 2,
+          "cores_per_group": 6,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "AMD Ryzen 9 (16 Cores, 2 CCD)",
+      "match": {
+        "keywords": ["ryzen", "9"],
+        "total_threads": 32
+      },
+      "layout": [
+        {
+          "group_name_pattern": "CCD {i}",
+          "type": "ccd",
+          "repeat": 2,
+          "cores_per_group": 8,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "AMD Ryzen 7 (8 Cores, 1 CCD)",
+      "match": {
+        "keywords": ["ryzen", "7"],
+        "total_threads": 16
+      },
+      "layout": [
+        {
+          "group_name": "CCD 0",
+          "type": "ccd",
+          "cores": 8,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "AMD Ryzen 5 (6 Cores, 1 CCD)",
+      "match": {
+        "keywords": ["ryzen", "5"],
+        "total_threads": 12
+      },
+      "layout": [
+        {
+          "group_name": "CCD 0",
+          "type": "ccd",
+          "cores": 6,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "AMD Ryzen Threadripper 7980X",
+      "match": {
+        "keywords": ["threadripper", "7980"],
+        "total_threads": 128
+      },
+      "layout": [
+        {
+          "group_name_pattern": "CCD {i}",
+          "type": "ccd",
+          "repeat": 8,
+          "cores_per_group": 8,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "AMD Threadripper/EPYC (96 Cores, 12 CCD)",
+      "match": {
+        "keywords": ["amd"],
+        "total_threads": 192
+      },
+      "layout": [
+        {
+          "group_name_pattern": "CCD {i}",
+          "type": "ccd",
+          "repeat": 12,
+          "cores_per_group": 8,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "AMD Threadripper (32 Cores, 4 CCD)",
+      "match": {
+        "keywords": ["amd"],
+        "total_threads": 64
+      },
+      "layout": [
+        {
+          "group_name_pattern": "CCD {i}",
+          "type": "ccd",
+          "repeat": 4,
+          "cores_per_group": 8,
+          "threads_per_core": 2
+        }
+      ]
+    },
+    {
+      "name": "AMD Threadripper (24 Cores, 4 CCD)",
+      "match": {
+        "keywords": ["amd"],
+        "total_threads": 48
+      },
+      "layout": [
+        {
+          "group_name_pattern": "CCD {i}",
+          "type": "ccd",
+          "repeat": 4,
+          "cores_per_group": 6,
+          "threads_per_core": 2
+        }
+      ]
+    }
+  ]
+}

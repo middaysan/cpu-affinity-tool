@@ -1,0 +1,36 @@
+## [1.1.2] - 2026-01-28
+
+### Added
+* **CPU Presets system**:
+
+  * Added configuration file `assets/cpu_presets.json` with support for popular Intel models (12th–14th gen) and AMD Ryzen (CCD architecture).
+  * New automatic CPU architecture detection (P-cores, E-cores, Hyper-Threading, CCD).
+  * Preset format documentation in `CPU_SCHEME_INSTRUCTION`.
+* **Improved visualization in the Group Editor**:
+
+  * Core grouping by clusters (e.g., Performance Cores, Efficient Cores, CCD 0, CCD 1).
+  * Color indication for different thread types (P-cores, E-cores, HT threads).
+  * Core labels display (e.g., P0, E8, C0).
+* **Infrastructure**:
+
+  * `cpu_presets.rs` module for parsing and matching presets.
+  * `CpuSchema` model to represent a hierarchical CPU structure.
+  * Support for test CPU models to debug the UI via `meta.rs`.
+
+### Changed
+* **Group Editor**:
+
+  * Completely rewrote the core selection UI in `group_editor.rs` to support hierarchical schemas.
+  * Improved core selection logic: now accounts for physical core and cluster membership.
+* **State storage**:
+
+  * `AppStateStorage` now automatically selects the best CPU schema on load.
+  * Improved configuration save logic in `state.json`.
+* **OS API**:
+
+  * Added stubs and extensions for topology handling in `libs/os_api`.
+
+### Fixed
+* Fixed display of occupied cores when editing groups.
+* Optimized rendering performance for large numbers of cores in the UI.
+
