@@ -115,6 +115,46 @@ impl AppState {
 
         app.log_manager.add_entry("Application started".into());
 
+        let model = AppStateStorage::get_effective_cpu_model();
+        let threads = AppStateStorage::get_effective_total_threads();
+        app.log_manager
+            .add_entry(format!("Detected CPU: \"{}\" ({} threads)", model, threads));
+
+        let presets_info = crate::app::models::cpu_presets::get_all_presets_info();
+        app.log_manager.add_entry(format!("Loaded {} CPU presets from embedded JSON", presets_info.len()));
+
+        if let Ok(state) = app.persistent_state.try_read() {
+            if state.cpu_schema.clusters.is_empty() {
+                app.log_manager
+                    .add_entry("CPU layout: Generic (no clusters)".into());
+                
+                // Try to find if any keywords matched but threads didn't
+                let model_lower = model.to_lowercase();
+                let model_trimmed = model_lower.trim();
+                for (name, keywords, p_threads) in presets_info {
+                    let kw_match = if keywords.is_empty() {
+                        false
+                    } else {
+                        keywords.iter().all(|kw| model_trimmed.contains(kw.to_lowercase().trim()))
+                    };
+                    
+                    if kw_match {
+                        if let Some(t) = p_threads {
+                            if t != threads {
+                                app.log_manager.add_entry(format!("Note: Preset \"{}\" matches keywords but expects {} threads (you have {})", name, t, threads));
+                            }
+                        }
+                    }
+                }
+            } else {
+                app.log_manager.add_entry(format!(
+                    "CPU layout: {} ({} clusters)",
+                    state.cpu_schema.model,
+                    state.cpu_schema.clusters.len()
+                ));
+            }
+        }
+
         // Set the UI theme based on the theme index in the persistent state
         // Explicitly drop the future to avoid the "let-underscore-future" warning
         drop(app.apply_theme(ctx));
@@ -122,11 +162,14 @@ impl AppState {
         // Create a clone of the running apps reference for the background monitors
         let apps_clone = Arc::clone(&app.running_apps);
 
-        // Spawn a background task to monitor running applications
-        tokio::spawn(run_running_app_monitor(apps_clone.clone()));
-
-        // Create a clone of the persistent state for the process settings monitor
+        // Create a clone of the persistent state for the monitors
         let persistent_state_clone = Arc::clone(&app.persistent_state);
+
+        // Spawn a background task to monitor running applications
+        tokio::spawn(run_running_app_monitor(
+            apps_clone.clone(),
+            persistent_state_clone.clone(),
+        ));
 
         // Spawn a background task to monitor and enforce process settings
         tokio::spawn(run_process_settings_monitor(
@@ -805,8 +848,9 @@ impl AppState {
 ///
 /// This function runs in a separate tokio task and periodically:
 /// 1. Checks for child processes of running applications
-/// 2. Removes processes that are no longer running
-/// 3. Removes applications that have no running processes
+/// 2. Finds processes with the same name as the application's executable
+/// 3. Removes processes that are no longer running
+/// 4. Removes applications that have no running processes
 ///
 /// The function uses a more efficient locking strategy to minimize contention:
 /// - It acquires a single write lock for all operations
@@ -816,7 +860,11 @@ impl AppState {
 /// # Parameters
 ///
 /// * `running_apps` - Thread-safe reference to the running applications collection
-pub async fn run_running_app_monitor(running_apps: Arc<RwLock<RunningApps>>) {
+/// * `app_state` - Thread-safe reference to the application state storage
+pub async fn run_running_app_monitor(
+    running_apps: Arc<RwLock<RunningApps>>,
+    app_state: Arc<RwLock<AppStateStorage>>,
+) {
     // Create a 2-second interval for periodic checking
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
 
@@ -836,6 +884,32 @@ pub async fn run_running_app_monitor(running_apps: Arc<RwLock<RunningApps>>) {
                     if !app.pids.is_empty() {
                         // Find all child processes of the first PID
                         OS::find_all_descendants(app.pids[0], &mut app.pids);
+
+                        // Try to find processes by name matching the executable file name
+                        let mut name_to_match = None;
+                        if let Ok(state) = app_state.try_read() {
+                            if let Some(group) = state.groups.get(app.group_index) {
+                                if let Some(program) = group.programs.get(app.prog_index) {
+                                    // Extract the executable name without extension for matching
+                                    name_to_match = program
+                                        .bin_path
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .map(|s| s.split('.').next().unwrap_or("").to_string());
+                                }
+                            }
+                        }
+
+                        if let Some(name) = name_to_match {
+                            if !name.is_empty() {
+                                let pids_by_name = OS::find_pids_by_name(&name);
+                                for pid in pids_by_name {
+                                    if !app.pids.contains(&pid) {
+                                        app.pids.push(pid);
+                                    }
+                                }
+                            }
+                        }
 
                         // Remove PIDs that are no longer running
                         app.pids.retain(|&pid| OS::is_pid_live(pid));

@@ -80,27 +80,25 @@ impl AppStateStorage {
                 match v_check.version {
                     Some(3) => {
                         let mut state: AppStateStorage = serde_json::from_str(&data).ok()?;
-                        // Always try to refresh schema if it looks generic, to catch new presets
+                        // Always try to refresh schema if it looks generic or model changed
                         let cpu_model = Self::get_effective_cpu_model();
                         let total_threads = Self::get_effective_total_threads();
 
-                        if state.cpu_schema.model == "Generic CPU"
+                        let is_generic = state.cpu_schema.model == "Generic CPU" 
                             || state.cpu_schema.clusters.is_empty()
-                            || {
-                                #[allow(clippy::const_is_empty)]
-                                !TEST_CPU_MODEL.is_empty()
-                            }
+                            || state.cpu_schema.clusters.iter().all(|c| c.cores.iter().all(|core| core.core_type == CoreType::Other));
+
+                        if is_generic
+                            || !TEST_CPU_MODEL.is_empty()
                             || (state.cpu_schema.model != cpu_model && !cpu_model.is_empty())
                         {
                             if let Some(preset) = get_preset_for_model(&cpu_model, total_threads) {
                                 state.cpu_schema = preset;
                                 state.save_state();
-                            } else {
-                                // If no preset found but we have a custom model name, at least update the name
-                                if state.cpu_schema.model != cpu_model {
-                                    state.cpu_schema.model = cpu_model;
-                                    state.save_state();
-                                }
+                            } else if state.cpu_schema.model != cpu_model && !cpu_model.is_empty() {
+                                // If no preset found but we have a new custom model name, at least update the name
+                                state.cpu_schema.model = cpu_model;
+                                state.save_state();
                             }
                         }
                         Some(state)

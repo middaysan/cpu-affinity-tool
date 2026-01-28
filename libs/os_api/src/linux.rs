@@ -285,6 +285,32 @@ impl OS {
         pids
     }
 
+    /// Finds all process IDs that match the target name (case-insensitive, up to the first dot).
+    pub fn find_pids_by_name(target_name: &str) -> Vec<u32> {
+        let mut pids = Vec::new();
+        if target_name.is_empty() {
+            return pids;
+        }
+
+        if let Ok(entries) = fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
+                    // Try to read /proc/PID/comm which contains the process name
+                    let comm_path = entry.path().join("comm");
+                    if let Ok(comm) = fs::read_to_string(comm_path) {
+                        let comm = comm.trim();
+                        // Extract part before the first dot
+                        let process_name = comm.split('.').next().unwrap_or("");
+                        if process_name.eq_ignore_ascii_case(target_name) {
+                            pids.push(pid);
+                        }
+                    }
+                }
+            }
+        }
+        pids
+    }
+
     /// Finds all child process IDs of a given parent process.
     ///
     /// This function uses the `get_all_pids` and `get_parent_pid` functions to find all child processes.

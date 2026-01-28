@@ -521,6 +521,49 @@ impl OS {
         }
     }
 
+    /// Finds all process IDs that match the target name (case-insensitive, up to the first dot).
+    pub fn find_pids_by_name(target_name: &str) -> Vec<u32> {
+        let mut pids = Vec::new();
+        if target_name.is_empty() {
+            return pids;
+        }
+        unsafe {
+            let snap = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+                Ok(s) => s,
+                Err(_) => return pids,
+            };
+            let _hg = HandleGuard(snap);
+
+            let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+            pe.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+
+            if Process32FirstW(snap, &mut pe).is_err() {
+                return pids;
+            }
+
+            loop {
+                let len = pe
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(pe.szExeFile.len());
+                let exe_file = String::from_utf16_lossy(&pe.szExeFile[..len]);
+
+                // Extract part before the first dot
+                let process_name = exe_file.split('.').next().unwrap_or("");
+
+                if process_name.eq_ignore_ascii_case(target_name) {
+                    pids.push(pe.th32ProcessID);
+                }
+
+                if Process32NextW(snap, &mut pe).is_err() {
+                    break;
+                }
+            }
+        }
+        pids
+    }
+
     #[allow(dead_code)]
     fn find_child_pids(parent: u32) -> Vec<u32> {
         match Self::snapshot_process_tree() {
@@ -785,7 +828,10 @@ impl OS {
     pub fn get_cpu_model() -> String {
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
         hklm.open_subkey(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
-            .and_then(|key| key.get_value("ProcessorNameString"))
+            .and_then(|key| {
+                let s: String = key.get_value("ProcessorNameString")?;
+                Ok(s.trim_matches(|c: char| c.is_whitespace() || c == '\0').to_string())
+            })
             .unwrap_or_else(|_| "Unknown CPU".to_string())
     }
 }

@@ -82,7 +82,12 @@ fn draw_cpu_cores_ui(ui: &mut egui::Ui, groups: &mut GroupFormState, cpu_schema:
     ui.with_layout(
         egui::Layout::top_down_justified(egui::Align::Center),
         |ui| {
-            ui.heading(format!("Select CPU cores ({})", cpu_schema.model));
+            let model_display = if cpu_schema.clusters.is_empty() {
+                format!("{} (No preset matched)", cpu_schema.model)
+            } else {
+                cpu_schema.model.clone()
+            };
+            ui.heading(format!("Select CPU cores ({})", model_display));
         },
     );
     ui.separator();

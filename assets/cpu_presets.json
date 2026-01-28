@@ -93,6 +93,52 @@
       ]
     },
     {
+      "name": "Intel Core i5 (13-14th Gen, 6P+8E)",
+      "match": {
+        "keywords": ["intel", "i5", "14600"],
+        "total_threads": 20
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 6,
+          "threads_per_core": 2
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 8,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
+      "name": "Intel Core i7/Ultra 7 (12-14th Gen, 6P+8E)",
+      "match": {
+        "keywords": ["intel", "i7"],
+        "total_threads": 20
+      },
+      "layout": [
+        {
+          "group_name": "Performance Cores",
+          "type": "performance",
+          "label_prefix": "P",
+          "cores": 6,
+          "threads_per_core": 2
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "label_prefix": "E",
+          "cores": 8,
+          "threads_per_core": 1
+        }
+      ]
+    },
+    {
       "name": "Intel Core Ultra 7 (Arrow Lake, 8P+12E)",
       "match": {
         "keywords": ["ultra", "265"],
@@ -118,7 +164,7 @@
     {
       "name": "Intel Legacy High-End (10th Gen, 10P)",
       "match": {
-        "keywords": ["intel"],
+        "keywords": ["intel", "10"],
         "total_threads": 20
       },
       "layout": [
@@ -128,29 +174,6 @@
           "label_prefix": "P",
           "cores": 10,
           "threads_per_core": 2
-        }
-      ]
-    },
-    {
-      "name": "Intel Core i7/Ultra 7 (12-14th Gen, 6P+8E)",
-      "match": {
-        "keywords": ["intel"],
-        "total_threads": 20
-      },
-      "layout": [
-        {
-          "group_name": "Performance Cores",
-          "type": "performance",
-          "label_prefix": "P",
-          "cores": 6,
-          "threads_per_core": 2
-        },
-        {
-          "group_name": "Efficient Cores",
-          "type": "efficient",
-          "label_prefix": "E",
-          "cores": 8,
-          "threads_per_core": 1
         }
       ]
     },
