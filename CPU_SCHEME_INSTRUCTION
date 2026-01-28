@@ -1,10 +1,10 @@
-### CPU Processor Scheme Configuration Instruction (CPU Presets) v2
+### CPU Processor Scheme Configuration Instruction (CPU Presets) v3
 
-This project uses a JSON file to describe processor architecture. The new version (v2) allows for automatic calculation of thread indices and easy description of complex multi-chiplet systems.
+This project uses a JSON file to describe processor architecture. Version 3 introduces flexible matching using Regular Expressions (Regex) and a rule-based system to handle multiple variations of the same architecture.
 
 #### Configuration File
 Path: `assets/cpu_presets.json`
-The file is compiled into the application. Rebuilding (`cargo build`) is required after making changes.
+The file is embedded into the application at compile time. You must rebuild the project (`cargo build --release`) for changes to take effect in the binary.
 
 ---
 
@@ -15,17 +15,24 @@ The file is compiled into the application. Rebuilding (`cargo build`) is require
   "schemes": [
     {
       "name": "Preset Name",
-      "match": {
-        "keywords": ["intel", "ultra"],
-        "total_threads": 24
-      },
+      "rules": [
+        {
+          "regexes": ["(?i)intel.*i9.*1[234]900"],
+          "total_threads": 32
+        }
+      ],
       "layout": [
         {
           "group_name": "Performance Cores",
           "type": "performance",
-          "label_prefix": "P",
           "cores": 8,
           "threads_per_core": 2
+        },
+        {
+          "group_name": "Efficient Cores",
+          "type": "efficient",
+          "cores": 16,
+          "threads_per_core": 1
         }
       ]
     }
@@ -35,80 +42,81 @@ The file is compiled into the application. Rebuilding (`cargo build`) is require
 
 ---
 
-#### Matching Logic (`match`)
+#### Matching Logic (`rules`)
 
-The program selects the first preset from the `schemes` array that satisfies the following conditions:
-- `keywords`: **All** words from the array must be present in the CPU model name (case-insensitive).
-- `total_threads`: (Optional) The total number of threads in the system must match.
+The application iterates through the `schemes` array and checks the `rules` for each scheme. A scheme matches if **any** of its rules are satisfied.
+
+A single **Rule** is satisfied if:
+1.  **Regex Match**: Any of the patterns in the `regexes` array matches the CPU model name (e.g., "13th Gen Intel(R) Core(TM) i9-13900K"). 
+    *   Use `(?i)` at the start of the regex for case-insensitive matching.
+    *   If the `regexes` array is empty, it defaults to `true`.
+2.  **Thread Match**: (Optional) The `total_threads` matches the system's logical processor count. If omitted, this condition is ignored.
 
 ---
 
 #### Topology Description (`layout`)
 
-The `layout` array describes groups of cores in order. Thread indices (0, 1, 2...) are assigned automatically from top to bottom.
+The `layout` array defines how logical threads are grouped into clusters (Performance, Efficient, CCDs, etc.).
 
-**Group Fields:**
+**Common Fields:**
 
-1.  **`type`**: Core type (affects color in the UI):
-    - `performance`: Blue (P-cores).
-    - `efficient`: Green (E-cores).
-    - `ccd`: Orange (AMD chiplets).
-2.  **`threads_per_core`**: Number of threads per physical core:
-    - `2`: Standard for P-cores and AMD (with Hyper-Threading/SMT).
-    - `1`: For Intel E-cores or new Intel P-cores without HT (Arrow Lake).
-3.  **`cores`**: Number of physical cores in this group.
-4.  **`label_prefix`**: Letter for buttons (P0, E1, C2...).
+1.  **`type`**: Determines the core type and its visual representation in the UI:
+    *   `performance`: P-cores (with HT/SMT support).
+    *   `p_core_no_ht`: P-cores without Hyper-Threading (e.g., Arrow Lake).
+    *   `efficient`: E-cores (always 1 thread per core).
+    *   `ccd`: AMD Compute Complex Die (with SMT support).
+2.  **`threads_per_core`**: Logical threads per physical core (default is 1).
+    *   `2`: Standard for P-cores/AMD with HT/SMT.
+    *   `1`: For E-cores or processors without HT.
+3.  **`group_name`**: Display name for the cluster.
+4.  **`cores`**: Number of physical cores in this group.
+5.  **`label_prefix`**: (Optional) Letter for buttons (P0, E8, C0). If omitted, the app uses defaults based on `type`.
 
-**Fields for Repeaters (AMD Threadripper/EPYC):**
+**Advanced Repeaters (for Multi-Chiplet systems):**
 
-If you need to describe many identical blocks (CCDs), use:
-- **`repeat`**: How many times to repeat the group.
-- **`group_name_pattern`**: Name with a variable `{i}` (e.g., `"CCD {i}"`).
-- **`cores_per_group`**: Number of physical cores in one block.
+Use these fields to describe multiple identical blocks (like AMD CCDs):
+*   **`repeat`**: Number of times to repeat the block.
+*   **`group_name_pattern`**: Name template with `{i}` for the index (e.g., `"CCD {i}"`).
+*   **`cores_per_group`**: Number of physical cores inside each block.
+
+---
+
+#### How to Add or Modify
+
+1.  **To add a new CPU model to an existing layout**:
+    Find the appropriate scheme in `cpu_presets.json` and add a new regex string to the `regexes` array within the relevant rule.
+    *Example*: Adding "i9-14900KS" to the existing i9 rule:
+    `"regexes": ["(?i)intel.*i9.*1[234]900", "(?i)intel.*i9.*14900KS"]`
+
+2.  **To add a completely new architecture**:
+    Create a new object in the `schemes` array with a unique `name`, defining the specific `rules` for matching and the `layout` of its cores.
+
+3.  **Order Matters**:
+    The app uses the **first** matching scheme. Place more specific rules (e.g., specific models) above general ones (e.g., "Intel Core i5").
 
 ---
 
 #### Examples
 
-**1. Intel Core i5-13600K (6P + 8E = 20 threads)**
+**1. Intel Hybrid (6P + 8E = 20 threads)**
 ```json
 {
-  "group_name": "P-Cores",
-  "type": "performance",
-  "cores": 6,
-  "threads_per_core": 2
-},
-{
-  "group_name": "E-Cores",
-  "type": "efficient",
-  "cores": 8,
-  "threads_per_core": 1
+  "name": "Intel Hybrid (6P + 8E)",
+  "rules": [{ "regexes": ["(?i)intel.*i5.*1[34]600"], "total_threads": 20 }],
+  "layout": [
+    { "group_name": "Performance Cores", "type": "performance", "cores": 6, "threads_per_core": 2 },
+    { "group_name": "Efficient Cores", "type": "efficient", "cores": 8, "threads_per_core": 1 }
+  ]
 }
 ```
 
-**2. AMD Ryzen 9 5950X (2 CCDs with 8 cores each = 32 threads)**
+**2. AMD Ryzen 9 (2 CCDs x 8 cores = 32 threads)**
 ```json
 {
-  "group_name_pattern": "CCD {i}",
-  "type": "ccd",
-  "repeat": 2,
-  "cores_per_group": 8,
-  "threads_per_core": 2
-}
-```
-
-**3. Intel Core Ultra 9 285K (Arrow Lake - no Hyper-Threading)**
-```json
-{
-  "group_name": "P-Cores",
-  "type": "performance",
-  "cores": 8,
-  "threads_per_core": 1 // HT disabled at the architectural level
-},
-{
-  "group_name": "E-Cores",
-  "type": "efficient",
-  "cores": 16,
-  "threads_per_core": 1
+  "name": "AMD Ryzen 9 (16 Cores, 2 CCD)",
+  "rules": [{ "regexes": ["(?i)ryzen.*9"], "total_threads": 32 }],
+  "layout": [
+    { "group_name_pattern": "CCD {i}", "type": "ccd", "repeat": 2, "cores_per_group": 8, "threads_per_core": 2 }
+  ]
 }
 ```
