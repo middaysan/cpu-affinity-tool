@@ -1,6 +1,13 @@
 #![allow(dead_code)]
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AppStatus {
+    NotRunning,
+    Running,
+    SettingsMismatch,
+}
+
 /// Represents a single running application instance.
 /// This structure tracks information about a running application,
 /// including its process IDs, group and program indices, and creation time.
@@ -13,6 +20,8 @@ pub struct RunningApp {
     pub prog_index: usize,
     /// Time when the application was started
     pub created_at: std::time::SystemTime,
+    /// Whether the CPU affinity and priority settings match the desired values
+    pub settings_matched: bool,
 }
 
 /// Manages a collection of running applications.
@@ -44,6 +53,7 @@ impl RunningApps {
                 group_index,
                 prog_index,
                 created_at: std::time::SystemTime::now(),
+                settings_matched: true, // Default to true until checked by monitor
             },
         );
     }

@@ -1,10 +1,7 @@
 use crate::app::controllers;
-use crate::app::models::app_state_storage::AppStateStorage;
-use crate::app::models::app_to_run::{AppToRun, RunAppEditState};
+use crate::app::models::{AppStatus, AppToRun, AppStateStorage, RunningApps, LogManager, RunAppEditState};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
 use crate::app::models::cpu_schema::CpuSchema;
-use crate::app::models::running_app::RunningApps;
-use crate::app::models::LogManager;
 use crate::app::views::header::TIPS;
 use crate::tray::TrayCmd;
 use eframe::egui;
@@ -36,7 +33,7 @@ pub struct AppState {
     /// Thread-safe reference to running applications
     pub running_apps: Arc<RwLock<RunningApps>>,
     /// Cache of running application statuses for quick access
-    pub running_apps_statuses: HashMap<String, bool>,
+    pub running_apps_statuses: HashMap<String, AppStatus>,
     /// Index of the currently displayed tip
     pub current_tip_index: usize,
     //TIP_CHANGE_INTERVAL
@@ -176,6 +173,7 @@ impl AppState {
         tokio::spawn(run_process_settings_monitor(
             apps_clone,
             persistent_state_clone,
+            ctx.clone(),
         ));
 
         app
@@ -614,43 +612,15 @@ impl AppState {
     }
 
     /// Runs an application with a specified CPU affinity based on the provided group.
+    /// If the application is already running, re-applies settings and attempts to focus its window.
     /// Logs the start of the app and any resulting errors.
-    /// Attempts to focus an existing running application window.
+    /// Synchronous version.
     ///
     /// # Parameters
     ///
-    /// * `app_key` - The unique key identifying the application
-    /// * `app_display_name` - A human-readable name for logging purposes
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing:
-    /// - Whether the app exists
-    /// - Whether the window was successfully focused
-    fn try_focus_existing_app(&mut self, app_key: &str, app_display_name: &str) -> (bool, bool) {
-        let lock_result = self.running_apps.try_read();
-
-        if let Ok(apps) = lock_result {
-            if let Some(app) = apps.apps.get(app_key) {
-                // Try to focus any window belonging to this app
-                let was_focused = app.pids.iter().any(|pid| OS::focus_window_by_pid(*pid));
-
-                self.log_manager.add_entry(format!(
-                    "App already running: {}, pids: {:?}",
-                    app_display_name, app.pids
-                ));
-
-                return (true, was_focused);
-            }
-        }
-
-        (false, false)
-    }
-
-    /// Runs an application with a specified CPU affinity based on the provided group.
-    /// If the application is already running, attempts to focus its window instead.
-    /// Logs the start of the app and any resulting errors.
-    /// Synchronous version.
+    /// * `group_index` - The index of the group the application belongs to
+    /// * `prog_index` - The index of the program within the group
+    /// * `app_to_run` - The application configuration to run
     pub fn run_app_with_affinity_sync(
         &mut self,
         group_index: usize,
@@ -659,23 +629,11 @@ impl AppState {
     ) {
         let app_key = app_to_run.get_key();
 
-        // Check if app is already running and try to focus its window
-        if self.does_app_running_sync(&app_key) {
-            let (app_exists, was_focused) =
-                self.try_focus_existing_app(&app_key, &app_to_run.display());
-
-            // If app exists and was successfully focused, we're done
-            if app_exists && was_focused {
-                return;
-            }
-        }
-
         // Try to get the group containing core affinity information
         let group = if let Ok(state) = self.persistent_state.try_read() {
             match state.groups.get(group_index) {
                 Some(g) => g.clone(), // Clone the group so we can drop the read lock
                 None => {
-                    drop(state);
                     self.log_manager
                         .add_entry(format!("Error: Group index {group_index} not found"));
                     return;
@@ -687,6 +645,33 @@ impl AppState {
             ));
             return;
         };
+
+        // Check if app is already running and try to focus its window
+        if let Some(pids) = self.get_running_app_pids(&app_key) {
+            // Re-apply settings to existing processes
+            let mask = group.cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
+            for &pid in &pids {
+                let _ = OS::set_process_affinity_by_pid(pid, mask);
+                let _ = OS::set_process_priority_by_pid(pid, app_to_run.priority);
+            }
+
+            // Try to focus any window belonging to this app
+            let was_focused = pids.iter().any(|&pid| OS::focus_window_by_pid(pid));
+
+            if was_focused {
+                self.log_manager.add_entry(format!(
+                    "App already running: {}, settings reapplied and window focused",
+                    app_to_run.display()
+                ));
+                return;
+            } else {
+                self.log_manager.add_entry(format!(
+                    "App already running: {}, settings reapplied but no window found to focus",
+                    app_to_run.display()
+                ));
+                // If not focused, we continue to start a new instance (old behavior)
+            }
+        }
 
         // Extract a human-readable label from the binary path
         let label = app_to_run
@@ -774,12 +759,11 @@ impl AppState {
         }
     }
 
-    /// Checks if an application is currently running.
+    /// Gets the current status of an application.
     /// Synchronous version.
     ///
     /// This method first tries to check the actual running apps collection.
-    /// If the lock can't be acquired (e.g., because another thread is writing to it),
-    /// it falls back to the cached status.
+    /// If the lock can't be acquired, it falls back to the cached status.
     ///
     /// # Parameters
     ///
@@ -787,22 +771,32 @@ impl AppState {
     ///
     /// # Returns
     ///
-    /// `true` if the application is running, `false` otherwise
-    pub fn does_app_running_sync(&mut self, app_key: &str) -> bool {
+    /// The `AppStatus` of the application
+    pub fn get_app_status_sync(&mut self, app_key: &str) -> AppStatus {
         // Try to get a read lock on the running apps
         if let Ok(apps) = self.running_apps.try_read() {
             // Check if the app is running and update the cache
-            let is_running = apps.apps.contains_key(app_key);
-            self.running_apps_statuses.insert(app_key.to_string(), is_running);
-            is_running
+            let status = if let Some(app) = apps.apps.get(app_key) {
+                if app.settings_matched {
+                    AppStatus::Running
+                } else {
+                    AppStatus::SettingsMismatch
+                }
+            } else {
+                AppStatus::NotRunning
+            };
+            self.running_apps_statuses
+                .insert(app_key.to_string(), status);
+            status
         } else {
             // Fall back to the cached status if we can't get a lock
             self.running_apps_statuses
                 .get(app_key)
                 .copied()
-                .unwrap_or(false)
+                .unwrap_or(AppStatus::NotRunning)
         }
     }
+
 
     /// Gets the PIDs of a running application.
     /// Synchronous version.
@@ -1001,9 +995,11 @@ pub async fn run_running_app_monitor(
 ///
 /// * `running_apps` - Thread-safe reference to the running applications collection
 /// * `app_state` - Thread-safe reference to the application state
+/// * `ctx` - The egui context to request repaints
 pub async fn run_process_settings_monitor(
     running_apps: Arc<RwLock<RunningApps>>,
     app_state: Arc<RwLock<AppStateStorage>>,
+    ctx: egui::Context,
 ) {
     // Create a 3-second interval for periodic checking
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
@@ -1012,29 +1008,19 @@ pub async fn run_process_settings_monitor(
         // Wait for the next interval tick
         interval.tick().await;
 
-        // Check if monitoring is enabled
-        let monitoring_enabled = if let Ok(state) = app_state.try_read() {
-            state.process_monitoring_enabled
-        } else {
-            false // Default to disabled if we can't read the state
-        };
-
-        // Skip processing if monitoring is disabled
-        if !monitoring_enabled {
-            continue;
-        }
-
-        // Get the groups configuration
-        let groups = if let Ok(state) = app_state.try_read() {
-            state.groups.clone()
+        // Get the groups configuration and monitoring flag
+        let (groups, monitoring_enabled) = if let Ok(state) = app_state.try_read() {
+            (state.groups.clone(), state.process_monitoring_enabled)
         } else {
             continue; // Skip this iteration if we can't read the state
         };
 
-        // Process all applications in a single read lock to minimize contention
-        if let Ok(apps) = running_apps.try_read() {
+        let mut changed = false;
+
+        // Process all applications in a single write lock
+        if let Ok(mut apps) = running_apps.try_write() {
             // Process each application
-            for app in apps.apps.values() {
+            for app in apps.apps.values_mut() {
                 // Get the group for this application
                 if let Some(group) = groups.get(app.group_index) {
                     // Get the expected CPU affinity mask from the group
@@ -1048,26 +1034,43 @@ pub async fn run_process_settings_monitor(
                             continue; // Skip if we can't find the program
                         };
 
-                    // Check and reset CPU affinity and priority for each process
+                    let mut all_matched = true;
+
+                    // Check and optionally reset CPU affinity and priority for each process
                     for &pid in &app.pids {
-                        // Check and reset CPU affinity
+                        // Check CPU affinity
                         if let Ok(current_mask) = OS::get_process_affinity(pid) {
                             if current_mask != expected_mask {
-                                // The CPU affinity has been changed, reset it
-                                let _ = OS::set_process_affinity_by_pid(pid, expected_mask);
+                                all_matched = false;
+                                // Reset affinity only if monitoring is enabled
+                                if monitoring_enabled {
+                                    let _ = OS::set_process_affinity_by_pid(pid, expected_mask);
+                                }
                             }
                         }
 
-                        // Check and reset priority
+                        // Check priority
                         if let Ok(current_priority) = OS::get_process_priority(pid) {
                             if current_priority != expected_priority {
-                                // The priority has been changed, reset it
-                                let _ = OS::set_process_priority_by_pid(pid, expected_priority);
+                                all_matched = false;
+                                // Reset priority only if monitoring is enabled
+                                if monitoring_enabled {
+                                    let _ = OS::set_process_priority_by_pid(pid, expected_priority);
+                                }
                             }
                         }
                     }
+
+                    if app.settings_matched != all_matched {
+                        app.settings_matched = all_matched;
+                        changed = true;
+                    }
                 }
             }
+        }
+
+        if changed {
+            ctx.request_repaint();
         }
     }
 }
