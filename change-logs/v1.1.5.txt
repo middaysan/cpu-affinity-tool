@@ -1,0 +1,23 @@
+### CPU Affinity Tool v1.1.5 - Changelog
+
+#### Core & OS Integration
+- **Process Priority Management**: Added support for setting the priority of the current process.
+- **Improved Background Execution**: The application now automatically sets its own process priority to "Below Normal" to minimize interference with high-load applications.
+- **Linux Enhancements**: Implemented process search by name and better process management for Linux systems.
+- **Windows API Improvements**: Enhanced Windows process priority handling and process information retrieval.
+
+#### CPU Presets & Detection
+- **Regex-based Matching**: Migrated CPU detection logic to use regular expressions for more flexible and accurate hardware identification.
+- **Multi-rule Support**: CPU presets now support multiple matching rules per configuration, allowing a single preset to cover more hardware variations.
+- **New Hardware Support**: Updated and optimized `cpu_presets.json` with improved rules for modern Intel (including Core Ultra/Arrow Lake) and AMD (Ryzen) processors.
+- **P-Core/E-Core Logic**: Refined handling of Performance and Efficient cores, including support for P-cores without Hyper-Threading (e.g., Arrow Lake).
+
+#### App State & Stability
+- **State Backup Rotation**: Improved data safety by implementing a rotating backup system for `state.json` (keeping `.old1` and `.old2` versions).
+- **Application Monitoring**: Added `settings_matched` tracking to monitor whether running applications maintain their assigned CPU affinity and priority settings.
+- **Repaint Optimization**: The UI now requests repaints more efficiently when background monitoring detects changes.
+
+#### Testing & Technical
+- **Expanded Test Suite**: Added comprehensive unit tests for CPU preset matching and state storage management.
+- **Dependency Updates**: Updated `Cargo.lock` with necessary library improvements.
+- **Code Quality**: Refined internal models for `AppState` and `RunningApp` for better maintainability and status tracking.
