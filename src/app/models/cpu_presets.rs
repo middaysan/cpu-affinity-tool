@@ -59,7 +59,13 @@ pub fn get_all_presets_info() -> Vec<(String, Vec<String>, Option<usize>)> {
     let root = &*PRESETS;
     root.schemes
         .iter()
-        .map(|s| (s.name.clone(), s.match_config.keywords.clone(), s.match_config.total_threads))
+        .map(|s| {
+            (
+                s.name.clone(),
+                s.match_config.keywords.clone(),
+                s.match_config.total_threads,
+            )
+        })
         .collect()
 }
 

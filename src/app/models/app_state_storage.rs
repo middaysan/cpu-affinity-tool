@@ -84,10 +84,13 @@ impl AppStateStorage {
                         let cpu_model = Self::get_effective_cpu_model();
                         let total_threads = Self::get_effective_total_threads();
 
-                        let is_generic = state.cpu_schema.model == "Generic CPU" 
+                        let is_generic = state.cpu_schema.model == "Generic CPU"
                             || state.cpu_schema.clusters.is_empty()
-                            || state.cpu_schema.clusters.iter().all(|c| c.cores.iter().all(|core| core.core_type == CoreType::Other));
+                            || state.cpu_schema.clusters.iter().all(|c| {
+                                c.cores.iter().all(|core| core.core_type == CoreType::Other)
+                            });
 
+                        #[allow(clippy::const_is_empty)]
                         if is_generic
                             || !TEST_CPU_MODEL.is_empty()
                             || (state.cpu_schema.model != cpu_model && !cpu_model.is_empty())

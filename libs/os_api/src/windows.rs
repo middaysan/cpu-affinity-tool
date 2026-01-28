@@ -865,7 +865,8 @@ impl OS {
         hklm.open_subkey(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
             .and_then(|key| {
                 let s: String = key.get_value("ProcessorNameString")?;
-                Ok(s.trim_matches(|c: char| c.is_whitespace() || c == '\0').to_string())
+                Ok(s.trim_matches(|c: char| c.is_whitespace() || c == '\0')
+                    .to_string())
             })
             .unwrap_or_else(|_| "Unknown CPU".to_string())
     }

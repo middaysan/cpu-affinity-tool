@@ -1,7 +1,9 @@
 use crate::app::controllers;
-use crate::app::models::{AppStatus, AppToRun, AppStateStorage, RunningApps, LogManager, RunAppEditState};
 use crate::app::models::core_group::{CoreGroup, GroupFormState};
 use crate::app::models::cpu_schema::CpuSchema;
+use crate::app::models::{
+    AppStateStorage, AppStatus, AppToRun, LogManager, RunAppEditState, RunningApps,
+};
 use crate::app::views::header::TIPS;
 use crate::tray::TrayCmd;
 use eframe::egui;
@@ -118,13 +120,16 @@ impl AppState {
             .add_entry(format!("Detected CPU: \"{}\" ({} threads)", model, threads));
 
         let presets_info = crate::app::models::cpu_presets::get_all_presets_info();
-        app.log_manager.add_entry(format!("Loaded {} CPU presets from embedded JSON", presets_info.len()));
+        app.log_manager.add_entry(format!(
+            "Loaded {} CPU presets from embedded JSON",
+            presets_info.len()
+        ));
 
         if let Ok(state) = app.persistent_state.try_read() {
             if state.cpu_schema.clusters.is_empty() {
                 app.log_manager
                     .add_entry("CPU layout: Generic (no clusters)".into());
-                
+
                 // Try to find if any keywords matched but threads didn't
                 let model_lower = model.to_lowercase();
                 let model_trimmed = model_lower.trim();
@@ -132,9 +137,11 @@ impl AppState {
                     let kw_match = if keywords.is_empty() {
                         false
                     } else {
-                        keywords.iter().all(|kw| model_trimmed.contains(kw.to_lowercase().trim()))
+                        keywords
+                            .iter()
+                            .all(|kw| model_trimmed.contains(kw.to_lowercase().trim()))
                     };
-                    
+
                     if kw_match {
                         if let Some(t) = p_threads {
                             if t != threads {
@@ -797,7 +804,6 @@ impl AppState {
         }
     }
 
-
     /// Gets the PIDs of a running application.
     /// Synchronous version.
     ///
@@ -964,7 +970,7 @@ pub async fn run_running_app_monitor(
                             OS::find_all_descendants(app.pids[0], &mut app.pids);
                         }
                         app.pids.retain(|&pid| OS::is_pid_live(pid));
-                        
+
                         if app.pids.is_empty() {
                             apps.remove_app(&key);
                             changed = true;
