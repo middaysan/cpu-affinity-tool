@@ -341,27 +341,20 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
             });
 
         if save_clicked {
-            // Get updated schema
-            let schema = app.get_cpu_schema().unwrap_or_else(|| {
-                let cpu_model = crate::app::models::AppStateStorage::get_effective_cpu_model();
-                CpuSchema {
-                    model: cpu_model,
-                    clusters: vec![],
-                }
-            });
-            let mut assigned = schema.get_assigned_cores();
-
-            for (i, &selected) in app.group_form.core_selection.iter().enumerate() {
-                if selected {
-                    assigned.insert(i);
-                }
-            }
+            // Gather indices of selected cores only.
+            let selected_cores: Vec<usize> = app
+                .group_form
+                .core_selection
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &selected)| if selected { Some(i) } else { None })
+                .collect();
 
             // Update group properties
             app.update_group_properties(
                 index,
                 app.group_form.group_name.clone(),
-                assigned.into_iter().collect(),
+                selected_cores,
                 app.group_form.run_all_enabled,
             );
 
