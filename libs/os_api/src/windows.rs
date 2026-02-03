@@ -21,7 +21,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::core::{BOOL, Interface, PCWSTR, PWSTR};
 // LocalFree is in Foundation for this windows crate version
-use windows::Win32::System::ProcessStatus::K32EnumProcesses;
+use windows::Win32::System::ProcessStatus::{K32EnumProcesses, K32GetModuleFileNameExW};
 use windows::Win32::System::Threading::{
     ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, CREATE_SUSPENDED, CreateProcessW,
     GetExitCodeProcess, GetPriorityClass, GetProcessAffinityMask, HIGH_PRIORITY_CLASS,
@@ -878,5 +878,25 @@ impl OS {
                     .to_string())
             })
             .unwrap_or_else(|_| "Unknown CPU".to_string())
+    }
+
+    pub fn get_process_image_path(pid: u32) -> Result<PathBuf, String> {
+        (|| unsafe {
+            let handle = Self::open_process(
+                pid,
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION,
+            )?;
+            let _hg = HandleGuard(handle);
+
+            let mut buffer = [0u16; 1024];
+            let len = K32GetModuleFileNameExW(Some(handle), None, &mut buffer);
+            if len == 0 {
+                return Err(OsError::Win(windows::core::Error::from_thread()));
+            }
+
+            let path_str = String::from_utf16_lossy(&buffer[..len as usize]);
+            Ok(PathBuf::from(path_str))
+        })()
+        .map_err(|e: OsError| format!("Failed to get image path for process {}: {}", pid, e))
     }
 }

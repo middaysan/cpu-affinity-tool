@@ -723,6 +723,14 @@ impl AppState {
                         ));
                     }
                 } else {
+                    // It's a new instance, we should add its PID to the existing RunningApp record
+                    if let Ok(mut apps) = self.running_apps.try_write() {
+                        if let Some(app) = apps.apps.get_mut(&app_key) {
+                            if !app.pids.contains(&pid) {
+                                app.pids.push(pid);
+                            }
+                        }
+                    }
                     self.log_manager.add_entry(format!(
                         "New instance of existing app started with PID: {pid}"
                     ));
@@ -916,6 +924,20 @@ pub async fn run_running_app_monitor(
                     .cloned()
                     .unwrap_or_default();
 
+                // If we found processes by name, verify them by path if possible
+                let mut verified_pids = Vec::new();
+                for pid in pids_by_name {
+                    if let Ok(image_path) = OS::get_process_image_path(pid) {
+                        // The key starts with the bin_path
+                        if key.starts_with(&image_path.display().to_string()) {
+                            verified_pids.push(pid);
+                        }
+                    } else {
+                        // If we can't get the path (Access Denied for some system processes with same name), 
+                        // we skip it to be safe and avoid over-matching
+                    }
+                }
+
                 if let Some(app) = apps.apps.get_mut(&key) {
                     // Update existing tracked application
                     let old_pid_count = app.pids.len();
@@ -925,8 +947,8 @@ pub async fn run_running_app_monitor(
                         OS::find_all_descendants(app.pids[0], &mut app.pids);
                     }
 
-                    // Add processes found by name matching
-                    for pid in pids_by_name {
+                    // Add verified processes found by name matching
+                    for pid in verified_pids {
                         if !app.pids.contains(&pid) {
                             app.pids.push(pid);
                         }
@@ -946,14 +968,14 @@ pub async fn run_running_app_monitor(
                     }
                 } else {
                     // Search for newly started application
-                    if !pids_by_name.is_empty() {
+                    if !verified_pids.is_empty() {
                         // Use the first found PID as the "root" for add_app
-                        apps.add_app(&key, pids_by_name[0], g_idx, p_idx);
+                        apps.add_app(&key, verified_pids[0], g_idx, p_idx);
                         changed = true;
 
-                        // Add any other instances found by name
+                        // Add any other instances found
                         if let Some(app) = apps.apps.get_mut(&key) {
-                            for pid in pids_by_name.into_iter().skip(1) {
+                            for pid in verified_pids.into_iter().skip(1) {
                                 if !app.pids.contains(&pid) {
                                     app.pids.push(pid);
                                 }
@@ -963,7 +985,7 @@ pub async fn run_running_app_monitor(
                 }
             }
 
-            // Optional: Process apps that are still running but were removed from configuration
+            // 4. Process apps that are still running but were removed from configuration
             let app_keys: Vec<String> = apps.apps.keys().cloned().collect();
             for key in app_keys {
                 if !processed_keys.contains(&key) {
@@ -1025,23 +1047,43 @@ pub async fn run_process_settings_monitor(
         };
 
         let mut changed = false;
+        let mut notifications = Vec::new();
 
         // Process all applications in a single write lock
         if let Ok(mut apps) = running_apps.try_write() {
             // Process each application
-            for app in apps.apps.values_mut() {
-                // Get the group for this application
-                if let Some(group) = groups.get(app.group_index) {
+            for (app_key, app) in apps.apps.iter_mut() {
+                // Find the program in any group by its key to avoid index shift issues
+                let mut found_program_and_group = None;
+                for group in groups.iter() {
+                    if let Some(program) = group.programs.iter().find(|p| p.get_key() == *app_key) {
+                        found_program_and_group = Some((program, group));
+                        break;
+                    }
+                }
+
+                if let Some((program, group)) = found_program_and_group {
+                    // Update indices in the running app record to keep them as accurate as possible
+                    // (though we don't strictly rely on them anymore in this monitor)
+                    if let Some(new_group_idx) = groups.iter().position(|g| std::ptr::eq(g, group)) {
+                        app.group_index = new_group_idx;
+                        if let Some(new_prog_idx) =
+                            group.programs.iter().position(|p| p.get_key() == *app_key)
+                        {
+                            app.prog_index = new_prog_idx;
+                        }
+                    }
+
                     // Get the expected CPU affinity mask from the group
-                    let expected_mask = group.cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
+                    let mut expected_mask = 0usize;
+                    for &i in &group.cores {
+                        if i < (std::mem::size_of::<usize>() * 8) {
+                            expected_mask |= 1 << i;
+                        }
+                    }
 
                     // Get the expected priority from the app configuration
-                    let expected_priority =
-                        if let Some(program) = group.programs.get(app.prog_index) {
-                            program.priority
-                        } else {
-                            continue; // Skip if we can't find the program
-                        };
+                    let expected_priority = program.priority;
 
                     let mut all_matched = true;
 
@@ -1053,7 +1095,12 @@ pub async fn run_process_settings_monitor(
                                 all_matched = false;
                                 // Reset affinity only if monitoring is enabled
                                 if monitoring_enabled {
-                                    let _ = OS::set_process_affinity_by_pid(pid, expected_mask);
+                                    if OS::set_process_affinity_by_pid(pid, expected_mask).is_ok() {
+                                        notifications.push(format!(
+                                            "Fixed affinity for {} (PID {}): {:X} -> {:X}",
+                                            program.name, pid, current_mask, expected_mask
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1064,7 +1111,12 @@ pub async fn run_process_settings_monitor(
                                 all_matched = false;
                                 // Reset priority only if monitoring is enabled
                                 if monitoring_enabled {
-                                    let _ = OS::set_process_priority_by_pid(pid, expected_priority);
+                                    if OS::set_process_priority_by_pid(pid, expected_priority).is_ok() {
+                                        notifications.push(format!(
+                                            "Fixed priority for {} (PID {}): {:?} -> {:?}",
+                                            program.name, pid, current_priority, expected_priority
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1075,6 +1127,17 @@ pub async fn run_process_settings_monitor(
                         changed = true;
                     }
                 }
+            }
+        }
+
+        if !notifications.is_empty() {
+            // Log changes - we need to get access to log_manager somehow, 
+            // but monitors don't have it easily. 
+            // For now, we print to stdout which is captured by the terminal if any.
+            // Ideally we'd have a message channel to AppState.
+            for msg in notifications {
+                #[cfg(debug_assertions)]
+                println!("MONITOR: {}", msg);
             }
         }
 
