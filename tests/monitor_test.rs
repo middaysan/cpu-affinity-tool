@@ -1,7 +1,3 @@
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use std::path::PathBuf;
-
 #[test]
 fn test_index_shift_logic() {
     // This is a conceptual test to show why using indices is dangerous
@@ -15,8 +11,14 @@ fn test_index_shift_logic() {
     }
 
     let mut groups = vec![
-        Group { name: "Group 0".into(), cores: vec![0] },
-        Group { name: "Group 1".into(), cores: vec![1] },
+        Group {
+            name: "Group 0".into(),
+            cores: vec![0],
+        },
+        Group {
+            name: "Group 1".into(),
+            cores: vec![1],
+        },
     ];
 
     let app = RunningApp { group_index: 1 }; // Points to Group 1

@@ -122,7 +122,10 @@ impl eframe::App for App {
         // 1. Handle commands from the system tray
         self.handle_tray_events(ctx);
 
-        // 2. Visibility check and minimization handling
+        // 2. Handle notifications from background monitors
+        self.handle_monitor_events();
+
+        // 3. Visibility check and minimization handling
         if !self.should_render(ctx) {
             return;
         }
@@ -156,6 +159,15 @@ impl App {
 
         if show_requested {
             self.show_from_tray(ctx);
+        }
+    }
+
+    /// Handles notifications from background monitors and adds them to the log.
+    fn handle_monitor_events(&mut self) {
+        if let Some(rx) = &self.state.monitor_rx {
+            while let Ok(msg) = rx.try_recv() {
+                self.state.log_manager.add_entry(msg);
+            }
         }
     }
 

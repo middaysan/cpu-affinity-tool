@@ -166,6 +166,41 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                 ui.separator();
                 ui.add_space(10.0);
 
+                ui.label(RichText::new("Additional Process Names (Auto-track):").strong());
+                ui.add_space(5.0);
+
+                let mut proc_to_remove: Option<usize> = None;
+                if selected_app.additional_processes.is_empty() {
+                    ui.label(
+                        RichText::new("No additional processes defined.")
+                            .weak()
+                            .italics(),
+                    );
+                } else {
+                    for (i, proc_name) in selected_app.additional_processes.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{}:", i + 1));
+                            ui.text_edit_singleline(proc_name);
+                            if ui.button("❌").clicked() {
+                                proc_to_remove = Some(i);
+                            }
+                        });
+                    }
+                }
+
+                if let Some(idx) = proc_to_remove {
+                    selected_app.additional_processes.remove(idx);
+                }
+
+                ui.add_space(5.0);
+                if ui.button("➕ Add Process Name").clicked() {
+                    selected_app.additional_processes.push(String::new());
+                }
+
+                ui.add_space(15.0);
+                ui.separator();
+                ui.add_space(10.0);
+
                 ui.horizontal(|ui| {
                     if ui
                         .add(

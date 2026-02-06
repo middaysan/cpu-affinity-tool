@@ -58,6 +58,9 @@ pub struct AppState {
 
     /// Flag indicating that the window is currently hidden in the tray
     pub is_hidden: bool,
+
+    /// Receiver for monitor notifications
+    pub monitor_rx: Option<Receiver<String>>,
 }
 
 impl AppState {
@@ -111,7 +114,11 @@ impl AppState {
             #[cfg(target_os = "windows")]
             hwnd: None,
             is_hidden: false,
+            monitor_rx: None,
         };
+
+        let (monitor_tx, monitor_rx) = std::sync::mpsc::channel();
+        app.monitor_rx = Some(monitor_rx);
 
         app.log_manager.add_entry("Application started".into());
 
@@ -177,6 +184,7 @@ impl AppState {
             apps_clone.clone(),
             persistent_state_clone.clone(),
             ctx.clone(),
+            monitor_tx.clone(),
         ));
 
         // Spawn a background task to monitor and enforce process settings
@@ -184,6 +192,7 @@ impl AppState {
             apps_clone,
             persistent_state_clone,
             ctx.clone(),
+            monitor_tx,
         ));
 
         app
@@ -874,6 +883,7 @@ pub async fn run_running_app_monitor(
     running_apps: Arc<RwLock<RunningApps>>,
     app_state: Arc<RwLock<AppStateStorage>>,
     ctx: egui::Context,
+    monitor_tx: std::sync::mpsc::Sender<String>,
 ) {
     // Create a 2-second interval for periodic checking
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -887,11 +897,42 @@ pub async fn run_running_app_monitor(
             let mut programs = Vec::new();
             for (g_idx, group) in state.groups.iter().enumerate() {
                 for (p_idx, program) in group.programs.iter().enumerate() {
-                    // Use program.name as it's extracted from the original file name (e.g. "Discord" from "Discord.exe" or "Discord.lnk")
-                    // This is more reliable for name matching than bin_path which might be a launcher like Update.exe
-                    let name = program.name.split('.').next().unwrap_or("").to_string();
-                    if !name.is_empty() {
-                        programs.push((program.get_key(), name, g_idx, p_idx));
+                    // Collect candidate names for process matching
+                    let mut names = Vec::new();
+
+                    // 1. Current display name (might be edited by user)
+                    if let Some(n) = program.name.split('.').next() {
+                        if !n.is_empty() {
+                            names.push(n.to_string());
+                        }
+                    }
+
+                    // 2. Original binary filename
+                    if let Some(n) = program
+                        .bin_path
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .and_then(|s| s.split('.').next())
+                    {
+                        if !n.is_empty() && !names.contains(&n.to_string()) {
+                            names.push(n.to_string());
+                        }
+                    }
+
+                    // 3. Dropped path filename (often the most reliable if bin_path is a launcher)
+                    if let Some(n) = program
+                        .dropped_path
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .and_then(|s| s.split('.').next())
+                    {
+                        if !n.is_empty() && !names.contains(&n.to_string()) {
+                            names.push(n.to_string());
+                        }
+                    }
+
+                    if !names.is_empty() {
+                        programs.push((program.clone(), names, g_idx, p_idx));
                     }
                 }
             }
@@ -900,10 +941,14 @@ pub async fn run_running_app_monitor(
             continue; // Skip this iteration if we can't read the state
         };
 
-        // 2. Get all running processes once for efficient matching
-        let all_processes = OS::get_all_process_names();
+        // 2. Get process tree snapshot once for efficient matching and descendant finding
+        let tree = match os_api::OS::snapshot_process_tree() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
         let mut name_to_pids: HashMap<String, Vec<u32>> = HashMap::new();
-        for (pid, full_name) in all_processes {
+        for (&pid, full_name) in &tree.names {
             // Extract part before the first dot for matching
             let name = full_name.split('.').next().unwrap_or("").to_string();
             name_to_pids
@@ -917,24 +962,52 @@ pub async fn run_running_app_monitor(
             let mut processed_keys = HashSet::new();
             let mut changed = false;
 
-            for (key, name, g_idx, p_idx) in configured_programs {
+            for (program, names, g_idx, p_idx) in configured_programs {
+                let key = program.get_key();
                 processed_keys.insert(key.clone());
-                let pids_by_name = name_to_pids
-                    .get(&name.to_lowercase())
-                    .cloned()
-                    .unwrap_or_default();
 
-                // If we found processes by name, verify them by path if possible
                 let mut verified_pids = Vec::new();
-                for pid in pids_by_name {
-                    if let Ok(image_path) = OS::get_process_image_path(pid) {
-                        // The key starts with the bin_path
-                        if key.starts_with(&image_path.display().to_string()) {
-                            verified_pids.push(pid);
+
+                // 1. Check main candidate names with prefix matching
+                for name in names {
+                    let target_lower = name.to_lowercase();
+                    for (p_name, pids) in &name_to_pids {
+                        if p_name.starts_with(&target_lower) {
+                            for &pid in pids {
+                                if verified_pids.contains(&pid) {
+                                    continue;
+                                }
+
+                                if *p_name == target_lower {
+                                    // Exact name match - still verify path for main executable
+                                    if let Ok(image_path) = OS::get_process_image_path(pid) {
+                                        if key.starts_with(&image_path.display().to_string()) {
+                                            verified_pids.push(pid);
+                                        }
+                                    }
+                                } else {
+                                    // Prefix match (e.g. "steamwebhelper" for "steam")
+                                    // Add without path verification as requested by user for prefix matching
+                                    verified_pids.push(pid);
+                                }
+                            }
                         }
-                    } else {
-                        // If we can't get the path (Access Denied for some system processes with same name), 
-                        // we skip it to be safe and avoid over-matching
+                    }
+                }
+
+                // 2. Check additional processes with prefix matching
+                for proc_name in &program.additional_processes {
+                    let search_name = proc_name.split('.').next().unwrap_or("").to_lowercase();
+                    if !search_name.is_empty() {
+                        for (p_name, pids) in &name_to_pids {
+                            if p_name.starts_with(&search_name) {
+                                for &pid in pids {
+                                    if !verified_pids.contains(&pid) {
+                                        verified_pids.push(pid);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -944,7 +1017,7 @@ pub async fn run_running_app_monitor(
 
                     // Find all child processes of the first PID (main process)
                     if !app.pids.is_empty() {
-                        OS::find_all_descendants(app.pids[0], &mut app.pids);
+                        OS::find_all_descendants_with_tree(app.pids[0], &mut app.pids, &tree);
                     }
 
                     // Add verified processes found by name matching
@@ -963,12 +1036,17 @@ pub async fn run_running_app_monitor(
 
                     // Remove app if no processes are left
                     if app.pids.is_empty() {
+                        let _ = monitor_tx.send(format!("App stopped: {}", program.name));
                         apps.remove_app(&key);
                         changed = true;
                     }
                 } else {
                     // Search for newly started application
                     if !verified_pids.is_empty() {
+                        let _ = monitor_tx.send(format!(
+                            "App detected: {} (PID {})",
+                            program.name, verified_pids[0]
+                        ));
                         // Use the first found PID as the "root" for add_app
                         apps.add_app(&key, verified_pids[0], g_idx, p_idx);
                         changed = true;
@@ -992,7 +1070,7 @@ pub async fn run_running_app_monitor(
                     if let Some(app) = apps.apps.get_mut(&key) {
                         let old_pid_count = app.pids.len();
                         if !app.pids.is_empty() {
-                            OS::find_all_descendants(app.pids[0], &mut app.pids);
+                            OS::find_all_descendants_with_tree(app.pids[0], &mut app.pids, &tree);
                         }
                         app.pids.retain(|&pid| OS::is_pid_live(pid));
 
@@ -1031,6 +1109,7 @@ pub async fn run_process_settings_monitor(
     running_apps: Arc<RwLock<RunningApps>>,
     app_state: Arc<RwLock<AppStateStorage>>,
     ctx: egui::Context,
+    monitor_tx: std::sync::mpsc::Sender<String>,
 ) {
     // Create a 3-second interval for periodic checking
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
@@ -1046,6 +1125,14 @@ pub async fn run_process_settings_monitor(
             continue; // Skip this iteration if we can't read the state
         };
 
+        // Create a map for quick lookup of programs by key
+        let mut key_to_program_group = HashMap::new();
+        for group in &groups {
+            for program in &group.programs {
+                key_to_program_group.insert(program.get_key(), (program, group));
+            }
+        }
+
         let mut changed = false;
         let mut notifications = Vec::new();
 
@@ -1053,19 +1140,12 @@ pub async fn run_process_settings_monitor(
         if let Ok(mut apps) = running_apps.try_write() {
             // Process each application
             for (app_key, app) in apps.apps.iter_mut() {
-                // Find the program in any group by its key to avoid index shift issues
-                let mut found_program_and_group = None;
-                for group in groups.iter() {
-                    if let Some(program) = group.programs.iter().find(|p| p.get_key() == *app_key) {
-                        found_program_and_group = Some((program, group));
-                        break;
-                    }
-                }
-
-                if let Some((program, group)) = found_program_and_group {
+                // Find the program in the map to avoid nested loops
+                if let Some(&(program, group)) = key_to_program_group.get(app_key) {
                     // Update indices in the running app record to keep them as accurate as possible
                     // (though we don't strictly rely on them anymore in this monitor)
-                    if let Some(new_group_idx) = groups.iter().position(|g| std::ptr::eq(g, group)) {
+                    if let Some(new_group_idx) = groups.iter().position(|g| std::ptr::eq(g, group))
+                    {
                         app.group_index = new_group_idx;
                         if let Some(new_prog_idx) =
                             group.programs.iter().position(|p| p.get_key() == *app_key)
@@ -1094,13 +1174,13 @@ pub async fn run_process_settings_monitor(
                             if current_mask != expected_mask {
                                 all_matched = false;
                                 // Reset affinity only if monitoring is enabled
-                                if monitoring_enabled {
-                                    if OS::set_process_affinity_by_pid(pid, expected_mask).is_ok() {
-                                        notifications.push(format!(
-                                            "Fixed affinity for {} (PID {}): {:X} -> {:X}",
-                                            program.name, pid, current_mask, expected_mask
-                                        ));
-                                    }
+                                if monitoring_enabled
+                                    && OS::set_process_affinity_by_pid(pid, expected_mask).is_ok()
+                                {
+                                    notifications.push(format!(
+                                        "Fixed affinity for {} (PID {}): {:X} -> {:X}",
+                                        program.name, pid, current_mask, expected_mask
+                                    ));
                                 }
                             }
                         }
@@ -1110,13 +1190,14 @@ pub async fn run_process_settings_monitor(
                             if current_priority != expected_priority {
                                 all_matched = false;
                                 // Reset priority only if monitoring is enabled
-                                if monitoring_enabled {
-                                    if OS::set_process_priority_by_pid(pid, expected_priority).is_ok() {
-                                        notifications.push(format!(
-                                            "Fixed priority for {} (PID {}): {:?} -> {:?}",
-                                            program.name, pid, current_priority, expected_priority
-                                        ));
-                                    }
+                                if monitoring_enabled
+                                    && OS::set_process_priority_by_pid(pid, expected_priority)
+                                        .is_ok()
+                                {
+                                    notifications.push(format!(
+                                        "Fixed priority for {} (PID {}): {:?} -> {:?}",
+                                        program.name, pid, current_priority, expected_priority
+                                    ));
                                 }
                             }
                         }
@@ -1131,11 +1212,8 @@ pub async fn run_process_settings_monitor(
         }
 
         if !notifications.is_empty() {
-            // Log changes - we need to get access to log_manager somehow, 
-            // but monitors don't have it easily. 
-            // For now, we print to stdout which is captured by the terminal if any.
-            // Ideally we'd have a message channel to AppState.
             for msg in notifications {
+                let _ = monitor_tx.send(format!("MONITOR: {}", msg));
                 #[cfg(debug_assertions)]
                 println!("MONITOR: {}", msg);
             }

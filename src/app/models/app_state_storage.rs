@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Current version of the application state schema
-pub const CURRENT_APP_STATE_VERSION: u32 = 3;
+pub const CURRENT_APP_STATE_VERSION: u32 = 4;
 pub const STATE_FILE_NAME: &str = "state.json";
 
 impl AppStateStorage {
@@ -109,7 +109,7 @@ impl AppStateStorage {
                 let v_check: VersionCheck = serde_json::from_str(&data).ok()?;
 
                 match v_check.version {
-                    Some(3) => {
+                    Some(4) => {
                         let mut state: AppStateStorage = serde_json::from_str(&data).ok()?;
                         // Always try to refresh schema if it looks generic or model changed
                         let cpu_model = Self::get_effective_cpu_model();
@@ -135,6 +135,13 @@ impl AppStateStorage {
                                 state.save_state();
                             }
                         }
+                        Some(state)
+                    }
+                    Some(3) => {
+                        // Migrate from v3 to v4 (adds additional_processes to AppToRun)
+                        let mut state: AppStateStorage = serde_json::from_str(&data).ok()?;
+                        state.version = CURRENT_APP_STATE_VERSION;
+                        state.save_state();
                         Some(state)
                     }
                     Some(2) => {

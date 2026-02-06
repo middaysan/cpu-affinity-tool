@@ -89,9 +89,10 @@ impl Drop for ComGuard {
 pub struct OS;
 
 // One snapshot used for all process-tree operations.
-struct ProcessTree {
-    parent_of: std::collections::HashMap<u32, u32>,
-    children_of: std::collections::HashMap<u32, Vec<u32>>,
+pub struct ProcessTree {
+    pub parent_of: std::collections::HashMap<u32, u32>,
+    pub children_of: std::collections::HashMap<u32, Vec<u32>>,
+    pub names: std::collections::HashMap<u32, String>,
 }
 
 impl OS {
@@ -227,7 +228,11 @@ impl OS {
         }
     }
 
-    fn snapshot_process_tree() -> Result<ProcessTree, OsError> {
+    pub fn snapshot_process_tree() -> Result<ProcessTree, String> {
+        Self::snapshot_process_tree_internal().map_err(|e| e.to_string())
+    }
+
+    fn snapshot_process_tree_internal() -> Result<ProcessTree, OsError> {
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
             let _hg = HandleGuard(snap);
@@ -242,14 +247,23 @@ impl OS {
             let mut parent_of = std::collections::HashMap::new();
             let mut children_of: std::collections::HashMap<u32, Vec<u32>> =
                 std::collections::HashMap::new();
+            let mut names = std::collections::HashMap::new();
 
             loop {
                 let pid = pe.th32ProcessID;
                 let ppid = pe.th32ParentProcessID;
 
+                let len = pe
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(pe.szExeFile.len());
+                let exe_file = String::from_utf16_lossy(&pe.szExeFile[..len]);
+
                 if pid != 0 {
                     parent_of.insert(pid, ppid);
                     children_of.entry(ppid).or_default().push(pid);
+                    names.insert(pid, exe_file);
                 }
 
                 let mut next: PROCESSENTRY32W = std::mem::zeroed();
@@ -264,6 +278,7 @@ impl OS {
             Ok(ProcessTree {
                 parent_of,
                 children_of,
+                names,
             })
         }
     }
@@ -620,11 +635,17 @@ impl OS {
     ///
     /// Preserves original behavior: doesn't add duplicates if `descendants` already contains some PIDs.
     pub fn find_all_descendants(parent_pid: u32, descendants: &mut Vec<u32>) {
-        let tree = match Self::snapshot_process_tree() {
-            Ok(t) => t,
-            Err(_) => return,
-        };
+        if let Ok(tree) = Self::snapshot_process_tree() {
+            Self::find_all_descendants_with_tree(parent_pid, descendants, &tree);
+        }
+    }
 
+    /// Finds all descendant processes using a pre-captured process tree snapshot.
+    pub fn find_all_descendants_with_tree(
+        parent_pid: u32,
+        descendants: &mut Vec<u32>,
+        tree: &ProcessTree,
+    ) {
         use std::collections::{HashSet, VecDeque};
 
         let mut existing: HashSet<u32> = descendants.iter().copied().collect();
@@ -882,13 +903,12 @@ impl OS {
 
     pub fn get_process_image_path(pid: u32) -> Result<PathBuf, String> {
         (|| unsafe {
-            let handle = Self::open_process(
-                pid,
-                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION,
-            )?;
+            // Try limited information first as it works for more processes (including those with higher integrity)
+            let handle = Self::open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+                .or_else(|_| Self::open_process(pid, PROCESS_QUERY_INFORMATION))?;
             let _hg = HandleGuard(handle);
 
-            let mut buffer = [0u16; 1024];
+            let mut buffer = [0u16; 2048]; // Increased buffer size
             let len = K32GetModuleFileNameExW(Some(handle), None, &mut buffer);
             if len == 0 {
                 return Err(OsError::Win(windows::core::Error::from_thread()));

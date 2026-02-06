@@ -25,6 +25,9 @@ pub struct AppToRun {
     pub args: Vec<String>,
     /// Actual path to the binary executable
     pub bin_path: PathBuf,
+    /// Additional process names to track (e.g. "discord.exe")
+    #[serde(default)]
+    pub additional_processes: Vec<String>,
     /// Whether the application should start automatically on application startup
     pub autorun: bool,
     /// Process priority class to assign to the application
@@ -70,6 +73,7 @@ impl AppToRun {
             dropped_path,
             args,
             bin_path,
+            additional_processes: Vec::new(),
             autorun,
             priority,
         }
