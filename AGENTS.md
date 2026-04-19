@@ -53,7 +53,7 @@ Key directories:
 - `src/app/runtime/` - `eframe::App` shell, `AppState` facade, `UiState`, `RuntimeRegistry`, startup wiring, monitor loops, commands, tray and window lifecycle, and view dispatch
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
 - `src/app/models/app_state_storage/` - internal persistence modules for state path resolution, storage I/O, migrations, and schema refresh; `app_state_storage.rs` remains the public storage schema and API entrypoint
-- `libs/os_api/` - platform boundary for OS-specific operations
+- `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, while Linux remains a single minimal backend file
 - `assets/` - icon, screenshot, and `cpu_presets.json`
 - `docs/` - release and process documentation, including the current checklist
 - `tests/` - external tests
@@ -173,6 +173,18 @@ Data source separation:
 - window focus and visibility helpers
 - URI and shortcut resolution
 - CPU model detection
+
+Internal backend structure:
+- Windows backend is split internally into focused modules under `libs/os_api/src/windows/`:
+  - `common`
+  - `scheduling`
+  - `processes`
+  - `shell`
+  - `launch`
+  - `window`
+  - `cpu`
+- crate-root public shape remains intentionally narrow: external callers still interact through `OS` plus `PriorityClass`
+- Linux backend remains a single-file minimal backend and is not forced into parity with the Windows internal layout
 
 Windows release-path surface:
 - tray integration
