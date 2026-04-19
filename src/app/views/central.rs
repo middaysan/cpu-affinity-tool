@@ -1,5 +1,5 @@
-use crate::app::models::{AppState, AppStatus, AppToRun};
-use crate::app::navigation::WindowRoute;
+use crate::app::models::{AppStatus, AppToRun};
+use crate::app::runtime::AppState;
 use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, Align, CentralPanel, Layout, RichText, ScrollArea};
 use eframe::egui::{Color32, Vec2};
@@ -17,7 +17,6 @@ pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
 
 fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
     let mut dropped_assigned = false;
-    let mut modified = false;
 
     let mut run_program: Option<Vec<(usize, usize, AppToRun)>> = None;
 
@@ -95,7 +94,6 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                     if ui.button(button_text).on_hover_text(hover_text).clicked() {
                         // Toggle is_hidden using helper method
                         app.set_group_is_hidden(g_i, !is_hidden);
-                        modified = true;
                     }
 
                     // TODO: add linux support
@@ -124,7 +122,6 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                                 app.log_manager
                                     .add_entry(format!("Added executables to group: {group_name}"));
                             }
-                            modified = true;
                         }
                     }
 
@@ -219,8 +216,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                                 let edit_button = ui.button("⚙").on_hover_text("Edit app settings");
 
                                 if edit_button.clicked() {
-                                    app.app_edit_state.run_settings = Some((g_i, prog_index));
-                                    app.set_current_window(WindowRoute::AppRunSettings);
+                                    app.open_app_run_settings(g_i, prog_index);
                                 }
                             });
 
@@ -238,7 +234,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                 }
             }
 
-            if let Some(dropped_files) = &app.dropped_files {
+            if let Some(dropped_files) = &app.ui.dropped_files {
                 if !dropped_files.is_empty() {
                     let rect = ui.min_rect();
                     if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
@@ -260,8 +256,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                             ));
                         }
                         dropped_assigned = true;
-                        app.dropped_files = None;
-                        modified = true;
+                        app.ui.dropped_files = None;
                     }
                 }
             }
@@ -283,11 +278,6 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
             // Use run_app_with_affinity_sync instead of run_app_with_affinity
             app.run_app_with_affinity_sync(g_index, p_index, prog);
         }
-    }
-
-    if modified {
-        // Save state using helper method
-        app.save_state();
     }
 
     dropped_assigned

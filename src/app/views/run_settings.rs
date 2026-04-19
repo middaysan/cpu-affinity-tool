@@ -1,32 +1,20 @@
-use crate::app::models::AppState;
 use crate::app::navigation::{GroupRoute, WindowRoute};
+use crate::app::runtime::AppState;
 use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Layout, RichText, Vec2};
 use os_api::PriorityClass;
 
 pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
-    // Extract group_idx and prog_idx early to avoid borrow checker issues
-    let (group_idx, prog_idx) = match app.app_edit_state.run_settings {
+    let (group_idx, prog_idx) = match app.ui.app_edit_state.run_settings {
         Some((g, p)) => (g, p), // Copy the values
         None => {
-            // If no run settings, return to groups view
             app.set_current_window(WindowRoute::Groups(GroupRoute::List));
             return;
         }
     };
 
-    // Initialize the current_edit if needed
-    if app.app_edit_state.current_edit.is_none() {
-        // Get program using helper method
-        if let Some(original) = app.get_group_program(group_idx, prog_idx) {
-            app.app_edit_state.current_edit = Some(original);
-        } else {
-            // If program not found, return to groups view
-            app.app_edit_state.current_edit = None;
-            app.app_edit_state.run_settings = None;
-            app.set_current_window(WindowRoute::Groups(GroupRoute::List));
-            return;
-        }
+    if !app.ensure_current_edit_loaded(group_idx, prog_idx) {
+        return;
     }
 
     // Variables to track UI state
@@ -50,6 +38,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             glass_frame(ui).show(ui, |ui| {
                 let selected_app = app
+                    .ui
                     .app_edit_state
                     .current_edit
                     .as_mut()
@@ -248,10 +237,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
         app.remove_app_from_group(group_idx, prog_idx);
     }
 
-    // Handle close outside of any closures
     if is_close {
-        app.app_edit_state.current_edit = None;
-        app.app_edit_state.run_settings = None;
-        app.set_current_window(WindowRoute::Groups(GroupRoute::List));
+        app.close_app_run_settings();
     }
 }

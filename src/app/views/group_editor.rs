@@ -1,6 +1,6 @@
-use crate::app::models::GroupFormState;
-use crate::app::models::{AppState, CoreInfo, CoreType, CpuSchema};
+use crate::app::models::{CoreInfo, CoreType, CpuSchema};
 use crate::app::navigation::{GroupRoute, WindowRoute};
+use crate::app::runtime::{AppState, GroupFormState};
 use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, CentralPanel, RichText};
 
@@ -267,7 +267,7 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
                 let mut schema = app.get_cpu_schema();
                 draw_group_form_ui(
                     ui,
-                    &mut app.group_form,
+                    &mut app.ui.group_form,
                     &mut schema,
                     false,
                     &mut || create_clicked = true,
@@ -288,7 +288,7 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
 
 /// Group editing window.
 pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
-    let index = app.group_form.editing_index.unwrap();
+    let index = app.ui.group_form.editing_index.unwrap();
 
     CentralPanel::default().show(ctx, |ui| {
         let mut save_clicked = false;
@@ -312,7 +312,7 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
                 let mut schema = app.get_cpu_schema();
                 draw_group_form_ui(
                     ui,
-                    &mut app.group_form,
+                    &mut app.ui.group_form,
                     &mut schema,
                     true,
                     &mut || save_clicked = true,
@@ -324,6 +324,7 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
         if save_clicked {
             // Gather indices of selected cores only.
             let selected_cores: Vec<usize> = app
+                .ui
                 .group_form
                 .core_selection
                 .iter()
@@ -334,9 +335,9 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
             // Update group properties
             app.update_group_properties(
                 index,
-                app.group_form.group_name.clone(),
+                app.ui.group_form.group_name.clone(),
                 selected_cores,
-                app.group_form.run_all_enabled,
+                app.ui.group_form.run_all_enabled,
             );
 
             app.reset_group_form();

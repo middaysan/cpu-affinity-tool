@@ -1,31 +1,24 @@
-use crate::app::models::AppState;
 use crate::app::navigation::{GroupRoute, WindowRoute};
+use crate::app::runtime::{monitors, startup, AppState};
 use crate::app::views::{central, footer, group_editor, header, logs, run_settings};
 use crate::tray::{init_tray, TrayCmd};
 use eframe::egui;
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::Duration;
 
-/// The main application structure that implements the eframe::App trait.
 pub struct App {
-    /// The application state that holds all data and configuration
     pub state: AppState,
+    tray_rx: Option<Receiver<TrayCmd>>,
+    #[cfg(target_os = "windows")]
+    _tray_icon_guard: Option<tray_icon::TrayIcon>,
+    #[cfg(target_os = "windows")]
+    hwnd: Option<windows::Win32::Foundation::HWND>,
+    is_hidden: bool,
 }
 
 impl App {
-    /// Creates a new instance of the App with initialized state and routes.
-    ///
-    /// Initializes the application state with the provided context and starts
-    /// any applications marked for autorun.
-    ///
-    /// # Parameters
-    ///
-    /// * `cc` - The creation context provided by the eframe framework
-    ///
-    /// # Returns
-    ///
-    /// A new `App` instance with initialized state
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         #[cfg(debug_assertions)]
         {
@@ -48,9 +41,17 @@ impl App {
             println!("========================================================");
         }
 
-        let mut state = AppState::new(&cc.egui_ctx);
+        let mut state = AppState::new();
+        startup::log_startup(&mut state);
+        state.runtime.monitor_rx = Some(monitors::spawn_monitors(
+            state.runtime.running_apps.clone(),
+            state.persistent_state.clone(),
+            cc.egui_ctx.clone(),
+        ));
 
-        // Get HWND on Windows
+        #[cfg(target_os = "windows")]
+        let mut hwnd = None;
+
         #[cfg(target_os = "windows")]
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -58,7 +59,7 @@ impl App {
                 let raw = handle.as_raw();
                 match raw {
                     RawWindowHandle::Win32(h) => {
-                        state.hwnd = Some(windows::Win32::Foundation::HWND(
+                        hwnd = Some(windows::Win32::Foundation::HWND(
                             h.hwnd.get() as *mut core::ffi::c_void
                         ));
                     }
@@ -70,13 +71,11 @@ impl App {
             }
         }
 
-        // Now that start_app_with_autorun is synchronous, we can call it directly
         state.start_app_with_autorun();
 
-        // Initialize the system tray (Windows). On other OSes, init_tray() will return a stub.
         #[cfg(target_os = "windows")]
-        let tray_res = if let Some(hwnd) = state.hwnd {
-            init_tray(cc.egui_ctx.clone(), hwnd)
+        let tray_res = if let Some(hwnd_value) = hwnd {
+            init_tray(cc.egui_ctx.clone(), hwnd_value)
         } else {
             Err("HWND not found".to_string())
         };
@@ -86,24 +85,39 @@ impl App {
 
         match tray_res {
             Ok(handle) => {
-                // Save the receiver channel to the state
-                state.tray_rx = Some(handle.rx);
+                let tray_rx = Some(handle.rx);
 
-                // On Windows, the TrayIcon must be kept alive
                 #[cfg(target_os = "windows")]
-                {
-                    state.tray_icon_guard = Some(handle.tray_icon);
+                let tray_icon_guard = Some(handle.tray_icon);
+
+                #[cfg(not(target_os = "windows"))]
+                let _ = &handle;
+
+                Self {
+                    state,
+                    tray_rx,
+                    #[cfg(target_os = "windows")]
+                    _tray_icon_guard: tray_icon_guard,
+                    #[cfg(target_os = "windows")]
+                    hwnd,
+                    is_hidden: false,
                 }
             }
             Err(e) => {
-                // Log the error but don't crash - the application will continue to work without the tray.
                 state
                     .log_manager
                     .add_entry(format!("Tray init failed: {e}"));
+                Self {
+                    state,
+                    tray_rx: None,
+                    #[cfg(target_os = "windows")]
+                    _tray_icon_guard: None,
+                    #[cfg(target_os = "windows")]
+                    hwnd,
+                    is_hidden: false,
+                }
             }
         }
-
-        Self { state }
     }
 }
 
@@ -133,11 +147,10 @@ impl eframe::App for App {
 }
 
 impl App {
-    /// Handles commands coming from the system tray.
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
         let mut show_requested = false;
 
-        if let Some(rx) = &self.state.tray_rx {
+        if let Some(rx) = &self.tray_rx {
             while let Ok(cmd) = rx.try_recv() {
                 match cmd {
                     TrayCmd::Show => show_requested = true,
@@ -150,26 +163,21 @@ impl App {
         }
     }
 
-    /// Handles notifications from background monitors and adds them to the log.
     fn handle_monitor_events(&mut self) {
-        if let Some(rx) = &self.state.monitor_rx {
+        if let Some(rx) = &self.state.runtime.monitor_rx {
             while let Ok(msg) = rx.try_recv() {
                 self.state.log_manager.add_entry(msg);
             }
         }
     }
 
-    /// Checks if the UI should be rendered at the moment.
-    /// Also handles the logic for hiding the application when minimized.
     fn should_render(&mut self, ctx: &egui::Context) -> bool {
-        // If the application is hidden - limit the update frequency to save CPU
-        if self.state.is_hidden {
+        if self.is_hidden {
             thread::sleep(Duration::from_millis(100));
             ctx.request_repaint();
             return false;
         }
 
-        // If the user minimized the window - hide it to the tray
         if ctx.input(|i| i.viewport().minimized == Some(true)) {
             self.hide_to_tray(ctx);
             return false;
@@ -178,35 +186,30 @@ impl App {
         true
     }
 
-    /// Hides the application window and switches it to tray mode.
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
-        self.state.is_hidden = true;
+        self.is_hidden = true;
 
         #[cfg(target_os = "windows")]
-        if let Some(hwnd) = self.state.hwnd {
+        if let Some(hwnd) = self.hwnd {
             os_api::OS::set_taskbar_visible(hwnd, false);
-            // Restore the window before moving, as minimized windows cannot be moved programmatically in Windows
             os_api::OS::restore_and_focus(hwnd);
         }
 
-        // Move the window far off-screen instead of Visible(false) to avoid issues with restoration
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
             -10000.0, -10000.0,
         )));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
     }
 
-    /// Restores the application window from the tray.
     fn show_from_tray(&mut self, ctx: &egui::Context) {
-        self.state.is_hidden = false;
+        self.is_hidden = false;
 
         #[cfg(target_os = "windows")]
-        if let Some(hwnd) = self.state.hwnd {
+        if let Some(hwnd) = self.hwnd {
             os_api::OS::set_taskbar_visible(hwnd, true);
             os_api::OS::restore_and_focus(hwnd);
         }
 
-        // Return the window to the visible area
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
             100.0, 100.0,
         )));
@@ -224,7 +227,6 @@ impl App {
         ctx.set_visuals(visuals);
     }
 
-    /// Handles file drops into the application window.
     fn handle_file_drops(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.raw.dropped_files.is_empty()) {
             return;
@@ -239,20 +241,18 @@ impl App {
         });
 
         if !files.is_empty() {
-            self.state.dropped_files = Some(files);
+            self.state.ui.dropped_files = Some(files);
         }
     }
 
-    /// Renders the main application interface.
     fn render_main_ui(&mut self, ctx: &egui::Context) {
         header::draw_top_panel(&mut self.state, ctx);
         Self::draw_active_view(&mut self.state, ctx);
         footer::draw_bottom_panel(&mut self.state, ctx);
     }
 
-    /// Selects and renders the appropriate view depending on the current route.
     fn draw_active_view(app_state: &mut AppState, ctx: &egui::Context) {
-        match app_state.current_window.clone() {
+        match app_state.ui.current_window.clone() {
             WindowRoute::Groups(group_route) => match group_route {
                 GroupRoute::List => central::draw_central_panel(app_state, ctx),
                 GroupRoute::Create => group_editor::create_group_window(app_state, ctx),

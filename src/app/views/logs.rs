@@ -1,5 +1,5 @@
-use crate::app::models::AppState;
 use crate::app::navigation::{GroupRoute, WindowRoute};
+use crate::app::runtime::AppState;
 use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
 

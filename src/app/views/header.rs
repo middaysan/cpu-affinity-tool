@@ -1,16 +1,6 @@
-use crate::app::models::AppState;
 use crate::app::navigation::{GroupRoute, WindowRoute};
+use crate::app::runtime::AppState;
 use eframe::egui::{self, Layout, Margin, RichText, TopBottomPanel};
-
-/// Static array of tips to display in the application header
-/// These tips rotate every 3 minutes
-pub static TIPS: [&str; 5] = [
-    "💡 Tip: Drag & drop executable files (.exe/.lnk) onto a group to add them, then click ▶ to run with the assigned CPU cores",
-    "💡 Tip: Create different core groups for different types of applications to optimize performance",
-    "💡 Tip: You can enable autorun for applications to start them automatically when the tool launches",
-    "💡 Tip: Check the logs to see the history of application launches and their CPU affinity settings",
-    "💡 Tip: Use the theme toggle button in the top-left corner to switch between light, dark, and system themes",
-];
 
 pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
     TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -19,16 +9,17 @@ pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let (icon, label) = match app.get_theme_index() {
-                        0 => ("💻", "System theme"),
-                        1 => ("☀", "Light theme"),
-                        _ => ("🌙", "Dark theme"),
+                        0 => ("\u{1F4BB}", "System theme"),
+                        1 => ("\u{2600}", "Light theme"),
+                        _ => ("\u{1F319}", "Dark theme"),
                     };
                     if ui
                         .button(RichText::new(icon).size(16.0))
                         .on_hover_text(label)
                         .clicked()
                     {
-                        app.toggle_theme(ctx);
+                        app.toggle_theme();
+                        ctx.request_repaint();
                     }
                     ui.separator();
                     ui.label(RichText::new("CPU Affinity Tool").heading().strong());
@@ -37,7 +28,7 @@ pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
                         if ui
                             .button(
                                 RichText::new(format!(
-                                    "📄 Logs ({})",
+                                    "\u{1F4C4} Logs ({})",
                                     app.log_manager.entries.len()
                                 ))
                                 .strong(),
@@ -47,7 +38,7 @@ pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
                             app.set_current_window(WindowRoute::Logs);
                         }
                         if ui
-                            .button(RichText::new("➕ Create Group").strong())
+                            .button(RichText::new("\u{2795} Create Group").strong())
                             .clicked()
                         {
                             app.set_current_window(WindowRoute::Groups(GroupRoute::Create));
@@ -57,7 +48,6 @@ pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
                 ui.add_space(4.0);
                 ui.separator();
 
-                // Display the current tip
                 ui.vertical(|ui| {
                     ui.add_sized(
                         [450.0, 25.0],

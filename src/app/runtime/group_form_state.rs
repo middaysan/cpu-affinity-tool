@@ -17,9 +17,6 @@ pub struct GroupFormState {
 
 impl GroupFormState {
     /// Reset all group form fields to their default values.
-    ///
-    /// Clears the editing state, disables the "run all" button,
-    /// clears the group name, and deselects all cores.
     pub fn reset(&mut self) {
         self.editing_index = None;
         self.editing_selection = None;
