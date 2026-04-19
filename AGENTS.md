@@ -239,8 +239,8 @@ Local verification commands:
 
 Current CI facts:
 - runner: `windows-latest`
-- checks: `fmt --check`, `clippy -D warnings`, `cargo build --release`
-- tests are not currently part of the committed CI contract
+- `.github/workflows/ci.yml` runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test`, and `cargo build --release`
+- tests are part of the committed CI contract for `ci.yml`
 
 Current release facts:
 - GitHub Release workflow reacts to pushed tags matching `v*`

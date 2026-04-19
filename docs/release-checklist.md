@@ -6,7 +6,7 @@ Linux backend code exists in the repository, but it is not part of the current C
 ## Before Tagging
 
 - Confirm the release stays Windows-only: `.github/workflows/release.yml` should publish only `cpu-affinity-tool.exe` for `x86_64-pc-windows-msvc`.
-- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs on `windows-latest` and currently checks `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, and `cargo build --release`.
+- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs on `windows-latest` and currently checks `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test`, and `cargo build --release`.
 - Confirm no project docs claim full cross-platform support or Linux release parity.
 - Confirm `README.md` and `AGENTS.md` describe Windows as the only current supported release path and Linux as experimental backend code.
 - Confirm version markers are aligned manually: release tag `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`.
