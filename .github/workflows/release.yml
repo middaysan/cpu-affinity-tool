@@ -83,7 +83,8 @@ jobs:
           path: target/release/cpu-affinity-tool.exe
           if-no-files-found: error
 
-# Linux build temporarily disabled - will be implemented later
+# Linux build intentionally kept out of the current release contract.
+# The repository has Linux backend code, but this workflow publishes Windows-only artifacts.
 #  build-linux:
 #    name: Build Linux Binary
 #    needs: check
@@ -141,7 +142,7 @@ jobs:
           name: windows-binary
           path: ./artifacts/windows
 
-# Linux binary download temporarily disabled
+# No Linux artifact is downloaded here because the current release publishes only the Windows binary.
 #      - name: Download Linux binary
 #        uses: actions/download-artifact@v3
 #        with:
@@ -162,5 +163,5 @@ jobs:
           generate_release_notes: true
           files: |
             ./artifacts/windows/cpu-affinity-tool.exe
-            # Linux binary temporarily disabled
+            # Linux artifact intentionally omitted from the current release contract
             # ./artifacts/linux/cpu-affinity-tool-linux

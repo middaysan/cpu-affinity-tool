@@ -1,4 +1,4 @@
-### v1.0.6 (2026-01-07)
+### v1.0.7 (2026-01-07)
 
 This release focuses on improving system integration, enhancing code quality, and preparing the codebase for future Rust standards.
 
@@ -21,4 +21,4 @@ This release focuses on improving system integration, enhancing code quality, an
 - **Platform Support**: Added platform-specific dependencies to ensure smoother builds and runtime behavior.
 
 ---
-*For more details on changes, see the [full diff](https://github.com/middaysan/cpu-affinity-tool/compare/v1.0.5...v1.0.6).*
+*For more details on changes, see the [full diff](https://github.com/middaysan/cpu-affinity-tool/compare/v1.0.6...v1.0.7).*

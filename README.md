@@ -4,6 +4,13 @@ A simple and convenient program for managing CPU cores (CPU affinity) on Windows
 
 ![CPU Affinity Tool](assets/screenshot.png)
 
+## Current Platform Status
+
+- **Windows** is the only platform that is currently treated as the supported, CI-validated, and published release path.
+- The current GitHub Release workflow publishes only `cpu-affinity-tool.exe` for `x86_64-pc-windows-msvc`.
+- The repository also contains a feature-gated Linux entrypoint (`cpu-affinity-tool-linux`), but that code path is still experimental backend work. It does not currently have CI coverage, published release artifacts, or runtime parity with the Windows path.
+- Manual pre-release checks for the current contract are documented in `docs/release-checklist.md`.
+
 ## Why do you need this?
 
 - **Improve Performance**: Isolate resource-heavy programs on separate cores.
