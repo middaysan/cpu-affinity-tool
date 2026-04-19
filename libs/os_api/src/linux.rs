@@ -14,6 +14,7 @@ use nix::sched::{CpuSet, sched_getaffinity, sched_setaffinity};
 use shlex;
 
 use crate::PriorityClass;
+use crate::{InstalledAppCatalogEntry, InstalledAppCatalogTarget};
 
 pub struct OS;
 
@@ -499,5 +500,17 @@ impl OS {
                     .map(|s| s.trim().to_string())
             })
             .unwrap_or_else(|| "Unknown CPU".to_string())
+    }
+
+    pub fn list_supported_start_apps() -> Result<Vec<InstalledAppCatalogEntry>, String> {
+        Ok(Vec::new())
+    }
+
+    pub fn activate_application(_aumid: &str) -> Result<u32, String> {
+        Err("Installed app activation is not supported on Linux".into())
+    }
+
+    pub fn get_process_app_user_model_id(_pid: u32) -> Result<Option<String>, String> {
+        Ok(None)
     }
 }

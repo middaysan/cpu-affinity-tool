@@ -4,6 +4,11 @@ use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, Align, CentralPanel, Color32, Layout, RichText, ScrollArea, Vec2};
 use std::path::PathBuf;
 
+const ICON_MOVE_UP: &str = "\u{23F6}";
+const ICON_MOVE_DOWN: &str = "\u{23F7}";
+const ICON_EDIT: &str = "\u{2699}";
+const ICON_SHOW: &str = "\u{1F441}";
+
 enum CentralAction {
     MoveGroup {
         from: usize,
@@ -18,6 +23,7 @@ enum CentralAction {
         group_index: usize,
         paths: Vec<PathBuf>,
     },
+    OpenInstalledAppPicker(usize),
     OpenAppRunSettings {
         group_index: usize,
         program_index: usize,
@@ -55,25 +61,33 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     if group_index > 0 {
-                        if ui.button("⏶").on_hover_text("Move group up").clicked() {
+                        if ui
+                            .button(ICON_MOVE_UP)
+                            .on_hover_text("Move group up")
+                            .clicked()
+                        {
                             actions.push(CentralAction::MoveGroup {
                                 from: group_index,
                                 to: group_index - 1,
                             });
                         }
                     } else {
-                        ui.add_enabled(false, egui::Button::new("⏶"));
+                        ui.add_enabled(false, egui::Button::new(ICON_MOVE_UP));
                     }
 
                     if group_index < groups_len - 1 {
-                        if ui.button("⏷").on_hover_text("Move group down").clicked() {
+                        if ui
+                            .button(ICON_MOVE_DOWN)
+                            .on_hover_text("Move group down")
+                            .clicked()
+                        {
                             actions.push(CentralAction::MoveGroup {
                                 from: group_index + 1,
                                 to: group_index,
                             });
                         }
                     } else {
-                        ui.add_enabled(false, egui::Button::new("⏷"));
+                        ui.add_enabled(false, egui::Button::new(ICON_MOVE_DOWN));
                     }
                 });
 
@@ -81,20 +95,15 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&group.name).heading().strong());
-
                     ui.add_sized(
                         [350.0, 0.0],
-                        egui::Label::new(
-                            RichText::new(format!("Cores: {:?}", group.cores))
-                                .small()
-                                .weak(),
-                        ),
+                        egui::Label::new(RichText::new(format!("Cores: {:?}", group.cores)).small().weak()),
                     );
                 });
 
                 ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
                     if ui
-                        .button("⚙")
+                        .button(ICON_EDIT)
                         .on_hover_text("Edit group settings")
                         .clicked()
                     {
@@ -103,19 +112,18 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                     ui.separator();
 
-                    let button_text = if group.is_hidden {
-                        RichText::new("👁").strikethrough()
+                    let hide_text = if group.is_hidden {
+                        RichText::new(ICON_SHOW).strikethrough()
                     } else {
-                        RichText::new("👁")
+                        RichText::new(ICON_SHOW)
                     };
-
                     let hover_text = if group.is_hidden {
                         "Show apps list"
                     } else {
                         "Hide apps list"
                     };
 
-                    if ui.button(button_text).on_hover_text(hover_text).clicked() {
+                    if ui.button(hide_text).on_hover_text(hover_text).clicked() {
                         actions.push(CentralAction::ToggleGroupHidden {
                             index: group_index,
                             is_hidden: !group.is_hidden,
@@ -123,8 +131,8 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                     }
 
                     if ui
-                        .button("➕ Add App")
-                        .on_hover_text("Add executables...")
+                        .button("Open App")
+                        .on_hover_text("Add executables, shortcuts, or URLs")
                         .clicked()
                     {
                         if let Some(paths) = rfd::FileDialog::new()
@@ -135,9 +143,21 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         }
                     }
 
+                    #[cfg(target_os = "windows")]
+                    if ui
+                        .button("Find Installed")
+                        .on_hover_text("Find installed Start-backed apps")
+                        .clicked()
+                    {
+                        actions.push(CentralAction::OpenInstalledAppPicker(group_index));
+                    }
+
                     if group.run_all_button
                         && ui
-                            .button(RichText::new("▶ Run All").color(Color32::from_rgb(0, 200, 0)))
+                            .button(
+                                RichText::new("\u{25B6} Run All")
+                                    .color(Color32::from_rgb(0, 200, 0)),
+                            )
                             .on_hover_text("Run all apps in group")
                             .clicked()
                     {
@@ -154,7 +174,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                 if group.programs.is_empty() {
                     ui.vertical_centered(|ui| {
                         ui.label(
-                            RichText::new("No executables. Drag & drop files here to add.")
+                            RichText::new("No apps yet. Use Open App, Find Installed, or drag files here.")
                                 .weak()
                                 .italics(),
                         );
@@ -194,12 +214,14 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                             let app_button = egui::Button::new(RichText::new(&program.name).strong());
                             let response =
-                                ui.add_sized([ui.available_width() - 30.0, 20.0], app_button);
+                                ui.add_sized([ui.available_width() - 40.0, 20.0], app_button);
 
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let edit_button = ui.button("⚙").on_hover_text("Edit app settings");
-
-                                if edit_button.clicked() {
+                                if ui
+                                    .button(ICON_EDIT)
+                                    .on_hover_text("Edit app settings")
+                                    .clicked()
+                                {
                                     actions.push(CentralAction::OpenAppRunSettings {
                                         group_index: program.group_index,
                                         program_index: program.program_index,
@@ -208,7 +230,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                             });
 
                             if response
-                                .on_hover_text(program.bin_path_display.clone())
+                                .on_hover_text(program.launch_target_detail.clone())
                                 .clicked()
                             {
                                 actions.push(CentralAction::RunGroupProgram {
@@ -262,6 +284,9 @@ fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
             }
             CentralAction::AddSelectedFiles { group_index, paths } => {
                 app.add_selected_files_to_group(group_index, paths);
+            }
+            CentralAction::OpenInstalledAppPicker(group_index) => {
+                app.open_installed_app_picker(group_index);
             }
             CentralAction::OpenAppRunSettings {
                 group_index,

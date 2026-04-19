@@ -2,8 +2,10 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::ptr::null_mut;
 
+use serde::Deserialize;
 use windows::Win32::Foundation::{HLOCAL, HWND, LocalFree};
 use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
 use windows::Win32::System::Com::{
@@ -17,8 +19,18 @@ use windows::core::{Interface, PCWSTR};
 use winreg::RegKey;
 use winreg::enums::HKEY_CLASSES_ROOT;
 
+use crate::{InstalledAppCatalogEntry, InstalledAppCatalogTarget};
+
 use super::OS;
 use super::common::{ComGuard, OsError, decode_ansi, expand_env, to_wide_z};
+
+#[derive(Deserialize)]
+struct StartAppRecord {
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "AppID")]
+    app_id: String,
+}
 
 pub(super) fn parse_url_file(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
@@ -163,6 +175,88 @@ fn get_program_path_for_uri_registry(uri_scheme: &str) -> Result<PathBuf, String
     Ok(PathBuf::from(first))
 }
 
+fn classify_start_app_record(record: StartAppRecord) -> Option<InstalledAppCatalogEntry> {
+    let name = record.name.trim().to_string();
+    let app_id = record.app_id.trim().to_string();
+    if name.is_empty() || app_id.is_empty() {
+        return None;
+    }
+
+    if app_id.contains('!') {
+        return Some(InstalledAppCatalogEntry {
+            name,
+            target: InstalledAppCatalogTarget::Aumid(app_id),
+        });
+    }
+
+    let path = PathBuf::from(&app_id);
+    let is_supported_exe = path.is_absolute()
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+        && path.exists();
+
+    if is_supported_exe {
+        return Some(InstalledAppCatalogEntry {
+            name,
+            target: InstalledAppCatalogTarget::Path(path),
+        });
+    }
+
+    None
+}
+
+fn parse_start_apps_json(stdout: &str) -> Result<Vec<InstalledAppCatalogEntry>, String> {
+    let value: serde_json::Value = serde_json::from_str(stdout)
+        .map_err(|e| format!("Failed to parse Start apps JSON: {e}"))?;
+
+    let mut entries = Vec::new();
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                let record: StartAppRecord = serde_json::from_value(item)
+                    .map_err(|e| format!("Invalid Start app record: {e}"))?;
+                if let Some(entry) = classify_start_app_record(record) {
+                    entries.push(entry);
+                }
+            }
+        }
+        serde_json::Value::Object(_) => {
+            let record: StartAppRecord = serde_json::from_value(value)
+                .map_err(|e| format!("Invalid Start app record: {e}"))?;
+            if let Some(entry) = classify_start_app_record(record) {
+                entries.push(entry);
+            }
+        }
+        _ => return Err("Unexpected PowerShell JSON shape for Get-StartApps".into()),
+    }
+
+    entries.sort_by_key(|entry| entry.name.to_lowercase());
+    entries.dedup_by(|left, right| left.name == right.name && left.target == right.target);
+    Ok(entries)
+}
+
+fn list_supported_start_apps_powershell() -> Result<Vec<InstalledAppCatalogEntry>, String> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to execute Get-StartApps: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Get-StartApps failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| format!("Get-StartApps output was not valid UTF-8: {e}"))?;
+    parse_start_apps_json(&stdout)
+}
+
 impl OS {
     pub fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, Vec<String>), String> {
         let file_ext = file_path
@@ -182,6 +276,10 @@ impl OS {
 
     pub fn get_program_path_for_uri(uri_scheme: &str) -> Result<PathBuf, String> {
         get_program_path_for_uri_registry(uri_scheme)
+    }
+
+    pub fn list_supported_start_apps() -> Result<Vec<InstalledAppCatalogEntry>, String> {
+        list_supported_start_apps_powershell()
     }
 }
 
@@ -203,8 +301,11 @@ mod tests {
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
 
-    use super::{OS, parse_url_file};
+    use super::{
+        OS, StartAppRecord, classify_start_app_record, parse_start_apps_json, parse_url_file,
+    };
     use crate::windows::common::{ComGuard, to_wide_z};
+    use crate::{InstalledAppCatalogEntry, InstalledAppCatalogTarget};
 
     fn unique_suffix() -> String {
         let nanos = SystemTime::now()
@@ -316,6 +417,54 @@ mod tests {
 
         drop(shortcut_guard);
         drop(target_guard);
+    }
+
+    #[test]
+    fn test_classify_start_app_record_accepts_aumid() {
+        let entry = classify_start_app_record(StartAppRecord {
+            name: "Spotify".into(),
+            app_id: "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            entry,
+            InstalledAppCatalogEntry {
+                name: "Spotify".into(),
+                target: InstalledAppCatalogTarget::Aumid(
+                    "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into()
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_start_app_record_accepts_absolute_exe_path() {
+        let exe_path = env::temp_dir().join(format!("codex-start-app-{}.exe", unique_suffix()));
+        let _guard = TempFileGuard::new(exe_path.clone());
+        fs::write(&exe_path, b"stub").unwrap();
+
+        let entry = classify_start_app_record(StartAppRecord {
+            name: "Tool".into(),
+            app_id: exe_path.display().to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            entry,
+            InstalledAppCatalogEntry {
+                name: "Tool".into(),
+                target: InstalledAppCatalogTarget::Path(exe_path),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_start_apps_json_rejects_unsupported_records() {
+        let json = r#"[{"Name":"Docs","AppID":"https://docs.python.org/"},{"Name":"Help","AppID":"http://support.steampowered.com/"},{"Name":"Shortcut","AppID":"Chrome"}]"#;
+
+        let entries = parse_start_apps_json(json).unwrap();
+        assert!(entries.is_empty());
     }
 
     #[test]

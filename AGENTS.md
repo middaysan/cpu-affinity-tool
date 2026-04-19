@@ -93,11 +93,13 @@ Current runtime split:
   - group form state
   - app edit session state
   - dropped files
+  - installed app picker state and cached catalog
   - rotating tip state
 - `runtime::RuntimeRegistry` owns runtime process tracking:
   - `running_apps`
   - cached app statuses
   - `monitor_rx`
+- runtime process identity is keyed by opaque `AppRuntimeKey`, not ad-hoc raw strings
 - `runtime::commands::*` own use-case logic for groups, apps, launch, and preferences
 - `runtime::monitors::*` own the two background monitor loops
 
@@ -134,20 +136,25 @@ State split:
 
 Persisted state facts:
 - `state.json` path is derived from `current_exe()`, so persisted state follows the binary directory
-- current persisted schema version: `4`
+- current persisted schema version: `5`
 - older formats are migrated on load
 - backup rotation uses `state.json.old`, `state.json.old1`, `state.json.old2`, and so on
 - persistence loading is split into `state_path`, `storage_io`, `migrations`, and `schema_refresh`
 
 Key entities:
 - `CoreGroup` - CPU core group plus assigned apps
-- `AppToRun` - application launch configuration
+- `AppToRun` - application launch configuration with `Path` or `Installed` launch targets
+- `AppRuntimeKey` - opaque runtime-only identity derived from `AppToRun` for tracking and monitor lookups
 - `RunningApp` / `RunningApps` - tracked live processes
 - `CpuSchema`, `CpuCluster`, `CoreInfo` - logical CPU layout description
 - `LogManager` - in-memory runtime log and history
 
 Important contract facts:
 - `additional_processes` in `AppToRun` participates in runtime process matching and is not only UI metadata
+- `AppToRun` path targets store both source path and resolved executable path
+- `AppToRun` installed targets store Windows `AUMID` and do not expose user-editable args in the current contract
+- runtime tracking identity keeps the existing stable encoded key contract, but it now flows through typed `AppRuntimeKey` instead of raw `String` keys across runtime core
+- the Windows `Find Installed` picker is a Start-backed subset, not a full OS inventory
 - `AppStateStorage` may rebuild `cpu_schema` for the current machine through presets when the stored schema is generic or outdated for the detected CPU model
 - `LogManager` keeps a bounded in-memory chronological history with three retention classes:
   - `Regular` capped at 1000 entries
@@ -168,9 +175,11 @@ Data source separation:
 ## Platform boundary
 `libs/os_api` is the main boundary between the app and the OS. It covers:
 - process launch
+- installed-app discovery and activation on Windows
 - affinity read and set
 - priority read and set
 - process inspection and process-tree logic
+- process AppUserModelID lookup on Windows
 - window focus and visibility helpers
 - URI and shortcut resolution
 - CPU model detection
@@ -192,6 +201,7 @@ Windows release-path surface:
 - taskbar and focus behavior
 - `.lnk` and `.url` parsing
 - registry-based URI resolution
+- Start-backed installed app discovery and AUMID activation
 - richer process inspection
 - embedded manifest and resources
 - Windows-only CI
@@ -207,6 +217,7 @@ Linux gaps:
 - no tray parity
 - no focus parity
 - no runtime wiring parity
+- no `Find Installed` parity
 - `os_api` is not symmetric between Windows and Linux
 - no Linux CI
 - no Linux release artifacts

@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 use std::collections::HashMap;
 
+use crate::app::models::AppRuntimeKey;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppStatus {
     NotRunning,
@@ -30,7 +32,7 @@ pub struct RunningApp {
 #[derive(Default)]
 pub struct RunningApps {
     /// Map of application keys to RunningApp instances
-    pub apps: HashMap<String, RunningApp>,
+    pub apps: HashMap<AppRuntimeKey, RunningApp>,
 }
 
 impl RunningApps {
@@ -45,9 +47,15 @@ impl RunningApps {
     /// * `pid` - The process ID of the application
     /// * `group_index` - The index of the group the application belongs to
     /// * `prog_index` - The index of the program within the group
-    pub fn add_app(&mut self, app_key: &str, pid: u32, group_index: usize, prog_index: usize) {
+    pub fn add_app(
+        &mut self,
+        app_key: &AppRuntimeKey,
+        pid: u32,
+        group_index: usize,
+        prog_index: usize,
+    ) {
         self.apps.insert(
-            app_key.to_string(),
+            app_key.clone(),
             RunningApp {
                 pids: vec![pid],
                 group_index,
@@ -63,7 +71,7 @@ impl RunningApps {
     /// # Parameters
     ///
     /// * `app_key` - The key of the application to remove
-    pub fn remove_app(&mut self, app_key: &str) {
+    pub fn remove_app(&mut self, app_key: &AppRuntimeKey) {
         self.apps.remove(app_key);
     }
 }

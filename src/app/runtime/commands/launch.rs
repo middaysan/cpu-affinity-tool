@@ -1,8 +1,34 @@
-use crate::app::models::{AppStateStorage, AppToRun, LogManager};
+use crate::app::models::{AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, LogManager};
 use crate::app::runtime::RuntimeRegistry;
 use os_api::{PriorityClass, OS};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use tokio::sync::RwLock as TokioRwLock;
+
+#[derive(Debug, Clone, Default)]
+struct LaunchProcessSnapshot {
+    children_of: HashMap<u32, Vec<u32>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostLaunchCorrectionOutcome {
+    tracked_pids: Vec<u32>,
+    new_pids_added: usize,
+    saw_identity_seed: bool,
+}
+
+struct PostLaunchCorrectionRequest {
+    running_apps: Arc<TokioRwLock<crate::app::models::RunningApps>>,
+    app_key: AppRuntimeKey,
+    initial_pid: u32,
+    group_index: usize,
+    prog_index: usize,
+    group_cores: Vec<usize>,
+    priority: PriorityClass,
+    expected_aumid: String,
+}
 
 trait LaunchOs {
     fn set_process_affinity_by_pid(&self, pid: u32, mask: usize) -> Result<(), String>;
@@ -15,6 +41,9 @@ trait LaunchOs {
         cores: &[usize],
         priority: PriorityClass,
     ) -> Result<u32, String>;
+    fn activate_application(&self, aumid: &str) -> Result<u32, String>;
+    fn snapshot_process_tree(&self) -> Result<LaunchProcessSnapshot, String>;
+    fn get_process_app_user_model_id(&self, pid: u32) -> Result<Option<String>, String>;
 }
 
 struct RealLaunchOs;
@@ -40,6 +69,20 @@ impl LaunchOs for RealLaunchOs {
         priority: PriorityClass,
     ) -> Result<u32, String> {
         OS::run(bin_path, args, cores, priority)
+    }
+
+    fn activate_application(&self, aumid: &str) -> Result<u32, String> {
+        OS::activate_application(aumid)
+    }
+
+    fn snapshot_process_tree(&self) -> Result<LaunchProcessSnapshot, String> {
+        OS::snapshot_process_tree().map(|tree| LaunchProcessSnapshot {
+            children_of: tree.children_of,
+        })
+    }
+
+    fn get_process_app_user_model_id(&self, pid: u32) -> Result<Option<String>, String> {
+        OS::get_process_app_user_model_id(pid)
     }
 }
 
@@ -151,9 +194,9 @@ fn run_launch_decision<O: LaunchOs>(
     os: &O,
 ) {
     let app_key = app_to_run.get_key();
+    let mask = group_cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
 
     if let Some(pids) = runtime.get_running_app_pids(&app_key) {
-        let mask = group_cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
         for &pid in &pids {
             let _ = os.set_process_affinity_by_pid(pid, mask);
             let _ = os.set_process_priority_by_pid(pid, app_to_run.priority);
@@ -175,18 +218,50 @@ fn run_launch_decision<O: LaunchOs>(
         return;
     }
 
-    let label = app_to_run
-        .bin_path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| app_to_run.bin_path.display().to_string());
+    let label = match &app_to_run.launch_target {
+        LaunchTarget::Path { bin_path, .. } => bin_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| bin_path.display().to_string()),
+        LaunchTarget::Installed { .. } => app_to_run.name.clone(),
+    };
     let display = app_to_run.display();
     let priority = app_to_run.priority;
 
     log_manager.add_entry(format!("Starting '{}', app: {}", label, display));
 
-    match os.run(app_to_run.bin_path, app_to_run.args, &group_cores, priority) {
-        Ok(pid) => record_started_pid(runtime, log_manager, &app_key, pid, group_index, prog_index),
+    let launch_result = match &app_to_run.launch_target {
+        LaunchTarget::Path { bin_path, .. } => os.run(
+            bin_path.clone(),
+            app_to_run.args.clone(),
+            &group_cores,
+            priority,
+        ),
+        LaunchTarget::Installed { aumid } => os.activate_application(aumid),
+    };
+
+    match launch_result {
+        Ok(pid) => {
+            if matches!(app_to_run.launch_target, LaunchTarget::Installed { .. }) {
+                let _ = os.set_process_affinity_by_pid(pid, mask);
+                let _ = os.set_process_priority_by_pid(pid, priority);
+            }
+
+            record_started_pid(runtime, log_manager, &app_key, pid, group_index, prog_index);
+
+            if let LaunchTarget::Installed { aumid } = &app_to_run.launch_target {
+                spawn_post_launch_correction(PostLaunchCorrectionRequest {
+                    running_apps: runtime.running_apps.clone(),
+                    app_key,
+                    initial_pid: pid,
+                    group_index,
+                    prog_index,
+                    group_cores,
+                    priority,
+                    expected_aumid: aumid.clone(),
+                });
+            }
+        }
         Err(e) => log_manager.add_important_sticky_once(format!("ERROR: {e}")),
     }
 }
@@ -194,7 +269,7 @@ fn run_launch_decision<O: LaunchOs>(
 fn record_started_pid(
     runtime: &RuntimeRegistry,
     log_manager: &mut LogManager,
-    app_key: &str,
+    app_key: &AppRuntimeKey,
     pid: u32,
     group_index: usize,
     prog_index: usize,
@@ -218,11 +293,130 @@ fn record_started_pid(
     }
 }
 
+fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+
+    handle.spawn(async move {
+        let os = RealLaunchOs;
+        let mut tracked_pids = vec![request.initial_pid];
+        let mut stable_polls = 0usize;
+        let mut saw_identity_seed = false;
+
+        for delay_ms in [0u64, 100, 250, 500, 1000, 2000, 3500] {
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+
+            let outcome = post_launch_correction_poll_with_os(
+                &os,
+                &request.expected_aumid,
+                &mut tracked_pids,
+                &request.group_cores,
+                request.priority,
+            );
+
+            if let Ok(outcome) = outcome {
+                if outcome.saw_identity_seed {
+                    saw_identity_seed = true;
+                }
+
+                if let Ok(mut apps) = request.running_apps.try_write() {
+                    if !apps.apps.contains_key(&request.app_key) {
+                        apps.add_app(
+                            &request.app_key,
+                            request.initial_pid,
+                            request.group_index,
+                            request.prog_index,
+                        );
+                    }
+
+                    for &pid in &outcome.tracked_pids {
+                        if let Some(app) = apps.apps.get_mut(&request.app_key) {
+                            if !app.pids.contains(&pid) {
+                                app.pids.push(pid);
+                            }
+                        }
+                    }
+                }
+
+                tracked_pids = outcome.tracked_pids;
+                if outcome.new_pids_added == 0 {
+                    stable_polls += 1;
+                } else {
+                    stable_polls = 0;
+                }
+
+                if saw_identity_seed && stable_polls >= 2 {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn post_launch_correction_poll_with_os<O: LaunchOs>(
+    os: &O,
+    expected_aumid: &str,
+    tracked_pids: &mut Vec<u32>,
+    group_cores: &[usize],
+    priority: PriorityClass,
+) -> Result<PostLaunchCorrectionOutcome, String> {
+    let snapshot = os.snapshot_process_tree()?;
+    let before: HashSet<u32> = tracked_pids.iter().copied().collect();
+
+    extend_with_descendants(&snapshot, tracked_pids);
+
+    let mask = group_cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
+    let mut saw_identity_seed = false;
+
+    for &pid in tracked_pids.iter() {
+        let _ = os.set_process_affinity_by_pid(pid, mask);
+        let _ = os.set_process_priority_by_pid(pid, priority);
+
+        if !saw_identity_seed
+            && os
+                .get_process_app_user_model_id(pid)?
+                .is_some_and(|aumid| aumid.eq_ignore_ascii_case(expected_aumid))
+        {
+            saw_identity_seed = true;
+        }
+    }
+
+    let new_pids_added = tracked_pids
+        .iter()
+        .filter(|pid| !before.contains(pid))
+        .count();
+
+    Ok(PostLaunchCorrectionOutcome {
+        tracked_pids: tracked_pids.clone(),
+        new_pids_added,
+        saw_identity_seed,
+    })
+}
+
+fn extend_with_descendants(snapshot: &LaunchProcessSnapshot, tracked_pids: &mut Vec<u32>) {
+    let mut visited: HashSet<u32> = tracked_pids.iter().copied().collect();
+    let mut stack = tracked_pids.clone();
+
+    while let Some(parent_pid) = stack.pop() {
+        if let Some(children) = snapshot.children_of.get(&parent_pid) {
+            for &child_pid in children {
+                if visited.insert(child_pid) {
+                    tracked_pids.push(child_pid);
+                    stack.push(child_pid);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_autorun_items, record_started_pid, run_app_with_affinity_sync_with_os,
-        run_launch_decision, LaunchOs,
+        collect_autorun_items, post_launch_correction_poll_with_os, record_started_pid,
+        run_app_with_affinity_sync_with_os, run_launch_decision, LaunchOs, LaunchProcessSnapshot,
     };
     use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, LogManager};
     use crate::app::runtime::RuntimeRegistry;
@@ -238,6 +432,10 @@ mod tests {
         focus_results: HashMap<u32, bool>,
         run_calls: RefCell<Vec<(PathBuf, Vec<String>, Vec<usize>, PriorityClass)>>,
         run_result: RefCell<Result<u32, String>>,
+        activate_calls: RefCell<Vec<String>>,
+        activate_result: RefCell<Result<u32, String>>,
+        snapshot_result: RefCell<Result<LaunchProcessSnapshot, String>>,
+        process_aumids: HashMap<u32, String>,
     }
 
     impl Default for FakeLaunchOs {
@@ -248,6 +446,10 @@ mod tests {
                 focus_results: HashMap::new(),
                 run_calls: RefCell::new(Vec::new()),
                 run_result: RefCell::new(Ok(0)),
+                activate_calls: RefCell::new(Vec::new()),
+                activate_result: RefCell::new(Ok(0)),
+                snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot::default())),
+                process_aumids: HashMap::new(),
             }
         }
     }
@@ -283,23 +485,36 @@ mod tests {
                 .push((bin_path, args, cores.to_vec(), priority));
             self.run_result.borrow().clone()
         }
+
+        fn activate_application(&self, aumid: &str) -> Result<u32, String> {
+            self.activate_calls.borrow_mut().push(aumid.to_string());
+            self.activate_result.borrow().clone()
+        }
+
+        fn snapshot_process_tree(&self) -> Result<LaunchProcessSnapshot, String> {
+            self.snapshot_result.borrow().clone()
+        }
+
+        fn get_process_app_user_model_id(&self, pid: u32) -> Result<Option<String>, String> {
+            Ok(self.process_aumids.get(&pid).cloned())
+        }
     }
 
     fn sample_state() -> Arc<RwLock<AppStateStorage>> {
         Arc::new(RwLock::new(AppStateStorage {
-            version: 4,
+            version: 5,
             groups: vec![CoreGroup {
                 name: "Games".to_string(),
                 cores: vec![0, 1],
                 programs: vec![
-                    AppToRun::new(
+                    AppToRun::new_path(
                         PathBuf::from(r"C:\one.lnk"),
                         vec![],
                         PathBuf::from(r"C:\one.exe"),
                         PriorityClass::Normal,
                         false,
                     ),
-                    AppToRun::new(
+                    AppToRun::new_path(
                         PathBuf::from(r"C:\two.lnk"),
                         vec!["--autorun".to_string()],
                         PathBuf::from(r"C:\two.exe"),
@@ -320,7 +535,7 @@ mod tests {
     }
 
     fn sample_app() -> AppToRun {
-        AppToRun::new(
+        AppToRun::new_path(
             PathBuf::from(r"C:\game.lnk"),
             vec!["--fullscreen".to_string()],
             PathBuf::from(r"C:\game.exe"),
@@ -335,7 +550,10 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].0, 0);
         assert_eq!(items[0].1, 1);
-        assert_eq!(items[0].2.bin_path, PathBuf::from(r"C:\two.exe"));
+        assert_eq!(
+            items[0].2.bin_path(),
+            Some(PathBuf::from(r"C:\two.exe").as_path())
+        );
         assert_eq!(items[0].2.args, vec!["--autorun".to_string()]);
     }
 
@@ -474,6 +692,77 @@ mod tests {
                 .filter(|entry| entry.message == "ERROR: boom")
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn test_installed_launch_uses_activation_and_immediate_apply() {
+        let runtime = RuntimeRegistry::new();
+        let mut log_manager = LogManager::default();
+        let app = AppToRun::new_installed(
+            "Spotify".into(),
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into(),
+            PriorityClass::High,
+            false,
+        );
+        let app_key = app.get_key();
+        let os = FakeLaunchOs {
+            activate_result: RefCell::new(Ok(4321)),
+            ..Default::default()
+        };
+
+        run_launch_decision(&runtime, &mut log_manager, 0, 0, app, vec![0, 2], &os);
+
+        assert!(os.run_calls.borrow().is_empty());
+        assert_eq!(
+            os.activate_calls.borrow().as_slice(),
+            &["SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string()]
+        );
+        assert_eq!(os.affinity_calls.borrow().as_slice(), &[(4321, 5)]);
+        assert_eq!(
+            os.priority_calls.borrow().as_slice(),
+            &[(4321, PriorityClass::High)]
+        );
+        assert_eq!(runtime.get_running_app_pids(&app_key), Some(vec![4321]));
+    }
+
+    #[test]
+    fn test_post_launch_correction_poll_attaches_descendants_and_reapplies_settings() {
+        let os = FakeLaunchOs {
+            snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                children_of: HashMap::from([(50, vec![51]), (51, vec![52])]),
+            })),
+            process_aumids: HashMap::from([(
+                50,
+                "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+            )]),
+            ..Default::default()
+        };
+        let mut tracked_pids = vec![50];
+
+        let outcome = post_launch_correction_poll_with_os(
+            &os,
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
+            &mut tracked_pids,
+            &[1, 3],
+            PriorityClass::AboveNormal,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.tracked_pids, vec![50, 51, 52]);
+        assert_eq!(outcome.new_pids_added, 2);
+        assert!(outcome.saw_identity_seed);
+        assert_eq!(
+            os.affinity_calls.borrow().as_slice(),
+            &[(50, 10), (51, 10), (52, 10)]
+        );
+        assert_eq!(
+            os.priority_calls.borrow().as_slice(),
+            &[
+                (50, PriorityClass::AboveNormal),
+                (51, PriorityClass::AboveNormal),
+                (52, PriorityClass::AboveNormal),
+            ]
         );
     }
 }

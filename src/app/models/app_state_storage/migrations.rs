@@ -29,6 +29,7 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     let version_check: VersionCheck = serde_json::from_str(data).ok()?;
 
     match version_check.version {
+        Some(5) => load_v5(data, path),
         Some(4) => load_v4(data, path),
         Some(3) => load_v3(data, path),
         Some(2) => load_v2(data, path),
@@ -36,12 +37,22 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     }
 }
 
-fn load_v4(data: &str, path: &Path) -> Option<AppStateStorage> {
+fn load_v5(data: &str, path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
 
     if schema_refresh::refresh_loaded_schema(&mut state) {
         let _ = state.save_to_path(path);
     }
+
+    Some(state)
+}
+
+fn load_v4(data: &str, path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.version = CURRENT_APP_STATE_VERSION;
+
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    let _ = state.save_to_path(path);
 
     Some(state)
 }

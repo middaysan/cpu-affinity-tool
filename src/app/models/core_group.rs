@@ -1,5 +1,5 @@
 use crate::app::models::AppToRun;
-use os_api::{PriorityClass, OS};
+use os_api::{InstalledAppCatalogEntry, InstalledAppCatalogTarget, PriorityClass, OS};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -57,7 +57,7 @@ impl CoreGroup {
             match parsed_app_file {
                 Ok((target, args)) => {
                     let app_to_run =
-                        AppToRun::new(path, args, target, PriorityClass::Normal, false);
+                        AppToRun::new_path(path, args, target, PriorityClass::Normal, false);
 
                     self.programs.push(app_to_run);
                     outcome.added_count += 1;
@@ -69,6 +69,26 @@ impl CoreGroup {
             }
         }
 
+        outcome
+    }
+
+    pub fn add_installed_app_to_group(
+        &mut self,
+        entry: InstalledAppCatalogEntry,
+    ) -> AddAppsOutcome {
+        let mut outcome = AddAppsOutcome::default();
+
+        let app_to_run = match entry.target {
+            InstalledAppCatalogTarget::Aumid(aumid) => {
+                AppToRun::new_installed(entry.name, aumid, PriorityClass::Normal, false)
+            }
+            InstalledAppCatalogTarget::Path(path) => {
+                AppToRun::new_path(path.clone(), Vec::new(), path, PriorityClass::Normal, false)
+            }
+        };
+
+        self.programs.push(app_to_run);
+        outcome.added_count = 1;
         outcome
     }
 }
@@ -101,7 +121,7 @@ mod tests {
             .is_some_and(|message| message.contains("Failed to get file extension")));
         assert_eq!(group.programs.len(), 1);
         assert_eq!(
-            group.programs[0].bin_path,
+            group.programs[0].bin_path().unwrap().to_path_buf(),
             std::path::PathBuf::from(r"C:\valid.exe")
         );
     }

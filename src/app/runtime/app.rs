@@ -1,6 +1,8 @@
 use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::runtime::{monitors, startup, AppState};
-use crate::app::views::{central, footer, group_editor, header, logs, run_settings};
+use crate::app::views::{
+    central, footer, group_editor, header, installed_app_picker, logs, run_settings,
+};
 use crate::tray::{init_tray, TrayCmd};
 use eframe::egui;
 use std::path::PathBuf;
@@ -129,18 +131,21 @@ impl eframe::App for App {
         // 2. Handle notifications from background monitors
         self.handle_monitor_events();
 
-        // 3. Visibility check and minimization handling
+        // 3. Poll background refresh tasks owned by AppState
+        self.state.poll_installed_app_picker_refresh();
+
+        // 4. Visibility check and minimization handling
         if !self.should_render(ctx) {
             return;
         }
 
-        // 3. Apply UI theme
+        // 5. Apply UI theme
         self.apply_theme(ctx);
 
-        // 4. Handle file drops
+        // 6. Handle file drops
         self.handle_file_drops(ctx);
 
-        // 5. Render main UI
+        // 7. Render main UI
         self.render_main_ui(ctx);
     }
 }
@@ -262,6 +267,9 @@ impl App {
             },
             WindowRoute::Logs => logs::draw_logs_window(app_state, ctx),
             WindowRoute::AppRunSettings => run_settings::draw_app_run_settings(app_state, ctx),
+            WindowRoute::InstalledAppPicker => {
+                installed_app_picker::draw_installed_app_picker(app_state, ctx)
+            }
         }
     }
 }

@@ -4,16 +4,20 @@ use std::process::{Child, Command, Stdio};
 use std::ptr::null_mut;
 
 use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+};
 use windows::Win32::System::Threading::{
     CREATE_SUSPENDED, CreateProcessW, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW,
     SetPriorityClass, SetProcessAffinityMask,
 };
+use windows::Win32::UI::Shell::{ApplicationActivationManager, IApplicationActivationManager};
 use windows::core::{PCWSTR, PWSTR};
 
 use crate::PriorityClass;
 
 use super::OS;
-use super::common::{HandleGuard, OsError, to_wide_z_str, transform_to_win_priority};
+use super::common::{ComGuard, HandleGuard, OsError, to_wide_z_str, transform_to_win_priority};
 
 pub(super) fn quote_arg_windows(arg: &str) -> String {
     if arg.is_empty() {
@@ -142,6 +146,29 @@ impl OS {
             Ok(pi.dwProcessId)
         })()
         .map_err(|e: OsError| format!("run {:?} failed: {}", file_path, e))
+    }
+
+    pub fn activate_application(aumid: &str) -> Result<u32, String> {
+        (|| unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                .ok()
+                .map_err(OsError::Win)?;
+            let _com = ComGuard;
+
+            let manager: IApplicationActivationManager =
+                CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_INPROC_SERVER)?;
+
+            let aumid_w = to_wide_z_str(aumid);
+            let empty_args = [0u16];
+            let process_id = manager.ActivateApplication(
+                PCWSTR(aumid_w.as_ptr()),
+                PCWSTR(empty_args.as_ptr()),
+                windows::Win32::UI::Shell::ACTIVATEOPTIONS(0),
+            )?;
+
+            Ok(process_id)
+        })()
+        .map_err(|e: OsError| format!("activate_application {aumid:?} failed: {e}"))
     }
 }
 

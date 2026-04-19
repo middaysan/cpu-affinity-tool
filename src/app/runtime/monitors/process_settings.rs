@@ -1,4 +1,4 @@
-use crate::app::models::{AppStateStorage, CoreGroup, RunningApps};
+use crate::app::models::{AppRuntimeKey, AppStateStorage, CoreGroup, RunningApps};
 use eframe::egui;
 use os_api::{PriorityClass, OS};
 use std::collections::HashMap;
@@ -100,7 +100,9 @@ pub async fn run_process_settings_monitor(
     }
 }
 
-fn collect_program_settings(groups: &[CoreGroup]) -> HashMap<String, ProgramRuntimeSettings> {
+fn collect_program_settings(
+    groups: &[CoreGroup],
+) -> HashMap<AppRuntimeKey, ProgramRuntimeSettings> {
     let mut settings = HashMap::new();
 
     for (group_index, group) in groups.iter().enumerate() {
@@ -251,7 +253,7 @@ mod tests {
             CoreGroup {
                 name: "Media".to_string(),
                 cores: vec![0],
-                programs: vec![AppToRun::new(
+                programs: vec![AppToRun::new_path(
                     PathBuf::from(r"C:\media.lnk"),
                     vec![],
                     PathBuf::from(r"C:\media.exe"),
@@ -264,7 +266,7 @@ mod tests {
             CoreGroup {
                 name: "Games".to_string(),
                 cores: vec![1, 2],
-                programs: vec![AppToRun::new(
+                programs: vec![AppToRun::new_path(
                     PathBuf::from(r"C:\game.lnk"),
                     vec![],
                     PathBuf::from(r"C:\game.exe"),
@@ -279,7 +281,7 @@ mod tests {
 
     fn sample_state() -> AppStateStorage {
         AppStateStorage {
-            version: 4,
+            version: 5,
             groups: groups_with_programs(),
             cpu_schema: CpuSchema {
                 model: "Test CPU".to_string(),

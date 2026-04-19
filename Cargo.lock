@@ -2809,6 +2809,7 @@ dependencies = [
  "nix 0.29.0",
  "ntapi",
  "serde",
+ "serde_json",
  "shlex",
  "windows 0.62.2",
  "winreg",

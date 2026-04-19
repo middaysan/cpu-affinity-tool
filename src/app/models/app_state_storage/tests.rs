@@ -1,5 +1,5 @@
 use super::{state_path, storage_io, AppStateStorage, CURRENT_APP_STATE_VERSION};
-use crate::app::models::app_to_run::AppToRun;
+use crate::app::models::app_to_run::{AppToRun, LaunchTarget};
 use crate::app::models::core_group::CoreGroup;
 use crate::app::models::cpu_presets::get_preset_for_model;
 use crate::app::models::cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
@@ -39,15 +39,13 @@ fn sample_state() -> AppStateStorage {
         groups: vec![CoreGroup {
             name: "Games".to_string(),
             cores: vec![0, 1],
-            programs: vec![AppToRun {
-                name: "Sample".to_string(),
-                dropped_path: PathBuf::from(r"C:\Sample.lnk"),
-                args: vec!["--fullscreen".to_string()],
-                bin_path: PathBuf::from(r"C:\Sample.exe"),
-                additional_processes: vec!["sample_helper.exe".to_string()],
-                autorun: true,
-                priority: PriorityClass::Normal,
-            }],
+            programs: vec![AppToRun::new_path(
+                PathBuf::from(r"C:\Sample.lnk"),
+                vec!["--fullscreen".to_string()],
+                PathBuf::from(r"C:\Sample.exe"),
+                PriorityClass::Normal,
+                true,
+            )],
             is_hidden: false,
             run_all_button: true,
         }],
@@ -130,7 +128,7 @@ fn test_backup_rotation() {
 }
 
 #[test]
-fn test_load_v4_state_keeps_current_schema_without_rewrite() {
+fn test_load_v5_state_keeps_current_schema_without_rewrite() {
     with_temp_state_path("v4_current", |state_path| {
         let serialized = serde_json::to_string_pretty(&current_schema_state()).unwrap();
         fs::write(state_path, &serialized).unwrap();
@@ -144,7 +142,7 @@ fn test_load_v4_state_keeps_current_schema_without_rewrite() {
 }
 
 #[test]
-fn test_load_v4_generic_state_refreshes_when_cpu_model_is_known() {
+fn test_load_v5_generic_state_refreshes_when_cpu_model_is_known() {
     with_temp_state_path("v4_generic", |state_path| {
         let generic = AppStateStorage {
             version: CURRENT_APP_STATE_VERSION,
@@ -176,7 +174,7 @@ fn test_load_v4_generic_state_refreshes_when_cpu_model_is_known() {
 }
 
 #[test]
-fn test_load_v3_state_migrates_and_persists_v4() {
+fn test_load_v3_state_migrates_and_persists_v5() {
     with_temp_state_path("v3_migration", |state_path| {
         let mut value = serde_json::to_value(sample_state()).unwrap();
         value["version"] = json!(3);
@@ -206,6 +204,66 @@ fn test_load_v3_state_migrates_and_persists_v4() {
             persisted["groups"][0]["programs"][0]["additional_processes"],
             json!([])
         );
+    });
+}
+
+#[test]
+fn test_load_v4_state_migrates_path_targets_losslessly() {
+    with_temp_state_path("v4_to_v5_path_targets", |state_path| {
+        let legacy_v4 = json!({
+            "version": 4,
+            "groups": [{
+                "name": "Games",
+                "cores": [0, 1],
+                "programs": [{
+                    "name": "Sample",
+                    "dropped_path": r"C:\Sample.lnk",
+                    "args": ["--fullscreen"],
+                    "bin_path": r"C:\Sample.exe",
+                    "additional_processes": ["sample_helper.exe"],
+                    "autorun": true,
+                    "priority": "Normal"
+                }],
+                "is_hidden": false,
+                "run_all_button": true
+            }],
+            "cpu_schema": {
+                "model": "Generic CPU",
+                "clusters": []
+            },
+            "theme_index": 2,
+            "process_monitoring_enabled": true
+        });
+
+        fs::write(
+            state_path,
+            serde_json::to_string_pretty(&legacy_v4).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = AppStateStorage::load_from_path(state_path);
+        assert_eq!(loaded.version, CURRENT_APP_STATE_VERSION);
+        assert!(matches!(
+            loaded.groups[0].programs[0].launch_target,
+            LaunchTarget::Path { .. }
+        ));
+        assert_eq!(
+            loaded.groups[0].programs[0].bin_path(),
+            Some(PathBuf::from(r"C:\Sample.exe").as_path())
+        );
+        assert_eq!(
+            loaded.groups[0].programs[0].dropped_path(),
+            Some(PathBuf::from(r"C:\Sample.lnk").as_path())
+        );
+        assert_eq!(
+            loaded.groups[0].programs[0].additional_processes,
+            vec!["sample_helper.exe".to_string()]
+        );
+
+        let persisted: Value =
+            serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
+        assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
+        assert!(persisted["groups"][0]["programs"][0]["launch_target"].is_object());
     });
 }
 

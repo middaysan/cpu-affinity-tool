@@ -1,6 +1,7 @@
 use crate::app::models::{AddAppsOutcome, AppStateStorage, AppToRun};
 use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::runtime::UiState;
+use os_api::InstalledAppCatalogEntry;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -43,6 +44,24 @@ pub fn update_program(
     }
 }
 
+pub fn add_installed_app_to_group(
+    persistent_state: &Arc<RwLock<AppStateStorage>>,
+    group_index: usize,
+    entry: InstalledAppCatalogEntry,
+) -> AddAppsOutcome {
+    {
+        let mut state = persistent_state.write().unwrap();
+        if let Some(group) = state.groups.get_mut(group_index) {
+            group.add_installed_app_to_group(entry)
+        } else {
+            AddAppsOutcome {
+                added_count: 0,
+                first_error: Some(format!("Group with index {group_index} not found")),
+            }
+        }
+    }
+}
+
 pub fn remove_app_from_group(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     group_index: usize,
@@ -52,7 +71,7 @@ pub fn remove_app_from_group(
         let mut state = persistent_state.write().unwrap();
         if let Some(group) = state.groups.get_mut(group_index) {
             if program_index < group.programs.len() {
-                let path = group.programs[program_index].bin_path.display().to_string();
+                let path = group.programs[program_index].launch_target_label();
                 group.programs.remove(program_index);
                 Some(path)
             } else {
@@ -110,15 +129,17 @@ mod tests {
 
     fn sample_persistent_state() -> Arc<RwLock<AppStateStorage>> {
         Arc::new(RwLock::new(AppStateStorage {
-            version: 4,
+            version: 5,
             groups: vec![CoreGroup {
                 name: "Games".to_string(),
                 cores: vec![0, 1],
                 programs: vec![AppToRun {
                     name: "Sample".to_string(),
-                    dropped_path: PathBuf::from(r"C:\Sample.lnk"),
+                    launch_target: crate::app::models::LaunchTarget::Path {
+                        dropped_path: PathBuf::from(r"C:\Sample.lnk"),
+                        bin_path: PathBuf::from(r"C:\Sample.exe"),
+                    },
                     args: vec![],
-                    bin_path: PathBuf::from(r"C:\Sample.exe"),
                     additional_processes: vec![],
                     autorun: false,
                     priority: PriorityClass::Normal,
@@ -140,9 +161,11 @@ mod tests {
         let persistent_state = sample_persistent_state();
         let updated = AppToRun {
             name: "Updated".to_string(),
-            dropped_path: PathBuf::from(r"C:\Sample.lnk"),
+            launch_target: crate::app::models::LaunchTarget::Path {
+                dropped_path: PathBuf::from(r"C:\Sample.lnk"),
+                bin_path: PathBuf::from(r"C:\Updated.exe"),
+            },
             args: vec!["--debug".to_string()],
-            bin_path: PathBuf::from(r"C:\Updated.exe"),
             additional_processes: vec!["helper.exe".to_string()],
             autorun: true,
             priority: PriorityClass::High,

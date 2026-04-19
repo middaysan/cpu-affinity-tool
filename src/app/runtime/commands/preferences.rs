@@ -23,7 +23,7 @@ mod tests {
 
     fn sample_state() -> Arc<RwLock<AppStateStorage>> {
         Arc::new(RwLock::new(AppStateStorage {
-            version: 4,
+            version: 5,
             groups: vec![],
             cpu_schema: CpuSchema {
                 model: "Test CPU".to_string(),

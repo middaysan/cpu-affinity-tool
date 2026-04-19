@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
 ntapi = "0.4.1"
@@ -22,8 +23,10 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Com",
     "Win32_UI_Shell",
     "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
     "Win32_System_Memory",
-    "Win32_Security"
+    "Win32_Security",
+    "Win32_System_ApplicationInstallationAndServicing"
 ] }
 
 [target.'cfg(unix)'.dependencies]

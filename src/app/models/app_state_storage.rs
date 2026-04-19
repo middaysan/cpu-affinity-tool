@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Current version of the application state schema.
-pub const CURRENT_APP_STATE_VERSION: u32 = 4;
+pub const CURRENT_APP_STATE_VERSION: u32 = 5;
 
 /// Storage for persistent application state that can be serialized to and deserialized from JSON.
 /// This structure is responsible for saving and loading the application state between sessions.

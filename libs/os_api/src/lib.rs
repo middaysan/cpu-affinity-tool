@@ -1,4 +1,6 @@
+mod catalog;
 mod process;
+pub use catalog::{InstalledAppCatalogEntry, InstalledAppCatalogTarget};
 pub use process::PriorityClass;
 
 #[cfg(target_os = "linux")]

@@ -1,6 +1,8 @@
 use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::runtime::{GroupFormState, RunAppEditState};
+use os_api::InstalledAppCatalogEntry;
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 
 const TIPS: [&str; 5] = [
     "💡 Tip: Drag & drop executable files (.exe/.lnk) onto a group to add them, then click ▶ to run with the assigned CPU cores",
@@ -9,6 +11,18 @@ const TIPS: [&str; 5] = [
     "💡 Tip: Check the logs to see the history of application launches and their CPU affinity settings",
     "💡 Tip: Use the theme toggle button in the top-left corner to switch between light, dark, and system themes",
 ];
+
+#[derive(Default)]
+pub(crate) struct InstalledAppPickerState {
+    pub(crate) target_group_index: Option<usize>,
+    pub(crate) query: String,
+    pub(crate) entries: Vec<InstalledAppCatalogEntry>,
+    pub(crate) selected_entry_index: Option<usize>,
+    pub(crate) is_refreshing: bool,
+    pub(crate) last_error: Option<String>,
+    pub(crate) needs_focus: bool,
+    pub(crate) refresh_rx: Option<Receiver<Result<Vec<InstalledAppCatalogEntry>, String>>>,
+}
 
 /// Transient UI state owned by the runtime layer.
 pub struct UiState {
@@ -19,6 +33,7 @@ pub struct UiState {
     pub(crate) current_tip_index: usize,
     pub(crate) tip_change_interval: f64,
     pub(crate) last_tip_change_time: f64,
+    pub(crate) installed_app_picker: InstalledAppPickerState,
 }
 
 impl UiState {
@@ -41,6 +56,7 @@ impl UiState {
             current_tip_index: 0,
             tip_change_interval: 120.0,
             last_tip_change_time: 0.0,
+            installed_app_picker: InstalledAppPickerState::default(),
         }
     }
 
@@ -89,5 +105,13 @@ mod tests {
 
         assert_eq!(first, still_first);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_new_initializes_installed_app_picker_closed() {
+        let state = UiState::new(4);
+        assert!(state.installed_app_picker.target_group_index.is_none());
+        assert!(state.installed_app_picker.entries.is_empty());
+        assert!(state.installed_app_picker.selected_entry_index.is_none());
     }
 }

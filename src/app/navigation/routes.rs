@@ -10,6 +10,7 @@ pub enum WindowRoute {
     Groups(GroupRoute),
     Logs,
     AppRunSettings,
+    InstalledAppPicker,
 }
 
 impl Default for WindowRoute {

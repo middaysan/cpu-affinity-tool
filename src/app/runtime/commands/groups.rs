@@ -150,7 +150,7 @@ mod tests {
 
     fn sample_persistent_state() -> Arc<RwLock<AppStateStorage>> {
         Arc::new(RwLock::new(AppStateStorage {
-            version: 4,
+            version: 5,
             groups: vec![CoreGroup {
                 name: "Games".to_string(),
                 cores: vec![1, 3],

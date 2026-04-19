@@ -2,7 +2,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::size_of;
 use std::path::PathBuf;
 
-use windows::Win32::Foundation::STILL_ACTIVE;
+use windows::Win32::Foundation::{
+    APPMODEL_ERROR_NO_APPLICATION, ERROR_INSUFFICIENT_BUFFER, STILL_ACTIVE,
+};
+use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
@@ -10,6 +13,7 @@ use windows::Win32::System::ProcessStatus::{K32EnumProcesses, K32GetModuleFileNa
 use windows::Win32::System::Threading::{
     GetExitCodeProcess, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::core::PWSTR;
 
 use super::OS;
 use super::common::{HandleGuard, OsError, open_process};
@@ -268,6 +272,43 @@ impl OS {
             Ok(PathBuf::from(path_str))
         })()
         .map_err(|e: OsError| format!("Failed to get image path for process {}: {}", pid, e))
+    }
+
+    pub fn get_process_app_user_model_id(pid: u32) -> Result<Option<String>, String> {
+        (|| unsafe {
+            let handle = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+                .or_else(|_| open_process(pid, PROCESS_QUERY_INFORMATION))?;
+            let _hg = HandleGuard(handle);
+
+            let mut len = 0u32;
+            let status = GetApplicationUserModelId(handle, &mut len, Some(PWSTR::null()));
+            if status == APPMODEL_ERROR_NO_APPLICATION {
+                return Ok(None);
+            }
+            if status != ERROR_INSUFFICIENT_BUFFER {
+                return Err(OsError::Msg(format!(
+                    "GetApplicationUserModelId sizing call failed with status {:?}",
+                    status
+                )));
+            }
+
+            let mut buffer = vec![0u16; len as usize];
+            let status =
+                GetApplicationUserModelId(handle, &mut len, Some(PWSTR(buffer.as_mut_ptr())));
+            if status == APPMODEL_ERROR_NO_APPLICATION {
+                return Ok(None);
+            }
+            if status != windows::Win32::Foundation::WIN32_ERROR(0) {
+                return Err(OsError::Msg(format!(
+                    "GetApplicationUserModelId failed with status {:?}",
+                    status
+                )));
+            }
+
+            let slice_len = len.saturating_sub(1) as usize;
+            Ok(Some(String::from_utf16_lossy(&buffer[..slice_len])))
+        })()
+        .map_err(|e: OsError| format!("Failed to get AppUserModelId for process {}: {}", pid, e))
     }
 }
 
