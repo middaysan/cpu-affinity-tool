@@ -1,4 +1,5 @@
 use crate::app::models::{AppState, AppStatus, AppToRun};
+use crate::app::navigation::WindowRoute;
 use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, Align, CentralPanel, Layout, RichText, ScrollArea};
 use eframe::egui::{Color32, Vec2};
@@ -219,9 +220,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                                 if edit_button.clicked() {
                                     app.app_edit_state.run_settings = Some((g_i, prog_index));
-                                    app.set_current_window(
-                                        crate::app::controllers::WindowController::AppRunSettings,
-                                    );
+                                    app.set_current_window(WindowRoute::AppRunSettings);
                                 }
                             });
 

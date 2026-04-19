@@ -1,4 +1,5 @@
 use crate::app::models::AppState;
+use crate::app::navigation::{GroupRoute, WindowRoute};
 use eframe::egui::{self, Layout, Margin, RichText, TopBottomPanel};
 
 /// Static array of tips to display in the application header
@@ -43,17 +44,13 @@ pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
                             )
                             .clicked()
                         {
-                            app.set_current_window(crate::app::controllers::WindowController::Logs);
+                            app.set_current_window(WindowRoute::Logs);
                         }
                         if ui
                             .button(RichText::new("➕ Create Group").strong())
                             .clicked()
                         {
-                            app.set_current_window(
-                                crate::app::controllers::WindowController::Groups(
-                                    crate::app::controllers::Group::Create,
-                                ),
-                            );
+                            app.set_current_window(WindowRoute::Groups(GroupRoute::Create));
                         }
                     });
                 });

@@ -1,7 +1,7 @@
 mod app;
 mod tray;
 
-use app::models::App;
+use app::runtime::App;
 use eframe::{run_native, NativeOptions};
 
 fn main() {

@@ -1,5 +1,6 @@
 use crate::app::models::GroupFormState;
 use crate::app::models::{AppState, CoreInfo, CoreType, CpuSchema};
+use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, CentralPanel, RichText};
 
@@ -281,9 +282,7 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
             app.create_group();
         }
         app.reset_group_form();
-        app.set_current_window(crate::app::controllers::WindowController::Groups(
-            crate::app::controllers::Group::ListGroups,
-        ));
+        app.set_current_window(WindowRoute::Groups(GroupRoute::List));
     }
 }
 
@@ -353,9 +352,7 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
         }
 
         if save_clicked || delete_clicked || cancel_clicked {
-            app.set_current_window(crate::app::controllers::WindowController::Groups(
-                crate::app::controllers::Group::ListGroups,
-            ));
+            app.set_current_window(WindowRoute::Groups(GroupRoute::List));
         }
     });
 }

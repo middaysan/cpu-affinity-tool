@@ -1,9 +1,9 @@
-use crate::app::controllers;
-use crate::app::models::core_group::{CoreGroup, GroupFormState};
+use crate::app::models::core_group::CoreGroup;
 use crate::app::models::cpu_schema::CpuSchema;
 use crate::app::models::{
-    AppStateStorage, AppStatus, AppToRun, LogManager, RunAppEditState, RunningApps,
+    AppStateStorage, AppStatus, AppToRun, GroupFormState, LogManager, RunAppEditState, RunningApps,
 };
+use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::views::header::TIPS;
 use crate::tray::TrayCmd;
 use eframe::egui;
@@ -20,8 +20,8 @@ use tokio::sync::RwLock as TokioRwLock;
 /// This structure holds all the application states, including persistent data,
 /// UI state, and runtime information about running applications.
 pub struct AppState {
-    /// The current window controller that determines which view is displayed
-    pub current_window: controllers::WindowController,
+    /// The current route that determines which view is displayed
+    pub current_window: WindowRoute,
     /// Persistent state that is saved to and loaded from the disk
     pub persistent_state: Arc<RwLock<AppStateStorage>>,
     /// State of the group form for creating or editing core groups
@@ -85,7 +85,7 @@ impl AppState {
     pub fn new(ctx: &egui::Context) -> Self {
         let mut app = Self {
             persistent_state: Arc::new(RwLock::new(AppStateStorage::load_state())),
-            current_window: controllers::WindowController::Groups(controllers::Group::ListGroups),
+            current_window: WindowRoute::Groups(GroupRoute::List),
             group_form: GroupFormState {
                 editing_index: None,
                 editing_selection: None,
@@ -201,7 +201,7 @@ impl AppState {
     pub fn get_groups(&self) -> Vec<CoreGroup> {
         match self.persistent_state.read() {
             Ok(state) => state.groups.clone(),
-            Err(_) => Vec::new()
+            Err(_) => Vec::new(),
         }
     }
 
@@ -209,7 +209,7 @@ impl AppState {
     pub fn get_group_name(&self, index: usize) -> Option<String> {
         match self.persistent_state.read() {
             Ok(state) => state.groups.get(index).map(|group| group.name.clone()),
-            Err(_) => None
+            Err(_) => None,
         }
     }
 
@@ -402,13 +402,17 @@ impl AppState {
                 .iter()
                 .enumerate()
                 .flat_map(|(g_i, group)| {
-                    group.programs.iter().enumerate().filter_map(move |(p_i, app)| {
-                        if app.autorun {
-                            Some((g_i, p_i, app.clone()))
-                        } else {
-                            None
-                        }
-                    })
+                    group
+                        .programs
+                        .iter()
+                        .enumerate()
+                        .filter_map(move |(p_i, app)| {
+                            if app.autorun {
+                                Some((g_i, p_i, app.clone()))
+                            } else {
+                                None
+                            }
+                        })
                 })
                 .collect()
         };
@@ -456,7 +460,10 @@ impl AppState {
 
     /// Checks if the process monitoring feature is enabled.
     pub fn is_process_monitoring_enabled(&self) -> bool {
-        self.persistent_state.read().unwrap().process_monitoring_enabled
+        self.persistent_state
+            .read()
+            .unwrap()
+            .process_monitoring_enabled
     }
 
     /// Creates a new core group from the group form data.
@@ -501,7 +508,7 @@ impl AppState {
     }
 
     /// Sets the active window/view.
-    pub fn set_current_window(&mut self, window: controllers::WindowController) {
+    pub fn set_current_window(&mut self, window: WindowRoute) {
         self.current_window = window;
     }
 
@@ -511,7 +518,10 @@ impl AppState {
             let mut state = self.persistent_state.write().unwrap();
             if let Some(group) = state.groups.get_mut(group_index) {
                 if programm_index < group.programs.len() {
-                    let path = group.programs[programm_index].bin_path.display().to_string();
+                    let path = group.programs[programm_index]
+                        .bin_path
+                        .display()
+                        .to_string();
                     group.programs.remove(programm_index);
                     Some(path)
                 } else {
@@ -523,7 +533,8 @@ impl AppState {
         };
         if let Some(path) = removed_path {
             self.save_state();
-            self.log_manager.add_entry(format!("Removing app: {}", path));
+            self.log_manager
+                .add_entry(format!("Removing app: {}", path));
         }
     }
 
@@ -556,9 +567,7 @@ impl AppState {
         self.group_form.editing_index = Some(group_index);
         self.group_form.last_clicked_core = None;
 
-        self.set_current_window(controllers::WindowController::Groups(
-            controllers::Group::Edit,
-        ));
+        self.set_current_window(WindowRoute::Groups(GroupRoute::Edit));
     }
 
     /// Runs an application with a specified CPU affinity based on the provided group.
@@ -825,7 +834,8 @@ pub async fn run_running_app_monitor(
                 Ok(guard) => guard,
                 Err(_) => {
                     let _ = monitor_tx.send(
-                        "WARNING: persistent_state lock poisoned, skipping monitor iteration".to_string(),
+                        "WARNING: persistent_state lock poisoned, skipping monitor iteration"
+                            .to_string(),
                     );
                     continue;
                 }
@@ -1058,7 +1068,8 @@ pub async fn run_process_settings_monitor(
                 Ok(guard) => guard,
                 Err(_) => {
                     let _ = monitor_tx.send(
-                        "WARNING: persistent_state lock poisoned, skipping monitor iteration".to_string(),
+                        "WARNING: persistent_state lock poisoned, skipping monitor iteration"
+                            .to_string(),
                     );
                     continue;
                 }

@@ -1,8 +1,6 @@
-use crate::app::views::{central, footer, group_editor, header, logs, run_settings};
-
-use crate::app::controllers;
 use crate::app::models::AppState;
-
+use crate::app::navigation::{GroupRoute, WindowRoute};
+use crate::app::views::{central, footer, group_editor, header, logs, run_settings};
 use crate::tray::{init_tray, TrayCmd};
 use eframe::egui;
 use std::path::PathBuf;
@@ -16,10 +14,10 @@ pub struct App {
 }
 
 impl App {
-    /// Creates a new instance of the App with initialized state and controller.
+    /// Creates a new instance of the App with initialized state and routes.
     ///
-    /// Initializes the application state with the provided context, creates a new
-    /// main controller, and starts any applications marked for autorun.
+    /// Initializes the application state with the provided context and starts
+    /// any applications marked for autorun.
     ///
     /// # Parameters
     ///
@@ -27,7 +25,7 @@ impl App {
     ///
     /// # Returns
     ///
-    /// A new `App` instance with initialized state and controller
+    /// A new `App` instance with initialized state
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         #[cfg(debug_assertions)]
         {
@@ -98,7 +96,7 @@ impl App {
                 }
             }
             Err(e) => {
-                // Log the error but don't crash — the application will continue to work without the tray.
+                // Log the error but don't crash - the application will continue to work without the tray.
                 state
                     .log_manager
                     .add_entry(format!("Tray init failed: {e}"));
@@ -164,14 +162,14 @@ impl App {
     /// Checks if the UI should be rendered at the moment.
     /// Also handles the logic for hiding the application when minimized.
     fn should_render(&mut self, ctx: &egui::Context) -> bool {
-        // If the application is hidden — limit the update frequency to save CPU
+        // If the application is hidden - limit the update frequency to save CPU
         if self.state.is_hidden {
             thread::sleep(Duration::from_millis(100));
             ctx.request_repaint();
             return false;
         }
 
-        // If the user minimized the window — hide it to the tray
+        // If the user minimized the window - hide it to the tray
         if ctx.input(|i| i.viewport().minimized == Some(true)) {
             self.hide_to_tray(ctx);
             return false;
@@ -252,18 +250,16 @@ impl App {
         footer::draw_bottom_panel(&mut self.state, ctx);
     }
 
-    /// Selects and renders the appropriate view depending on the current window state.
+    /// Selects and renders the appropriate view depending on the current route.
     fn draw_active_view(app_state: &mut AppState, ctx: &egui::Context) {
         match app_state.current_window.clone() {
-            controllers::WindowController::Groups(group_view) => match group_view {
-                controllers::Group::ListGroups => central::draw_central_panel(app_state, ctx),
-                controllers::Group::Create => group_editor::create_group_window(app_state, ctx),
-                controllers::Group::Edit => group_editor::edit_group_window(app_state, ctx),
+            WindowRoute::Groups(group_route) => match group_route {
+                GroupRoute::List => central::draw_central_panel(app_state, ctx),
+                GroupRoute::Create => group_editor::create_group_window(app_state, ctx),
+                GroupRoute::Edit => group_editor::edit_group_window(app_state, ctx),
             },
-            controllers::WindowController::Logs => logs::draw_logs_window(app_state, ctx),
-            controllers::WindowController::AppRunSettings => {
-                run_settings::draw_app_run_settings(app_state, ctx)
-            }
+            WindowRoute::Logs => logs::draw_logs_window(app_state, ctx),
+            WindowRoute::AppRunSettings => run_settings::draw_app_run_settings(app_state, ctx),
         }
     }
 }

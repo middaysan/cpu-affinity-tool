@@ -1,4 +1,5 @@
 use crate::app::models::AppState;
+use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Layout, RichText, Vec2};
 use os_api::PriorityClass;
@@ -9,9 +10,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
         Some((g, p)) => (g, p), // Copy the values
         None => {
             // If no run settings, return to groups view
-            app.set_current_window(crate::app::controllers::WindowController::Groups(
-                crate::app::controllers::Group::ListGroups,
-            ));
+            app.set_current_window(WindowRoute::Groups(GroupRoute::List));
             return;
         }
     };
@@ -25,9 +24,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
             // If program not found, return to groups view
             app.app_edit_state.current_edit = None;
             app.app_edit_state.run_settings = None;
-            app.set_current_window(crate::app::controllers::WindowController::Groups(
-                crate::app::controllers::Group::ListGroups,
-            ));
+            app.set_current_window(WindowRoute::Groups(GroupRoute::List));
             return;
         }
     }
@@ -255,8 +252,6 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
     if is_close {
         app.app_edit_state.current_edit = None;
         app.app_edit_state.run_settings = None;
-        app.set_current_window(crate::app::controllers::WindowController::Groups(
-            crate::app::controllers::Group::ListGroups,
-        ));
+        app.set_current_window(WindowRoute::Groups(GroupRoute::List));
     }
 }
