@@ -59,53 +59,43 @@ mod sys {
 
         let hwnd_val = SendHwnd(hwnd.0 as isize);
 
-        // Event handling via Tokio
         {
             let tx = tx.clone();
             let ctx = ctx.clone();
-            tokio::spawn(async move {
-                let menu_channel = MenuEvent::receiver();
-                let tray_channel = TrayIconEvent::receiver();
-
-                loop {
-                    // Poll menu events
-                    while let Ok(event) = menu_channel.try_recv() {
-                        let id = event.id.0.as_str();
-                        match id {
-                            "1" => {
-                                let hwnd = windows::Win32::Foundation::HWND(
-                                    hwnd_val.0 as *mut core::ffi::c_void,
-                                );
-                                os_api::OS::restore_and_focus(hwnd);
-                                let _ = tx.send(TrayCmd::Show);
-                                ctx.request_repaint();
-                            }
-                            "3" => {
-                                std::process::exit(0);
-                            }
-                            _ => {}
-                        }
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                let id = event.id.0.as_str();
+                match id {
+                    "1" => {
+                        let hwnd =
+                            windows::Win32::Foundation::HWND(hwnd_val.0 as *mut core::ffi::c_void);
+                        os_api::OS::restore_and_focus(hwnd);
+                        let _ = tx.send(TrayCmd::Show);
+                        ctx.request_repaint();
                     }
-
-                    // Poll icon events
-                    while let Ok(event) = tray_channel.try_recv() {
-                        if let TrayIconEvent::DoubleClick {
-                            button: MouseButton::Left,
-                            ..
-                        } = event
-                        {
-                            let hwnd = windows::Win32::Foundation::HWND(
-                                hwnd_val.0 as *mut core::ffi::c_void,
-                            );
-                            os_api::OS::restore_and_focus(hwnd);
-                            let _ = tx.send(TrayCmd::Show);
-                            ctx.request_repaint();
-                        }
+                    "3" => {
+                        std::process::exit(0);
                     }
-
-                    tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+                    _ => {}
                 }
-            });
+            }));
+        }
+
+        {
+            let tx = tx.clone();
+            let ctx = ctx.clone();
+            TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+                if let TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                } = event
+                {
+                    let hwnd =
+                        windows::Win32::Foundation::HWND(hwnd_val.0 as *mut core::ffi::c_void);
+                    os_api::OS::restore_and_focus(hwnd);
+                    let _ = tx.send(TrayCmd::Show);
+                    ctx.request_repaint();
+                }
+            }));
         }
 
         Ok(TrayHandle { tray_icon, rx })

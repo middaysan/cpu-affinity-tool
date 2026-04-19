@@ -1,45 +1,76 @@
-use crate::app::models::{AppStatus, AppToRun};
+use crate::app::models::AppStatus;
 use crate::app::runtime::AppState;
 use crate::app::views::shared_elements::glass_frame;
-use eframe::egui::{self, Align, CentralPanel, Layout, RichText, ScrollArea};
-use eframe::egui::{Color32, Vec2};
+use eframe::egui::{self, Align, CentralPanel, Color32, Layout, RichText, ScrollArea, Vec2};
+use std::path::PathBuf;
+
+enum CentralAction {
+    MoveGroup {
+        from: usize,
+        to: usize,
+    },
+    StartEditGroup(usize),
+    ToggleGroupHidden {
+        index: usize,
+        is_hidden: bool,
+    },
+    AddSelectedFiles {
+        group_index: usize,
+        paths: Vec<PathBuf>,
+    },
+    OpenAppRunSettings {
+        group_index: usize,
+        program_index: usize,
+    },
+    RunGroup(usize),
+    RunGroupProgram {
+        group_index: usize,
+        program_index: usize,
+    },
+    ConsumeDroppedFiles(usize),
+}
 
 pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
     CentralPanel::default().show(ctx, |ui| {
-        let mut dropped_assigned = false;
         ScrollArea::vertical().show(ui, |ui| {
             ui.vertical(|ui| {
-                dropped_assigned = render_groups(app, ui, ctx);
+                let actions = render_groups(app, ui, ctx);
+                execute_actions(app, actions);
             });
         });
     });
 }
 
-fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
-    let mut dropped_assigned = false;
+fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> Vec<CentralAction> {
+    let mut actions = Vec::new();
+    let mut drop_target = None;
+    let snapshot = app.build_central_panel_snapshot();
+    let groups_len = snapshot.groups.len();
 
-    let mut run_program: Option<Vec<(usize, usize, AppToRun)>> = None;
+    for group in snapshot.groups {
+        let group_index = group.group_index;
 
-    let mut swap_step: Option<(usize, bool)> = None;
-    let groups = app.get_groups();
-    let groups_len = groups.len();
-
-    for g_i in 0..groups_len {
         glass_frame(ui).outer_margin(5.0).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    if g_i > 0 {
+                    if group_index > 0 {
                         if ui.button("⏶").on_hover_text("Move group up").clicked() {
-                            swap_step = Some((g_i, true));
+                            actions.push(CentralAction::MoveGroup {
+                                from: group_index,
+                                to: group_index - 1,
+                            });
                         }
                     } else {
                         ui.add_enabled(false, egui::Button::new("⏶"));
                     }
 
-                    if g_i < groups_len - 1 {
+                    if group_index < groups_len - 1 {
                         if ui.button("⏷").on_hover_text("Move group down").clicked() {
-                            swap_step = Some((g_i, false));
+                            actions.push(CentralAction::MoveGroup {
+                                from: group_index + 1,
+                                to: group_index,
+                            });
                         }
                     } else {
                         ui.add_enabled(false, egui::Button::new("⏷"));
@@ -48,17 +79,13 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                 ui.add_space(8.0);
 
-                // Get group name and cores using helper methods
-                let group_name = app.get_group_name(g_i).unwrap_or_default();
-                let group_cores = app.get_group_cores(g_i).unwrap_or_default();
-
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(&group_name).heading().strong());
+                    ui.label(RichText::new(&group.name).heading().strong());
 
                     ui.add_sized(
                         [350.0, 0.0],
                         egui::Label::new(
-                            RichText::new(format!("Cores: {:?}", group_cores))
+                            RichText::new(format!("Cores: {:?}", group.cores))
                                 .small()
                                 .weak(),
                         ),
@@ -71,32 +98,30 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         .on_hover_text("Edit group settings")
                         .clicked()
                     {
-                        app.start_editing_group(g_i);
+                        actions.push(CentralAction::StartEditGroup(group_index));
                     }
 
                     ui.separator();
 
-                    // Get is_hidden using helper method
-                    let is_hidden = app.get_group_is_hidden(g_i).unwrap_or(false);
-
-                    let button_text = if is_hidden {
+                    let button_text = if group.is_hidden {
                         RichText::new("👁").strikethrough()
                     } else {
                         RichText::new("👁")
                     };
 
-                    let hover_text = if is_hidden {
+                    let hover_text = if group.is_hidden {
                         "Show apps list"
                     } else {
                         "Hide apps list"
                     };
 
                     if ui.button(button_text).on_hover_text(hover_text).clicked() {
-                        // Toggle is_hidden using helper method
-                        app.set_group_is_hidden(g_i, !is_hidden);
+                        actions.push(CentralAction::ToggleGroupHidden {
+                            index: group_index,
+                            is_hidden: !group.is_hidden,
+                        });
                     }
 
-                    // TODO: add linux support
                     if ui
                         .button("➕ Add App")
                         .on_hover_text("Add executables...")
@@ -106,65 +131,27 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                             .add_filter("Executables", &["exe", "lnk", "url"])
                             .pick_files()
                         {
-                            // Get group name using helper method
-                            let group_name = app.get_group_name(g_i).unwrap_or_default();
-
-                            app.log_manager.add_entry(format!(
-                                "Adding executables to group: {group_name}, paths: {paths:?}"
-                            ));
-
-                            // Add apps to group using helper method
-                            let res = app.add_apps_to_group(g_i, paths);
-                            if let Err(err) = res {
-                                app.log_manager
-                                    .add_entry(format!("Error adding executables: {err}"));
-                            } else {
-                                app.log_manager
-                                    .add_entry(format!("Added executables to group: {group_name}"));
-                            }
+                            actions.push(CentralAction::AddSelectedFiles { group_index, paths });
                         }
                     }
 
-                    // Get run_all_button using helper method
-                    let run_all_button = app.get_group_run_all_button(g_i).unwrap_or(false);
-
-                    if run_all_button
+                    if group.run_all_button
                         && ui
                             .button(RichText::new("▶ Run All").color(Color32::from_rgb(0, 200, 0)))
                             .on_hover_text("Run all apps in group")
                             .clicked()
                     {
-                        // Get programs using helper method
-                        let programs = app.get_group_programs(g_i).unwrap_or_default();
-
-                        if programs.is_empty() {
-                            // Get group name using helper method
-                            let group_name = app.get_group_name(g_i).unwrap_or_default();
-
-                            app.log_manager
-                                .add_entry(format!("No executables to run in group: {group_name}"));
-                        } else {
-                            for (prog_index, prog) in programs.iter().enumerate() {
-                                run_program.get_or_insert_with(Vec::new).push((
-                                    g_i,
-                                    prog_index,
-                                    prog.clone(),
-                                ));
-                            }
-                        }
+                        actions.push(CentralAction::RunGroup(group_index));
                     }
                 });
             });
 
-            if !app.get_group_is_hidden(g_i).unwrap_or(false) {
+            if !group.is_hidden {
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(4.0);
 
-                // Get programs using helper method
-                let programs = app.get_group_programs(g_i).unwrap_or_default();
-
-                if programs.is_empty() {
+                if group.programs.is_empty() {
                     ui.vertical_centered(|ui| {
                         ui.label(
                             RichText::new("No executables. Drag & drop files here to add.")
@@ -173,17 +160,16 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         );
                     });
                 } else {
-                    let len = programs.len();
-                    for prog_index in 0..len {
-                        let prog = app.get_group_program(g_i, prog_index).unwrap();
-                        let app_status = app.get_app_status_sync(&prog.get_key());
+                    let len = group.programs.len();
+                    for program in &group.programs {
+                        let app_status = app.get_app_status_sync(&program.app_key);
 
                         ui.horizontal(|ui| {
                             let (rect, response) =
                                 ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
                             let color = match app_status {
                                 AppStatus::Running => {
-                                    if let Some(pids) = app.get_running_app_pids(&prog.get_key()) {
+                                    if let Some(pids) = app.get_running_app_pids(&program.app_key) {
                                         response.on_hover_text(format!(
                                             "Tracking PIDs: {:?}\nStatus: All settings applied",
                                             pids
@@ -192,7 +178,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                                     Color32::from_rgb(0, 255, 0)
                                 }
                                 AppStatus::SettingsMismatch => {
-                                    if let Some(pids) = app.get_running_app_pids(&prog.get_key()) {
+                                    if let Some(pids) = app.get_running_app_pids(&program.app_key) {
                                         response.on_hover_text(format!(
                                             "Tracking PIDs: {:?}\nStatus: Settings mismatch (CPU affinity or priority)",
                                             pids
@@ -206,9 +192,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                             ui.add_space(4.0);
 
-                            let label = &prog.name;
-                            let app_button = egui::Button::new(RichText::new(label).strong());
-
+                            let app_button = egui::Button::new(RichText::new(&program.name).strong());
                             let response =
                                 ui.add_sized([ui.available_width() - 30.0, 20.0], app_button);
 
@@ -216,69 +200,87 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                                 let edit_button = ui.button("⚙").on_hover_text("Edit app settings");
 
                                 if edit_button.clicked() {
-                                    app.open_app_run_settings(g_i, prog_index);
+                                    actions.push(CentralAction::OpenAppRunSettings {
+                                        group_index: program.group_index,
+                                        program_index: program.program_index,
+                                    });
                                 }
                             });
 
                             if response
-                                .on_hover_text(prog.bin_path.to_string_lossy().to_string())
+                                .on_hover_text(program.bin_path_display.clone())
                                 .clicked()
                             {
-                                run_program = Some(vec![(g_i, prog_index, prog.clone())]);
+                                actions.push(CentralAction::RunGroupProgram {
+                                    group_index: program.group_index,
+                                    program_index: program.program_index,
+                                });
                             }
                         });
-                        if prog_index < len - 1 {
+
+                        if program.program_index < len - 1 {
                             ui.add_space(2.0);
                         }
                     }
                 }
             }
 
-            if let Some(dropped_files) = &app.ui.dropped_files {
-                if !dropped_files.is_empty() {
-                    let rect = ui.min_rect();
-                    if rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
-                        // Clone dropped_files early to release the immutable borrow
-                        let files_clone = dropped_files.clone();
-                        let files_count = files_clone.len();
+            let has_dropped_files = app
+                .ui
+                .dropped_files
+                .as_ref()
+                .is_some_and(|files| !files.is_empty());
 
-                        // Add apps to group using helper method
-                        let res = app.add_apps_to_group(g_i, files_clone);
-                        if let Err(err) = res {
-                            app.log_manager
-                                .add_entry(format!("Error adding executables: {err}"));
-                        } else {
-                            // Get group name using helper method
-                            let group_name = app.get_group_name(g_i).unwrap_or_default();
-
-                            app.log_manager.add_entry(format!(
-                                "Added {files_count} executables to group: {group_name}"
-                            ));
-                        }
-                        dropped_assigned = true;
-                        app.ui.dropped_files = None;
-                    }
+            if drop_target.is_none() && has_dropped_files {
+                let rect = ui.min_rect();
+                let hover_pos = ctx.input(|i| i.pointer.hover_pos().unwrap_or_default());
+                if rect.contains(hover_pos) {
+                    drop_target = Some(group_index);
                 }
             }
         });
     }
 
-    if let Some((index, is_up)) = swap_step {
-        if is_up {
-            // Swap groups using helper method
-            app.swap_groups(index, index - 1);
-        } else {
-            // Swap groups using helper method
-            app.swap_groups(index + 1, index);
-        }
+    if let Some(group_index) = drop_target {
+        actions.push(CentralAction::ConsumeDroppedFiles(group_index));
     }
 
-    if let Some(programs) = run_program {
-        for (g_index, p_index, prog) in programs {
-            // Use run_app_with_affinity_sync instead of run_app_with_affinity
-            app.run_app_with_affinity_sync(g_index, p_index, prog);
+    actions
+}
+
+fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
+    for action in actions {
+        match action {
+            CentralAction::MoveGroup { from, to } => {
+                app.swap_groups(from, to);
+            }
+            CentralAction::StartEditGroup(group_index) => {
+                app.start_editing_group(group_index);
+            }
+            CentralAction::ToggleGroupHidden { index, is_hidden } => {
+                app.set_group_is_hidden(index, is_hidden);
+            }
+            CentralAction::AddSelectedFiles { group_index, paths } => {
+                app.add_selected_files_to_group(group_index, paths);
+            }
+            CentralAction::OpenAppRunSettings {
+                group_index,
+                program_index,
+            } => {
+                app.open_app_run_settings(group_index, program_index);
+            }
+            CentralAction::RunGroup(group_index) => {
+                app.run_group(group_index);
+            }
+            CentralAction::RunGroupProgram {
+                group_index,
+                program_index,
+            } => {
+                app.run_group_program(group_index, program_index);
+            }
+            CentralAction::ConsumeDroppedFiles(group_index) => {
+                let _ = app.consume_dropped_files_into_group(group_index);
+            }
         }
     }
-
-    dropped_assigned
 }

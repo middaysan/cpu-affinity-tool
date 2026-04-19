@@ -1,4 +1,4 @@
-use crate::app::models::{AppStateStorage, AppToRun, LogManager};
+use crate::app::models::{AddAppsOutcome, AppStateStorage, AppToRun};
 use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::runtime::UiState;
 use std::path::PathBuf;
@@ -8,19 +8,18 @@ pub fn add_apps_to_group(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     group_index: usize,
     paths: Vec<PathBuf>,
-) -> Result<(), String> {
-    let result = {
+) -> AddAppsOutcome {
+    {
         let mut state = persistent_state.write().unwrap();
         if let Some(group) = state.groups.get_mut(group_index) {
             group.add_app_to_group(paths)
         } else {
-            Err(format!("Group with index {group_index} not found"))
+            AddAppsOutcome {
+                added_count: 0,
+                first_error: Some(format!("Group with index {group_index} not found")),
+            }
         }
-    };
-    if result.is_ok() {
-        persistent_state.read().unwrap().save_state();
     }
-    result
 }
 
 pub fn update_program(
@@ -29,7 +28,7 @@ pub fn update_program(
     program_index: usize,
     program: AppToRun,
 ) -> bool {
-    let updated = {
+    {
         let mut state = persistent_state.write().unwrap();
         if let Some(group) = state.groups.get_mut(group_index) {
             if program_index < group.programs.len() {
@@ -41,20 +40,15 @@ pub fn update_program(
         } else {
             false
         }
-    };
-    if updated {
-        persistent_state.read().unwrap().save_state();
     }
-    updated
 }
 
 pub fn remove_app_from_group(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
-    log_manager: &mut LogManager,
     group_index: usize,
     program_index: usize,
-) {
-    let removed_path = {
+) -> Option<String> {
+    {
         let mut state = persistent_state.write().unwrap();
         if let Some(group) = state.groups.get_mut(group_index) {
             if program_index < group.programs.len() {
@@ -67,11 +61,6 @@ pub fn remove_app_from_group(
         } else {
             None
         }
-    };
-
-    if let Some(path) = removed_path {
-        persistent_state.read().unwrap().save_state();
-        log_manager.add_entry(format!("Removing app: {}", path));
     }
 }
 
@@ -149,7 +138,6 @@ mod tests {
     #[test]
     fn test_update_and_remove_program() {
         let persistent_state = sample_persistent_state();
-        let mut log_manager = LogManager::default();
         let updated = AppToRun {
             name: "Updated".to_string(),
             dropped_path: PathBuf::from(r"C:\Sample.lnk"),
@@ -161,11 +149,11 @@ mod tests {
         };
 
         assert!(update_program(&persistent_state, 0, 0, updated.clone()));
-        remove_app_from_group(&persistent_state, &mut log_manager, 0, 0);
+        let removed = remove_app_from_group(&persistent_state, 0, 0);
 
         let state = persistent_state.read().unwrap();
         assert!(state.groups[0].programs.is_empty());
-        assert_eq!(log_manager.entries.len(), 1);
+        assert_eq!(removed.as_deref(), Some(r"C:\Updated.exe"));
     }
 
     #[test]

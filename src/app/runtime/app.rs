@@ -5,7 +5,6 @@ use crate::tray::{init_tray, TrayCmd};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
-use std::thread;
 use std::time::Duration;
 
 pub struct App {
@@ -106,7 +105,7 @@ impl App {
             Err(e) => {
                 state
                     .log_manager
-                    .add_entry(format!("Tray init failed: {e}"));
+                    .add_sticky_once(format!("Tray init failed: {e}"));
                 Self {
                     state,
                     tray_rx: None,
@@ -166,15 +165,18 @@ impl App {
     fn handle_monitor_events(&mut self) {
         if let Some(rx) = &self.state.runtime.monitor_rx {
             while let Ok(msg) = rx.try_recv() {
-                self.state.log_manager.add_entry(msg);
+                if msg.starts_with("WARNING:") {
+                    self.state.log_manager.add_sticky_once(msg);
+                } else {
+                    self.state.log_manager.add_entry(msg);
+                }
             }
         }
     }
 
     fn should_render(&mut self, ctx: &egui::Context) -> bool {
         if self.is_hidden {
-            thread::sleep(Duration::from_millis(100));
-            ctx.request_repaint();
+            ctx.request_repaint_after(Duration::from_millis(250));
             return false;
         }
 

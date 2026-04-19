@@ -7,14 +7,20 @@ pub fn set_group_is_hidden(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     index: usize,
     is_hidden: bool,
-) {
+) -> bool {
     {
         let mut state = persistent_state.write().unwrap();
         if let Some(group) = state.groups.get_mut(index) {
-            group.is_hidden = is_hidden;
+            if group.is_hidden != is_hidden {
+                group.is_hidden = is_hidden;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
         }
     }
-    persistent_state.read().unwrap().save_state();
 }
 
 pub fn swap_groups(
@@ -22,7 +28,7 @@ pub fn swap_groups(
     index1: usize,
     index2: usize,
 ) -> bool {
-    let swapped = {
+    {
         let mut state = persistent_state.write().unwrap();
         if index1 < state.groups.len() && index2 < state.groups.len() {
             state.groups.swap(index1, index2);
@@ -30,22 +36,18 @@ pub fn swap_groups(
         } else {
             false
         }
-    };
-    if swapped {
-        persistent_state.read().unwrap().save_state();
     }
-    swapped
 }
 
 pub fn create_group(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     ui: &mut UiState,
     log_manager: &mut LogManager,
-) {
+) -> bool {
     let group_name_trimmed = ui.group_form.group_name.trim();
     if group_name_trimmed.is_empty() {
         log_manager.add_entry("Group name cannot be empty".into());
-        return;
+        return false;
     }
 
     let selected_cores: Vec<usize> = ui
@@ -58,7 +60,7 @@ pub fn create_group(
 
     if selected_cores.is_empty() {
         log_manager.add_entry("At least one core must be selected".into());
-        return;
+        return false;
     }
 
     {
@@ -71,8 +73,7 @@ pub fn create_group(
             run_all_button: ui.group_form.run_all_enabled,
         });
     }
-    persistent_state.read().unwrap().save_state();
-    ui.reset_group_form();
+    true
 }
 
 pub fn update_group_properties(
@@ -82,7 +83,7 @@ pub fn update_group_properties(
     cores: Vec<usize>,
     run_all_button: bool,
 ) -> bool {
-    let updated = {
+    {
         let mut state = persistent_state.write().unwrap();
         if index < state.groups.len() {
             state.groups[index].name = name;
@@ -92,15 +93,11 @@ pub fn update_group_properties(
         } else {
             false
         }
-    };
-    if updated {
-        persistent_state.read().unwrap().save_state();
     }
-    updated
 }
 
 pub fn remove_group(persistent_state: &Arc<RwLock<AppStateStorage>>, index: usize) -> bool {
-    let removed = {
+    {
         let mut state = persistent_state.write().unwrap();
         if index < state.groups.len() {
             state.groups.remove(index);
@@ -108,11 +105,7 @@ pub fn remove_group(persistent_state: &Arc<RwLock<AppStateStorage>>, index: usiz
         } else {
             false
         }
-    };
-    if removed {
-        persistent_state.read().unwrap().save_state();
     }
-    removed
 }
 
 pub fn start_editing_group(
@@ -175,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_group_persists_and_resets_form() {
+    fn test_create_group_mutates_state() {
         let persistent_state = sample_persistent_state();
         let mut ui = UiState::new(4);
         let mut log_manager = LogManager::default();
@@ -185,19 +178,16 @@ mod tests {
         ui.group_form.core_selection[0] = true;
         ui.group_form.core_selection[2] = true;
 
-        create_group(&persistent_state, &mut ui, &mut log_manager);
+        assert!(create_group(&persistent_state, &mut ui, &mut log_manager));
 
         let state = persistent_state.read().unwrap();
         let group = state.groups.last().unwrap();
         assert_eq!(group.name, "Work");
         assert_eq!(group.cores, vec![0, 2]);
         assert!(group.run_all_button);
-        assert!(ui.group_form.group_name.is_empty());
-        assert!(ui
-            .group_form
-            .core_selection
-            .iter()
-            .all(|selected| !selected));
+        assert_eq!(ui.group_form.group_name, "Work");
+        assert!(ui.group_form.core_selection[0]);
+        assert!(ui.group_form.core_selection[2]);
     }
 
     #[test]

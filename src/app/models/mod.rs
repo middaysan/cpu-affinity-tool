@@ -20,7 +20,7 @@ mod running_app;
 // Public re-exports of key structures for use in other modules
 pub use app_state_storage::AppStateStorage;
 pub use app_to_run::AppToRun;
-pub use core_group::CoreGroup;
+pub use core_group::{AddAppsOutcome, CoreGroup};
 pub use cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 pub use log_manager::LogManager;
 pub use meta::{effective_cpu_model, effective_total_threads, APP_VERSION};

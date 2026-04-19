@@ -56,12 +56,9 @@ impl AppStateStorage {
         storage_io::save_to_path(self, path)
     }
 
-    /// Saves the current application state to the default JSON file.
-    ///
-    /// Serializes the current state to JSON and writes it to a file named `state.json`
-    /// in the executable directory. If serialization or writing fails, the error is ignored.
-    pub fn save_state(&self) {
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn try_save_state(&self) -> Result<(), Box<dyn std::error::Error>> {
         let path = state_path::get_state_path();
-        let _ = self.save_to_path(&path);
+        self.save_to_path(&path)
     }
 }

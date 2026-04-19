@@ -29,7 +29,7 @@ pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
                             .button(
                                 RichText::new(format!(
                                     "\u{1F4C4} Logs ({})",
-                                    app.log_manager.entries.len()
+                                    app.log_manager.len()
                                 ))
                                 .strong(),
                             )

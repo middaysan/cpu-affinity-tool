@@ -4,6 +4,8 @@ use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
 
 pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {
+    let mut clear_logs = false;
+
     CentralPanel::default().show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.heading("Logs");
@@ -12,7 +14,7 @@ pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {
                     app.set_current_window(WindowRoute::Groups(GroupRoute::List));
                 }
                 if ui.button("Clear Logs").clicked() {
-                    app.log_manager.entries.clear();
+                    clear_logs = true;
                 }
             });
         });
@@ -28,4 +30,8 @@ pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {
                 });
         });
     });
+
+    if clear_logs {
+        app.clear_logs();
+    }
 }

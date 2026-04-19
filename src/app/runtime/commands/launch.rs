@@ -46,19 +46,21 @@ pub fn run_app_with_affinity_sync(
     app_to_run: AppToRun,
 ) {
     let app_key = app_to_run.get_key();
-    let group = {
+    let group_cores = {
         let state = persistent_state.read().unwrap();
         match state.groups.get(group_index) {
-            Some(g) => g.clone(),
+            Some(group) => group.cores.clone(),
             None => {
-                log_manager.add_entry(format!("Error: Group index {group_index} not found"));
+                log_manager.add_important_sticky_once(format!(
+                    "Error: Group index {group_index} not found"
+                ));
                 return;
             }
         }
     };
 
     if let Some(pids) = runtime.get_running_app_pids(&app_key) {
-        let mask = group.cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
+        let mask = group_cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
         for &pid in &pids {
             let _ = OS::set_process_affinity_by_pid(pid, mask);
             let _ = OS::set_process_priority_by_pid(pid, app_to_run.priority);
@@ -94,7 +96,7 @@ pub fn run_app_with_affinity_sync(
     match OS::run(
         app_to_run.bin_path,
         app_to_run.args,
-        &group.cores,
+        &group_cores,
         app_to_run.priority,
     ) {
         Ok(pid) => {
@@ -116,7 +118,7 @@ pub fn run_app_with_affinity_sync(
                 ));
             }
         }
-        Err(e) => log_manager.add_entry(format!("ERROR: {e}")),
+        Err(e) => log_manager.add_important_sticky_once(format!("ERROR: {e}")),
     }
 }
 

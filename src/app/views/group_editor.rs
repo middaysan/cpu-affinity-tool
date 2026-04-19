@@ -1,5 +1,4 @@
 use crate::app::models::{CoreInfo, CoreType, CpuSchema};
-use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::runtime::{AppState, GroupFormState};
 use crate::app::views::shared_elements::glass_frame;
 use eframe::egui::{self, CentralPanel, RichText};
@@ -279,17 +278,15 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
 
     if create_clicked || cancel_clicked {
         if create_clicked {
-            app.create_group();
+            app.commit_group_form_session();
+        } else {
+            app.cancel_group_form_session();
         }
-        app.reset_group_form();
-        app.set_current_window(WindowRoute::Groups(GroupRoute::List));
     }
 }
 
 /// Group editing window.
 pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
-    let index = app.ui.group_form.editing_index.unwrap();
-
     CentralPanel::default().show(ctx, |ui| {
         let mut save_clicked = false;
         let mut delete_clicked = false;
@@ -322,38 +319,15 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
             });
 
         if save_clicked {
-            // Gather indices of selected cores only.
-            let selected_cores: Vec<usize> = app
-                .ui
-                .group_form
-                .core_selection
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &selected)| if selected { Some(i) } else { None })
-                .collect();
-
-            // Update group properties
-            app.update_group_properties(
-                index,
-                app.ui.group_form.group_name.clone(),
-                selected_cores,
-                app.ui.group_form.run_all_enabled,
-            );
-
-            app.reset_group_form();
+            app.commit_group_form_session();
         }
 
         if delete_clicked {
-            app.remove_group(index);
-            app.reset_group_form();
+            app.delete_current_group_form_target();
         }
 
         if cancel_clicked {
-            app.reset_group_form();
-        }
-
-        if save_clicked || delete_clicked || cancel_clicked {
-            app.set_current_window(WindowRoute::Groups(GroupRoute::List));
+            app.cancel_group_form_session();
         }
     });
 }

@@ -21,7 +21,6 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
     let mut is_close = false;
     let mut save_clicked = false;
     let mut delete_clicked = false;
-    let mut updated_app = None;
 
     CentralPanel::default().show(ctx, |ui| {
         ui.add_space(5.0);
@@ -195,7 +194,6 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                         )
                         .clicked()
                     {
-                        updated_app = Some(selected_app.clone());
                         save_clicked = true;
                         is_close = true;
                     }
@@ -226,18 +224,11 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
         });
     });
 
-    // Handle save outside of any closures
     if save_clicked {
-        if let Some(updated) = updated_app {
-            app.update_program(group_idx, prog_idx, updated);
-        }
-    }
-
-    if delete_clicked {
-        app.remove_app_from_group(group_idx, prog_idx);
-    }
-
-    if is_close {
+        app.commit_current_app_edit_session();
+    } else if delete_clicked {
+        app.delete_current_app_edit_target();
+    } else if is_close {
         app.close_app_run_settings();
     }
 }

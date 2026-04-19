@@ -2,6 +2,12 @@ use crate::app::models::AppToRun;
 use os_api::{PriorityClass, OS};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AddAppsOutcome {
+    pub added_count: usize,
+    pub first_error: Option<String>,
+}
+
 /// Represents a group of CPU cores and associated programs.
 /// This structure is used to organize applications by the CPU cores they should run on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,20 +37,18 @@ impl CoreGroup {
     ///
     /// # Returns
     ///
-    /// * `Ok(())` if all applications were added successfully
-    /// * `Err(String)` with an error message if any application failed to parse
+    /// * [`AddAppsOutcome`] describing how many apps were added and the first parse error, if any
     ///
     /// # Note
     ///
-    /// If the input vector is empty, the function returns `Ok(())` without making any changes.
-    /// If any application fails to parse, the function returns immediately with the error,
-    /// and any applications that were already added remain in the group.
-    pub fn add_app_to_group(
-        &mut self,
-        dropped_paths: Vec<std::path::PathBuf>,
-    ) -> Result<(), String> {
+    /// If the input vector is empty, the function returns an empty outcome without making any changes.
+    /// If any application fails to parse, processing stops immediately and any already added
+    /// applications remain in the group.
+    pub fn add_app_to_group(&mut self, dropped_paths: Vec<std::path::PathBuf>) -> AddAppsOutcome {
+        let mut outcome = AddAppsOutcome::default();
+
         if dropped_paths.is_empty() {
-            return Ok(());
+            return outcome;
         }
 
         for path in dropped_paths {
@@ -56,11 +60,49 @@ impl CoreGroup {
                         AppToRun::new(path, args, target, PriorityClass::Normal, false);
 
                     self.programs.push(app_to_run);
+                    outcome.added_count += 1;
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    outcome.first_error = Some(err);
+                    break;
+                }
             }
         }
 
-        Ok(())
+        outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CoreGroup;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_add_app_to_group_keeps_partial_success_before_first_error() {
+        let mut group = CoreGroup {
+            name: "Test".to_string(),
+            cores: vec![0],
+            programs: vec![],
+            is_hidden: false,
+            run_all_button: false,
+        };
+
+        let outcome = group.add_app_to_group(vec![
+            r"C:\valid.exe".into(),
+            r"C:\broken".into(),
+            r"C:\later.exe".into(),
+        ]);
+
+        assert_eq!(outcome.added_count, 1);
+        assert!(outcome
+            .first_error
+            .as_deref()
+            .is_some_and(|message| message.contains("Failed to get file extension")));
+        assert_eq!(group.programs.len(), 1);
+        assert_eq!(
+            group.programs[0].bin_path,
+            std::path::PathBuf::from(r"C:\valid.exe")
+        );
     }
 }

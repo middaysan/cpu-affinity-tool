@@ -6,7 +6,6 @@ pub fn toggle_theme(persistent_state: &Arc<RwLock<AppStateStorage>>) {
         let mut state = persistent_state.write().unwrap();
         state.theme_index = (state.theme_index + 1) % 3;
     }
-    persistent_state.read().unwrap().save_state();
 }
 
 pub fn toggle_process_monitoring(persistent_state: &Arc<RwLock<AppStateStorage>>) {
@@ -14,7 +13,6 @@ pub fn toggle_process_monitoring(persistent_state: &Arc<RwLock<AppStateStorage>>
         let mut state = persistent_state.write().unwrap();
         state.process_monitoring_enabled = !state.process_monitoring_enabled;
     }
-    persistent_state.read().unwrap().save_state();
 }
 
 #[cfg(test)]
