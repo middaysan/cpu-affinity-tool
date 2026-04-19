@@ -1,70 +1,18 @@
+mod migrations;
+mod schema_refresh;
+mod state_path;
+mod storage_io;
+
+#[cfg(test)]
+mod tests;
+
 use crate::app::models::core_group::CoreGroup;
-use crate::app::models::cpu_presets::get_preset_for_model;
-use crate::app::models::cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
-use crate::app::models::meta::{TEST_CPU_MODEL, TEST_TOTAL_THREADS};
-use os_api::OS;
+use crate::app::models::cpu_schema::CpuSchema;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// Current version of the application state schema
+/// Current version of the application state schema.
 pub const CURRENT_APP_STATE_VERSION: u32 = 4;
-pub const STATE_FILE_NAME: &str = "state.json";
-
-impl AppStateStorage {
-    /// Helper to get the CPU model, respecting test overrides.
-    pub fn get_effective_cpu_model() -> String {
-        #[allow(clippy::const_is_empty)]
-        if !TEST_CPU_MODEL.is_empty() {
-            TEST_CPU_MODEL.to_string()
-        } else {
-            OS::get_cpu_model()
-        }
-    }
-
-    /// Helper to get the total threads, respecting test overrides.
-    pub fn get_effective_total_threads() -> usize {
-        #[allow(clippy::absurd_extreme_comparisons)]
-        if TEST_TOTAL_THREADS > 0 {
-            TEST_TOTAL_THREADS
-        } else {
-            num_cpus::get()
-        }
-    }
-
-    fn get_state_path() -> PathBuf {
-        std::env::current_exe()
-            .map(|mut p| {
-                p.set_file_name(STATE_FILE_NAME);
-                p
-            })
-            .unwrap_or_else(|_| STATE_FILE_NAME.into())
-    }
-
-    fn backup_state_file(path: &Path) {
-        if !path.exists() {
-            return;
-        }
-
-        let mut backup_path = path.to_path_buf();
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(STATE_FILE_NAME);
-
-        // Try state.json.old, then state.json.old1, .old2, etc.
-        let mut backup_name = format!("{}.old", file_name);
-        backup_path.set_file_name(&backup_name);
-
-        let mut counter = 1;
-        while backup_path.exists() {
-            backup_name = format!("{}.old{}", file_name, counter);
-            backup_path.set_file_name(&backup_name);
-            counter += 1;
-        }
-
-        let _ = std::fs::rename(path, backup_path);
-    }
-}
 
 /// Storage for persistent application state that can be serialized to and deserialized from JSON.
 /// This structure is responsible for saving and loading the application state between sessions.
@@ -85,260 +33,35 @@ pub struct AppStateStorage {
 }
 
 impl AppStateStorage {
-    /// Loads the application state from a JSON file.
-    ///
-    /// Attempts to read the state from a file named "state.json" located in the same directory
-    /// as the executable. If the file doesn't exist or can't be parsed, it creates a default state
-    /// with empty groups and clusters, and theme_index set to 0.
-    ///
-    /// # Returns
-    ///
-    /// An `AppStateStorage` instance is either loaded from the file or created with default values.
+    /// Loads the application state from the default JSON file.
     pub fn load_state() -> AppStateStorage {
-        let path = Self::get_state_path();
+        let path = state_path::get_state_path();
+        Self::load_from_path(&path)
+    }
 
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|data| {
-                // Try to parse with version check
-                #[derive(Deserialize)]
-                struct VersionCheck {
-                    pub version: Option<u32>,
-                }
-
-                let v_check: VersionCheck = serde_json::from_str(&data).ok()?;
-
-                match v_check.version {
-                    Some(4) => {
-                        let mut state: AppStateStorage = serde_json::from_str(&data).ok()?;
-                        // Always try to refresh schema if it looks generic or model changed
-                        let cpu_model = Self::get_effective_cpu_model();
-                        let total_threads = Self::get_effective_total_threads();
-
-                        let is_generic = state.cpu_schema.model == "Generic CPU"
-                            || state.cpu_schema.clusters.is_empty()
-                            || state.cpu_schema.clusters.iter().all(|c| {
-                                c.cores.iter().all(|core| core.core_type == CoreType::Other)
-                            });
-
-                        #[allow(clippy::const_is_empty)]
-                        if is_generic
-                            || !TEST_CPU_MODEL.is_empty()
-                            || (state.cpu_schema.model != cpu_model && !cpu_model.is_empty())
-                        {
-                            if let Some(preset) = get_preset_for_model(&cpu_model, total_threads) {
-                                state.cpu_schema = preset;
-                                state.save_state();
-                            } else if state.cpu_schema.model != cpu_model && !cpu_model.is_empty() {
-                                // If no preset found but we have a new custom model name, at least update the name
-                                state.cpu_schema.model = cpu_model;
-                                state.save_state();
-                            }
-                        }
-                        Some(state)
-                    }
-                    Some(3) => {
-                        // Migrate from v3 to v4 (adds additional_processes to AppToRun)
-                        let mut state: AppStateStorage = serde_json::from_str(&data).ok()?;
-                        state.version = CURRENT_APP_STATE_VERSION;
-                        state.save_state();
-                        Some(state)
-                    }
-                    Some(2) => {
-                        #[derive(Deserialize)]
-                        struct V2AppStateStorage {
-                            pub _version: u32,
-                            pub groups: Vec<CoreGroup>,
-                            pub clusters: Vec<Vec<usize>>,
-                            pub theme_index: usize,
-                            pub process_monitoring_enabled: bool,
-                        }
-
-                        let v2: V2AppStateStorage = serde_json::from_str(&data).ok()?;
-                        let mut schema_clusters = Vec::new();
-                        for (i, cluster_cores) in v2.clusters.into_iter().enumerate() {
-                            let cores = cluster_cores
-                                .into_iter()
-                                .map(|ci| CoreInfo {
-                                    index: ci,
-                                    core_type: CoreType::Other,
-                                    label: format!("Core {ci}"),
-                                })
-                                .collect();
-                            schema_clusters.push(CpuCluster {
-                                name: format!("Cluster {}", i + 1),
-                                cores,
-                            });
-                        }
-
-                        let mut migrated = AppStateStorage {
-                            version: CURRENT_APP_STATE_VERSION,
-                            groups: v2.groups,
-                            cpu_schema: CpuSchema {
-                                model: "Generic CPU".to_string(),
-                                clusters: schema_clusters,
-                            },
-                            theme_index: v2.theme_index,
-                            process_monitoring_enabled: v2.process_monitoring_enabled,
-                        };
-
-                        // Try to get a better schema
-                        let cpu_model = Self::get_effective_cpu_model();
-                        let num_threads = Self::get_effective_total_threads();
-                        if let Some(preset) = get_preset_for_model(&cpu_model, num_threads) {
-                            migrated.cpu_schema = preset;
-                        } else if migrated.cpu_schema.clusters.is_empty()
-                            || migrated.cpu_schema.model == "Generic CPU"
-                        {
-                            migrated.cpu_schema.model = cpu_model;
-                        }
-
-                        Self::backup_state_file(&path);
-                        migrated.save_state();
-                        Some(migrated)
-                    }
-                    _ => {
-                        // Legacy or V1
-                        #[derive(Deserialize)]
-                        struct LegacyAppStateStorage {
-                            pub groups: Vec<CoreGroup>,
-                            pub clusters: Vec<Vec<usize>>,
-                            pub theme_index: usize,
-                        }
-
-                        let legacy: LegacyAppStateStorage = serde_json::from_str(&data).ok()?;
-                        let mut schema_clusters = Vec::new();
-                        for (i, cluster_cores) in legacy.clusters.into_iter().enumerate() {
-                            let cores = cluster_cores
-                                .into_iter()
-                                .map(|ci| CoreInfo {
-                                    index: ci,
-                                    core_type: CoreType::Other,
-                                    label: format!("Core {ci}"),
-                                })
-                                .collect();
-                            schema_clusters.push(CpuCluster {
-                                name: format!("Cluster {}", i + 1),
-                                cores,
-                            });
-                        }
-
-                        let mut migrated = AppStateStorage {
-                            version: CURRENT_APP_STATE_VERSION,
-                            groups: legacy.groups,
-                            cpu_schema: CpuSchema {
-                                model: "Generic CPU".to_string(),
-                                clusters: schema_clusters,
-                            },
-                            theme_index: legacy.theme_index,
-                            process_monitoring_enabled: false,
-                        };
-
-                        // Try to get a better schema
-                        let cpu_model = Self::get_effective_cpu_model();
-                        let total_threads = Self::get_effective_total_threads();
-                        if let Some(preset) = get_preset_for_model(&cpu_model, total_threads) {
-                            migrated.cpu_schema = preset;
-                        } else if migrated.cpu_schema.clusters.is_empty()
-                            || migrated.cpu_schema.model == "Generic CPU"
-                        {
-                            migrated.cpu_schema.model = cpu_model;
-                        }
-
-                        Self::backup_state_file(&path);
-                        migrated.save_state();
-                        Some(migrated)
-                    }
-                }
-            })
+    fn load_from_path(path: &Path) -> AppStateStorage {
+        storage_io::read_state_file(path)
+            .and_then(|data| migrations::load_from_data(&data, path))
             .unwrap_or_else(|| {
-                Self::backup_state_file(&path);
-                // Create a new default state with the current version
-                let cpu_model = Self::get_effective_cpu_model();
-                let total_threads = Self::get_effective_total_threads();
-                let cpu_schema =
-                    get_preset_for_model(&cpu_model, total_threads).unwrap_or(CpuSchema {
-                        model: cpu_model,
-                        clusters: Vec::new(),
-                    });
+                storage_io::backup_state_file(path);
 
-                let default_state = AppStateStorage {
-                    version: CURRENT_APP_STATE_VERSION,
-                    groups: Vec::new(),
-                    cpu_schema,
-                    theme_index: 0,
-                    process_monitoring_enabled: false,
-                };
-
-                // Save the default state to disk
-                default_state.save_state();
+                let default_state = schema_refresh::build_default_state();
+                let _ = default_state.save_to_path(path);
 
                 default_state
             })
     }
 
     fn save_to_path(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
-        Ok(())
+        storage_io::save_to_path(self, path)
     }
 
-    /// Saves the current application state to a JSON file.
+    /// Saves the current application state to the default JSON file.
     ///
-    /// Serializes the current state to JSON and writes it to a file named "state.json"
-    /// in the current directory. If serialization or writing fails, the error is silently ignored.
+    /// Serializes the current state to JSON and writes it to a file named `state.json`
+    /// in the executable directory. If serialization or writing fails, the error is ignored.
     pub fn save_state(&self) {
-        let path = Self::get_state_path();
+        let path = state_path::get_state_path();
         let _ = self.save_to_path(&path);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn test_backup_rotation() {
-        let temp_dir = std::env::temp_dir().join("cpu_affinity_tool_test");
-        if temp_dir.exists() {
-            let _ = fs::remove_dir_all(&temp_dir);
-        }
-        fs::create_dir_all(&temp_dir).unwrap();
-
-        let state_path = temp_dir.join(STATE_FILE_NAME);
-
-        // 1. First backup
-        fs::write(&state_path, "original").unwrap();
-        AppStateStorage::backup_state_file(&state_path);
-        assert!(!state_path.exists());
-        assert!(temp_dir.join("state.json.old").exists());
-        assert_eq!(
-            fs::read_to_string(temp_dir.join("state.json.old")).unwrap(),
-            "original"
-        );
-
-        // 2. Second backup (should be .old1)
-        fs::write(&state_path, "second").unwrap();
-        AppStateStorage::backup_state_file(&state_path);
-        assert!(!state_path.exists());
-        assert!(temp_dir.join("state.json.old1").exists());
-        assert_eq!(
-            fs::read_to_string(temp_dir.join("state.json.old1")).unwrap(),
-            "second"
-        );
-
-        // 3. Third backup (should be .old2)
-        fs::write(&state_path, "third").unwrap();
-        AppStateStorage::backup_state_file(&state_path);
-        assert!(!state_path.exists());
-        assert!(temp_dir.join("state.json.old2").exists());
-        assert_eq!(
-            fs::read_to_string(temp_dir.join("state.json.old2")).unwrap(),
-            "third"
-        );
-
-        // Clean up
-        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

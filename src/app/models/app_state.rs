@@ -1,5 +1,6 @@
 use crate::app::models::core_group::CoreGroup;
 use crate::app::models::cpu_schema::CpuSchema;
+use crate::app::models::meta::{effective_cpu_model, effective_total_threads};
 use crate::app::models::{
     AppStateStorage, AppStatus, AppToRun, GroupFormState, LogManager, RunAppEditState, RunningApps,
 };
@@ -89,7 +90,7 @@ impl AppState {
             group_form: GroupFormState {
                 editing_index: None,
                 editing_selection: None,
-                core_selection: vec![false; AppStateStorage::get_effective_total_threads()],
+                core_selection: vec![false; effective_total_threads()],
                 group_name: String::new(),
                 run_all_enabled: false,
                 last_clicked_core: None,
@@ -120,8 +121,8 @@ impl AppState {
 
         app.log_manager.add_entry("Application started".into());
 
-        let model = AppStateStorage::get_effective_cpu_model();
-        let threads = AppStateStorage::get_effective_total_threads();
+        let model = effective_cpu_model();
+        let threads = effective_total_threads();
         app.log_manager
             .add_entry(format!("Detected CPU: \"{}\" ({} threads)", model, threads));
 
