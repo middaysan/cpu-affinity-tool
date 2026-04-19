@@ -9,6 +9,7 @@ A simple and convenient program for managing CPU cores (CPU affinity) on Windows
 - **Windows** is the only platform that is currently treated as the supported, CI-validated, and published release path.
 - The current GitHub Release workflow publishes only `cpu-affinity-tool.exe` for `x86_64-pc-windows-msvc`.
 - The repository also contains a feature-gated Linux entrypoint (`cpu-affinity-tool-linux`), but that code path is still experimental backend work. It does not currently have CI coverage, published release artifacts, or runtime parity with the Windows path.
+- The Windows binary embeds `requestedExecutionLevel=requireAdministrator`, so the tool requires elevated launch; on a non-elevated start, users should expect the normal UAC prompt.
 - Manual pre-release checks for the current contract are documented in `docs/release-checklist.md`.
 
 ## Why do you need this?
@@ -39,7 +40,7 @@ Select the desired group from the list. You can add an application in two ways:
 - Simply drag the application file (`.exe`) or its shortcut directly onto the group area in the program window.
 
 ### 3. App Settings
-Click the gear icon (**⚙**) next to the application name to:
+Click the gear icon next to the application name to:
 - Change the process priority (e.g., set to "High" for games).
 - Add command-line arguments.
 - Enable **Autorun** so the app starts automatically when CPU Affinity Tool is launched.

@@ -45,6 +45,17 @@ jobs:
           command: clippy
           args: -- -D warnings
 
+      - name: Run os_api tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --manifest-path libs/os_api/Cargo.toml
+
+      - name: Run tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+
   build-windows:
     name: Build Windows Binary
     needs: check

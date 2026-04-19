@@ -67,6 +67,7 @@ Important root files:
 - `Makefile.toml` - local developer automation wrapper
 - `README.md` - user-facing project description
 - `docs/release-checklist.md` - manual checklist for the current Windows-only release contract
+- `docs/release-smoke-matrix.md` - compact manual smoke reference subordinate to the release checklist
 - `CPU_SCHEME_INSTRUCTION` - format contract for `cpu_presets.json`
 
 ## Runtime architecture
@@ -239,6 +240,7 @@ Do not invent dependency purpose just because a crate appears in `Cargo.toml`.
 
 ## Build, verification, CI, and release
 Local verification commands:
+- `cargo test --manifest-path libs/os_api/Cargo.toml`
 - `cargo test`
 - `cargo fmt --all -- --check`
 - `cargo clippy -- -D warnings`
@@ -251,11 +253,12 @@ Local verification commands:
 
 Current CI facts:
 - runner: `windows-latest`
-- `.github/workflows/ci.yml` runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test`, and `cargo build --release`
+- `.github/workflows/ci.yml` runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test`, and `cargo build --release`
 - tests are part of the committed CI contract for `ci.yml`
 
 Current release facts:
 - GitHub Release workflow reacts to pushed tags matching `v*`
+- its Windows check job runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, and `cargo test` before the release build job
 - it publishes `cpu-affinity-tool.exe`
 - target: `x86_64-pc-windows-msvc`
 - Linux release job is still commented out or absent from the active release contract
@@ -265,7 +268,7 @@ Additional release facts:
 - `changelogs/*.txt` are maintained manually
 - GitHub Release workflow does not ingest `changelogs/*.txt`
 - release notes currently rely on `generate_release_notes: true`
-- manual pre-release validation lives in `docs/release-checklist.md`
+- manual pre-release validation lives in `docs/release-checklist.md` and its subordinate `docs/release-smoke-matrix.md`
 - version truth is split across Git tag, `Cargo.toml`, and `changelogs/`
 - that version sync is still manual
 
