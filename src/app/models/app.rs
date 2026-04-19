@@ -10,12 +10,9 @@ use std::thread;
 use std::time::Duration;
 
 /// The main application structure that implements the eframe::App trait.
-/// This is the core of the application that connects the state with controllers and views.
 pub struct App {
     /// The application state that holds all data and configuration
     pub state: AppState,
-    /// The main controller that handles the application's control flow
-    pub main_controller: controllers::MainController,
 }
 
 impl App {
@@ -54,7 +51,6 @@ impl App {
         }
 
         let mut state = AppState::new(&cc.egui_ctx);
-        let main_controller = controllers::MainController::new();
 
         // Get HWND on Windows
         #[cfg(target_os = "windows")]
@@ -109,10 +105,7 @@ impl App {
             }
         }
 
-        Self {
-            state,
-            main_controller,
-        }
+        Self { state }
     }
 }
 
@@ -138,9 +131,6 @@ impl eframe::App for App {
 
         // 5. Render main UI
         self.render_main_ui(ctx);
-
-        // 6. Synchronize controller state
-        self.sync_controller_state();
     }
 }
 
@@ -257,24 +247,14 @@ impl App {
 
     /// Renders the main application interface.
     fn render_main_ui(&mut self, ctx: &egui::Context) {
-        let app_state = &mut self.state;
-        self.main_controller.render_with(ctx, |controller, ui_ctx| {
-            header::draw_top_panel(app_state, ui_ctx);
-
-            // Render content depending on the active controller
-            Self::draw_active_view(app_state, ui_ctx, controller);
-
-            footer::draw_bottom_panel(app_state, ui_ctx);
-        });
+        header::draw_top_panel(&mut self.state, ctx);
+        Self::draw_active_view(&mut self.state, ctx);
+        footer::draw_bottom_panel(&mut self.state, ctx);
     }
 
-    /// Selects and renders the appropriate view depending on the controller state.
-    fn draw_active_view(
-        app_state: &mut AppState,
-        ctx: &egui::Context,
-        controller: &controllers::MainController,
-    ) {
-        match &controller.window_controller {
+    /// Selects and renders the appropriate view depending on the current window state.
+    fn draw_active_view(app_state: &mut AppState, ctx: &egui::Context) {
+        match app_state.current_window.clone() {
             controllers::WindowController::Groups(group_view) => match group_view {
                 controllers::Group::ListGroups => central::draw_central_panel(app_state, ctx),
                 controllers::Group::Create => group_editor::create_group_window(app_state, ctx),
@@ -284,15 +264,6 @@ impl App {
             controllers::WindowController::AppRunSettings => {
                 run_settings::draw_app_run_settings(app_state, ctx)
             }
-        }
-    }
-
-    /// Synchronizes the controller state if it has been changed.
-    fn sync_controller_state(&mut self) {
-        if self.state.controller_changed {
-            self.state.controller_changed = false;
-            let current_window = self.state.current_window.clone();
-            self.main_controller.set_window(current_window);
         }
     }
 }

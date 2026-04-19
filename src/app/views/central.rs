@@ -21,7 +21,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
     let mut run_program: Option<Vec<(usize, usize, AppToRun)>> = None;
 
     let mut swap_step: Option<(usize, bool)> = None;
-    let groups = app.get_groups().unwrap_or_default();
+    let groups = app.get_groups();
     let groups_len = groups.len();
 
     for g_i in 0..groups_len {

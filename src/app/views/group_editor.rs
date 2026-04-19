@@ -263,14 +263,7 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                // Get cpu schema using helper method
-                let mut schema = app.get_cpu_schema().unwrap_or_else(|| {
-                    let cpu_model = crate::app::models::AppStateStorage::get_effective_cpu_model();
-                    CpuSchema {
-                        model: cpu_model,
-                        clusters: vec![],
-                    }
-                });
+                let mut schema = app.get_cpu_schema();
                 draw_group_form_ui(
                     ui,
                     &mut app.group_form,
@@ -280,8 +273,6 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
                     &mut || cancel_clicked = true,
                     None,
                 );
-                // Update schema if needed
-                app.set_cpu_schema(schema);
             });
     });
 
@@ -319,14 +310,7 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                // Get cpu schema using helper method
-                let mut schema = app.get_cpu_schema().unwrap_or_else(|| {
-                    let cpu_model = crate::app::models::AppStateStorage::get_effective_cpu_model();
-                    CpuSchema {
-                        model: cpu_model,
-                        clusters: vec![],
-                    }
-                });
+                let mut schema = app.get_cpu_schema();
                 draw_group_form_ui(
                     ui,
                     &mut app.group_form,
@@ -336,8 +320,6 @@ pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
                     &mut || cancel_clicked = true,
                     Some(&mut || delete_clicked = true),
                 );
-                // Update schema if needed
-                app.set_cpu_schema(schema);
             });
 
         if save_clicked {

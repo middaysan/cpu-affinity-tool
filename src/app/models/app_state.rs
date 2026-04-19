@@ -13,7 +13,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::RwLock;
+use tokio::sync::RwLock as TokioRwLock;
 
 /// The central state management component of the application.
 /// This structure holds all the application states, including persistent data,
@@ -21,8 +22,6 @@ use tokio::sync::RwLock;
 pub struct AppState {
     /// The current window controller that determines which view is displayed
     pub current_window: controllers::WindowController,
-    /// Flag indicating whether the controller has been changed and needs to be updated
-    pub controller_changed: bool,
     /// Persistent state that is saved to and loaded from the disk
     pub persistent_state: Arc<RwLock<AppStateStorage>>,
     /// State of the group form for creating or editing core groups
@@ -34,7 +33,7 @@ pub struct AppState {
     /// Manager for application logs
     pub log_manager: LogManager,
     /// Thread-safe reference to running applications
-    pub running_apps: Arc<RwLock<RunningApps>>,
+    pub running_apps: Arc<TokioRwLock<RunningApps>>,
     /// Cache of running application statuses for quick access
     pub running_apps_statuses: HashMap<String, AppStatus>,
     /// Index of the currently displayed tip
@@ -87,7 +86,6 @@ impl AppState {
         let mut app = Self {
             persistent_state: Arc::new(RwLock::new(AppStateStorage::load_state())),
             current_window: controllers::WindowController::Groups(controllers::Group::ListGroups),
-            controller_changed: false,
             group_form: GroupFormState {
                 editing_index: None,
                 editing_selection: None,
@@ -102,7 +100,7 @@ impl AppState {
             },
             dropped_files: None,
             log_manager: LogManager::default(),
-            running_apps: Arc::new(RwLock::new(RunningApps::default())),
+            running_apps: Arc::new(TokioRwLock::new(RunningApps::default())),
             running_apps_statuses: HashMap::new(),
             current_tip_index: 0,
             last_tip_change_time: 0.0,
@@ -133,7 +131,8 @@ impl AppState {
             presets_info.len()
         ));
 
-        if let Ok(state) = app.persistent_state.try_read() {
+        {
+            let state = app.persistent_state.read().unwrap();
             if state.cpu_schema.clusters.is_empty() {
                 app.log_manager
                     .add_entry("CPU layout: Generic (no clusters)".into());
@@ -169,10 +168,6 @@ impl AppState {
             }
         }
 
-        // Set the UI theme based on the theme index in the persistent state
-        // Explicitly drop the future to avoid the "let-underscore-future" warning
-        drop(app.apply_theme(ctx));
-
         // Create a clone of the running apps reference for the background monitors
         let apps_clone = Arc::clone(&app.running_apps);
 
@@ -202,178 +197,161 @@ impl AppState {
 impl AppState {
     // Helper methods for synchronous access to persistent_state
 
-    /// Gets a reference to the groups in the persistent state.
-    /// Returns None if the lock couldn't be acquired.
-    pub fn get_groups(&self) -> Option<Vec<CoreGroup>> {
-        self.persistent_state
-            .try_read()
-            .ok()
-            .map(|state| state.groups.clone())
+    /// Gets all groups from the persistent state.
+    pub fn get_groups(&self) -> Vec<CoreGroup> {
+        match self.persistent_state.read() {
+            Ok(state) => state.groups.clone(),
+            Err(_) => Vec::new()
+        }
     }
 
-    /// Gets the name of a specific group in the persistent state.
-    /// Returns None if the lock couldn't be acquired or the group doesn't exist.
+    /// Gets the name of a specific group. Returns None if the index is out of range.
     pub fn get_group_name(&self, index: usize) -> Option<String> {
-        self.persistent_state
-            .try_read()
-            .ok()
-            .and_then(|state| state.groups.get(index).map(|group| group.name.clone()))
+        match self.persistent_state.read() {
+            Ok(state) => state.groups.get(index).map(|group| group.name.clone()),
+            Err(_) => None
+        }
     }
 
-    /// Gets whether a specific group is hidden in the persistent state.
-    /// Returns None if the lock couldn't be acquired or the group doesn't exist.
+    /// Gets whether a specific group is hidden. Returns None if the index is out of range.
     pub fn get_group_is_hidden(&self, index: usize) -> Option<bool> {
-        self.persistent_state
-            .try_read()
-            .ok()
-            .and_then(|state| state.groups.get(index).map(|group| group.is_hidden))
+        match self.persistent_state.read() {
+            Ok(state) => state.groups.get(index).map(|group| group.is_hidden),
+            Err(_) => None,
+        }
     }
 
-    /// Sets whether a specific group is hidden in the persistent state.
-    /// Returns true if the update was successful, false otherwise.
-    pub fn set_group_is_hidden(&mut self, index: usize, is_hidden: bool) -> bool {
-        if let Ok(mut state) = self.persistent_state.try_write() {
+    /// Sets whether a specific group is hidden.
+    pub fn set_group_is_hidden(&mut self, index: usize, is_hidden: bool) {
+        {
+            let mut state = self.persistent_state.write().unwrap();
             if let Some(group) = state.groups.get_mut(index) {
                 group.is_hidden = is_hidden;
-                state.save_state();
-                return true;
             }
         }
-        false
+        self.save_state();
     }
 
-    /// Gets whether a specific group has the run_all_button enabled in the persistent state.
-    /// Returns None if the lock couldn't be acquired or the group doesn't exist.
+    /// Gets whether a specific group has the run_all_button enabled. Returns None if out of range.
     pub fn get_group_run_all_button(&self, index: usize) -> Option<bool> {
         self.persistent_state
-            .try_read()
-            .ok()
-            .and_then(|state| state.groups.get(index).map(|group| group.run_all_button))
+            .read()
+            .unwrap()
+            .groups
+            .get(index)
+            .map(|group| group.run_all_button)
     }
 
-    /// Gets the programs of a specific group in the persistent state.
-    /// Returns None if the lock couldn't be acquired or the group doesn't exist.
+    /// Gets the programs of a specific group. Returns None if the index is out of range.
     pub fn get_group_programs(&self, index: usize) -> Option<Vec<AppToRun>> {
         self.persistent_state
-            .try_read()
-            .ok()
-            .and_then(|state| state.groups.get(index).map(|group| group.programs.clone()))
+            .read()
+            .unwrap()
+            .groups
+            .get(index)
+            .map(|group| group.programs.clone())
     }
 
-    /// Gets a specific program from a specific group in the persistent state.
-    /// Returns None if the lock couldn't be acquired or the group/program doesn't exist.
+    /// Gets a specific program from a specific group. Returns None if indices are out of range.
     pub fn get_group_program(&self, group_index: usize, program_index: usize) -> Option<AppToRun> {
-        self.persistent_state.try_read().ok().and_then(|state| {
-            state
-                .groups
-                .get(group_index)
-                .and_then(|group| group.programs.get(program_index).cloned())
-        })
+        self.persistent_state
+            .read()
+            .unwrap()
+            .groups
+            .get(group_index)
+            .and_then(|group| group.programs.get(program_index).cloned())
     }
 
-    /// Gets the cores of a specific group in the persistent state.
-    /// Returns None if the lock couldn't be acquired or the group doesn't exist.
+    /// Gets the cores of a specific group. Returns None if the index is out of range.
     pub fn get_group_cores(&self, index: usize) -> Option<Vec<usize>> {
         self.persistent_state
-            .try_read()
-            .ok()
-            .and_then(|state| state.groups.get(index).map(|group| group.cores.clone()))
+            .read()
+            .unwrap()
+            .groups
+            .get(index)
+            .map(|group| group.cores.clone())
     }
 
     /// Gets the CPU schema from the persistent state.
-    /// Returns None if the lock couldn't be acquired.
-    pub fn get_cpu_schema(&self) -> Option<CpuSchema> {
-        self.persistent_state
-            .try_read()
-            .ok()
-            .map(|state| state.cpu_schema.clone())
+    pub fn get_cpu_schema(&self) -> CpuSchema {
+        self.persistent_state.read().unwrap().cpu_schema.clone()
     }
 
-    /// Sets the CPU schema in the persistent state.
-    /// Returns true if the update was successful, false otherwise.
-    pub fn set_cpu_schema(&mut self, schema: CpuSchema) -> bool {
-        if let Ok(mut state) = self.persistent_state.try_write() {
-            state.cpu_schema = schema;
-            state.save_state();
-            return true;
-        }
-        false
-    }
-
-    /// Swaps two groups in the persistent state.
-    /// Returns true if the swap was successful, false otherwise.
+    /// Swaps two groups. Returns true if both indices are valid, false otherwise.
     pub fn swap_groups(&mut self, index1: usize, index2: usize) -> bool {
-        if let Ok(mut state) = self.persistent_state.try_write() {
+        let swapped = {
+            let mut state = self.persistent_state.write().unwrap();
             if index1 < state.groups.len() && index2 < state.groups.len() {
                 state.groups.swap(index1, index2);
-                state.save_state();
-                return true;
+                true
+            } else {
+                false
             }
+        };
+        if swapped {
+            self.save_state();
         }
-        false
+        swapped
     }
 
     /// Saves the current state to disk.
-    /// Returns true if the save was successful, false otherwise.
-    pub fn save_state(&mut self) -> bool {
-        if let Ok(state) = self.persistent_state.try_write() {
-            state.save_state();
-            return true;
-        }
-        false
+    pub fn save_state(&mut self) {
+        self.persistent_state.read().unwrap().save_state();
     }
 
     /// Adds applications to a group.
-    /// Returns Ok if successful, or an error message if failed.
+    /// Returns Ok if successful, or an error message if the index is invalid.
     pub fn add_apps_to_group(
         &mut self,
         group_index: usize,
         paths: Vec<std::path::PathBuf>,
     ) -> Result<(), String> {
-        if let Ok(mut state) = self.persistent_state.try_write() {
+        let result = {
+            let mut state = self.persistent_state.write().unwrap();
             if let Some(group) = state.groups.get_mut(group_index) {
-                let result = group.add_app_to_group(paths);
-                if result.is_ok() {
-                    state.save_state();
-                }
-                return result;
+                group.add_app_to_group(paths)
+            } else {
+                Err(format!("Group with index {group_index} not found"))
             }
-            return Err(format!("Group with index {group_index} not found"));
+        };
+        if result.is_ok() {
+            self.save_state();
         }
-        Err("Failed to acquire write lock for adding apps to group".to_string())
+        result
     }
 
-    /// Updates a program in a group.
-    /// Returns true if the update was successful, false otherwise.
+    /// Updates a program in a group. Returns true if indices are valid, false otherwise.
     pub fn update_program(
         &mut self,
         group_index: usize,
         program_index: usize,
         program: AppToRun,
     ) -> bool {
-        if let Ok(mut state) = self.persistent_state.try_write() {
+        let updated = {
+            let mut state = self.persistent_state.write().unwrap();
             if let Some(group) = state.groups.get_mut(group_index) {
                 if program_index < group.programs.len() {
                     group.programs[program_index] = program;
-                    state.save_state();
-                    return true;
+                    true
+                } else {
+                    false
                 }
+            } else {
+                false
             }
+        };
+        if updated {
+            self.save_state();
         }
-        false
+        updated
     }
 
     /// Gets the theme index from the persistent state.
-    /// Returns 0 (default) if the lock couldn't be acquired.
     pub fn get_theme_index(&self) -> usize {
-        self.persistent_state
-            .try_read()
-            .map(|state| state.theme_index)
-            .unwrap_or(0)
+        self.persistent_state.read().unwrap().theme_index
     }
 
-    /// Updates a group's properties in the persistent state.
-    /// Returns true if the update was successful, false otherwise.
+    /// Updates a group's properties. Returns true if the index is valid, false otherwise.
     pub fn update_group_properties(
         &mut self,
         index: usize,
@@ -381,55 +359,61 @@ impl AppState {
         cores: Vec<usize>,
         run_all_button: bool,
     ) -> bool {
-        if let Ok(mut state) = self.persistent_state.try_write() {
+        let updated = {
+            let mut state = self.persistent_state.write().unwrap();
             if index < state.groups.len() {
                 state.groups[index].name = name;
                 state.groups[index].cores = cores;
                 state.groups[index].run_all_button = run_all_button;
-                state.save_state();
-                return true;
+                true
+            } else {
+                false
             }
+        };
+        if updated {
+            self.save_state();
         }
-        false
+        updated
     }
 
-    /// Removes a group from the persistent state.
-    /// Returns true if the removal was successful, false otherwise.
+    /// Removes a group. Returns true if the index is valid, false otherwise.
     pub fn remove_group(&mut self, index: usize) -> bool {
-        if let Ok(mut state) = self.persistent_state.try_write() {
+        let removed = {
+            let mut state = self.persistent_state.write().unwrap();
             if index < state.groups.len() {
                 state.groups.remove(index);
-                state.save_state();
-                return true;
+                true
+            } else {
+                false
             }
+        };
+        if removed {
+            self.save_state();
         }
-        false
+        removed
     }
 
     /// Starts all applications marked for automatic startup.
-    ///
-    /// Iterates through all groups and their programs, and for each program
-    /// that has the `autorun` flag set to true, calls `run_app_with_affinity()`
-    /// to launch the application with the appropriate CPU affinity.
-    ///
-    /// This method is typically called during application initialization.
     pub fn start_app_with_autorun(&mut self) {
-        // Try to get a read lock on the persistent state
-        if let Ok(state) = self.persistent_state.try_read() {
-            let groups = state.groups.clone();
-            // Drop the lock before running apps to avoid deadlocks
-            drop(state);
-
-            for group in groups.iter() {
-                for app in group.programs.iter() {
-                    if app.autorun {
-                        // We can't call the async run_app_with_affinity directly here
-                        // For now, we'll just log that we would run the app
-                        self.log_manager
-                            .add_entry(format!("Would autorun app: {}", app.display()));
-                    }
-                }
-            }
+        let autorun_items: Vec<(usize, usize, AppToRun)> = {
+            let state = self.persistent_state.read().unwrap();
+            state
+                .groups
+                .iter()
+                .enumerate()
+                .flat_map(|(g_i, group)| {
+                    group.programs.iter().enumerate().filter_map(move |(p_i, app)| {
+                        if app.autorun {
+                            Some((g_i, p_i, app.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect()
+        };
+        for (g_i, p_i, app_to_run) in autorun_items {
+            self.run_app_with_affinity_sync(g_i, p_i, app_to_run);
         }
     }
 
@@ -445,14 +429,15 @@ impl AppState {
         self.group_form.reset();
     }
 
-    /// Applies the current theme to the UI based on the theme index.
-    ///
-    /// # Parameters
-    ///
-    /// * `ctx` - The egui context to apply the theme to
-    pub async fn apply_theme(&self, ctx: &egui::Context) {
-        let state = self.persistent_state.read().await;
-        let visuals = match state.theme_index {
+    /// Toggles the UI theme between default, light, and dark modes and saves the state.
+    pub fn toggle_theme(&mut self, ctx: &egui::Context) {
+        let new_index = {
+            let mut state = self.persistent_state.write().unwrap();
+            state.theme_index = (state.theme_index + 1) % 3;
+            state.theme_index
+        };
+        self.save_state();
+        let visuals = match new_index {
             0 => egui::Visuals::default(),
             1 => egui::Visuals::light(),
             _ => egui::Visuals::dark(),
@@ -460,47 +445,18 @@ impl AppState {
         ctx.set_visuals(visuals);
     }
 
-    /// Toggles the UI theme between default, light, and dark modes and saves the state.
-    /// Synchronous version.
-    ///
-    /// # Parameters
-    ///
-    /// * `ctx` - The egui context to apply the theme to
-    pub fn toggle_theme(&mut self, ctx: &egui::Context) {
-        if let Ok(mut state) = self.persistent_state.try_write() {
-            state.theme_index = (state.theme_index + 1) % 3;
-            state.save_state();
-
-            // Apply theme synchronously
-            let visuals = match state.theme_index {
-                0 => egui::Visuals::default(),
-                1 => egui::Visuals::light(),
-                _ => egui::Visuals::dark(),
-            };
-            ctx.set_visuals(visuals);
-        }
-    }
-
     /// Toggles the process monitoring feature on or off and saves the state.
-    /// Synchronous version.
     pub fn toggle_process_monitoring(&mut self) {
-        if let Ok(mut state) = self.persistent_state.try_write() {
+        {
+            let mut state = self.persistent_state.write().unwrap();
             state.process_monitoring_enabled = !state.process_monitoring_enabled;
-            state.save_state();
         }
+        self.save_state();
     }
 
     /// Checks if the process monitoring feature is enabled.
-    /// Synchronous version.
-    ///
-    /// # Returns
-    ///
-    /// `true` if process monitoring is enabled, `false` otherwise
     pub fn is_process_monitoring_enabled(&self) -> bool {
-        self.persistent_state
-            .try_read()
-            .map(|state| state.process_monitoring_enabled)
-            .unwrap_or(false)
+        self.persistent_state.read().unwrap().process_monitoring_enabled
     }
 
     /// Creates a new core group from the group form data.
@@ -530,7 +486,8 @@ impl AppState {
         }
 
         // Add a new group to the persistent application state.
-        if let Ok(mut state) = self.persistent_state.try_write() {
+        {
+            let mut state = self.persistent_state.write().unwrap();
             state.groups.push(CoreGroup {
                 name: group_name_trimmed.to_string(),
                 cores: selected_cores,
@@ -538,53 +495,47 @@ impl AppState {
                 is_hidden: false,
                 run_all_button: self.group_form.run_all_enabled,
             });
-            state.save_state();
-        } else {
-            self.log_manager
-                .add_entry("Failed to acquire write lock for creating group".into());
         }
-
+        self.save_state();
         self.reset_group_form();
     }
 
-    /// Sets a new window and marks the controller as changed.
+    /// Sets the active window/view.
     pub fn set_current_window(&mut self, window: controllers::WindowController) {
         self.current_window = window;
-        self.controller_changed = true;
     }
 
-    /// Remove an application from a specified group by binary path.
-    /// Synchronous version.
+    /// Remove an application from a specified group.
     pub fn remove_app_from_group(&mut self, group_index: usize, programm_index: usize) {
-        if let Ok(mut state) = self.persistent_state.try_write() {
+        let removed_path = {
+            let mut state = self.persistent_state.write().unwrap();
             if let Some(group) = state.groups.get_mut(group_index) {
                 if programm_index < group.programs.len() {
-                    let app = &group.programs[programm_index];
-                    self.log_manager
-                        .add_entry(format!("Removing app: {}", app.bin_path.display()));
+                    let path = group.programs[programm_index].bin_path.display().to_string();
                     group.programs.remove(programm_index);
-                    state.save_state();
+                    Some(path)
+                } else {
+                    None
                 }
+            } else {
+                None
             }
-        } else {
-            self.log_manager.add_entry(format!(
-                "Failed to acquire write lock for removing app from group {group_index}"
-            ));
+        };
+        if let Some(path) = removed_path {
+            self.save_state();
+            self.log_manager.add_entry(format!("Removing app: {}", path));
         }
     }
 
     /// Prepares the group form for editing an existing group.
-    /// It fills the form with the group data and updates associated clusters.
-    /// Synchronous version.
     pub fn start_editing_group(&mut self, group_index: usize) {
         let total_cores = self.group_form.core_selection.len();
 
-        // Try to get a read lock to access group information
-        if let Ok(state_read) = self.persistent_state.try_read() {
-            // Update the core selection based on the selected group's cores.
+        {
+            let state = self.persistent_state.read().unwrap();
             self.group_form.core_selection = {
                 let mut selection = vec![false; total_cores];
-                if let Some(group) = state_read.groups.get(group_index) {
+                if let Some(group) = state.groups.get(group_index) {
                     for &core in &group.cores {
                         if core < total_cores {
                             selection[core] = true;
@@ -593,33 +544,13 @@ impl AppState {
                 }
                 selection
             };
-
-            // Get group information for form
-            if let Some(group) = state_read.groups.get(group_index) {
+            if let Some(group) = state.groups.get(group_index) {
                 self.group_form.group_name = group.name.clone();
                 self.group_form.run_all_enabled = group.run_all_button;
-
-                // Prepare clusters data based on the new schema
-
-                // For now, let's keep the schema as is, or update it if needed.
-                // The original code was:
-                // let clusters_data: Vec<Vec<usize>> = group.cores.iter()
-                //    .map(|&ci| state_read.clusters.get(ci).cloned().unwrap_or_default()).collect();
-                // state_write.clusters = clusters_data;
-
-                // If we want to maintain similar behavior (though it looks suspicious):
-                drop(state_read);
-                // No changes to schema here for now, we'll handle it in the UI.
             } else {
-                // Drop the read lock if group not found
-                drop(state_read);
                 self.log_manager
                     .add_entry(format!("Group with index {group_index} not found"));
             }
-        } else {
-            self.log_manager.add_entry(format!(
-                "Failed to acquire read lock for editing group {group_index}"
-            ));
         }
 
         self.group_form.editing_index = Some(group_index);
@@ -648,21 +579,17 @@ impl AppState {
     ) {
         let app_key = app_to_run.get_key();
 
-        // Try to get the group containing core affinity information
-        let group = if let Ok(state) = self.persistent_state.try_read() {
+        // Get the group containing core affinity information
+        let group = {
+            let state = self.persistent_state.read().unwrap();
             match state.groups.get(group_index) {
-                Some(g) => g.clone(), // Clone the group so we can drop the read lock
+                Some(g) => g.clone(),
                 None => {
                     self.log_manager
                         .add_entry(format!("Error: Group index {group_index} not found"));
                     return;
                 }
             }
-        } else {
-            self.log_manager.add_entry(format!(
-                "Error: Failed to acquire read lock for group {group_index}"
-            ));
-            return;
         };
 
         // Check if app is already running and try to focus its window
@@ -880,7 +807,7 @@ impl AppState {
 /// * `running_apps` - Thread-safe reference to the running applications collection
 /// * `app_state` - Thread-safe reference to the application state storage
 pub async fn run_running_app_monitor(
-    running_apps: Arc<RwLock<RunningApps>>,
+    running_apps: Arc<TokioRwLock<RunningApps>>,
     app_state: Arc<RwLock<AppStateStorage>>,
     ctx: egui::Context,
     monitor_tx: std::sync::mpsc::Sender<String>,
@@ -893,7 +820,16 @@ pub async fn run_running_app_monitor(
         interval.tick().await;
 
         // 1. Get all configured programs and their names to match from AppStateStorage
-        let configured_programs = if let Ok(state) = app_state.try_read() {
+        let configured_programs = {
+            let state = match app_state.read() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    let _ = monitor_tx.send(
+                        "WARNING: persistent_state lock poisoned, skipping monitor iteration".to_string(),
+                    );
+                    continue;
+                }
+            };
             let mut programs = Vec::new();
             for (g_idx, group) in state.groups.iter().enumerate() {
                 for (p_idx, program) in group.programs.iter().enumerate() {
@@ -937,8 +873,6 @@ pub async fn run_running_app_monitor(
                 }
             }
             programs
-        } else {
-            continue; // Skip this iteration if we can't read the state
         };
 
         // 2. Get process tree snapshot once for efficient matching and descendant finding
@@ -1106,7 +1040,7 @@ pub async fn run_running_app_monitor(
 /// * `app_state` - Thread-safe reference to the application state
 /// * `ctx` - The egui context to request repaints
 pub async fn run_process_settings_monitor(
-    running_apps: Arc<RwLock<RunningApps>>,
+    running_apps: Arc<TokioRwLock<RunningApps>>,
     app_state: Arc<RwLock<AppStateStorage>>,
     ctx: egui::Context,
     monitor_tx: std::sync::mpsc::Sender<String>,
@@ -1119,10 +1053,17 @@ pub async fn run_process_settings_monitor(
         interval.tick().await;
 
         // Get the groups configuration and monitoring flag
-        let (groups, monitoring_enabled) = if let Ok(state) = app_state.try_read() {
+        let (groups, monitoring_enabled) = {
+            let state = match app_state.read() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    let _ = monitor_tx.send(
+                        "WARNING: persistent_state lock poisoned, skipping monitor iteration".to_string(),
+                    );
+                    continue;
+                }
+            };
             (state.groups.clone(), state.process_monitoring_enabled)
-        } else {
-            continue; // Skip this iteration if we can't read the state
         };
 
         // Create a map for quick lookup of programs by key
