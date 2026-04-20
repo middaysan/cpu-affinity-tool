@@ -1,6 +1,10 @@
 use crate::app::models::{AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, RunningApps};
+use crate::app::runtime::runtime_registry::{
+    cleanup_orphaned_package_owners, ensure_package_owner_claim,
+    resolve_installed_package_runtime_info_cached, InstalledPackageTrackingState,
+};
 use eframe::egui;
-use os_api::OS;
+use os_api::{InstalledPackageRuntimeInfo, OS};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -21,6 +25,12 @@ enum ConfiguredProgramMatcher {
     Installed {
         aumid: String,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PackageLocalPidCandidates {
+    same_aumid_pids: Vec<u32>,
+    no_identity_pids: Vec<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +54,10 @@ trait RunningAppsOs {
     fn get_process_image_path(&self, pid: u32) -> Result<PathBuf, String>;
     fn is_pid_live(&self, pid: u32) -> bool;
     fn get_process_app_user_model_id(&self, pid: u32) -> Result<Option<String>, String>;
+    fn resolve_installed_package_runtime_info(
+        &self,
+        aumid: &str,
+    ) -> Result<InstalledPackageRuntimeInfo, String>;
 }
 
 struct RealRunningAppsOs;
@@ -67,10 +81,18 @@ impl RunningAppsOs for RealRunningAppsOs {
     fn get_process_app_user_model_id(&self, pid: u32) -> Result<Option<String>, String> {
         OS::get_process_app_user_model_id(pid)
     }
+
+    fn resolve_installed_package_runtime_info(
+        &self,
+        aumid: &str,
+    ) -> Result<InstalledPackageRuntimeInfo, String> {
+        OS::resolve_installed_package_runtime_info(aumid)
+    }
 }
 
 pub async fn run_running_app_monitor(
     running_apps: Arc<TokioRwLock<RunningApps>>,
+    installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     app_state: Arc<RwLock<AppStateStorage>>,
     ctx: egui::Context,
     monitor_tx: std::sync::mpsc::Sender<String>,
@@ -119,6 +141,7 @@ pub async fn run_running_app_monitor(
                 &snapshot,
                 &name_to_pids,
                 &aumid_to_seed_pids,
+                &installed_package_tracking,
                 &os,
             );
 
@@ -293,6 +316,55 @@ fn path_eq_case_insensitive(left: &Path, right: &Path) -> bool {
         .eq_ignore_ascii_case(&right.to_string_lossy())
 }
 
+fn normalize_path_for_prefix(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+fn path_is_under_root_case_insensitive(path: &Path, install_root: &Path) -> bool {
+    let path_normalized = normalize_path_for_prefix(path);
+    let root_normalized = normalize_path_for_prefix(install_root);
+
+    path_normalized == root_normalized || path_normalized.starts_with(&(root_normalized + "\\"))
+}
+
+fn collect_package_local_pid_candidates<O: RunningAppsOs>(
+    tracked_pids: &[u32],
+    snapshot: &ProcessSnapshot,
+    install_root: &Path,
+    expected_aumid: &str,
+    os: &O,
+) -> Result<PackageLocalPidCandidates, String> {
+    let tracked_set: HashSet<u32> = tracked_pids.iter().copied().collect();
+    let mut candidates = PackageLocalPidCandidates::default();
+
+    for &pid in snapshot.names.keys() {
+        if tracked_set.contains(&pid) {
+            continue;
+        }
+
+        let Ok(image_path) = os.get_process_image_path(pid) else {
+            continue;
+        };
+        if !path_is_under_root_case_insensitive(&image_path, install_root) {
+            continue;
+        }
+
+        match os.get_process_app_user_model_id(pid)? {
+            Some(aumid) if !aumid.trim().is_empty() => {
+                if aumid.eq_ignore_ascii_case(expected_aumid) {
+                    candidates.same_aumid_pids.push(pid);
+                }
+            }
+            _ => candidates.no_identity_pids.push(pid),
+        }
+    }
+
+    Ok(candidates)
+}
+
 fn extend_with_named_processes(
     tracked_pids: &mut Vec<u32>,
     additional_processes: &[String],
@@ -341,6 +413,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
     snapshot: &ProcessSnapshot,
     name_to_pids: &HashMap<String, Vec<u32>>,
     aumid_to_seed_pids: &HashMap<String, Vec<u32>>,
+    installed_package_tracking: &Arc<RwLock<InstalledPackageTrackingState>>,
     os: &O,
 ) -> RunningAppsIterationOutcome {
     let mut processed_keys = HashSet::new();
@@ -349,6 +422,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
     for configured in configured_programs {
         let key = configured.key.clone();
         processed_keys.insert(key.clone());
+        let was_tracked = apps.apps.contains_key(&key);
 
         let mut detected_pids = match &configured.matcher {
             ConfiguredProgramMatcher::Path { .. } => {
@@ -365,6 +439,27 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
             }
         };
 
+        let installed_package_info = match &configured.matcher {
+            ConfiguredProgramMatcher::Installed { aumid }
+                if was_tracked || !detected_pids.is_empty() =>
+            {
+                resolve_installed_package_runtime_info_cached(
+                    installed_package_tracking,
+                    aumid,
+                    |aumid| os.resolve_installed_package_runtime_info(aumid),
+                )
+                .ok()
+            }
+            _ => None,
+        };
+        let owns_package = installed_package_info
+            .as_ref()
+            .map(|info| {
+                let mut tracking = installed_package_tracking.write().unwrap();
+                ensure_package_owner_claim(&mut tracking, apps, &info.package_family_name, &key)
+            })
+            .unwrap_or(false);
+
         if let Some(app) = apps.apps.get_mut(&key) {
             let old_pid_count = app.pids.len();
 
@@ -375,8 +470,33 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                 }
             }
 
+            if let (ConfiguredProgramMatcher::Installed { aumid }, Some(package_info)) =
+                (&configured.matcher, installed_package_info.as_ref())
+            {
+                if let Ok(package_candidates) = collect_package_local_pid_candidates(
+                    &app.pids,
+                    snapshot,
+                    &package_info.install_root,
+                    aumid,
+                    os,
+                ) {
+                    for pid in package_candidates.same_aumid_pids {
+                        if !app.pids.contains(&pid) {
+                            app.pids.push(pid);
+                        }
+                    }
+                    if owns_package {
+                        for pid in package_candidates.no_identity_pids {
+                            if !app.pids.contains(&pid) {
+                                app.pids.push(pid);
+                            }
+                        }
+                    }
+                }
+            }
+
             if matches!(
-                configured.matcher,
+                &configured.matcher,
                 ConfiguredProgramMatcher::Installed { .. }
             ) || !configured.additional_processes_normalized.is_empty()
             {
@@ -415,6 +535,30 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
         }
 
         extend_with_descendants(snapshot, &mut detected_pids);
+        if let (ConfiguredProgramMatcher::Installed { aumid }, Some(package_info)) =
+            (&configured.matcher, installed_package_info.as_ref())
+        {
+            if let Ok(package_candidates) = collect_package_local_pid_candidates(
+                &detected_pids,
+                snapshot,
+                &package_info.install_root,
+                aumid,
+                os,
+            ) {
+                for pid in package_candidates.same_aumid_pids {
+                    if !detected_pids.contains(&pid) {
+                        detected_pids.push(pid);
+                    }
+                }
+                if owns_package {
+                    for pid in package_candidates.no_identity_pids {
+                        if !detected_pids.contains(&pid) {
+                            detected_pids.push(pid);
+                        }
+                    }
+                }
+            }
+        }
         extend_with_named_processes(
             &mut detected_pids,
             &configured.additional_processes_normalized,
@@ -467,6 +611,8 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
         }
     }
 
+    cleanup_orphaned_package_owners(&mut installed_package_tracking.write().unwrap(), apps);
+
     outcome
 }
 
@@ -478,10 +624,12 @@ mod tests {
         ProcessSnapshot, RunningAppsOs,
     };
     use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, RunningApps};
-    use os_api::PriorityClass;
+    use crate::app::runtime::runtime_registry::InstalledPackageTrackingState;
+    use os_api::{InstalledPackageRuntimeInfo, PriorityClass};
     use std::cell::Cell;
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
+    use std::sync::{Arc, RwLock};
 
     struct FakeRunningAppsOs {
         snapshot: Result<ProcessSnapshot, String>,
@@ -489,6 +637,8 @@ mod tests {
         live_pids: HashSet<u32>,
         aumids: HashMap<u32, String>,
         aumid_lookup_count: Cell<usize>,
+        installed_package_infos: HashMap<String, Result<InstalledPackageRuntimeInfo, String>>,
+        metadata_lookup_count: Cell<usize>,
     }
 
     impl Default for FakeRunningAppsOs {
@@ -499,6 +649,8 @@ mod tests {
                 live_pids: HashSet::new(),
                 aumids: HashMap::new(),
                 aumid_lookup_count: Cell::new(0),
+                installed_package_infos: HashMap::new(),
+                metadata_lookup_count: Cell::new(0),
             }
         }
     }
@@ -523,6 +675,18 @@ mod tests {
             self.aumid_lookup_count
                 .set(self.aumid_lookup_count.get() + 1);
             Ok(self.aumids.get(&pid).cloned())
+        }
+
+        fn resolve_installed_package_runtime_info(
+            &self,
+            aumid: &str,
+        ) -> Result<InstalledPackageRuntimeInfo, String> {
+            self.metadata_lookup_count
+                .set(self.metadata_lookup_count.get() + 1);
+            self.installed_package_infos
+                .get(aumid)
+                .cloned()
+                .unwrap_or_else(|| Err(format!("missing package metadata for {aumid}")))
         }
     }
 
@@ -581,11 +745,45 @@ mod tests {
         }
     }
 
+    fn sample_shared_package_installed_program_state() -> AppStateStorage {
+        AppStateStorage {
+            version: 5,
+            groups: vec![CoreGroup {
+                name: "Media".to_string(),
+                cores: vec![2, 3],
+                programs: vec![
+                    AppToRun::new_installed(
+                        "Spotify".to_string(),
+                        "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+                        PriorityClass::Normal,
+                        false,
+                    ),
+                    AppToRun::new_installed(
+                        "Spotify Launcher".to_string(),
+                        "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!SpotifyLauncher".to_string(),
+                        PriorityClass::Normal,
+                        false,
+                    ),
+                ],
+                is_hidden: false,
+                run_all_button: true,
+            }],
+            cpu_schema: CpuSchema {
+                model: "Test CPU".to_string(),
+                clusters: Vec::new(),
+            },
+            theme_index: 0,
+            process_monitoring_enabled: false,
+        }
+    }
+
     fn run_iteration(
         apps: &mut RunningApps,
         configured: Vec<super::ConfiguredProgramSnapshot>,
         os: &FakeRunningAppsOs,
     ) -> super::RunningAppsIterationOutcome {
+        let installed_package_tracking =
+            Arc::new(RwLock::new(InstalledPackageTrackingState::default()));
         let snapshot = os.snapshot.clone().unwrap();
         let name_to_pids = build_name_to_pids(&snapshot);
         let aumid_to_seed_pids = if configured
@@ -602,6 +800,7 @@ mod tests {
             &snapshot,
             &name_to_pids,
             &aumid_to_seed_pids,
+            &installed_package_tracking,
             os,
         )
     }
@@ -669,8 +868,7 @@ mod tests {
             }),
             image_paths: HashMap::from([(10, PathBuf::from(r"C:\game.exe"))]),
             live_pids: HashSet::from([10]),
-            aumids: HashMap::new(),
-            aumid_lookup_count: Cell::new(0),
+            ..Default::default()
         };
 
         let outcome = run_iteration(&mut apps, configured, &os);
@@ -696,8 +894,7 @@ mod tests {
             }),
             image_paths: HashMap::from([(10, PathBuf::from(r"C:\other.exe"))]),
             live_pids: HashSet::from([10]),
-            aumids: HashMap::new(),
-            aumid_lookup_count: Cell::new(0),
+            ..Default::default()
         };
 
         let outcome = run_iteration(&mut apps, configured, &os);
@@ -722,8 +919,7 @@ mod tests {
             }),
             image_paths: HashMap::from([(10, PathBuf::from(r"C:\game.exe"))]),
             live_pids: HashSet::from([10, 11]),
-            aumids: HashMap::new(),
-            aumid_lookup_count: Cell::new(0),
+            ..Default::default()
         };
 
         let outcome = run_iteration(&mut apps, configured, &os);
@@ -753,7 +949,7 @@ mod tests {
                 20,
                 "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
             )]),
-            aumid_lookup_count: Cell::new(0),
+            ..Default::default()
         };
 
         let outcome = run_iteration(&mut apps, configured, &os);
@@ -789,7 +985,7 @@ mod tests {
                 20,
                 "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
             )]),
-            aumid_lookup_count: Cell::new(0),
+            ..Default::default()
         };
 
         let outcome = run_iteration(&mut apps, configured, &os);
@@ -799,6 +995,57 @@ mod tests {
         assert_eq!(
             apps.apps.get(&key).map(|app| app.pids.clone()),
             Some(vec![20, 21])
+        );
+    }
+
+    #[test]
+    fn test_tracked_installed_target_attaches_package_local_pid_after_seed() {
+        let mut state = sample_installed_program_state();
+        state.groups[0].programs[0].additional_processes.clear();
+        let configured = collect_configured_programs(&state);
+        let mut apps = RunningApps::default();
+        let key = state.groups[0].programs[0].get_key();
+        apps.add_app(&key, 20, 0, 0);
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::new(),
+                names: HashMap::from([
+                    (20, "spotify.exe".to_string()),
+                    (22, "spotifyhelper.exe".to_string()),
+                ]),
+            }),
+            image_paths: HashMap::from([
+                (
+                    20,
+                    PathBuf::from(r"C:\Program Files\WindowsApps\Spotify\Spotify.exe"),
+                ),
+                (
+                    22,
+                    PathBuf::from(r"C:\Program Files\WindowsApps\Spotify\SpotifyHelper.exe"),
+                ),
+            ]),
+            live_pids: HashSet::from([20, 22]),
+            aumids: HashMap::from([(
+                20,
+                "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+            )]),
+            installed_package_infos: HashMap::from([(
+                "spotifyab.spotifymusic_zpdnekdrzrea0!spotify".to_string(),
+                Ok(InstalledPackageRuntimeInfo {
+                    aumid: "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into(),
+                    package_family_name: "SpotifyAB.SpotifyMusic_zpdnekdrzrea0".into(),
+                    install_root: PathBuf::from(r"C:\Program Files\WindowsApps\Spotify"),
+                }),
+            )]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        assert!(outcome.changed);
+        assert_eq!(
+            apps.apps.get(&key).map(|app| app.pids.clone()),
+            Some(vec![20, 22])
         );
     }
 
@@ -816,6 +1063,15 @@ mod tests {
             live_pids: HashSet::from([21]),
             aumids: HashMap::new(),
             aumid_lookup_count: Cell::new(0),
+            metadata_lookup_count: Cell::new(0),
+            installed_package_infos: HashMap::from([(
+                "spotifyab.spotifymusic_zpdnekdrzrea0!spotify".to_string(),
+                Ok(InstalledPackageRuntimeInfo {
+                    aumid: "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into(),
+                    package_family_name: "SpotifyAB.SpotifyMusic_zpdnekdrzrea0".into(),
+                    install_root: PathBuf::from(r"C:\Program Files\WindowsApps\Spotify"),
+                }),
+            )]),
         };
 
         let outcome = run_iteration(&mut apps, configured, &os);
@@ -823,6 +1079,7 @@ mod tests {
         assert!(!outcome.changed);
         assert!(outcome.notifications.is_empty());
         assert!(apps.apps.is_empty());
+        assert_eq!(os.metadata_lookup_count.get(), 0);
     }
 
     #[test]
@@ -841,13 +1098,90 @@ mod tests {
                 10,
                 "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
             )]),
-            aumid_lookup_count: Cell::new(0),
+            ..Default::default()
         };
 
         let outcome = run_iteration(&mut apps, configured, &os);
 
         assert!(outcome.changed);
         assert_eq!(os.aumid_lookup_count.get(), 0);
+        assert_eq!(os.metadata_lookup_count.get(), 0);
+    }
+
+    #[test]
+    fn test_shared_package_no_identity_pids_attach_only_to_first_active_target() {
+        let state = sample_shared_package_installed_program_state();
+        let configured = collect_configured_programs(&state);
+        let mut apps = RunningApps::default();
+        let first_key = state.groups[0].programs[0].get_key();
+        let second_key = state.groups[0].programs[1].get_key();
+        apps.add_app(&first_key, 20, 0, 0);
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::new(),
+                names: HashMap::from([
+                    (20, "spotify.exe".to_string()),
+                    (30, "spotifylauncher.exe".to_string()),
+                    (31, "spotifyhelper.exe".to_string()),
+                ]),
+            }),
+            image_paths: HashMap::from([
+                (
+                    20,
+                    PathBuf::from(r"C:\Program Files\WindowsApps\Spotify\Spotify.exe"),
+                ),
+                (
+                    30,
+                    PathBuf::from(r"C:\Program Files\WindowsApps\Spotify\SpotifyLauncher.exe"),
+                ),
+                (
+                    31,
+                    PathBuf::from(r"C:\Program Files\WindowsApps\Spotify\SpotifyHelper.exe"),
+                ),
+            ]),
+            live_pids: HashSet::from([20, 30, 31]),
+            aumids: HashMap::from([
+                (
+                    20,
+                    "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+                ),
+                (
+                    30,
+                    "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!SpotifyLauncher".to_string(),
+                ),
+            ]),
+            installed_package_infos: HashMap::from([
+                (
+                    "spotifyab.spotifymusic_zpdnekdrzrea0!spotify".to_string(),
+                    Ok(InstalledPackageRuntimeInfo {
+                        aumid: "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into(),
+                        package_family_name: "SpotifyAB.SpotifyMusic_zpdnekdrzrea0".into(),
+                        install_root: PathBuf::from(r"C:\Program Files\WindowsApps\Spotify"),
+                    }),
+                ),
+                (
+                    "spotifyab.spotifymusic_zpdnekdrzrea0!spotifylauncher".to_string(),
+                    Ok(InstalledPackageRuntimeInfo {
+                        aumid: "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!SpotifyLauncher".into(),
+                        package_family_name: "SpotifyAB.SpotifyMusic_zpdnekdrzrea0".into(),
+                        install_root: PathBuf::from(r"C:\Program Files\WindowsApps\Spotify"),
+                    }),
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        assert!(outcome.changed);
+        assert_eq!(
+            apps.apps.get(&first_key).map(|app| app.pids.clone()),
+            Some(vec![20, 31])
+        );
+        assert_eq!(
+            apps.apps.get(&second_key).map(|app| app.pids.clone()),
+            Some(vec![30])
+        );
     }
 
     #[test]
@@ -864,8 +1198,7 @@ mod tests {
             }),
             image_paths: HashMap::new(),
             live_pids: HashSet::new(),
-            aumids: HashMap::new(),
-            aumid_lookup_count: Cell::new(0),
+            ..Default::default()
         };
 
         let outcome = run_iteration(&mut apps, configured, &os);
@@ -888,8 +1221,7 @@ mod tests {
             }),
             image_paths: HashMap::new(),
             live_pids: HashSet::new(),
-            aumids: HashMap::new(),
-            aumid_lookup_count: Cell::new(0),
+            ..Default::default()
         };
 
         let outcome = run_iteration(&mut apps, Vec::new(), &os);

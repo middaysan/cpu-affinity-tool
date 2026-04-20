@@ -97,6 +97,8 @@ Current runtime split:
   - rotating tip state
 - `runtime::RuntimeRegistry` owns runtime process tracking:
   - `running_apps`
+  - runtime-only installed-package metadata cache for Windows installed targets
+  - package-owner claims for shared package-local helper processes
   - cached app statuses
   - `monitor_rx`
 - runtime process identity is keyed by opaque `AppRuntimeKey`, not ad-hoc raw strings
@@ -119,6 +121,7 @@ Linux entrypoint is still much thinner and must not be described as having parit
 - monitor notifications flow through `monitor_rx` owned by `RuntimeRegistry`
 - persisted state uses `Arc<RwLock<AppStateStorage>>`
 - running-process tracking uses `Arc<TokioRwLock<RunningApps>>`
+- installed-package runtime metadata cache and ownership state use in-memory `Arc<RwLock<...>>`
 - Windows tray integration uses tray-icon and muda event handlers instead of a polling loop
 
 Background loops:
@@ -155,6 +158,8 @@ Important contract facts:
 - `AppToRun` installed targets store Windows `AUMID` and do not expose user-editable args in the current contract
 - runtime tracking identity keeps the existing stable encoded key contract, but it now flows through typed `AppRuntimeKey` instead of raw `String` keys across runtime core
 - the Windows `Find Installed` picker is a Start-backed subset, not a full OS inventory
+- tracked Windows installed targets now use a runtime-only package metadata cache plus package-local PID enrichment while the target stays tracked
+- package-local helper PID ownership for multiple installed targets in the same package follows `first active target wins`
 - `AppStateStorage` may rebuild `cpu_schema` for the current machine through presets when the stored schema is generic or outdated for the detected CPU model
 - `LogManager` keeps a bounded in-memory chronological history with three retention classes:
   - `Regular` capped at 1000 entries
@@ -176,6 +181,7 @@ Data source separation:
 `libs/os_api` is the main boundary between the app and the OS. It covers:
 - process launch
 - installed-app discovery and activation on Windows
+- installed package metadata lookup on Windows
 - affinity read and set
 - priority read and set
 - process inspection and process-tree logic
@@ -202,6 +208,7 @@ Windows release-path surface:
 - `.lnk` and `.url` parsing
 - registry-based URI resolution
 - Start-backed installed app discovery and AUMID activation
+- runtime-only package metadata lookup and package-local helper tracking for installed targets
 - richer process inspection
 - embedded manifest and resources
 - Windows-only CI

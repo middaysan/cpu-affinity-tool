@@ -46,6 +46,7 @@ impl App {
         startup::log_startup(&mut state);
         state.runtime.monitor_rx = Some(monitors::spawn_monitors(
             state.runtime.running_apps.clone(),
+            state.runtime.installed_package_tracking.clone(),
             state.persistent_state.clone(),
             cc.egui_ctx.clone(),
         ));

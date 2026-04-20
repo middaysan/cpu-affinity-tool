@@ -14,7 +14,7 @@ use nix::sched::{CpuSet, sched_getaffinity, sched_setaffinity};
 use shlex;
 
 use crate::PriorityClass;
-use crate::{InstalledAppCatalogEntry, InstalledAppCatalogTarget};
+use crate::{InstalledAppCatalogEntry, InstalledAppCatalogTarget, InstalledPackageRuntimeInfo};
 
 pub struct OS;
 
@@ -512,5 +512,11 @@ impl OS {
 
     pub fn get_process_app_user_model_id(_pid: u32) -> Result<Option<String>, String> {
         Ok(None)
+    }
+
+    pub fn resolve_installed_package_runtime_info(
+        _aumid: &str,
+    ) -> Result<InstalledPackageRuntimeInfo, String> {
+        Err("Installed package metadata is not supported on Linux".into())
     }
 }
