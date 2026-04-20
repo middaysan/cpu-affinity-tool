@@ -271,12 +271,12 @@ Local verification commands:
 
 Current CI facts:
 - runner: `windows-latest`
-- `.github/workflows/ci.yml` runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test`, and `cargo build --release`
+- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, and runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test`, and `cargo build --release`
 - tests are part of the committed CI contract for `ci.yml`
 
 Current release facts:
 - GitHub Release workflow reacts to pushed tags matching `v*`
-- its Windows check job runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, and `cargo test` before the release build job
+- its Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test`, and then builds `cpu-affinity-tool.exe` in the same runner before upload
 - it publishes `cpu-affinity-tool.exe`
 - target: `x86_64-pc-windows-msvc`
 - Linux release job is still commented out or absent from the active release contract

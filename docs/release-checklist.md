@@ -7,8 +7,8 @@ Use this checklist as the primary release doc. Use `docs/release-smoke-matrix.md
 ## Before Tagging
 
 - Confirm the release stays Windows-only: `.github/workflows/release.yml` should publish only `cpu-affinity-tool.exe` for `x86_64-pc-windows-msvc`.
-- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs on `windows-latest` and currently checks `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test`, and `cargo build --release`.
-- Confirm the tag-release gate matches reality: `.github/workflows/release.yml` runs the same formatting, lint, `libs/os_api`, and root test gates before building and publishing the Windows artifact.
+- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs on `windows-latest`, cancels superseded runs per branch or PR, restores Rust cache, and checks `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test`, and `cargo build --release`.
+- Confirm the tag-release gate matches reality: `.github/workflows/release.yml` runs the same formatting, lint, `libs/os_api`, and root test gates and then builds the Windows artifact in the same Windows job before publishing it.
 - Confirm no project docs claim full cross-platform support or Linux release parity.
 - Confirm `README.md` and `AGENTS.md` describe Windows as the only current supported release path and Linux as experimental backend code.
 - Confirm `README.md` documents the administrator/UAC expectation from `app.manifest`.

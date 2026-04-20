@@ -1,0 +1,65 @@
+## [1.2.0] - 2026-04-20
+
+### Added
+- **Installed app support on Windows**:
+  - Added a dedicated **Find Installed** flow for Start-backed Windows apps, including Microsoft Store / MSIX targets.
+  - Added persistent `AUMID`-based installed targets alongside traditional file-based `.exe`, `.lnk`, and `.url` targets.
+  - Added target-aware launch handling so installed apps can be started through Windows activation instead of requiring a visible executable path.
+- **Installed-app runtime tracking improvements**:
+  - Added runtime-only installed package metadata lookup and caching.
+  - Added package-local helper PID tracking so affinity and priority can be re-applied to late-spawned helper processes for installed targets.
+  - Added package-owner arbitration for shared package-local helpers with `first active target wins`.
+- **Installed app picker UI**:
+  - Added a full-screen top-level picker route with keyboard and mouse support.
+  - Added explicit fallback guidance to use **Open App** when an installed target is not listed in the Start-backed catalog.
+- **Release documentation**:
+  - Added `docs/release-checklist.md` and `docs/release-smoke-matrix.md` as the committed Windows release-path checklist and smoke reference.
+
+### Changed
+- **Runtime architecture**:
+  - Split the old runtime-heavy app state into clearer ownership boundaries under `src/app/runtime/`.
+  - Introduced `runtime::App`, `runtime::AppState`, `UiState`, `RuntimeRegistry`, command modules, and monitor modules.
+  - Replaced ad-hoc string runtime identities with typed `AppRuntimeKey`.
+- **Module layout**:
+  - Removed the misleading `controllers` layer in favor of explicit navigation/runtime structure.
+  - Moved UI edit/form state out of domain entity modules.
+  - Moved the `eframe::App` shell out of `models` into `runtime`.
+- **Persistence internals**:
+  - Split app-state persistence into focused modules for state-path resolution, storage I/O, migrations, and schema refresh.
+  - Kept external persistence behavior compatible, including backup rotation and older state migration.
+- **Views and runtime interaction**:
+  - Moved launch, save, and mutation side effects out of views so rendering stays focused on UI and intent emission.
+  - Kept existing user flows while routing behavior through runtime commands and facade methods.
+- **Logging and save flow**:
+  - Bounded in-memory log retention and separated regular, important, and sticky diagnostics.
+  - Reduced redundant `save_state` writes by centralizing persistence through higher-level runtime operations.
+- **Windows OS integration**:
+  - Split the Windows `os_api` backend into focused internal modules while preserving the public `OS` surface.
+  - Updated installed-app discovery and package metadata shell paths to run PowerShell without flashing a visible console window.
+- **CI and release workflow**:
+  - Windows CI now uses direct cargo steps, Rust cache restoration, and concurrency cancellation for superseded runs.
+  - The tag-release workflow now performs validation and Windows release build in a single Windows job before publishing the artifact.
+
+### Fixed
+- Fixed misleading architecture boundaries where runtime responsibilities lived under model-oriented names.
+- Fixed persistence maintenance pain by isolating migrations, schema refresh, and file I/O paths.
+- Fixed installed Store/MSIX launch stability by re-attaching package-local helper processes after launch.
+- Fixed the Windows PowerShell console flicker that could appear during **Find Installed** refreshes and installed-app metadata resolution.
+
+### Testing
+- Added behavior-oriented regression coverage for:
+  - launch and autorun behavior
+  - running-app monitor paths
+  - process-settings monitor logic
+  - persistence migration and load scenarios
+  - Windows shell parsing and installed-app helpers in `libs/os_api`
+- Kept the Windows release gate aligned with the committed local verification bundle:
+  - `cargo fmt --all -- --check`
+  - `cargo clippy -- -D warnings`
+  - `cargo test --manifest-path libs/os_api/Cargo.toml`
+  - `cargo test`
+  - `cargo build --release`
+
+### Notes
+- This release remains **Windows-only** in terms of supported, CI-validated, published artifacts.
+- Linux backend code still exists in the repository, but it remains experimental and is not part of the current release contract.
