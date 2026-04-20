@@ -530,7 +530,7 @@ mod tests {
         write_shortcut(&shortcut, &target, args).unwrap();
 
         let (resolved_target, resolved_args) = OS::parse_dropped_file(shortcut.clone()).unwrap();
-        assert_eq!(resolved_target, target);
+        assert_eq!(resolved_target, normalize_existing_windows_path(&target));
         assert_eq!(
             resolved_args,
             vec!["--mode".to_string(), "quoted arg".to_string()]
