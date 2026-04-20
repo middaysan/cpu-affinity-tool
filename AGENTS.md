@@ -284,8 +284,8 @@ Current release facts:
 
 Additional release facts:
 - `changelogs/*.txt` are maintained manually
-- GitHub Release workflow does not ingest `changelogs/*.txt`
-- release notes currently rely on `generate_release_notes: true`
+- GitHub Release workflow uses `changelogs/vX.Y.Z.txt` as the release body for the matching tag
+- release notes no longer rely on `generate_release_notes: true`
 - manual pre-release validation lives in `docs/release-checklist.md` and its subordinate `docs/release-smoke-matrix.md`
 - version truth is split across Git tag, `Cargo.toml`, and `changelogs/`
 - that version sync is still manual

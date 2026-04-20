@@ -64,6 +64,9 @@ jobs:
     needs: [build-windows]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download Windows binary
         uses: actions/download-artifact@v4
         with:
@@ -81,6 +84,6 @@ jobs:
           name: CPU Affinity Tool v${{ steps.get_version.outputs.VERSION }}
           draft: false
           prerelease: false
-          generate_release_notes: true
+          body_path: changelogs/v${{ steps.get_version.outputs.VERSION }}.txt
           files: |
             ./artifacts/windows/cpu-affinity-tool.exe

@@ -31,5 +31,5 @@ Use this checklist as the primary release doc. Use `docs/release-smoke-matrix.md
 ## Release Notes And Distribution
 
 - Confirm the tag format is a stable tag: `vX.Y.Z`.
-- Confirm `changelogs/*.txt` are up to date even though GitHub Release notes are generated automatically via `generate_release_notes: true`.
+- Confirm `changelogs/vX.Y.Z.txt` is up to date because `.github/workflows/release.yml` uses it as the published GitHub Release body.
 - Confirm installer packaging, code signing, checksums, winget, choco, and Linux artifacts are still absent, or update docs/workflows in the same change if that contract changed.
