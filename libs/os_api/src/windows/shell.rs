@@ -145,7 +145,7 @@ fn resolve_lnk(path: &Path) -> Result<(PathBuf, Vec<String>), String> {
         link.GetPath(&mut wbuf, &mut find as *mut _, SLGP_UNCPRIORITY.0 as u32)?;
         let n = wbuf.iter().position(|&c| c == 0).unwrap_or(wbuf.len());
         let target_raw = String::from_utf16_lossy(&wbuf[..n]);
-        let target = PathBuf::from(expand_env(&target_raw));
+        let target = normalize_existing_windows_path(&PathBuf::from(expand_env(&target_raw)));
 
         let mut abuf = [0u16; 32768];
         link.GetArguments(&mut abuf)?;
@@ -157,6 +157,26 @@ fn resolve_lnk(path: &Path) -> Result<(PathBuf, Vec<String>), String> {
         Ok((target, args_vec))
     })()
     .map_err(|e: OsError| format!("resolve_lnk {:?} failed: {}", path, e))
+}
+
+fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+
+    if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{stripped}"));
+    }
+
+    if let Some(stripped) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(stripped);
+    }
+
+    path.to_path_buf()
+}
+
+fn normalize_existing_windows_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path)
+        .map(|canonical| strip_windows_verbatim_prefix(&canonical))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn get_program_path_for_uri_registry(uri_scheme: &str) -> Result<PathBuf, String> {
@@ -387,7 +407,7 @@ mod tests {
     use std::env;
     use std::ffi::OsStr;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -401,8 +421,9 @@ mod tests {
     use winreg::enums::HKEY_CURRENT_USER;
 
     use super::{
-        OS, StartAppRecord, classify_start_app_record, package_family_name_from_aumid,
-        parse_appx_package_runtime_info_json, parse_start_apps_json, parse_url_file,
+        OS, StartAppRecord, classify_start_app_record, normalize_existing_windows_path,
+        package_family_name_from_aumid, parse_appx_package_runtime_info_json,
+        parse_start_apps_json, parse_url_file, strip_windows_verbatim_prefix,
     };
     use crate::windows::common::{ComGuard, to_wide_z};
     use crate::{InstalledAppCatalogEntry, InstalledAppCatalogTarget, InstalledPackageRuntimeInfo};
@@ -517,6 +538,24 @@ mod tests {
 
         drop(shortcut_guard);
         drop(target_guard);
+    }
+
+    #[test]
+    fn test_strip_windows_verbatim_prefix_handles_local_and_unc_forms() {
+        assert_eq!(
+            strip_windows_verbatim_prefix(Path::new(r"\\?\C:\Tools\app.exe")),
+            PathBuf::from(r"C:\Tools\app.exe")
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(Path::new(r"\\?\UNC\server\share\tool.exe")),
+            PathBuf::from(r"\\server\share\tool.exe")
+        );
+    }
+
+    #[test]
+    fn test_normalize_existing_windows_path_keeps_missing_path_unchanged() {
+        let missing = PathBuf::from(r"C:\definitely-missing-codex-test-path.exe");
+        assert_eq!(normalize_existing_windows_path(&missing), missing);
     }
 
     #[test]

@@ -297,11 +297,23 @@ impl From<&AppToRun> for AppRuntimeKey {
 
 #[cfg(target_os = "windows")]
 fn normalized_path_identity(path: &Path) -> String {
-    let normalized = path.to_string_lossy().replace('/', "\\");
-    normalized
-        .strip_prefix(r"\\?\")
-        .unwrap_or(&normalized)
-        .to_ascii_lowercase()
+    let normalized = normalize_existing_windows_path_for_identity(path)
+        .to_string_lossy()
+        .replace('/', "\\");
+
+    if let Some(stripped) = normalized.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{stripped}").to_ascii_lowercase()
+    } else {
+        normalized
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&normalized)
+            .to_ascii_lowercase()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_existing_windows_path_for_identity(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[cfg(not(target_os = "windows"))]

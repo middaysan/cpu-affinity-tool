@@ -312,8 +312,31 @@ fn collect_path_verified_pids<O: RunningAppsOs>(
 }
 
 fn path_eq_case_insensitive(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy()
+    if left
+        .to_string_lossy()
         .eq_ignore_ascii_case(&right.to_string_lossy())
+    {
+        return true;
+    }
+
+    canonicalized_path_string(left)
+        .zip(canonicalized_path_string(right))
+        .is_some_and(|(left, right)| left.eq_ignore_ascii_case(&right))
+}
+
+fn canonicalized_path_string(path: &Path) -> Option<String> {
+    std::fs::canonicalize(path)
+        .ok()
+        .map(|canonical| canonical.to_string_lossy().replace('/', "\\"))
+        .map(|text| {
+            if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {
+                format!(r"\\{stripped}")
+            } else if let Some(stripped) = text.strip_prefix(r"\\?\") {
+                stripped.to_string()
+            } else {
+                text
+            }
+        })
 }
 
 fn normalize_path_for_prefix(path: &Path) -> String {
