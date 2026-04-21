@@ -4,8 +4,18 @@ use os_api::InstalledAppCatalogEntry;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
+#[cfg(target_os = "windows")]
 const TIPS: [&str; 5] = [
     "💡 Tip: Drag & drop executable files (.exe/.lnk) onto a group to add them, then click ▶ to run with the assigned CPU cores",
+    "💡 Tip: Create different core groups for different types of applications to optimize performance",
+    "💡 Tip: You can enable autorun for applications to start them automatically when the tool launches",
+    "💡 Tip: Check the logs to see the history of application launches and their CPU affinity settings",
+    "💡 Tip: Use the theme toggle button in the top-left corner to switch between light, dark, and system themes",
+];
+
+#[cfg(not(target_os = "windows"))]
+const TIPS: [&str; 5] = [
+    "💡 Tip: Drag & drop binaries or .desktop launchers onto a group to add them, then click ▶ to run with the assigned CPU cores",
     "💡 Tip: Create different core groups for different types of applications to optimize performance",
     "💡 Tip: You can enable autorun for applications to start them automatically when the tool launches",
     "💡 Tip: Check the logs to see the history of application launches and their CPU affinity settings",

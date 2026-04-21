@@ -122,7 +122,13 @@ fn platform_state_path_for(
     home_dir: Option<PathBuf>,
 ) -> Option<PathBuf> {
     match platform {
-        "windows" => local_app_data.map(|path| path.join("CpuAffinityTool").join(STATE_FILE_NAME)),
+        "windows" => local_app_data.map(|path| {
+            let base = path
+                .to_string_lossy()
+                .trim_end_matches(['\\', '/'])
+                .to_string();
+            PathBuf::from(format!(r"{base}\CpuAffinityTool\{STATE_FILE_NAME}"))
+        }),
         "linux" => xdg_data_home
             .or_else(|| home_dir.map(|path| path.join(".local").join("share")))
             .map(|path| path.join("cpu-affinity-tool").join(STATE_FILE_NAME)),

@@ -1,36 +1,60 @@
-// linux_process_ops.rs
-
+use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::str::FromStr;
 
 use libc::{
     PRIO_PROCESS, SCHED_FIFO, SCHED_RR, getpriority, pid_t, sched_getscheduler, sched_param,
     sched_setscheduler, setpriority,
 };
 use nix::sched::{CpuSet, sched_getaffinity, sched_setaffinity};
-use shlex;
+use nix::unistd::Pid;
 
 use crate::PriorityClass;
 use crate::{InstalledAppCatalogEntry, InstalledAppCatalogTarget, InstalledPackageRuntimeInfo};
 
 pub struct OS;
 
+pub struct ProcessTree {
+    pub parent_of: HashMap<u32, u32>,
+    pub children_of: HashMap<u32, Vec<u32>>,
+    pub names: HashMap<u32, String>,
+}
+
+#[derive(Debug, Default)]
+struct DesktopEntry {
+    name: String,
+    exec: String,
+    hidden: bool,
+    no_display: bool,
+    entry_type: Option<String>,
+}
+
 impl OS {
-    // ---- helpers to reduce duplication ----
+    pub const fn supports_hide_to_tray() -> bool {
+        false
+    }
+
+    pub const fn supports_installed_app_picker() -> bool {
+        true
+    }
+
     fn compose_mask_from_cores(cores: &[usize]) -> Result<usize, String> {
         let mut mask = 0usize;
-        for &i in cores {
+
+        for &core in cores {
             let bit = 1usize
-                .checked_shl(i as u32)
-                .ok_or_else(|| format!("core index {} out of range for affinity mask", i))?;
+                .checked_shl(core as u32)
+                .ok_or_else(|| format!("core index {core} out of range for affinity mask"))?;
             mask |= bit;
         }
+
         if mask == 0 {
             return Err("affinity mask is empty".into());
         }
+
         Ok(mask)
     }
 
@@ -38,30 +62,38 @@ impl OS {
         if mask == 0 {
             return Err("affinity mask is empty".into());
         }
+
         let mut cpu_set = CpuSet::new();
-        for i in 0..usize::BITS {
-            if (mask & (1usize << i)) != 0 {
-                cpu_set.set(i as usize).map_err(|e| e.to_string())?;
+        for bit in 0..usize::BITS as usize {
+            if (mask & (1usize << bit)) != 0 {
+                cpu_set.set(bit).map_err(|e| e.to_string())?;
             }
         }
+
         Ok(cpu_set)
     }
 
     fn mask_from_cpuset(set: &CpuSet) -> usize {
-        let mut mask: usize = 0;
-        for i in 0..usize::BITS as usize {
-            if set.is_set(i).unwrap_or(false) {
-                mask |= 1usize << i;
+        let mut mask = 0usize;
+
+        for bit in 0..usize::BITS as usize {
+            if set.is_set(bit).unwrap_or(false) {
+                mask |= 1usize << bit;
             }
         }
+
         mask
     }
 
-    fn set_priority_for_pid(pid: pid_t, p: PriorityClass) -> Result<(), String> {
-        match p {
+    fn pid(pid: u32) -> Pid {
+        Pid::from_raw(pid as i32)
+    }
+
+    fn set_priority_for_pid(pid: pid_t, priority: PriorityClass) -> Result<(), String> {
+        match priority {
             PriorityClass::Realtime => {
-                let param = sched_param { sched_priority: 50 };
-                let ret = unsafe { sched_setscheduler(pid, SCHED_FIFO, &param) };
+                let params = sched_param { sched_priority: 50 };
+                let ret = unsafe { sched_setscheduler(pid, SCHED_FIFO, &params) };
                 if ret == 0 {
                     Ok(())
                 } else {
@@ -69,8 +101,8 @@ impl OS {
                 }
             }
             _ => {
-                let nice = Self::to_nice(p);
-                let ret = unsafe { setpriority(PRIO_PROCESS, pid, nice) };
+                let nice = Self::to_nice(priority);
+                let ret = unsafe { setpriority(PRIO_PROCESS, pid as u32, nice) };
                 if ret == 0 {
                     Ok(())
                 } else {
@@ -79,8 +111,9 @@ impl OS {
             }
         }
     }
-    fn to_nice(p: PriorityClass) -> i32 {
-        match p {
+
+    fn to_nice(priority: PriorityClass) -> i32 {
+        match priority {
             PriorityClass::Idle => 19,
             PriorityClass::BelowNormal => 10,
             PriorityClass::Normal => 0,
@@ -90,78 +123,316 @@ impl OS {
         }
     }
 
-    fn spawn(target: &PathBuf, args: &[String]) -> Result<Child, String> {
+    fn spawn(target: &Path, args: &[String]) -> Result<Child, String> {
         let mut cmd = Command::new(target);
         if !args.is_empty() {
             cmd.args(args);
         }
+
         cmd.stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| format!("spawn {:?} failed: {}", target, e))
+            .map_err(|e| format!("spawn {:?} failed: {e}", target))
     }
 
     fn set_affinity(child: &Child, mask: usize) -> Result<(), String> {
-        let pid = child.id() as pid_t;
         let cpu_set = Self::cpuset_from_mask(mask)?;
-        sched_setaffinity(pid, &cpu_set).map_err(|e| e.to_string())
+        sched_setaffinity(Self::pid(child.id()), &cpu_set).map_err(|e| e.to_string())
     }
 
-    fn set_priority(child: &Child, p: PriorityClass) -> Result<(), String> {
-        let pid = child.id() as pid_t;
-        Self::set_priority_for_pid(pid, p)
+    fn set_priority(child: &Child, priority: PriorityClass) -> Result<(), String> {
+        Self::set_priority_for_pid(child.id() as pid_t, priority)
     }
 
-    /// Gets the current CPU affinity mask for a process.
-    /// Note: Only the lowest `usize::BITS` CPUs are represented in the returned mask.
+    fn resolve_non_absolute_command(command: &str) -> Option<PathBuf> {
+        if command.contains('/') {
+            let path = PathBuf::from(command);
+            return path.exists().then_some(path);
+        }
+
+        env::var_os("PATH").and_then(|path_var| {
+            env::split_paths(&path_var)
+                .map(|dir| dir.join(command))
+                .find(|candidate| candidate.exists())
+        })
+    }
+
+    fn resolve_command(command: &str) -> Result<PathBuf, String> {
+        let path = PathBuf::from(command);
+        if path.is_absolute() {
+            if path.exists() {
+                return Ok(path);
+            }
+
+            return Err(format!("executable '{}' does not exist", path.display()));
+        }
+
+        Self::resolve_non_absolute_command(command)
+            .ok_or_else(|| format!("failed to resolve executable '{command}'"))
+    }
+
+    fn strip_exec_field_codes(token: &str) -> Option<String> {
+        let mut chars = token.chars().peekable();
+        let mut out = String::new();
+
+        while let Some(ch) = chars.next() {
+            if ch != '%' {
+                out.push(ch);
+                continue;
+            }
+
+            match chars.next() {
+                Some('%') => out.push('%'),
+                Some(code)
+                    if matches!(
+                        code,
+                        'f' | 'F' | 'u' | 'U' | 'd' | 'D' | 'n' | 'N' | 'i' | 'c' | 'k' | 'v' | 'm'
+                    ) => {}
+                Some(code) => {
+                    out.push('%');
+                    out.push(code);
+                }
+                None => out.push('%'),
+            }
+        }
+
+        let cleaned = out.trim();
+        (!cleaned.is_empty()).then(|| cleaned.to_string())
+    }
+
+    fn desktop_exec_tokens(exec: &str) -> Result<Vec<String>, String> {
+        let raw = shlex::split(exec).unwrap_or_else(|| vec![exec.to_string()]);
+        let tokens: Vec<String> = raw
+            .into_iter()
+            .filter_map(|token| Self::strip_exec_field_codes(&token))
+            .collect();
+
+        if tokens.is_empty() {
+            return Err("Exec is empty".into());
+        }
+
+        Ok(tokens)
+    }
+
+    fn desktop_exec_to_target(exec: &str) -> Result<(PathBuf, Vec<String>), String> {
+        let tokens = Self::desktop_exec_tokens(exec)?;
+
+        let (command, args) = if tokens[0] == "env" {
+            let mut index = 1usize;
+            while index < tokens.len()
+                && tokens[index].contains('=')
+                && !tokens[index].starts_with('-')
+            {
+                index += 1;
+            }
+
+            if index >= tokens.len() {
+                return Err("desktop Exec= only contained env assignments".into());
+            }
+
+            (tokens[index].clone(), tokens[index + 1..].to_vec())
+        } else {
+            (tokens[0].clone(), tokens[1..].to_vec())
+        };
+
+        let target = Self::resolve_command(&command)?;
+        Ok((target, args))
+    }
+
+    fn parse_desktop_file(path: &Path) -> Result<(PathBuf, Vec<String>), String> {
+        let content =
+            fs::read_to_string(path).map_err(|e| format!("failed to read .desktop: {e}"))?;
+        let entry = Self::parse_desktop_entry(&content)?;
+        Self::desktop_exec_to_target(&entry.exec)
+    }
+
+    fn parse_desktop_entry(content: &str) -> Result<DesktopEntry, String> {
+        let mut in_desktop_entry = false;
+        let mut entry = DesktopEntry::default();
+
+        for raw_line in content.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            if line.starts_with('[') && line.ends_with(']') {
+                in_desktop_entry = line.eq_ignore_ascii_case("[Desktop Entry]");
+                continue;
+            }
+
+            if !in_desktop_entry {
+                continue;
+            }
+
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let value = value.trim();
+
+            match key.trim() {
+                "Name" if entry.name.is_empty() => entry.name = value.to_string(),
+                "Exec" if entry.exec.is_empty() => entry.exec = value.to_string(),
+                "Type" => entry.entry_type = Some(value.to_string()),
+                "Hidden" => entry.hidden = value.eq_ignore_ascii_case("true"),
+                "NoDisplay" => entry.no_display = value.eq_ignore_ascii_case("true"),
+                _ => {}
+            }
+        }
+
+        if entry.exec.is_empty() {
+            return Err("Exec= not found in .desktop".into());
+        }
+
+        if entry.name.is_empty() {
+            entry.name = "Unknown".into();
+        }
+
+        Ok(entry)
+    }
+
+    fn proc_path(pid: u32, entry: &str) -> PathBuf {
+        PathBuf::from("/proc").join(pid.to_string()).join(entry)
+    }
+
+    fn read_proc_stat(pid: u32) -> Result<(u32, String), String> {
+        let stat = fs::read_to_string(Self::proc_path(pid, "stat"))
+            .map_err(|e| format!("failed to read /proc/{pid}/stat: {e}"))?;
+        let open = stat
+            .find('(')
+            .ok_or_else(|| format!("failed to parse /proc/{pid}/stat"))?;
+        let close = stat
+            .rfind(')')
+            .ok_or_else(|| format!("failed to parse /proc/{pid}/stat"))?;
+
+        let comm = stat[open + 1..close].to_string();
+        let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+        if rest.len() < 3 {
+            return Err(format!("failed to parse parent pid for /proc/{pid}/stat"));
+        }
+
+        let parent_pid = rest[1]
+            .parse::<u32>()
+            .map_err(|e| format!("failed to parse parent pid for /proc/{pid}: {e}"))?;
+
+        Ok((parent_pid, comm))
+    }
+
+    fn process_name_from_pid(pid: u32) -> String {
+        Self::get_process_image_path(pid)
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.to_string())
+            })
+            .or_else(|| {
+                fs::read_to_string(Self::proc_path(pid, "comm"))
+                    .ok()
+                    .map(|name| name.trim().to_string())
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| pid.to_string())
+    }
+
+    fn desktop_file_search_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        let mut seen = HashSet::new();
+
+        let mut push_dir = |path: PathBuf| {
+            if seen.insert(path.clone()) {
+                dirs.push(path);
+            }
+        };
+
+        if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
+            push_dir(PathBuf::from(data_home).join("applications"));
+        } else if let Some(home) = env::var_os("HOME") {
+            push_dir(PathBuf::from(home).join(".local/share/applications"));
+        }
+
+        if let Some(home) = env::var_os("HOME") {
+            push_dir(PathBuf::from(home).join(".local/share/flatpak/exports/share/applications"));
+        }
+
+        let xdg_dirs =
+            env::var_os("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+        for dir in env::split_paths(&xdg_dirs) {
+            push_dir(dir.join("applications"));
+        }
+
+        push_dir(PathBuf::from("/var/lib/flatpak/exports/share/applications"));
+
+        dirs
+    }
+
+    fn collect_desktop_files(dir: &Path, output: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                Self::collect_desktop_files(&path, output);
+                continue;
+            }
+
+            if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("desktop"))
+            {
+                output.push(path);
+            }
+        }
+    }
+
+    fn find_desktop_file_by_name(file_name: &str) -> Option<PathBuf> {
+        Self::desktop_file_search_dirs()
+            .into_iter()
+            .map(|dir| dir.join(file_name))
+            .find(|path| path.exists())
+    }
+
     pub fn get_process_affinity(pid: u32) -> Result<usize, String> {
-        let pid = pid as pid_t;
-        let mut set = CpuSet::new();
-        sched_getaffinity(pid, &mut set).map_err(|e| e.to_string())?;
+        let set = sched_getaffinity(Self::pid(pid)).map_err(|e| e.to_string())?;
         Ok(Self::mask_from_cpuset(&set))
     }
 
-    /// Gets the current priority class for a process.
     pub fn get_process_priority(pid: u32) -> Result<PriorityClass, String> {
-        let pid_t = pid as pid_t;
-        // Realtime if scheduled with FIFO or RR
-        let policy = unsafe { sched_getscheduler(pid_t) };
+        let pid = pid as pid_t;
+        let policy = unsafe { sched_getscheduler(pid) };
         if policy == SCHED_FIFO || policy == SCHED_RR {
             return Ok(PriorityClass::Realtime);
         }
 
-        // Otherwise map nice value to our classes
-        // getpriority returns value in range -20..19; on error it returns -1 but errno must be checked.
         errno::set_errno(errno::Errno(0));
-        let prio = unsafe { getpriority(PRIO_PROCESS, pid_t) };
+        let nice = unsafe { getpriority(PRIO_PROCESS, pid as u32) };
         let err = errno::errno().0;
-        if prio == -1 && err != 0 {
+        if nice == -1 && err != 0 {
             return Err(io::Error::last_os_error().to_string());
         }
-        let p = match prio {
+
+        Ok(match nice {
             n if n >= 15 => PriorityClass::Idle,
             n if n >= 5 => PriorityClass::BelowNormal,
             n if n >= -4 => PriorityClass::Normal,
             n if n >= -9 => PriorityClass::AboveNormal,
-            _ /* <= -10 */ => PriorityClass::High,
-        };
-        Ok(p)
+            _ => PriorityClass::High,
+        })
     }
 
-    /// Sets the CPU affinity mask for a process by PID.
     pub fn set_process_affinity_by_pid(pid: u32, mask: usize) -> Result<(), String> {
-        let pid = pid as pid_t;
         let cpu_set = Self::cpuset_from_mask(mask)?;
-        sched_setaffinity(pid, &cpu_set).map_err(|e| e.to_string())
+        sched_setaffinity(Self::pid(pid), &cpu_set).map_err(|e| e.to_string())
     }
 
-    /// Sets the priority class for a process by PID.
     pub fn set_process_priority_by_pid(pid: u32, priority: PriorityClass) -> Result<(), String> {
-        let pid = pid as pid_t;
-        Self::set_priority_for_pid(pid, priority)
+        Self::set_priority_for_pid(pid as pid_t, priority)
     }
 
-    /// Sets the priority class for the current process.
     pub fn set_current_process_priority(priority: PriorityClass) -> Result<(), String> {
         Self::set_priority_for_pid(0, priority)
     }
@@ -171,33 +442,13 @@ impl OS {
 
         if path
             .extension()
-            .and_then(|e| e.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("desktop"))
-            .unwrap_or(false)
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("desktop"))
         {
             return Self::parse_desktop_file(&path);
         }
 
         Ok((path, Vec::new()))
-    }
-
-    fn parse_desktop_file(path: &Path) -> Result<(PathBuf, Vec<String>), String> {
-        let content =
-            fs::read_to_string(path).map_err(|e| format!("failed to read .desktop: {}", e))?;
-
-        for line in content.lines() {
-            if line.starts_with("Exec=") {
-                let cmdline = line["Exec=".len()..].trim();
-                let vec = shlex::split(cmdline).unwrap_or_else(|| vec![cmdline.to_string()]);
-                if vec.is_empty() {
-                    return Err("Exec is empty".to_string());
-                }
-                let target = PathBuf::from(&vec[0]);
-                return Ok((target, vec[1..].to_vec()));
-            }
-        }
-
-        Err("Exec= not found in .desktop".into())
     }
 
     pub fn run(
@@ -206,304 +457,220 @@ impl OS {
         cores: &[usize],
         priority: PriorityClass,
     ) -> Result<u32, String> {
-        // Compose mask with validation similar to Windows implementation
         let mask = Self::compose_mask_from_cores(cores)?;
         let child = Self::spawn(&file_path, &args)?;
         let pid = child.id();
+
         Self::set_affinity(&child, mask)?;
         Self::set_priority(&child, priority)?;
+
         Ok(pid)
     }
 
-    /// Gets the parent process ID of a given process.
-    ///
-    /// This function reads the `/proc/{pid}/stat` file to get the parent process ID.
-    ///
-    /// # Parameters
-    ///
-    /// * `pid` - The process ID to get the parent of
-    ///
-    /// # Returns
-    ///
-    /// The parent process ID, or None if the process doesn't exist or the parent couldn't be determined
-    pub fn get_parent_pid(pid: u32) -> Option<u32> {
-        // Read the /proc/{pid}/stat file
-        let stat_path = format!("/proc/{}/stat", pid);
-        let stat_content = match fs::read_to_string(&stat_path) {
-            Ok(content) => content,
-            Err(_) => return None,
-        };
+    pub fn snapshot_process_tree() -> Result<ProcessTree, String> {
+        let mut parent_of = HashMap::new();
+        let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut names = HashMap::new();
 
-        // Parse the stat file to get the parent PID (4th field)
-        // Format: pid (comm) state ppid ...
-        let parts: Vec<&str> = stat_content.split_whitespace().collect();
+        for pid in Self::get_all_pids() {
+            let Ok((parent_pid, _comm)) = Self::read_proc_stat(pid) else {
+                continue;
+            };
 
-        // The 4th field (index 3) is the parent PID
-        // But we need to handle the case where the command name (comm) contains spaces
-        // So we find the closing parenthesis and count from there
-        if let Some(paren_pos) = stat_content.rfind(')') {
-            let after_paren = &stat_content[paren_pos + 1..];
-            let after_parts: Vec<&str> = after_paren.split_whitespace().collect();
-
-            // The parent PID is the 3rd field after the closing parenthesis
-            if after_parts.len() >= 3 {
-                return u32::from_str(after_parts[2]).ok();
-            }
+            parent_of.insert(pid, parent_pid);
+            children_of.entry(parent_pid).or_default().push(pid);
+            names.insert(pid, Self::process_name_from_pid(pid));
         }
 
-        None
+        Ok(ProcessTree {
+            parent_of,
+            children_of,
+            names,
+        })
     }
 
-    /// Gets all process IDs in the system.
-    ///
-    /// This function reads the `/proc` directory to get all process IDs.
-    ///
-    /// # Returns
-    ///
-    /// A vector of all process IDs
+    pub fn get_parent_pid(pid: u32) -> Option<u32> {
+        Self::read_proc_stat(pid)
+            .ok()
+            .map(|(parent_pid, _)| parent_pid)
+    }
+
     pub fn get_all_pids() -> Vec<u32> {
         let mut pids = Vec::new();
 
-        // Read the /proc directory
-        let proc_dir = match fs::read_dir("/proc") {
-            Ok(dir) => dir,
-            Err(_) => return pids,
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return pids;
         };
 
-        // Iterate over all entries in the /proc directory
-        for entry in proc_dir {
-            if let Ok(entry) = entry {
-                let file_name = entry.file_name();
-                let file_name_str = file_name.to_string_lossy();
-
-                // Check if the entry is a directory and its name is a number (PID)
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
-                    && file_name_str.chars().all(|c| c.is_digit(10))
-                {
-                    // Parse the directory name as a PID
-                    if let Ok(pid) = u32::from_str(&file_name_str) {
-                        pids.push(pid);
-                    }
-                }
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            if let Ok(pid) = file_name.parse::<u32>() {
+                pids.push(pid);
             }
         }
 
         pids
     }
 
-    /// Finds all process IDs that match the target name (case-insensitive, up to the first dot).
     pub fn find_pids_by_name(target_name: &str) -> Vec<u32> {
-        let mut pids = Vec::new();
-        if target_name.is_empty() {
-            return pids;
+        if target_name.trim().is_empty() {
+            return Vec::new();
         }
 
-        if let Ok(entries) = fs::read_dir("/proc") {
-            for entry in entries.flatten() {
-                if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
-                    // Try to read /proc/PID/comm which contains the process name
-                    let comm_path = entry.path().join("comm");
-                    if let Ok(comm) = fs::read_to_string(comm_path) {
-                        let comm = comm.trim();
-                        // Extract part before the first dot
-                        let process_name = comm.split('.').next().unwrap_or("");
-                        if process_name.eq_ignore_ascii_case(target_name) {
-                            pids.push(pid);
+        let target_name = target_name
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+
+        Self::snapshot_process_tree()
+            .map(|tree| {
+                tree.names
+                    .into_iter()
+                    .filter_map(|(pid, name)| {
+                        let process_name = name.split('.').next().unwrap_or("").to_lowercase();
+                        (process_name == target_name).then_some(pid)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get_all_process_names() -> Vec<(u32, String)> {
+        Self::snapshot_process_tree()
+            .map(|tree| tree.names.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn find_child_pids(parent: u32) -> Vec<u32> {
+        Self::snapshot_process_tree()
+            .ok()
+            .and_then(|tree| tree.children_of.get(&parent).cloned())
+            .unwrap_or_default()
+    }
+
+    pub fn find_all_descendants(parent_pid: u32, descendants: &mut Vec<u32>) {
+        if let Ok(tree) = Self::snapshot_process_tree() {
+            let mut visited: HashSet<u32> = descendants.iter().copied().collect();
+            let mut stack = vec![parent_pid];
+
+            while let Some(parent) = stack.pop() {
+                if let Some(children) = tree.children_of.get(&parent) {
+                    for &child in children {
+                        if visited.insert(child) {
+                            descendants.push(child);
+                            stack.push(child);
                         }
                     }
                 }
             }
         }
-        pids
     }
 
-    /// Returns all running process IDs and their executable names.
-    pub fn get_all_process_names() -> Vec<(u32, String)> {
-        let mut results = Vec::new();
-        if let Ok(entries) = fs::read_dir("/proc") {
-            for entry in entries.flatten() {
-                if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
-                    // Try to read /proc/PID/comm which contains the process name
-                    let comm_path = entry.path().join("comm");
-                    if let Ok(comm) = fs::read_to_string(comm_path) {
-                        results.push((pid, comm.trim().to_string()));
-                    }
-                }
-            }
-        }
-        results
-    }
-
-    /// Finds all child process IDs of a given parent process.
-    ///
-    /// This function uses the `get_all_pids` and `get_parent_pid` functions to find all child processes.
-    ///
-    /// # Parameters
-    ///
-    /// * `parent` - The parent process ID
-    ///
-    /// # Returns
-    ///
-    /// A vector of child process IDs
-    pub fn find_child_pids(parent: u32) -> Vec<u32> {
-        let mut children = Vec::new();
-
-        // Get all PIDs in the system
-        let all_pids = Self::get_all_pids();
-
-        // Check each PID to see if its parent is the specified parent
-        for pid in all_pids {
-            if let Some(ppid) = Self::get_parent_pid(pid) {
-                if ppid == parent {
-                    children.push(pid);
-                }
-            }
-        }
-
-        children
-    }
-
-    /// Recursively finds all descendant processes of a given parent process.
-    ///
-    /// This function uses the `find_child_pids` function to find all child processes
-    /// and then recursively finds all descendants of those child processes.
-    ///
-    /// # Parameters
-    ///
-    /// * `parent_pid` - The parent process ID
-    /// * `descendants` - A mutable vector to store the descendant process IDs
-    pub fn find_all_descendants(parent_pid: u32, descendants: &mut Vec<u32>) {
-        // Find all direct children of the parent process
-        let children = Self::find_child_pids(parent_pid);
-
-        // For each child, add it to the descendants list and recursively find its descendants
-        for child in children {
-            // Avoid infinite recursion if the child is already in the descendants list
-            if !descendants.contains(&child) {
-                descendants.push(child);
-                Self::find_all_descendants(child, descendants);
-            }
-        }
-    }
-
-    /// Checks if a process with a given PID is still running.
-    ///
-    /// This function checks if the `/proc/{pid}` directory exists.
-    ///
-    /// # Parameters
-    ///
-    /// * `pid` - The process ID to check
-    ///
-    /// # Returns
-    ///
-    /// `true` if the process is running, `false` otherwise
     pub fn is_pid_live(pid: u32) -> bool {
-        let proc_path = format!("/proc/{}", pid);
+        Self::proc_path(pid, "").is_dir()
+    }
 
-        // Check if the /proc/{pid} directory exists
-        if let Ok(metadata) = fs::metadata(&proc_path) {
-            return metadata.is_dir();
-        }
+    pub fn get_process_image_path(pid: u32) -> Result<PathBuf, String> {
+        fs::read_link(Self::proc_path(pid, "exe"))
+            .map_err(|e| format!("failed to read /proc/{pid}/exe: {e}"))
+    }
 
+    pub fn focus_window_by_pid(_pid: u32) -> bool {
         false
     }
 
-    /// Attempts to focus a window belonging to a process with a given PID.
-    ///
-    /// This is a simplified implementation that always returns false.
-    /// A proper implementation would require X11 or Wayland APIs to focus windows.
-    ///
-    /// # Parameters
-    ///
-    /// * `pid` - The process ID of the window to focus
-    ///
-    /// # Returns
-    ///
-    /// `true` if the window was successfully focused, `false` otherwise
-    pub fn focus_window_by_pid(pid: u32) -> bool {
-        // TODO: Implement window focusing using X11 or Wayland APIs
-        // This would require additional dependencies like x11rb or wayland-client
-
-        // For now, just return false to indicate that focusing failed
-        false
-    }
-
-    /// Gets the program path for a given URI scheme.
-    ///
-    /// This function checks the XDG MIME database to find the default application
-    /// for the given URI scheme.
-    ///
-    /// # Parameters
-    ///
-    /// * `uri_scheme` - The URI scheme to get the program path for (e.g., "http", "mailto")
-    ///
-    /// # Returns
-    ///
-    /// The program path, or an error if the program couldn't be found
     pub fn get_program_path_for_uri(uri_scheme: &str) -> Result<PathBuf, String> {
-        // Try to get the default application for the URI scheme using xdg-mime
         let output = Command::new("xdg-mime")
-            .args(&[
+            .args([
                 "query",
                 "default",
-                &format!("x-scheme-handler/{}", uri_scheme),
+                &format!("x-scheme-handler/{uri_scheme}"),
             ])
             .output()
-            .map_err(|e| format!("Failed to execute xdg-mime: {}", e))?;
+            .map_err(|e| format!("failed to execute xdg-mime: {e}"))?;
 
         if !output.status.success() {
-            return Err(format!("xdg-mime failed with status: {}", output.status));
+            return Err(format!("xdg-mime failed with status {}", output.status));
         }
 
-        // Parse the output to get the desktop file name
         let desktop_file = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if desktop_file.is_empty() {
             return Err(format!(
-                "No default application found for URI scheme: {}",
-                uri_scheme
+                "no default application found for URI scheme '{uri_scheme}'"
             ));
         }
 
-        // Look for the desktop file in the standard locations
-        let desktop_dirs = [
-            "/usr/share/applications",
-            "/usr/local/share/applications",
-            "~/.local/share/applications",
-        ];
-
-        for dir in &desktop_dirs {
-            let dir_path = if dir.starts_with("~/") {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "".to_string());
-                PathBuf::from(home).join(&dir[2..])
-            } else {
-                PathBuf::from(dir)
-            };
-
-            let desktop_path = dir_path.join(&desktop_file);
-            if desktop_path.exists() {
-                // Parse the desktop file to get the Exec line
-                return Self::parse_desktop_file(&desktop_path).map(|(path, _)| path);
-            }
-        }
-
-        Err(format!("Desktop file not found: {}", desktop_file))
+        let path = Self::find_desktop_file_by_name(&desktop_file)
+            .ok_or_else(|| format!("desktop file '{desktop_file}' not found"))?;
+        Self::parse_desktop_file(&path).map(|(path, _)| path)
     }
 
     pub fn get_cpu_model() -> String {
-        std::fs::read_to_string("/proc/cpuinfo")
+        fs::read_to_string("/proc/cpuinfo")
             .ok()
             .and_then(|content| {
                 content
                     .lines()
                     .find(|line| line.starts_with("model name"))
                     .and_then(|line| line.split(':').nth(1))
-                    .map(|s| s.trim().to_string())
+                    .map(|value| value.trim().to_string())
             })
             .unwrap_or_else(|| "Unknown CPU".to_string())
     }
 
     pub fn list_supported_start_apps() -> Result<Vec<InstalledAppCatalogEntry>, String> {
-        Ok(Vec::new())
+        let mut desktop_files = Vec::new();
+        for dir in Self::desktop_file_search_dirs() {
+            Self::collect_desktop_files(&dir, &mut desktop_files);
+        }
+
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+
+        for desktop_file in desktop_files {
+            let Ok(content) = fs::read_to_string(&desktop_file) else {
+                continue;
+            };
+            let Ok(entry) = Self::parse_desktop_entry(&content) else {
+                continue;
+            };
+
+            if entry.hidden || entry.no_display {
+                continue;
+            }
+
+            if entry
+                .entry_type
+                .as_deref()
+                .is_some_and(|value| !value.eq_ignore_ascii_case("Application"))
+            {
+                continue;
+            }
+
+            if Self::desktop_exec_to_target(&entry.exec).is_err() {
+                continue;
+            }
+
+            let identity = format!(
+                "{}|{}",
+                entry.name.to_lowercase(),
+                desktop_file.to_string_lossy().to_lowercase()
+            );
+            if !seen.insert(identity) {
+                continue;
+            }
+
+            entries.push(InstalledAppCatalogEntry {
+                name: entry.name,
+                target: InstalledAppCatalogTarget::Path(desktop_file),
+            });
+        }
+
+        entries.sort_by_cached_key(|entry| entry.name.to_lowercase());
+        Ok(entries)
     }
 
     pub fn activate_application(_aumid: &str) -> Result<u32, String> {
@@ -525,6 +692,40 @@ impl OS {
             .arg(path)
             .spawn()
             .map(|_| ())
-            .map_err(|e| format!("Failed to open directory '{}': {}", path.display(), e))
+            .map_err(|e| format!("Failed to open directory '{}': {e}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OS;
+
+    #[test]
+    fn test_strip_exec_field_codes_handles_desktop_placeholders() {
+        assert_eq!(OS::strip_exec_field_codes("%u"), None);
+        assert_eq!(
+            OS::strip_exec_field_codes("--profile=%k"),
+            Some("--profile=".to_string())
+        );
+        assert_eq!(
+            OS::strip_exec_field_codes("100%%"),
+            Some("100%".to_string())
+        );
+    }
+
+    #[test]
+    fn test_desktop_exec_tokens_drop_field_codes() {
+        let tokens =
+            OS::desktop_exec_tokens(r#"flatpak run app.id --arg %u --title="Hello %c""#).unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                "flatpak".to_string(),
+                "run".to_string(),
+                "app.id".to_string(),
+                "--arg".to_string(),
+                "--title=Hello".to_string(),
+            ]
+        );
     }
 }

@@ -190,7 +190,7 @@ impl AppState {
         let attempted_count = paths.len();
         let group_name = self.get_group_name(group_index).unwrap_or_default();
         self.log_manager.add_entry(format!(
-            "Adding executables to group: {group_name}, paths: {paths:?}"
+            "Adding app targets to group: {group_name}, paths: {paths:?}"
         ));
 
         let outcome = apps::add_apps_to_group(&self.persistent_state, group_index, paths);
@@ -248,10 +248,10 @@ impl AppState {
 
             if outcome.added_count == attempted_count {
                 self.log_manager
-                    .add_entry(format!("Added executables to group: {group_name}"));
+                    .add_entry(format!("Added app targets to group: {group_name}"));
             } else {
                 self.log_manager.add_entry(format!(
-                    "Added {} executables to group: {}",
+                    "Added {} app targets to group: {}",
                     outcome.added_count, group_name
                 ));
             }
@@ -259,7 +259,7 @@ impl AppState {
 
         if let Some(err) = outcome.first_error {
             self.log_manager
-                .add_entry(format!("Error adding executables: {err}"));
+                .add_entry(format!("Error adding app targets: {err}"));
         }
     }
 
@@ -392,7 +392,7 @@ impl AppState {
         if programs.is_empty() {
             let group_name = self.get_group_name(group_index).unwrap_or_default();
             self.log_manager
-                .add_entry(format!("No executables to run in group: {group_name}"));
+                .add_entry(format!("No app targets to run in group: {group_name}"));
             return;
         }
 
@@ -545,6 +545,8 @@ impl AppState {
                             });
                     }
                     Err(err) => {
+                        self.log_manager
+                            .add_entry(format!("Installed app refresh failed: {err}"));
                         self.ui.installed_app_picker.last_error = Some(err);
                     }
                 }
@@ -556,6 +558,8 @@ impl AppState {
             }
             Err(TryRecvError::Disconnected) => {
                 self.ui.installed_app_picker.is_refreshing = false;
+                self.log_manager
+                    .add_entry("Installed app refresh channel disconnected".into());
                 self.ui.installed_app_picker.last_error =
                     Some("Installed app refresh channel disconnected".into());
             }

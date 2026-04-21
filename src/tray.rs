@@ -1,6 +1,7 @@
 use std::sync::mpsc::Receiver;
 
 /// Simple commands from the tray to the application
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub enum TrayCmd {
     Show,

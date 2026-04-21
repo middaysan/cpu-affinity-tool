@@ -47,6 +47,43 @@ pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
     });
 }
 
+#[cfg(target_os = "windows")]
+fn pick_open_app_files() -> Option<Vec<PathBuf>> {
+    rfd::FileDialog::new()
+        .add_filter("Apps", &["exe", "lnk", "url"])
+        .pick_files()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn pick_open_app_files() -> Option<Vec<PathBuf>> {
+    rfd::FileDialog::new().pick_files()
+}
+
+#[cfg(target_os = "windows")]
+fn open_app_hover_text() -> &'static str {
+    "Add executables, shortcuts, or URLs"
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_app_hover_text() -> &'static str {
+    "Add binaries, scripts, or .desktop launchers"
+}
+
+#[cfg(target_os = "windows")]
+fn installed_app_hover_text() -> &'static str {
+    "Find installed Start-backed apps"
+}
+
+#[cfg(target_os = "linux")]
+fn installed_app_hover_text() -> &'static str {
+    "Find apps from .desktop entries on this system"
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn installed_app_hover_text() -> &'static str {
+    "Find supported installed apps"
+}
+
 fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> Vec<CentralAction> {
     let mut actions = Vec::new();
     let mut drop_target = None;
@@ -132,22 +169,19 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                     if ui
                         .button("Open App")
-                        .on_hover_text("Add executables, shortcuts, or URLs")
+                        .on_hover_text(open_app_hover_text())
                         .clicked()
                     {
-                        if let Some(paths) = rfd::FileDialog::new()
-                            .add_filter("Executables", &["exe", "lnk", "url"])
-                            .pick_files()
-                        {
+                        if let Some(paths) = pick_open_app_files() {
                             actions.push(CentralAction::AddSelectedFiles { group_index, paths });
                         }
                     }
 
-                    #[cfg(target_os = "windows")]
-                    if ui
-                        .button("Find Installed")
-                        .on_hover_text("Find installed Start-backed apps")
-                        .clicked()
+                    if os_api::OS::supports_installed_app_picker()
+                        && ui
+                            .button("Find Installed")
+                            .on_hover_text(installed_app_hover_text())
+                            .clicked()
                     {
                         actions.push(CentralAction::OpenInstalledAppPicker(group_index));
                     }

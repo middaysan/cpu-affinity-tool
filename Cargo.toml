@@ -12,6 +12,7 @@ manifest = "app.manifest"
 [[bin]]
 name = "cpu-affinity-tool" 
 path = "src/main_windows.rs"
+required-features = ["windows"]
 
 [[bin]]
 name = "cpu-affinity-tool-linux" 
@@ -26,24 +27,25 @@ debug = true
 [dependencies]
 mimalloc = "0.1.48"
 tokio = { version = "1.49.0", features = ["time", "sync", "rt", "macros", "full"] }
-[target.'cfg(windows)'.dependencies]
 os_api = { path = "libs/os_api" }
-eframe = { version = "0.33.3", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
-winit = "0.30"
+eframe = { version = "0.33.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 num_cpus = "1.16"
 rfd = "0.17.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+once_cell = "1.21.3"
+regex = "1.10"
+
+[target.'cfg(windows)'.dependencies]
+winit = "0.30"
 parselnk = "0.1.1"
 shlex = "1.3.0"
 windows = { version = "0.62.2", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 libc = "0.2.171"
-once_cell = "1.21.3"
 tray-icon = "0.21.3"
 image = "0.25"
-regex = "1.10"
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"
 
 [features]

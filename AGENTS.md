@@ -40,8 +40,8 @@ Repository binaries:
 - `cpu-affinity-tool-linux` - feature-gated Linux entrypoint
 
 Current platform reality:
-- Windows is the primary and only explicitly supported, CI-validated, published platform
-- Linux code exists as a partial and experimental backend
+- Windows is the primary released and explicitly supported platform
+- Linux code exists as a CI-validated desktop beta path from source for `x86_64` `glibc` desktop sessions on `X11` or `Wayland`
 - Linux is not part of the current release contract
 - the project must not be described as a fully cross-platform desktop app
 
@@ -53,10 +53,9 @@ Key directories:
 - `src/app/runtime/` - `eframe::App` shell, `AppState` facade, `UiState`, `RuntimeRegistry`, startup wiring, monitor loops, commands, tray and window lifecycle, and view dispatch
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
 - `src/app/models/app_state_storage/` - internal persistence modules for state path resolution, storage I/O, migrations, and schema refresh; `app_state_storage.rs` remains the public storage schema and API entrypoint
-- `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, while Linux remains a single minimal backend file
+- `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, while Linux remains a single-file desktop beta backend
 - `assets/` - icon, screenshot, `cpu_presets.json`, and social-preview guidance
 - `docs/` - release/process documentation and user-facing comparison/rationale references
-- `tests/` - external tests
 - `.github/workflows/` - CI and GitHub Release automation
 - `changelogs/` - manual release notes
 
@@ -122,7 +121,7 @@ Windows runtime flow:
 4. `App::new` creates `AppState`, writes startup diagnostics, starts monitor tasks, captures `HWND`, runs autorun, and initializes tray integration.
 5. `App::update` handles tray events, monitor notifications, hidden-window flow, file drops, applies theme, and renders the active view.
 
-Linux entrypoint is still much thinner and must not be described as having parity with Windows runtime behavior.
+Linux entrypoint now reaches the shared `runtime::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
 
 ## Concurrency model
 - GUI runs on the main thread
@@ -226,24 +225,22 @@ Windows release-path surface:
 - runtime-only package metadata lookup and package-local helper tracking for installed targets
 - richer process inspection
 - embedded manifest and resources
-- Windows-only CI
+- Windows release-path CI validation
 - current published release artifact
 
 Linux backend surface present in repo:
 - `/proc`-based process inspection
 - `.desktop` parsing
+- `.desktop`-based installed-app catalog discovery for the picker
 - `xdg-mime` URI lookup
 - affinity and priority via `nix` and `libc`
 
 Linux gaps:
 - no tray parity
 - no focus parity
-- no runtime wiring parity
-- no `Find Installed` parity
+- no Windows-style installed-app activation, AUMID identity, or package metadata parity
 - `os_api` is not symmetric between Windows and Linux
-- no Linux CI
-- no Linux release artifacts
-- no end-to-end validated Linux support claim
+- no Linux release artifacts or published Linux binary contract
 
 ## Dependencies and tooling
 Only list materially relevant dependencies by actual role.
@@ -278,6 +275,8 @@ Local verification commands:
 - `cargo fmt --all -- --check`
 - `cargo clippy -- -D warnings`
 - `cargo build --release`
+- `cargo test --features linux --bin cpu-affinity-tool-linux`
+- `cargo build --release --features linux --bin cpu-affinity-tool-linux`
 
 `cargo make`:
 - local developer automation wrapper around tasks like `fmt`, `lint`, `build-release`, `check`, and `release`
@@ -285,8 +284,10 @@ Local verification commands:
 - CI and GitHub Release workflows do not rely on `cargo make` as the truth source
 
 Current CI facts:
-- runner: `windows-latest`
-- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, and runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test`, and `cargo build --release`
+- runners:
+  - `windows-latest` for the Windows release-path job
+  - `ubuntu-latest` for the Linux desktop beta job
+- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, and verifies the Linux beta binary on `ubuntu-latest`
 - tests are part of the committed CI contract for `ci.yml`
 
 Current release facts:

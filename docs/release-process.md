@@ -6,6 +6,7 @@ It is intentionally narrow and truthful:
 
 - releases are Windows-only
 - the published artifact is currently `cpu-affinity-tool.exe`
+- CI also validates a Linux desktop beta path from source, but that does not change the release artifact contract
 - there is no installer, zip package, code signing, checksum publication, winget package, or Linux artifact in the current release contract
 
 ## Source of truth
@@ -14,12 +15,20 @@ Use these files together:
 
 - `docs/release-checklist.md`
 - `docs/release-smoke-matrix.md`
+- `.github/workflows/ci.yml`
 - `.github/workflows/release.yml`
 - `changelogs/vX.Y.Z.txt`
 
 ## Current automated flow
 
 The release workflow is tag-based.
+
+Normal branch and pull-request CI runs both:
+
+- the Windows release-path validation job
+- the Linux desktop beta validation job
+
+The tag-based release workflow itself remains Windows-only.
 
 When a stable tag matching `v*` is pushed:
 

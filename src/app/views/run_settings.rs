@@ -5,6 +5,28 @@ use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Layout, RichTex
 use os_api::PriorityClass;
 use std::path::PathBuf;
 
+#[cfg(target_os = "windows")]
+fn pick_binary_path() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Executables", &["exe"])
+        .pick_file()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn pick_binary_path() -> Option<PathBuf> {
+    rfd::FileDialog::new().pick_file()
+}
+
+#[cfg(target_os = "windows")]
+fn browse_binary_hover_text() -> &'static str {
+    "Select executable..."
+}
+
+#[cfg(not(target_os = "windows"))]
+fn browse_binary_hover_text() -> &'static str {
+    "Select binary path..."
+}
+
 pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
     let (group_idx, prog_idx) = match app.ui.app_edit_state.run_settings {
         Some((g, p)) => (g, p),
@@ -65,13 +87,10 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
 
                                 if ui
                                     .button("Browse")
-                                    .on_hover_text("Select executable...")
+                                    .on_hover_text(browse_binary_hover_text())
                                     .clicked()
                                 {
-                                    if let Some(path) = rfd::FileDialog::new()
-                                        .add_filter("Executables", &["exe"])
-                                        .pick_file()
-                                    {
+                                    if let Some(path) = pick_binary_path() {
                                         if let Some(bin_path) = selected_app.bin_path_mut() {
                                             *bin_path = path;
                                         }
