@@ -92,9 +92,6 @@ impl App {
                 #[cfg(target_os = "windows")]
                 let tray_icon_guard = Some(handle.tray_icon);
 
-                #[cfg(not(target_os = "windows"))]
-                let _ = &handle;
-
                 Self {
                     state,
                     tray_rx,
@@ -186,7 +183,9 @@ impl App {
             return false;
         }
 
-        if ctx.input(|i| i.viewport().minimized == Some(true)) {
+        if os_api::OS::supports_hide_to_tray()
+            && ctx.input(|i| i.viewport().minimized == Some(true))
+        {
             self.hide_to_tray(ctx);
             return false;
         }

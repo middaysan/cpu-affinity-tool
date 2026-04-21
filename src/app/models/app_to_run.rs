@@ -154,9 +154,8 @@ impl AppToRun {
         priority: PriorityClass,
         autorun: bool,
     ) -> Self {
-        let name = dropped_path
-            .file_name()
-            .and_then(|s| s.to_str())
+        let name = path_file_name_lossy(&dropped_path)
+            .as_deref()
             .unwrap_or("Unknown")
             .rsplit_once('.')
             .map(|(stem, _)| stem)
@@ -283,6 +282,31 @@ impl AppToRun {
     }
 }
 
+fn path_file_name_lossy(path: &Path) -> Option<String> {
+    let raw = path.to_string_lossy();
+    raw.rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
+}
+
+fn looks_like_windows_path(path: &Path) -> bool {
+    let raw = path.to_string_lossy();
+    raw.contains('\\') || raw.get(1..3) == Some(":\\") || raw.get(1..3) == Some(":/")
+}
+
+fn normalize_windows_path_text(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('/', "\\");
+
+    if let Some(stripped) = normalized.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{stripped}").to_ascii_lowercase()
+    } else {
+        normalized
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&normalized)
+            .to_ascii_lowercase()
+    }
+}
+
 impl From<&AppToRun> for AppRuntimeKey {
     fn from(app: &AppToRun) -> Self {
         let target_kind = if app.is_installed_target() {
@@ -318,7 +342,11 @@ fn normalize_existing_windows_path_for_identity(path: &Path) -> PathBuf {
 
 #[cfg(not(target_os = "windows"))]
 fn normalized_path_identity(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    if looks_like_windows_path(path) {
+        normalize_windows_path_text(path)
+    } else {
+        path.to_string_lossy().into_owned()
+    }
 }
 
 #[cfg(test)]

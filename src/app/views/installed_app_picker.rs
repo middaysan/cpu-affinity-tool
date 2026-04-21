@@ -13,6 +13,27 @@ enum InstalledAppPickerAction {
     ConfirmSelection,
 }
 
+#[cfg(target_os = "windows")]
+fn installed_app_picker_heading() -> (&'static str, &'static str) {
+    (
+        "Find Installed App",
+        "Browse supported Start-backed apps from the current Windows installation.",
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn installed_app_picker_heading() -> (&'static str, &'static str) {
+    (
+        "Find Installed App",
+        "Browse apps discovered from desktop entries. Typing a search also surfaces matching executables from PATH.",
+    )
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn installed_app_picker_heading() -> (&'static str, &'static str) {
+    ("Find Installed App", "Browse supported installed apps.")
+}
+
 pub fn draw_installed_app_picker(app: &mut AppState, ctx: &Context) {
     if app.ui.installed_app_picker.target_group_index.is_none() {
         app.close_installed_app_picker();
@@ -24,15 +45,17 @@ pub fn draw_installed_app_picker(app: &mut AppState, ctx: &Context) {
     let needs_focus = app.take_installed_app_picker_focus_request();
 
     CentralPanel::default().show(ctx, |ui| {
+        let (heading, description) = installed_app_picker_heading();
         ui.add_space(5.0);
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("Find Installed App").strong());
+            ui.heading(RichText::new(heading).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Close").on_hover_text("Close").clicked() {
                     actions.push(InstalledAppPickerAction::Close);
                 }
             });
         });
+        ui.label(RichText::new(description).small().weak());
         ui.add_space(10.0);
 
         let search_id = egui::Id::new("installed_app_picker_search");
@@ -137,10 +160,12 @@ pub fn draw_installed_app_picker(app: &mut AppState, ctx: &Context) {
 
         ui.add_space(8.0);
         ui.label(
-            RichText::new("If the app is not listed, use Open App")
-                .small()
-                .weak()
-                .italics(),
+            RichText::new(
+                "If the app is not listed, use Open App with the direct path, launcher file, or portable binary.",
+            )
+            .small()
+            .weak()
+            .italics(),
         );
     });
 

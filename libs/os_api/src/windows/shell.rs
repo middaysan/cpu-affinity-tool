@@ -22,7 +22,10 @@ use windows::core::{Interface, PCWSTR};
 use winreg::RegKey;
 use winreg::enums::{HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
-use crate::{InstalledAppCatalogEntry, InstalledAppCatalogTarget, InstalledPackageRuntimeInfo};
+use crate::{
+    InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
+    InstalledPackageRuntimeInfo,
+};
 
 use super::OS;
 use super::common::{ComGuard, OsError, decode_ansi, expand_env, to_wide_z};
@@ -223,18 +226,20 @@ fn classify_catalog_record(name: &str, raw_target: &str) -> Option<InstalledAppC
     }
 
     if raw_target.contains('!') {
-        return Some(InstalledAppCatalogEntry {
+        return Some(InstalledAppCatalogEntry::new_aumid(
             name,
-            target: InstalledAppCatalogTarget::Aumid(raw_target),
-        });
+            raw_target,
+            InstalledAppCatalogSource::WindowsAppsFolder,
+        ));
     }
 
     let path = PathBuf::from(&raw_target);
     if is_supported_absolute_exe_path(&path) {
-        return Some(InstalledAppCatalogEntry {
+        return Some(InstalledAppCatalogEntry::new_path(
             name,
-            target: InstalledAppCatalogTarget::Path(normalize_existing_windows_path(&path)),
-        });
+            normalize_existing_windows_path(&path),
+            InstalledAppCatalogSource::WindowsAppsFolder,
+        ));
     }
 
     None
@@ -360,20 +365,22 @@ fn classify_start_menu_entry(path: &Path) -> Option<InstalledAppCatalogEntry> {
 
     let extension = path.extension().and_then(|ext| ext.to_str())?;
     match extension.to_ascii_lowercase().as_str() {
-        "exe" if is_supported_absolute_exe_path(path) => Some(InstalledAppCatalogEntry {
-            name: display_name,
-            target: InstalledAppCatalogTarget::Path(normalize_existing_windows_path(path)),
-        }),
+        "exe" if is_supported_absolute_exe_path(path) => Some(InstalledAppCatalogEntry::new_path(
+            display_name,
+            normalize_existing_windows_path(path),
+            InstalledAppCatalogSource::WindowsStartMenu,
+        )),
         "lnk" => {
             let (target, args) = resolve_lnk(path).ok()?;
             if !args.is_empty() || !is_supported_absolute_exe_path(&target) {
                 return None;
             }
 
-            Some(InstalledAppCatalogEntry {
-                name: display_name,
-                target: InstalledAppCatalogTarget::Path(normalize_existing_windows_path(&target)),
-            })
+            Some(InstalledAppCatalogEntry::new_path(
+                display_name,
+                normalize_existing_windows_path(&target),
+                InstalledAppCatalogSource::WindowsStartMenu,
+            ))
         }
         _ => None,
     }
@@ -441,10 +448,11 @@ fn classify_app_paths_entry(
         return None;
     }
 
-    Some(InstalledAppCatalogEntry {
+    Some(InstalledAppCatalogEntry::new_path(
         name,
-        target: InstalledAppCatalogTarget::Path(normalize_existing_windows_path(&candidate)),
-    })
+        normalize_existing_windows_path(&candidate),
+        InstalledAppCatalogSource::WindowsAppPaths,
+    ))
 }
 
 fn app_paths_display_name(key_name: &str, default_path: &Path) -> String {
@@ -711,7 +719,10 @@ mod tests {
         target_identity,
     };
     use crate::windows::common::{ComGuard, to_wide_z};
-    use crate::{InstalledAppCatalogEntry, InstalledAppCatalogTarget, InstalledPackageRuntimeInfo};
+    use crate::{
+        InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
+        InstalledPackageRuntimeInfo,
+    };
 
     fn unique_suffix() -> String {
         let nanos = SystemTime::now()
@@ -867,12 +878,11 @@ mod tests {
 
         assert_eq!(
             entry,
-            InstalledAppCatalogEntry {
-                name: "Spotify".into(),
-                target: InstalledAppCatalogTarget::Aumid(
-                    "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into()
-                ),
-            }
+            InstalledAppCatalogEntry::new_aumid(
+                "Spotify",
+                "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
+                InstalledAppCatalogSource::WindowsAppsFolder,
+            )
         );
     }
 
@@ -886,10 +896,11 @@ mod tests {
 
         assert_eq!(
             entry,
-            InstalledAppCatalogEntry {
-                name: "Tool".into(),
-                target: InstalledAppCatalogTarget::Path(normalize_existing_windows_path(&exe_path)),
-            }
+            InstalledAppCatalogEntry::new_path(
+                "Tool",
+                normalize_existing_windows_path(&exe_path),
+                InstalledAppCatalogSource::WindowsAppsFolder,
+            )
         );
     }
 
@@ -912,10 +923,11 @@ mod tests {
 
         assert_eq!(
             entry,
-            InstalledAppCatalogEntry {
-                name: "Discord".into(),
-                target: InstalledAppCatalogTarget::Path(normalize_existing_windows_path(&exe_path)),
-            }
+            InstalledAppCatalogEntry::new_path(
+                "Discord",
+                normalize_existing_windows_path(&exe_path),
+                InstalledAppCatalogSource::WindowsAppPaths,
+            )
         );
     }
 
@@ -948,10 +960,11 @@ mod tests {
         let entry = classify_start_menu_entry(&shortcut).unwrap();
         assert_eq!(
             entry,
-            InstalledAppCatalogEntry {
-                name: "RustDesk".into(),
-                target: InstalledAppCatalogTarget::Path(normalize_existing_windows_path(&target)),
-            }
+            InstalledAppCatalogEntry::new_path(
+                "RustDesk",
+                normalize_existing_windows_path(&target),
+                InstalledAppCatalogSource::WindowsStartMenu,
+            )
         );
     }
 
@@ -1066,35 +1079,36 @@ mod tests {
         let normalized_path = normalize_existing_windows_path(&exe_path);
         let merged = merge_catalog_sources(
             vec![
-                InstalledAppCatalogEntry {
-                    name: "Spotify".into(),
-                    target: InstalledAppCatalogTarget::Aumid(
-                        "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into(),
-                    ),
-                },
-                InstalledAppCatalogEntry {
-                    name: "Friendly Discord".into(),
-                    target: InstalledAppCatalogTarget::Path(normalized_path.clone()),
-                },
+                InstalledAppCatalogEntry::new_aumid(
+                    "Spotify",
+                    "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
+                    InstalledAppCatalogSource::WindowsAppsFolder,
+                ),
+                InstalledAppCatalogEntry::new_path(
+                    "Friendly Discord",
+                    normalized_path.clone(),
+                    InstalledAppCatalogSource::WindowsAppsFolder,
+                ),
             ],
-            vec![InstalledAppCatalogEntry {
-                name: "Start Menu Discord".into(),
-                target: InstalledAppCatalogTarget::Path(normalized_path.clone()),
-            }],
+            vec![InstalledAppCatalogEntry::new_path(
+                "Start Menu Discord",
+                normalized_path.clone(),
+                InstalledAppCatalogSource::WindowsStartMenu,
+            )],
         );
         let merged = merge_catalog_sources(
             merged,
             vec![
-                InstalledAppCatalogEntry {
-                    name: "Duplicate Spotify".into(),
-                    target: InstalledAppCatalogTarget::Aumid(
-                        "spotifyab.spotifymusic_zpdnekdrzrea0!spotify".into(),
-                    ),
-                },
-                InstalledAppCatalogEntry {
-                    name: "Discord".into(),
-                    target: InstalledAppCatalogTarget::Path(exe_path),
-                },
+                InstalledAppCatalogEntry::new_aumid(
+                    "Duplicate Spotify",
+                    "spotifyab.spotifymusic_zpdnekdrzrea0!spotify",
+                    InstalledAppCatalogSource::WindowsStartMenu,
+                ),
+                InstalledAppCatalogEntry::new_path(
+                    "Discord",
+                    exe_path,
+                    InstalledAppCatalogSource::WindowsAppPaths,
+                ),
             ],
         );
 
@@ -1110,14 +1124,16 @@ mod tests {
         fs::write(&exe_path, b"stub").unwrap();
 
         let mut entries = vec![
-            InstalledAppCatalogEntry {
-                name: "Discord".into(),
-                target: InstalledAppCatalogTarget::Path(normalize_existing_windows_path(&exe_path)),
-            },
-            InstalledAppCatalogEntry {
-                name: "Discord Duplicate".into(),
-                target: InstalledAppCatalogTarget::Path(exe_path),
-            },
+            InstalledAppCatalogEntry::new_path(
+                "Discord",
+                normalize_existing_windows_path(&exe_path),
+                InstalledAppCatalogSource::WindowsStartMenu,
+            ),
+            InstalledAppCatalogEntry::new_path(
+                "Discord Duplicate",
+                exe_path,
+                InstalledAppCatalogSource::WindowsAppPaths,
+            ),
         ];
 
         dedup_catalog_entries(&mut entries);

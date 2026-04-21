@@ -40,9 +40,9 @@ Repository binaries:
 - `cpu-affinity-tool-linux` - feature-gated Linux entrypoint
 
 Current platform reality:
-- Windows is the primary and only explicitly supported, CI-validated, published platform
-- Linux code exists as a partial and experimental backend
-- Linux is not part of the current release contract
+- Windows is the primary released and explicitly supported platform
+- Linux code exists as a CI-validated desktop beta path from source for `x86_64` `glibc` desktop sessions on `X11` or `Wayland`
+- Linux also has a separate beta prerelease artifact contract under `linux-beta-v*` tags, but it is not part of the stable release contract
 - the project must not be described as a fully cross-platform desktop app
 
 ## Repository map
@@ -53,10 +53,9 @@ Key directories:
 - `src/app/runtime/` - `eframe::App` shell, `AppState` facade, `UiState`, `RuntimeRegistry`, startup wiring, monitor loops, commands, tray and window lifecycle, and view dispatch
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
 - `src/app/models/app_state_storage/` - internal persistence modules for state path resolution, storage I/O, migrations, and schema refresh; `app_state_storage.rs` remains the public storage schema and API entrypoint
-- `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, while Linux remains a single minimal backend file
+- `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, while Linux remains a single-file desktop beta backend
 - `assets/` - icon, screenshot, `cpu_presets.json`, and social-preview guidance
 - `docs/` - release/process documentation and user-facing comparison/rationale references
-- `tests/` - external tests
 - `.github/workflows/` - CI and GitHub Release automation
 - `changelogs/` - manual release notes
 
@@ -75,7 +74,8 @@ Important root files:
 - `docs/comparison.md` - comparison with Task Manager, Process Lasso, and CLI workflows
 - `docs/why.md` - rationale, limits, and non-goals of affinity management
 - `docs/release-checklist.md` - manual checklist for the current Windows-only release contract
-- `docs/release-process.md` - current tag-based Windows release process and release-notes template
+- `docs/linux-beta-release-checklist.md` - manual checklist for the Linux beta prerelease contract
+- `docs/release-process.md` - current tag-based stable Windows release flow plus Linux beta prerelease flow and release-notes template
 - `docs/release-smoke-matrix.md` - compact manual smoke reference subordinate to the release checklist
 - `docs/github-metadata.md` - manual GitHub UI metadata plan
 - `CPU_SCHEME_INSTRUCTION` - format contract for `cpu_presets.json`
@@ -122,7 +122,7 @@ Windows runtime flow:
 4. `App::new` creates `AppState`, writes startup diagnostics, starts monitor tasks, captures `HWND`, runs autorun, and initializes tray integration.
 5. `App::update` handles tray events, monitor notifications, hidden-window flow, file drops, applies theme, and renders the active view.
 
-Linux entrypoint is still much thinner and must not be described as having parity with Windows runtime behavior.
+Linux entrypoint now reaches the shared `runtime::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
 
 ## Concurrency model
 - GUI runs on the main thread
@@ -226,24 +226,23 @@ Windows release-path surface:
 - runtime-only package metadata lookup and package-local helper tracking for installed targets
 - richer process inspection
 - embedded manifest and resources
-- Windows-only CI
+- Windows release-path CI validation
 - current published release artifact
 
 Linux backend surface present in repo:
 - `/proc`-based process inspection
 - `.desktop` parsing
+- `.desktop`-based installed-app catalog discovery for the picker
+- query-matched `PATH` executable discovery for the Linux picker
 - `xdg-mime` URI lookup
 - affinity and priority via `nix` and `libc`
 
 Linux gaps:
 - no tray parity
 - no focus parity
-- no runtime wiring parity
-- no `Find Installed` parity
+- no Windows-style installed-app activation, AUMID identity, or package metadata parity
 - `os_api` is not symmetric between Windows and Linux
-- no Linux CI
-- no Linux release artifacts
-- no end-to-end validated Linux support claim
+- no Linux stable release artifacts, installer packaging, AppImage, Flatpak, or parity with the Windows stable release contract
 
 ## Dependencies and tooling
 Only list materially relevant dependencies by actual role.
@@ -278,6 +277,8 @@ Local verification commands:
 - `cargo fmt --all -- --check`
 - `cargo clippy -- -D warnings`
 - `cargo build --release`
+- `cargo test --features linux --bin cpu-affinity-tool-linux`
+- `cargo build --release --features linux --bin cpu-affinity-tool-linux`
 
 `cargo make`:
 - local developer automation wrapper around tasks like `fmt`, `lint`, `build-release`, `check`, and `release`
@@ -285,24 +286,31 @@ Local verification commands:
 - CI and GitHub Release workflows do not rely on `cargo make` as the truth source
 
 Current CI facts:
-- runner: `windows-latest`
-- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, and runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test`, and `cargo build --release`
+- runners:
+  - `windows-latest` for the Windows release-path job
+  - `ubuntu-latest` for the Linux desktop beta job
+- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, and verifies the Linux beta binary on `ubuntu-latest`
 - tests are part of the committed CI contract for `ci.yml`
 
 Current release facts:
-- GitHub Release workflow reacts to pushed tags matching `v*`
-- its Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test`, and then builds `cpu-affinity-tool.exe` in the same runner before upload
-- it publishes `cpu-affinity-tool.exe`
-- target: `x86_64-pc-windows-msvc`
-- Linux release job is still commented out or absent from the active release contract
-- installer, code signing, checksums, winget, choco, and similar distribution steps are currently absent
+- stable GitHub Release workflow reacts to pushed tags matching `v*`
+- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test`, and then builds `cpu-affinity-tool.exe` in the same runner before upload
+- the stable release workflow publishes `cpu-affinity-tool.exe`
+- stable release target: `x86_64-pc-windows-msvc`
+- Linux beta prerelease workflow reacts to pushed tags matching `linux-beta-v*`
+- the Linux beta prerelease workflow runs on `ubuntu-latest`, installs the Linux GUI build dependencies, runs `cargo fmt --all -- --check`, `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features linux --bin cpu-affinity-tool-linux`, and then builds `cpu-affinity-tool-linux`
+- the Linux beta prerelease workflow validates that `Cargo.toml` version matches the `X.Y.Z` part of the tag and that `changelogs/linux-beta-vX.Y.Z-N.txt` exists
+- the Linux beta prerelease workflow publishes `cpu-affinity-tool-linux-x86_64`, `cpu-affinity-tool-linux-x86_64.tar.gz`, and `SHA256SUMS.txt` with `prerelease: true`
+- installer packaging, AppImage, Flatpak, code signing, winget, choco, and similar distribution steps are currently absent
 
 Additional release facts:
 - `changelogs/*.txt` are maintained manually
-- GitHub Release workflow uses `changelogs/vX.Y.Z.txt` as the release body for the matching tag
+- the stable GitHub Release workflow uses `changelogs/vX.Y.Z.txt` as the release body for the matching tag
+- the Linux beta prerelease workflow uses `changelogs/linux-beta-vX.Y.Z-N.txt` as the prerelease body for the matching tag
 - release notes no longer rely on `generate_release_notes: true`
 - manual pre-release validation lives in `docs/release-checklist.md` and its subordinate `docs/release-smoke-matrix.md`
-- `docs/release-process.md` documents the current automated tag-release flow and its current artifact limits
+- manual Linux beta pre-release validation lives in `docs/linux-beta-release-checklist.md`
+- `docs/release-process.md` documents the current automated stable tag-release flow, Linux beta prerelease flow, and their current artifact limits
 - version truth is split across Git tag, `Cargo.toml`, and `changelogs/`
 - that version sync is still manual
 
@@ -330,7 +338,7 @@ Update `AGENTS.md` in the same change when you alter:
 - workflow protocol, stage rules, or review protocol documented here
 
 Truthfulness rules:
-- do not claim Linux releases exist when they do not
+- do not claim Linux stable releases, installers, AppImage, or Flatpak artifacts exist when they do not
 - do not claim CI runs tests unless committed workflows actually do
 - do not claim changelogs automatically feed GitHub Releases unless that is wired
 - do not claim full cross-platform parity
@@ -343,7 +351,8 @@ Release sync rule before pushing a release tag:
 - release and platform facts in `README.md` and `AGENTS.md`
 
 Tag discipline:
-- while the workflow matches `v*` and publishes `prerelease: false`, use only stable tags like `vX.Y.Z`
+- use stable tags like `vX.Y.Z` only for the Windows stable release workflow
+- use Linux beta tags like `linux-beta-vX.Y.Z-N` only for the Linux beta prerelease workflow
 
 Language rules:
 - all code comments must be in English

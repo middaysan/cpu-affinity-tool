@@ -82,9 +82,18 @@ impl CoreGroup {
             InstalledAppCatalogTarget::Aumid(aumid) => {
                 AppToRun::new_installed(entry.name, aumid, PriorityClass::Normal, false)
             }
-            InstalledAppCatalogTarget::Path(path) => {
-                AppToRun::new_path(path.clone(), Vec::new(), path, PriorityClass::Normal, false)
-            }
+            InstalledAppCatalogTarget::Path(path) => match OS::parse_dropped_file(path.clone()) {
+                Ok((target, args)) => {
+                    let mut app =
+                        AppToRun::new_path(path, args, target, PriorityClass::Normal, false);
+                    app.name = entry.name;
+                    app
+                }
+                Err(err) => {
+                    outcome.first_error = Some(err);
+                    return outcome;
+                }
+            },
         };
 
         self.programs.push(app_to_run);
@@ -95,6 +104,7 @@ impl CoreGroup {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
     use super::CoreGroup;
 
     #[cfg(target_os = "windows")]

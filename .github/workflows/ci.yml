@@ -17,8 +17,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Check and Build
+  windows-check:
+    name: Windows Check and Build
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -51,3 +51,50 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+  linux-beta-check:
+    name: Linux Beta Check and Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Linux GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libclang-dev \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            libs/os_api -> target
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings
+
+      - name: Run os_api tests
+        run: cargo test --manifest-path libs/os_api/Cargo.toml
+
+      - name: Run Linux binary tests
+        run: cargo test --features linux --bin cpu-affinity-tool-linux
+
+      - name: Build Linux binary
+        run: cargo build --release --features linux --bin cpu-affinity-tool-linux

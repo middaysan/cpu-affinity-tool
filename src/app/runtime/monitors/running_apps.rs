@@ -225,10 +225,14 @@ fn push_stem_name(names: &mut Vec<String>, candidate: Option<&str>) {
 
 fn push_path_stem_name(names: &mut Vec<String>, path: Option<&Path>) {
     let stem = path
-        .and_then(|path| path.file_name())
-        .and_then(|file_name| file_name.to_str())
-        .and_then(|name| name.split('.').next());
-    push_stem_name(names, stem);
+        .map(|path| path.to_string_lossy())
+        .and_then(|path| {
+            path.rsplit(['/', '\\'])
+                .find(|segment| !segment.is_empty())
+                .map(|segment| segment.to_string())
+        })
+        .and_then(|name| name.split('.').next().map(|stem| stem.to_string()));
+    push_stem_name(names, stem.as_deref());
 }
 
 fn build_name_to_pids(snapshot: &ProcessSnapshot) -> HashMap<String, Vec<u32>> {
