@@ -2,9 +2,10 @@
 
 Windows utility for managing CPU affinity of games and background applications.
 
-- Primary released platform: Windows
-- Linux desktop beta: source build only on `x86_64` `glibc` desktop sessions with `X11` or `Wayland`
-- Official download artifact: Windows only
+- Primary stable released platform: Windows
+- Linux desktop beta: source build on `x86_64` `glibc` desktop sessions with `X11` or `Wayland`, plus prerelease artifacts under `linux-beta-v*` tags
+- Stable download artifact: Windows only
+- Linux beta prereleases: [GitHub Releases](https://github.com/middaysan/cpu-affinity-tool/releases)
 - Download: [Latest Release](https://github.com/middaysan/cpu-affinity-tool/releases/latest)
 - License: [MIT](./LICENSE)
 
@@ -104,7 +105,7 @@ It overlaps with a narrower part of that use case. CPU Affinity Tool is a focuse
 
 ### Is Linux or macOS supported?
 
-Windows is the only published release artifact today. Linux has a desktop beta path from source for `x86_64` `glibc` systems running a normal desktop session on `X11` or `Wayland`, but there is still no official Linux release artifact. macOS is not supported.
+Windows is the only stable published release artifact today. Linux has a desktop beta path from source for `x86_64` `glibc` systems running a normal desktop session on `X11` or `Wayland`, and Linux beta prereleases are published separately under `linux-beta-v*` tags. There is still no stable Linux release, installer, AppImage, or Flatpak. macOS is not supported.
 
 ### Where is the configuration stored?
 
@@ -160,7 +161,8 @@ Linux beta notes:
 - supported target: `x86_64` Linux with `glibc`
 - expected environment: desktop session on `X11` or `Wayland`
 - Debian/Ubuntu-like systems may need `libclang-dev libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev` before building
-- current Linux path is CI-validated for build/test, but not published as a release artifact
+- Linux beta prereleases are published separately under `linux-beta-v*` tags as a raw binary, `tar.gz`, and `SHA256SUMS.txt`
+- Linux still does not have a stable published release artifact
 - tray/taskbar/focus behavior still does not have Windows parity
 
 Useful verification commands:
