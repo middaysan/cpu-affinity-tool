@@ -1,0 +1,35 @@
+## [1.2.1] - 2026-04-21
+
+### Added
+- **Broader Windows app discovery**:
+  - Added Start Menu shortcut discovery to **Find Installed** alongside the existing `AppsFolder` and `App Paths` sources.
+  - Added recursive scanning of the user and common Start Menu `Programs` folders for launch-safe `.lnk` and `.exe` entries.
+
+### Changed
+- **Installed app discovery precedence**:
+  - `Find Installed` now merges `AppsFolder`, Start Menu shortcuts, and `App Paths`.
+  - Duplicate targets are deduplicated by target identity, with display-name precedence `AppsFolder > Start Menu > App Paths`.
+- **Installed app picker UI**:
+  - Picker rows now use a full-width selectable layout with the app name centered and the detail shown on a second, lighter line.
+  - The installed-app list keeps long details inside the row instead of pushing content outside the visible layout.
+
+### Fixed
+- Fixed missed desktop apps such as RustDesk that were available through Start Menu shortcuts but absent from both `AppsFolder` and `App Paths`.
+- Fixed noisy Start Menu discovery by filtering obvious uninstall, remove, and repair shortcuts.
+- Fixed potential broken installed entries from shortcuts that require launch arguments by excluding them from the discovery list.
+
+### Testing
+- Verified local gates:
+  - `cargo fmt --all -- --check`
+  - `cargo clippy -- -D warnings`
+  - `cargo test --manifest-path libs/os_api/Cargo.toml`
+  - `cargo test`
+  - `cargo build --release`
+- Added and extended Windows `os_api` tests for:
+  - Start Menu shortcut classification
+  - uninstall shortcut filtering
+  - merged installed-catalog precedence and dedup behavior
+
+### Notes
+- This release remains **Windows-only** in terms of supported, CI-validated, published artifacts.
+- If a Windows app is still not shown in **Find Installed**, **Open App** remains the explicit fallback path.

@@ -58,7 +58,7 @@ The main benefit is better control over where CPU time goes. In CPU-limited situ
 - **Core groups**: Save groups of CPU cores for different tasks
 - **App launch rules**: Start apps with a chosen core group and process priority
 - **Open App**: Add normal `.exe`, `.lnk`, or `.url` targets from disk
-- **Find Installed**: Add supported installed Windows apps from the Start-based app list
+- **Find Installed**: Add supported installed Windows apps from the `AppsFolder + Start Menu shortcuts + App Paths` subset
 - **Automatic monitoring**: Re-apply affinity and priority if an app changes them
 - **Autorun**: Start selected apps automatically with the tool
 - **Drag and drop**: Drop an app or shortcut into the window to add it quickly

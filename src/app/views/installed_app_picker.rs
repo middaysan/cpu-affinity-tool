@@ -1,6 +1,6 @@
 use crate::app::runtime::AppState;
 use eframe::egui::{
-    self, Align, CentralPanel, Context, Key, Layout, RichText, ScrollArea, TextEdit,
+    self, Align, CentralPanel, Context, Key, Layout, RichText, ScrollArea, Stroke, TextEdit,
 };
 
 enum InstalledAppPickerAction {
@@ -88,15 +88,40 @@ pub fn draw_installed_app_picker(app: &mut AppState, ctx: &Context) {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for row in &snapshot.rows {
-                    let response = ui
-                        .horizontal(|ui| {
-                            let select = ui.selectable_label(row.selected, &row.name);
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(&row.detail).small().weak());
-                            });
-                            select
-                        })
-                        .inner;
+                    let visuals = ui.visuals();
+                    let fill = if row.selected {
+                        visuals.selection.bg_fill
+                    } else {
+                        visuals.widgets.inactive.bg_fill
+                    };
+                    let stroke = if row.selected {
+                        visuals.selection.stroke
+                    } else {
+                        Stroke::new(1.0, visuals.widgets.inactive.bg_stroke.color)
+                    };
+
+                    let frame = egui::Frame::new()
+                        .fill(fill)
+                        .stroke(stroke)
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .inner_margin(egui::Margin::symmetric(8, 3));
+
+                    let inner = frame.show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new(&row.name).size(12.0));
+                            ui.add_space(0.3);
+                            ui.add(
+                                egui::Label::new(RichText::new(&row.detail).small().weak()).wrap(),
+                            );
+                        });
+                    });
+
+                    let response = ui.interact(
+                        inner.response.rect,
+                        egui::Id::new(("installed_app_picker_row", row.entry_index)),
+                        egui::Sense::click(),
+                    );
 
                     if response.clicked() {
                         actions.push(InstalledAppPickerAction::SelectEntry(row.entry_index));
@@ -105,6 +130,8 @@ pub fn draw_installed_app_picker(app: &mut AppState, ctx: &Context) {
                         actions.push(InstalledAppPickerAction::SelectEntry(row.entry_index));
                         actions.push(InstalledAppPickerAction::ConfirmSelection);
                     }
+
+                    ui.add_space(1.0);
                 }
             });
 
