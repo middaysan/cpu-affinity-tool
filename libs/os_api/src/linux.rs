@@ -519,4 +519,12 @@ impl OS {
     ) -> Result<InstalledPackageRuntimeInfo, String> {
         Err("Installed package metadata is not supported on Linux".into())
     }
+
+    pub fn open_directory(path: &Path) -> Result<(), String> {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to open directory '{}': {}", path.display(), e))
+    }
 }

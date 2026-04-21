@@ -668,6 +668,15 @@ impl OS {
         )
     }
 
+    pub fn open_directory(path: &Path) -> Result<(), String> {
+        let target = normalize_existing_windows_path(path);
+        Command::new("explorer.exe")
+            .arg(&target)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to open directory '{}': {}", target.display(), e))
+    }
+
     pub fn resolve_installed_package_runtime_info(
         aumid: &str,
     ) -> Result<InstalledPackageRuntimeInfo, String> {

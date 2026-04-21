@@ -9,10 +9,25 @@ mod tests;
 use crate::app::models::core_group::CoreGroup;
 use crate::app::models::cpu_schema::CpuSchema;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Current version of the application state schema.
 pub const CURRENT_APP_STATE_VERSION: u32 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateStorageMode {
+    LegacySidecar,
+    PlatformData,
+}
+
+impl StateStorageMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StateStorageMode::LegacySidecar => "Legacy sidecar",
+            StateStorageMode::PlatformData => "Platform data",
+        }
+    }
+}
 
 /// Storage for persistent application state that can be serialized to and deserialized from JSON.
 /// This structure is responsible for saving and loading the application state between sessions.
@@ -60,5 +75,13 @@ impl AppStateStorage {
     pub fn try_save_state(&self) -> Result<(), Box<dyn std::error::Error>> {
         let path = state_path::get_state_path();
         self.save_to_path(&path)
+    }
+
+    pub fn active_data_dir() -> PathBuf {
+        state_path::get_state_dir()
+    }
+
+    pub fn active_storage_mode() -> StateStorageMode {
+        state_path::get_state_storage_mode()
     }
 }

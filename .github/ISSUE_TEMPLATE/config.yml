@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Support and diagnostics guide
+    url: https://github.com/middaysan/cpu-affinity-tool/blob/main/SUPPORT.md
+    about: Read the support guide before opening an issue and check what environment details to include.
+  - name: Security policy
+    url: https://github.com/middaysan/cpu-affinity-tool/blob/main/SECURITY.md
+    about: Please report security issues privately and do not post them in public issues.
+

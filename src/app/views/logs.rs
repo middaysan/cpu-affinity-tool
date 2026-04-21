@@ -5,6 +5,13 @@ use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
 
 pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {
     let mut clear_logs = false;
+    let mut open_data_folder = false;
+    let data_dir = app.active_data_dir();
+    let hover = format!(
+        "Open {} folder\n{}",
+        app.active_storage_mode().as_str(),
+        data_dir.display()
+    );
 
     CentralPanel::default().show(ctx, |ui| {
         ui.horizontal(|ui| {
@@ -15,6 +22,9 @@ pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {
                 }
                 if ui.button("Clear Logs").clicked() {
                     clear_logs = true;
+                }
+                if ui.button("Open Data Folder").on_hover_text(hover).clicked() {
+                    open_data_folder = true;
                 }
             });
         });
@@ -33,5 +43,9 @@ pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {
 
     if clear_logs {
         app.clear_logs();
+    }
+
+    if open_data_folder {
+        app.open_active_data_dir();
     }
 }

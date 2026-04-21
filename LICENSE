@@ -1,24 +1,21 @@
-# CPU Affinity Tool License
+MIT License
 
-Copyright (c) 2025 CPU Affinity Tool Author
+Copyright (c) 2025 middaysan
 
-## Non-Commercial Use License
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-This software and associated documentation files (the "Software") may be used for non-commercial purposes only. Non-commercial purposes include personal use, research, education, and other activities that do not generate direct or indirect commercial advantage.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-## Commercial Use Restrictions
-
-For any commercial use of this Software, including but not limited to:
-- Using the Software in a commercial product
-- Using the Software to provide commercial services
-- Using the Software within a commercial organization to support its operations
-
-You must contact the author for explicit permission and licensing terms. Commercial use without prior written permission is strictly prohibited.
-
-Contact information: midda7@gmail.com
-
-## General Terms
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-All redistributions of the Software must retain this license notice and copyright information.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

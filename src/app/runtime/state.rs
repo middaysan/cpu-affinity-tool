@@ -1,7 +1,7 @@
 use crate::app::models::cpu_schema::CpuSchema;
 use crate::app::models::{
     effective_total_threads, AddAppsOutcome, AppRuntimeKey, AppStateStorage, AppStatus, AppToRun,
-    LogManager,
+    LogManager, StateStorageMode,
 };
 use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::runtime::commands::{apps, groups, launch, preferences};
@@ -641,6 +641,24 @@ impl AppState {
 
     pub fn clear_logs(&mut self) {
         self.log_manager.clear();
+    }
+
+    pub fn active_data_dir(&self) -> PathBuf {
+        AppStateStorage::active_data_dir()
+    }
+
+    pub fn active_storage_mode(&self) -> StateStorageMode {
+        AppStateStorage::active_storage_mode()
+    }
+
+    pub fn open_active_data_dir(&mut self) {
+        let data_dir = self.active_data_dir();
+        if let Err(err) = os_api::OS::open_directory(&data_dir) {
+            self.log_manager.add_important_sticky_once(format!(
+                "ERROR: Failed to open data folder '{}': {err}",
+                data_dir.display()
+            ));
+        }
     }
 
     fn filtered_installed_app_entry_indices(&self) -> Vec<usize> {

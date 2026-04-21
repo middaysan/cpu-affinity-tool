@@ -1,0 +1,102 @@
+name: Bug Report
+description: Report a reproducible problem with CPU Affinity Tool on Windows.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please provide a clear and reproducible report. CPU Affinity Tool is currently a Windows-first project, so Windows environment details matter.
+
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: Short description of the problem.
+      placeholder: Affinity settings are not re-applied after the game spawns helper processes
+    validations:
+      required: true
+
+  - type: input
+    id: app_version
+    attributes:
+      label: App version
+      description: The CPU Affinity Tool version you are using.
+      placeholder: 1.2.1
+    validations:
+      required: true
+
+  - type: input
+    id: windows_version
+    attributes:
+      label: Windows version
+      description: Include the Windows edition and build if possible.
+      placeholder: Windows 11 24H2 (build 26100)
+    validations:
+      required: true
+
+  - type: input
+    id: cpu_model
+    attributes:
+      label: CPU model
+      description: The processor model of the affected machine.
+      placeholder: AMD Ryzen 7 7800X3D
+    validations:
+      required: true
+
+  - type: dropdown
+    id: target_add_method
+    attributes:
+      label: How was the target added?
+      options:
+        - Open App
+        - Find Installed
+        - Drag and drop
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: Reproduction steps
+      description: List the exact steps needed to reproduce the problem.
+      placeholder: |
+        1. Start CPU Affinity Tool as administrator
+        2. Add the target with Find Installed
+        3. Enable monitoring
+        4. Launch the target
+        5. Observe that priority resets after startup
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      placeholder: The configured affinity and priority stay applied while monitoring is enabled.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Actual behavior
+      placeholder: The process launches, but the priority resets to Normal after a helper process starts.
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots_logs
+    attributes:
+      label: Screenshots or logs
+      description: Paste log output or attach screenshots if available.
+      placeholder: Include any relevant log lines, screenshots, or short clips.
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Anything else that may help with diagnosis.
+

@@ -3,6 +3,8 @@ name = "cpu-affinity-tool"
 version = "1.2.1"
 edition = "2021"
 default-run = "cpu-affinity-tool"
+description = "Windows utility for managing CPU affinity of games and background applications."
+license = "MIT"
 
 [package.metadata.winres]
 manifest = "app.manifest"

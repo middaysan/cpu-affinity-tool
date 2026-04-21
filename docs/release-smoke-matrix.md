@@ -28,5 +28,5 @@ Confirm that the shipped Windows binary starts correctly, applies its core launc
 - If launch failures happen only for shortcuts or URI handlers, verify the target machine has the expected handler installed and registered.
 - If `.url` coverage is not applicable on the smoke machine, mark the scenario as not applicable and note the missing handler explicitly in the release validation notes.
 - If tray restore fails, verify that the app is still alive in Task Manager before retrying; a dead process is release-blocking, a one-off interaction miss should be reproduced before classification.
-- If saved state appears missing after restart, verify the binary is still using the expected `state.json` next to `current_exe()`.
+- If saved state appears missing after restart, verify the binary is using the expected active state path: the legacy sidecar `state.json` next to the executable if it already exists, otherwise the platform data directory.
 - If UAC behavior differs from expectation, re-check `app.manifest`, the built artifact, and any packaging step that might have replaced resources.

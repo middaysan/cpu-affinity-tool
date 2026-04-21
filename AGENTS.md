@@ -54,20 +54,30 @@ Key directories:
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
 - `src/app/models/app_state_storage/` - internal persistence modules for state path resolution, storage I/O, migrations, and schema refresh; `app_state_storage.rs` remains the public storage schema and API entrypoint
 - `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, while Linux remains a single minimal backend file
-- `assets/` - icon, screenshot, and `cpu_presets.json`
-- `docs/` - release and process documentation, including the current checklist
+- `assets/` - icon, screenshot, `cpu_presets.json`, and social-preview guidance
+- `docs/` - release/process documentation and user-facing comparison/rationale references
 - `tests/` - external tests
 - `.github/workflows/` - CI and GitHub Release automation
 - `changelogs/` - manual release notes
 
 Important root files:
 - `Cargo.toml` - package metadata, binaries, features, dependencies
+- `LICENSE` - MIT license
 - `build.rs` - Windows resource embedding and rebuild hooks
 - `app.manifest` - embedded Windows manifest with elevated privilege model
 - `Makefile.toml` - local developer automation wrapper
 - `README.md` - user-facing project description
+- `CHANGELOG.md` - consolidated human-facing release history
+- `CONTRIBUTING.md` - contribution workflow and review expectations
+- `SECURITY.md` - private security reporting policy
+- `SUPPORT.md` - support routing and diagnostics expectations
+- `.github/ISSUE_TEMPLATE/` - structured issue intake for bugs and feature requests
+- `docs/comparison.md` - comparison with Task Manager, Process Lasso, and CLI workflows
+- `docs/why.md` - rationale, limits, and non-goals of affinity management
 - `docs/release-checklist.md` - manual checklist for the current Windows-only release contract
+- `docs/release-process.md` - current tag-based Windows release process and release-notes template
 - `docs/release-smoke-matrix.md` - compact manual smoke reference subordinate to the release checklist
+- `docs/github-metadata.md` - manual GitHub UI metadata plan
 - `CPU_SCHEME_INSTRUCTION` - format contract for `cpu_presets.json`
 
 ## Runtime architecture
@@ -138,7 +148,11 @@ State split:
 - `AppStateStorage` is the persisted JSON schema
 
 Persisted state facts:
-- `state.json` path is derived from `current_exe()`, so persisted state follows the binary directory
+- if `state.json` already exists next to the current executable, that legacy sidecar path remains the active persisted state location for the whole run
+- otherwise the default persisted state location is platform-correct:
+  - Windows: `%LOCALAPPDATA%\CpuAffinityTool\state.json`
+  - Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/cpu-affinity-tool/state.json`
+- there is no automatic migration or copy between the legacy sidecar path and the platform data path
 - current persisted schema version: `5`
 - older formats are migrated on load
 - backup rotation uses `state.json.old`, `state.json.old1`, `state.json.old2`, and so on
@@ -182,6 +196,7 @@ Data source separation:
 - process launch
 - installed-app discovery and activation on Windows
 - installed package metadata lookup on Windows
+- opening the active data directory in the platform file manager
 - affinity read and set
 - priority read and set
 - process inspection and process-tree logic
@@ -287,6 +302,7 @@ Additional release facts:
 - GitHub Release workflow uses `changelogs/vX.Y.Z.txt` as the release body for the matching tag
 - release notes no longer rely on `generate_release_notes: true`
 - manual pre-release validation lives in `docs/release-checklist.md` and its subordinate `docs/release-smoke-matrix.md`
+- `docs/release-process.md` documents the current automated tag-release flow and its current artifact limits
 - version truth is split across Git tag, `Cargo.toml`, and `changelogs/`
 - that version sync is still manual
 

@@ -1,0 +1,44 @@
+name: Feature Request
+description: Propose a focused improvement for CPU Affinity Tool.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the problem first. Feature requests are easier to evaluate when they stay focused and explain the intended workflow clearly.
+
+  - type: textarea
+    id: problem_statement
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve?
+      placeholder: I want an easier way to inspect which helper processes were matched to an installed app target.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed solution
+      description: What behavior would you like to see?
+      placeholder: Add a small per-app view that lists tracked helper processes and their current status.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What have you tried already, or what other options would work?
+      placeholder: I can inspect the logs today, but it is slow and easy to miss the relevant entries.
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Add screenshots, workflow notes, or other context if it helps.
+

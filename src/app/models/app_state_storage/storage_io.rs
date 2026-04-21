@@ -10,6 +10,9 @@ pub(super) fn save_to_path<T: Serialize>(
     value: &T,
     path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let json = serde_json::to_string_pretty(value)?;
     std::fs::write(path, json)?;
     Ok(())

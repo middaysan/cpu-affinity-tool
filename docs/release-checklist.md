@@ -3,6 +3,7 @@
 This repository currently releases a Windows-only desktop binary.
 Linux backend code exists in the repository, but it is not part of the current CI or release contract.
 Use this checklist as the primary release doc. Use `docs/release-smoke-matrix.md` as the compact manual smoke reference for the actual Windows release path.
+Use `docs/release-process.md` for the current automated tag-release flow and release-notes template.
 
 ## Before Tagging
 

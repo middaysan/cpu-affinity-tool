@@ -1,92 +1,171 @@
 # CPU Affinity Tool
 
-**Split games and background apps across different CPU core groups on Windows.**
+Windows utility for managing CPU affinity of games and background applications.
 
-CPU Affinity Tool helps you decide which CPU cores your programs can use. This is called **CPU affinity**: instead of letting every app fight for the same CPU time, you choose where each app should run.
-
-This is especially useful on modern CPUs with different kinds of cores or multiple chiplets. You can keep a game on one group of cores and move browsers, Discord, launchers, overlays, or other background apps to another.
+- Officially supported platform: Windows
+- Download: [Latest Release](https://github.com/middaysan/cpu-affinity-tool/releases/latest)
+- License: [MIT](./LICENSE)
 
 ![CPU Affinity Tool main window](assets/screenshot.png)
 
-[Download the latest release](https://github.com/middaysan/cpu-affinity-tool/releases/latest) | [Browse all releases](https://github.com/middaysan/cpu-affinity-tool/releases)
+## What problem it solves
 
-## Why this tool exists
+Games, browsers, launchers, Discord, overlays, recording tools, and work apps can compete for the same CPU time. Windows can handle many workloads well on its own, but some systems behave better when the foreground workload and background workload are kept apart.
 
-When a game and your background apps use the same CPU resources, they can get in each other's way. That can show up as stutter, uneven frame times, or sudden dips when your CPU is the bottleneck.
+CPU Affinity Tool lets you save and apply repeatable launch rules instead of reopening Task Manager or re-running command-line commands every time.
 
-Modern processors make this more noticeable:
+It is meant to give you explicit control over:
 
-- some CPUs have different types of cores
-- some CPUs split cores across multiple chiplets or CCDs
-- some systems simply feel better when foreground work and background work stay apart
+- which CPU cores an app can use
+- which priority class an app starts with
+- whether those settings should be re-applied while the app is running
 
-CPU Affinity Tool gives you a simple way to make that split yourself.
+This is a control tool, not a promise of better FPS.
 
-## Best for
+## Who this is for
 
-- PCs with hybrid CPUs, such as performance and efficiency cores
-- multi-chiplet or multi-CCD CPUs
-- games that are limited by the CPU more than the GPU
-- setups where a game runs alongside browsers, Discord, launchers, recording tools, or work apps
-
-## What it helps with
-
-- Keep a game on one group of cores and background apps on another
-- Reduce CPU contention between the app you care about and everything else
-- Launch apps with saved core and priority rules
-- Re-apply settings automatically if a program changes them while running
-- Keep separate layouts for gaming, work, streaming, or everyday use
-
-## What to expect
-
-This is **not** a magic FPS button. Some PCs and games will show little difference, and results depend on your CPU, the game, and what is running in the background.
-
-The main benefit is better control over where CPU time goes. In CPU-limited situations, that can mean:
-
-- fewer sudden dips
-- smoother frame-time behavior
-- more consistent performance when background apps are active
-
-## Quick start
-
-1. Create a core group for the apps you want to isolate, such as `Game Cores` or `Background Cores`.
-2. Add apps to that group with **Open App**, **Find Installed**, or drag and drop.
-3. Launch the app from the tool and keep monitoring enabled if you want settings to be restored automatically while it runs.
+- Gamers who keep browsers, Discord, launchers, overlays, or recording tools open in the background
+- Users with hybrid CPUs, multi-chiplet CPUs, or other workloads where core placement matters
+- Users who want repeatable launch rules instead of one-off Task Manager changes
+- Users who want saved affinity and priority rules for a fixed set of games or applications
 
 ## Features
 
-- **Core groups**: Save groups of CPU cores for different tasks
-- **App launch rules**: Start apps with a chosen core group and process priority
-- **Open App**: Add normal `.exe`, `.lnk`, or `.url` targets from disk
-- **Find Installed**: Add supported installed Windows apps from the `AppsFolder + Start Menu shortcuts + App Paths` subset
-- **Automatic monitoring**: Re-apply affinity and priority if an app changes them
-- **Autorun**: Start selected apps automatically with the tool
-- **Drag and drop**: Drop an app or shortcut into the window to add it quickly
-- **Logs**: See launch and setting events in the built-in history view
-- **Themes**: Light, dark, or system theme
+- Save CPU core groups for different workloads
+- Launch apps with saved affinity and priority rules
+- Add apps from `.exe`, `.lnk`, and `.url` targets with **Open App**
+- Add supported installed Windows apps with **Find Installed**
+- Re-apply affinity and priority while monitoring is enabled
+- Autorun selected apps with the tool
+- Add targets by drag and drop
+- Inspect launch and monitoring activity in the built-in log view
+- Open the active data folder directly from the log screen
+- Switch between light, dark, and system theme modes
 
-## Typical examples
+## When it helps
 
-- **Gaming layout**: Put the game on one core group and move the browser, Discord, launchers, and update tools to another
-- **Work layout**: Keep a heavy work app on one group and leave the rest of the system on another
-- **Streaming or recording layout**: Separate the game from background tools that would otherwise compete for CPU time
-- **Multi-chiplet setup**: Keep the main app on one chiplet or CCD and background load on another
+- A game is CPU-bound and background apps are competing for the same cores
+- You have heavy background activity such as browsers, voice chat, launchers, or recording tools
+- Your CPU layout is asymmetric or segmented, such as hybrid-core or multi-chiplet designs
+- You want a repeatable launch layout that stays consistent across runs
 
-## Requirements and limitations
+## When it does not
 
-- Windows is the only supported and published platform today
-- Current releases publish `cpu-affinity-tool.exe`
-- The app requires administrator rights, so Windows will normally show a UAC prompt on launch
-- The repository also contains a Linux entrypoint, but that path is still experimental and is not part of the supported release
-- If an installed Windows app is not listed in **Find Installed**, use **Open App** instead
+- The real bottleneck is the GPU
+- Your background load is already light enough that contention is negligible
+- The game or application does not respond well to affinity pinning
+- Windows scheduling already behaves well for your workload
 
-For release-process details, see [docs/release-checklist.md](docs/release-checklist.md).
+For a longer explanation, see [docs/why.md](docs/why.md).
 
-## Download
+## Quick Start
 
-- [Latest Windows release](https://github.com/middaysan/cpu-affinity-tool/releases/latest)
-- [All releases](https://github.com/middaysan/cpu-affinity-tool/releases)
+1. Download the latest Windows release and run `cpu-affinity-tool.exe`.
+2. Accept the UAC prompt. The current Windows build requires administrator rights.
+3. Create a CPU core group for the workload you want to isolate.
+4. Add an app with **Open App**, **Find Installed**, or drag and drop.
+5. Set the desired affinity and priority, then save the rule.
+6. Launch the app from the tool and keep monitoring enabled if you want settings re-applied automatically.
 
-## License
+## Comparison
 
-This project is licensed for non-commercial use. You may use it for free for personal purposes. For commercial use, please contact the author.
+| Tool | Saved launch rules | Monitoring / re-apply | Complexity | Best fit |
+| --- | --- | --- | --- | --- |
+| CPU Affinity Tool | Yes | Yes | Low | Focused Windows affinity workflows with saved rules |
+| Task Manager | No | No | Low | One-off manual changes |
+| Process Lasso | Yes | Yes | Medium | Broader third-party process automation on Windows |
+| PowerShell / CLI methods | Script-dependent | Script-dependent | High | Users who want fully manual or scripted control |
+
+See [docs/comparison.md](docs/comparison.md) for a fuller breakdown.
+
+## FAQ
+
+### Does it improve FPS?
+
+Not by itself. It can help when CPU contention is real, but it is not a guaranteed FPS booster.
+
+### Does it work for every game?
+
+No. Some games benefit, some show little change, and some do not react well to manual affinity pinning.
+
+### Do I need administrator privileges?
+
+Yes. The current Windows release is built with `requireAdministrator`, so you should expect a UAC prompt on launch.
+
+### Can Windows or the application override affinity settings?
+
+Yes. Some applications or helper processes may change affinity or priority after launch. That is why the tool includes monitoring and re-apply behavior.
+
+### Is this an alternative to Process Lasso?
+
+It overlaps with a narrower part of that use case. CPU Affinity Tool is a focused Windows utility for saved affinity and priority workflows, not a full replacement for every Process Lasso feature.
+
+### Is Linux or macOS supported?
+
+No official Linux or macOS release is currently supported. The repository contains an experimental Linux path, but only Windows is officially supported and released at the moment.
+
+### Where is the configuration stored?
+
+If `state.json` already exists next to the executable, the app keeps using that legacy sidecar file. Otherwise, new Windows installs default to `%LOCALAPPDATA%\CpuAffinityTool\state.json`.
+
+## Troubleshooting
+
+### The app I want is not listed in Find Installed
+
+Use **Open App** instead. The installed-app picker is a launch-safe Windows subset, not a full inventory of every app on the system.
+
+### Affinity or priority is not applied
+
+- Make sure you launched the target from CPU Affinity Tool
+- Keep monitoring enabled if the app changes settings after launch
+- Verify that you accepted the UAC prompt and the tool is running elevated
+
+### The application overrides the configured settings
+
+Some applications spawn helper processes or reset their own settings. Monitoring is designed to correct that, but it may not cover every application behavior.
+
+### Windows security software or antivirus prompts appear
+
+The current release is a Windows executable that requests elevation. Verify that you downloaded it from the official release page and that the prompt matches the expected executable path.
+
+### Shortcut or launch path behavior looks wrong
+
+Try **Open App** with the direct executable path. For installed apps, try **Find Installed** first and fall back to **Open App** if the target is not listed correctly.
+
+## Build from source
+
+Supported build target for the official product path:
+
+- Windows
+- Rust stable toolchain
+
+Basic release build:
+
+```bash
+cargo build --release --bin cpu-affinity-tool
+```
+
+Useful verification commands:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy -- -D warnings
+cargo test --manifest-path libs/os_api/Cargo.toml
+cargo test
+cargo build --release
+```
+
+Expected Windows artifact:
+
+```text
+target/release/cpu-affinity-tool.exe
+```
+
+For release-process details, see [docs/release-process.md](docs/release-process.md).
+
+## Contributing, Support, Security, License
+
+- Contributing guide: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Support and diagnostics: [SUPPORT.md](SUPPORT.md)
+- Security reporting: [SECURITY.md](SECURITY.md)
+- License: [LICENSE](LICENSE)
