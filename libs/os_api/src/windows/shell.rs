@@ -879,7 +879,7 @@ mod tests {
             entry,
             InstalledAppCatalogEntry {
                 name: "Tool".into(),
-                target: InstalledAppCatalogTarget::Path(exe_path),
+                target: InstalledAppCatalogTarget::Path(normalize_existing_windows_path(&exe_path)),
             }
         );
     }
