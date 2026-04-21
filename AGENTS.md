@@ -233,6 +233,7 @@ Linux backend surface present in repo:
 - `/proc`-based process inspection
 - `.desktop` parsing
 - `.desktop`-based installed-app catalog discovery for the picker
+- query-matched `PATH` executable discovery for the Linux picker
 - `xdg-mime` URI lookup
 - affinity and priority via `nix` and `libc`
 

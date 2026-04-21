@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -13,7 +14,10 @@ use nix::sched::{CpuSet, sched_getaffinity, sched_setaffinity};
 use nix::unistd::Pid;
 
 use crate::PriorityClass;
-use crate::{InstalledAppCatalogEntry, InstalledAppCatalogTarget, InstalledPackageRuntimeInfo};
+use crate::{
+    InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
+    InstalledPackageRuntimeInfo,
+};
 
 pub struct OS;
 
@@ -169,6 +173,46 @@ impl OS {
 
         Self::resolve_non_absolute_command(command)
             .ok_or_else(|| format!("failed to resolve executable '{command}'"))
+    }
+
+    fn sort_catalog_entries(entries: &mut [InstalledAppCatalogEntry]) {
+        entries.sort_by_cached_key(|entry| {
+            (
+                entry.source.picker_priority(),
+                entry.name.to_lowercase(),
+                entry.detail.to_lowercase(),
+            )
+        });
+    }
+
+    fn desktop_entry_identity(entry: &InstalledAppCatalogEntry) -> Option<String> {
+        match &entry.target {
+            InstalledAppCatalogTarget::Path(path) => Some(format!(
+                "{}|{}",
+                entry.name.to_lowercase(),
+                path.to_string_lossy().to_lowercase()
+            )),
+            InstalledAppCatalogTarget::Aumid(_) => None,
+        }
+    }
+
+    fn path_entry_identity(entry: &InstalledAppCatalogEntry) -> Option<String> {
+        match &entry.target {
+            InstalledAppCatalogTarget::Path(path) => Some(format!(
+                "{}|{}",
+                entry.name.to_lowercase(),
+                path.to_string_lossy().to_lowercase()
+            )),
+            InstalledAppCatalogTarget::Aumid(_) => None,
+        }
+    }
+
+    fn desktop_and_path_match_identity(entry: &InstalledAppCatalogEntry) -> String {
+        format!(
+            "{}|{}",
+            entry.name.to_lowercase(),
+            entry.detail.to_lowercase()
+        )
     }
 
     fn strip_exec_field_codes(token: &str) -> Option<String> {
@@ -362,6 +406,7 @@ impl OS {
         }
 
         push_dir(PathBuf::from("/var/lib/flatpak/exports/share/applications"));
+        push_dir(PathBuf::from("/var/lib/snapd/desktop/applications"));
 
         dirs
     }
@@ -387,6 +432,173 @@ impl OS {
                 output.push(path);
             }
         }
+    }
+
+    fn path_search_dirs_from(path_var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        let mut seen = HashSet::new();
+
+        let Some(path_var) = path_var else {
+            return dirs;
+        };
+
+        for dir in env::split_paths(path_var) {
+            if seen.insert(dir.clone()) {
+                dirs.push(dir);
+            }
+        }
+
+        dirs
+    }
+
+    fn path_search_dirs() -> Vec<PathBuf> {
+        Self::path_search_dirs_from(env::var_os("PATH").as_deref())
+    }
+
+    fn is_executable_file(path: &Path) -> bool {
+        let Ok(metadata) = fs::metadata(path) else {
+            return false;
+        };
+
+        metadata.is_file() && (metadata.permissions().mode() & 0o111 != 0)
+    }
+
+    fn collect_path_executables(dir: &Path, output: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if Self::is_executable_file(&path) {
+                output.push(path);
+            }
+        }
+    }
+
+    fn path_entry_display_name(path: &Path) -> Option<String> {
+        let file_name = path.file_name()?.to_str()?.trim();
+        if file_name.is_empty() {
+            return None;
+        }
+
+        let stem = Path::new(file_name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::trim)
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or(file_name);
+
+        Some(stem.to_string())
+    }
+
+    fn list_desktop_catalog_entries() -> Vec<InstalledAppCatalogEntry> {
+        let mut desktop_files = Vec::new();
+        for dir in Self::desktop_file_search_dirs() {
+            Self::collect_desktop_files(&dir, &mut desktop_files);
+        }
+
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+
+        for desktop_file in desktop_files {
+            let Ok(content) = fs::read_to_string(&desktop_file) else {
+                continue;
+            };
+            let Ok(entry) = Self::parse_desktop_entry(&content) else {
+                continue;
+            };
+
+            if entry.hidden || entry.no_display {
+                continue;
+            }
+
+            if entry
+                .entry_type
+                .as_deref()
+                .is_some_and(|value| !value.eq_ignore_ascii_case("Application"))
+            {
+                continue;
+            }
+
+            let Ok((resolved_target, _args)) = Self::desktop_exec_to_target(&entry.exec) else {
+                continue;
+            };
+
+            let catalog_entry = InstalledAppCatalogEntry::new_path(
+                entry.name,
+                desktop_file,
+                InstalledAppCatalogSource::LinuxDesktopEntry,
+            )
+            .with_detail(resolved_target.display().to_string());
+
+            let Some(identity) = Self::desktop_entry_identity(&catalog_entry) else {
+                continue;
+            };
+            if seen.insert(identity) {
+                entries.push(catalog_entry);
+            }
+        }
+
+        Self::sort_catalog_entries(&mut entries);
+        entries
+    }
+
+    fn list_path_catalog_entries_from_dirs(dirs: &[PathBuf]) -> Vec<InstalledAppCatalogEntry> {
+        let mut executable_paths = Vec::new();
+        for dir in dirs {
+            Self::collect_path_executables(&dir, &mut executable_paths);
+        }
+
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+
+        for executable_path in executable_paths {
+            let Some(name) = Self::path_entry_display_name(&executable_path) else {
+                continue;
+            };
+
+            let catalog_entry = InstalledAppCatalogEntry::new_path(
+                name,
+                executable_path,
+                InstalledAppCatalogSource::LinuxPathExecutable,
+            );
+
+            let Some(identity) = Self::path_entry_identity(&catalog_entry) else {
+                continue;
+            };
+            if seen.insert(identity) {
+                entries.push(catalog_entry);
+            }
+        }
+
+        Self::sort_catalog_entries(&mut entries);
+        entries
+    }
+
+    fn list_path_catalog_entries() -> Vec<InstalledAppCatalogEntry> {
+        let dirs = Self::path_search_dirs();
+        Self::list_path_catalog_entries_from_dirs(&dirs)
+    }
+
+    fn merge_catalog_sources(
+        primary: Vec<InstalledAppCatalogEntry>,
+        secondary: Vec<InstalledAppCatalogEntry>,
+    ) -> Vec<InstalledAppCatalogEntry> {
+        let mut identities: HashSet<String> = primary
+            .iter()
+            .map(Self::desktop_and_path_match_identity)
+            .collect();
+        let mut merged = primary;
+
+        for entry in secondary {
+            if identities.insert(Self::desktop_and_path_match_identity(&entry)) {
+                merged.push(entry);
+            }
+        }
+
+        Self::sort_catalog_entries(&mut merged);
+        merged
     }
 
     fn find_desktop_file_by_name(file_name: &str) -> Option<PathBuf> {
@@ -622,55 +834,9 @@ impl OS {
     }
 
     pub fn list_supported_start_apps() -> Result<Vec<InstalledAppCatalogEntry>, String> {
-        let mut desktop_files = Vec::new();
-        for dir in Self::desktop_file_search_dirs() {
-            Self::collect_desktop_files(&dir, &mut desktop_files);
-        }
-
-        let mut entries = Vec::new();
-        let mut seen = HashSet::new();
-
-        for desktop_file in desktop_files {
-            let Ok(content) = fs::read_to_string(&desktop_file) else {
-                continue;
-            };
-            let Ok(entry) = Self::parse_desktop_entry(&content) else {
-                continue;
-            };
-
-            if entry.hidden || entry.no_display {
-                continue;
-            }
-
-            if entry
-                .entry_type
-                .as_deref()
-                .is_some_and(|value| !value.eq_ignore_ascii_case("Application"))
-            {
-                continue;
-            }
-
-            if Self::desktop_exec_to_target(&entry.exec).is_err() {
-                continue;
-            }
-
-            let identity = format!(
-                "{}|{}",
-                entry.name.to_lowercase(),
-                desktop_file.to_string_lossy().to_lowercase()
-            );
-            if !seen.insert(identity) {
-                continue;
-            }
-
-            entries.push(InstalledAppCatalogEntry {
-                name: entry.name,
-                target: InstalledAppCatalogTarget::Path(desktop_file),
-            });
-        }
-
-        entries.sort_by_cached_key(|entry| entry.name.to_lowercase());
-        Ok(entries)
+        let desktop_entries = Self::list_desktop_catalog_entries();
+        let path_entries = Self::list_path_catalog_entries();
+        Ok(Self::merge_catalog_sources(desktop_entries, path_entries))
     }
 
     pub fn activate_application(_aumid: &str) -> Result<u32, String> {
@@ -699,6 +865,33 @@ impl OS {
 #[cfg(test)]
 mod tests {
     use super::OS;
+    use crate::{InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_suffix() -> String {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string()
+    }
+
+    struct TempDirGuard(PathBuf);
+
+    impl TempDirGuard {
+        fn new(path: PathBuf) -> Self {
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn test_strip_exec_field_codes_handles_desktop_placeholders() {
@@ -727,5 +920,72 @@ mod tests {
                 "--title=Hello".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_desktop_file_search_dirs_include_snap_launchers() {
+        let dirs = OS::desktop_file_search_dirs();
+        assert!(dirs.contains(&PathBuf::from("/var/lib/snapd/desktop/applications")));
+    }
+
+    #[test]
+    fn test_list_path_catalog_entries_only_keeps_executable_files() {
+        let unique = unique_suffix();
+        let temp_dir = std::env::temp_dir().join(format!("codex-linux-path-{unique}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let _guard = TempDirGuard::new(temp_dir.clone());
+
+        let executable = temp_dir.join("steam");
+        fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        let mut executable_permissions = fs::metadata(&executable).unwrap().permissions();
+        executable_permissions.set_mode(0o755);
+        fs::set_permissions(&executable, executable_permissions).unwrap();
+
+        let not_executable = temp_dir.join("notes.txt");
+        fs::write(&not_executable, b"hello").unwrap();
+
+        let subdir = temp_dir.join("nested");
+        fs::create_dir_all(&subdir).unwrap();
+
+        let entries = OS::list_path_catalog_entries_from_dirs(std::slice::from_ref(&temp_dir));
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "steam");
+        assert_eq!(
+            entries[0].source,
+            InstalledAppCatalogSource::LinuxPathExecutable
+        );
+        assert_eq!(
+            entries[0].target,
+            InstalledAppCatalogTarget::Path(executable.clone())
+        );
+        assert_eq!(entries[0].detail, executable.display().to_string());
+    }
+
+    #[test]
+    fn test_merge_catalog_sources_keeps_desktop_entry_before_path_duplicate() {
+        let desktop = InstalledAppCatalogEntry::new_path(
+            "Steam",
+            PathBuf::from("/usr/share/applications/steam.desktop"),
+            InstalledAppCatalogSource::LinuxDesktopEntry,
+        )
+        .with_detail("/usr/bin/steam");
+        let duplicate_path = InstalledAppCatalogEntry::new_path(
+            "Steam",
+            PathBuf::from("/usr/bin/steam"),
+            InstalledAppCatalogSource::LinuxPathExecutable,
+        );
+        let extra_path = InstalledAppCatalogEntry::new_path(
+            "steamcmd",
+            PathBuf::from("/usr/bin/steamcmd"),
+            InstalledAppCatalogSource::LinuxPathExecutable,
+        );
+
+        let merged =
+            OS::merge_catalog_sources(vec![desktop.clone()], vec![duplicate_path, extra_path]);
+
+        assert_eq!(merged.len(), 2);
+        assert!(merged.contains(&desktop));
+        assert!(merged.iter().any(|entry| entry.name == "steamcmd"));
     }
 }

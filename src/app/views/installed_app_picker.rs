@@ -25,7 +25,7 @@ fn installed_app_picker_heading() -> (&'static str, &'static str) {
 fn installed_app_picker_heading() -> (&'static str, &'static str) {
     (
         "Find Installed App",
-        "Browse apps discovered from .desktop entries on this Linux system.",
+        "Browse apps discovered from desktop entries. Typing a search also surfaces matching executables from PATH.",
     )
 }
 
@@ -161,7 +161,7 @@ pub fn draw_installed_app_picker(app: &mut AppState, ctx: &Context) {
         ui.add_space(8.0);
         ui.label(
             RichText::new(
-                "If the app is not listed, use Open App with the direct path or launcher file.",
+                "If the app is not listed, use Open App with the direct path, launcher file, or portable binary.",
             )
             .small()
             .weak()

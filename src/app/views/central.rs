@@ -76,7 +76,7 @@ fn installed_app_hover_text() -> &'static str {
 
 #[cfg(target_os = "linux")]
 fn installed_app_hover_text() -> &'static str {
-    "Find apps from .desktop entries on this system"
+    "Find apps from desktop entries and matching PATH executables"
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]

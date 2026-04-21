@@ -6,7 +6,7 @@ use crate::app::models::{
 use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::runtime::commands::{apps, groups, launch, preferences};
 use crate::app::runtime::{RuntimeRegistry, UiState};
-use os_api::{InstalledAppCatalogEntry, InstalledAppCatalogTarget};
+use os_api::InstalledAppCatalogEntry;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, RwLock};
@@ -438,9 +438,10 @@ impl AppState {
             .into_iter()
             .map(|entry_index| {
                 let entry = &picker.entries[entry_index];
-                let detail = match &entry.target {
-                    InstalledAppCatalogTarget::Aumid(aumid) => format!("Installed app ({aumid})"),
-                    InstalledAppCatalogTarget::Path(path) => path.display().to_string(),
+                let detail = if entry.detail.trim().is_empty() {
+                    entry.source.label().to_string()
+                } else {
+                    format!("{} • {}", entry.source.label(), entry.detail)
                 };
 
                 InstalledAppPickerRowSnapshot {
@@ -667,20 +668,51 @@ impl AppState {
 
     fn filtered_installed_app_entry_indices(&self) -> Vec<usize> {
         let query = self.ui.installed_app_picker.query.trim().to_lowercase();
-
-        self.ui
+        let mut matches: Vec<(usize, (usize, usize, String, String))> = self
+            .ui
             .installed_app_picker
             .entries
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                if query.is_empty() || entry.name.to_lowercase().contains(&query) {
-                    Some(index)
-                } else {
-                    None
-                }
+                Self::installed_app_query_sort_key(entry, &query).map(|key| (index, key))
             })
-            .collect()
+            .collect();
+
+        matches.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+        matches.into_iter().map(|(index, _)| index).collect()
+    }
+
+    fn installed_app_query_sort_key(
+        entry: &InstalledAppCatalogEntry,
+        query: &str,
+    ) -> Option<(usize, usize, String, String)> {
+        let name = entry.name.to_lowercase();
+        let detail = entry.detail.to_lowercase();
+
+        if query.is_empty() {
+            if entry.source.hide_until_query() {
+                return None;
+            }
+
+            return Some((0, entry.source.picker_priority(), name, detail));
+        }
+
+        let match_rank = if name == query {
+            0
+        } else if name.starts_with(query) {
+            1
+        } else if name.contains(query) {
+            2
+        } else if detail.starts_with(query) {
+            3
+        } else if detail.contains(query) {
+            4
+        } else {
+            return None;
+        };
+
+        Some((match_rank, entry.source.picker_priority(), name, detail))
     }
 
     fn normalize_installed_app_picker_selection(&mut self) {
@@ -723,7 +755,7 @@ mod tests {
     use crate::app::navigation::{GroupRoute, WindowRoute};
     use crate::app::runtime::{RuntimeRegistry, UiState};
     use os_api::PriorityClass;
-    use os_api::{InstalledAppCatalogEntry, InstalledAppCatalogTarget};
+    use os_api::{InstalledAppCatalogEntry, InstalledAppCatalogSource};
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
 
@@ -934,16 +966,16 @@ mod tests {
     fn test_installed_app_picker_open_query_navigation_and_close() {
         let mut app = sample_state();
         app.ui.installed_app_picker.entries = vec![
-            InstalledAppCatalogEntry {
-                name: "Spotify".into(),
-                target: InstalledAppCatalogTarget::Aumid(
-                    "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into(),
-                ),
-            },
-            InstalledAppCatalogEntry {
-                name: "Steam".into(),
-                target: InstalledAppCatalogTarget::Aumid("ValveCorporation.Steam!Steam".into()),
-            },
+            InstalledAppCatalogEntry::new_aumid(
+                "Spotify",
+                "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
+                InstalledAppCatalogSource::WindowsAppsFolder,
+            ),
+            InstalledAppCatalogEntry::new_aumid(
+                "Steam",
+                "ValveCorporation.Steam!Steam",
+                InstalledAppCatalogSource::WindowsAppsFolder,
+            ),
         ];
 
         app.open_installed_app_picker(0);
@@ -979,12 +1011,11 @@ mod tests {
     #[test]
     fn test_confirm_selected_installed_app_adds_entry_and_saves_once() {
         let mut app = sample_state();
-        app.ui.installed_app_picker.entries = vec![InstalledAppCatalogEntry {
-            name: "Spotify".into(),
-            target: InstalledAppCatalogTarget::Aumid(
-                "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into(),
-            ),
-        }];
+        app.ui.installed_app_picker.entries = vec![InstalledAppCatalogEntry::new_aumid(
+            "Spotify",
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
+            InstalledAppCatalogSource::WindowsAppsFolder,
+        )];
 
         app.open_installed_app_picker(0);
         assert!(app.confirm_selected_installed_app());
@@ -1012,12 +1043,11 @@ mod tests {
     fn test_leaving_picker_route_clears_session_but_keeps_cached_entries() {
         let mut app = sample_state();
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.ui.installed_app_picker.entries = vec![InstalledAppCatalogEntry {
-            name: "Spotify".into(),
-            target: InstalledAppCatalogTarget::Aumid(
-                "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into(),
-            ),
-        }];
+        app.ui.installed_app_picker.entries = vec![InstalledAppCatalogEntry::new_aumid(
+            "Spotify",
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
+            InstalledAppCatalogSource::WindowsAppsFolder,
+        )];
         app.open_installed_app_picker(0);
         app.ui.installed_app_picker.query = "spot".into();
         app.ui.installed_app_picker.last_error = Some("boom".into());
@@ -1033,5 +1063,64 @@ mod tests {
         assert!(!app.ui.installed_app_picker.is_refreshing);
         assert!(app.ui.installed_app_picker.refresh_rx.is_none());
         assert_eq!(app.ui.installed_app_picker.entries.len(), 1);
+    }
+
+    #[test]
+    fn test_linux_path_entries_stay_hidden_until_query() {
+        let mut app = sample_state();
+        app.ui.installed_app_picker.entries = vec![
+            InstalledAppCatalogEntry::new_path(
+                "Steam",
+                PathBuf::from("/usr/share/applications/steam.desktop"),
+                InstalledAppCatalogSource::LinuxDesktopEntry,
+            )
+            .with_detail("/usr/bin/steam"),
+            InstalledAppCatalogEntry::new_path(
+                "steamcmd",
+                PathBuf::from("/usr/bin/steamcmd"),
+                InstalledAppCatalogSource::LinuxPathExecutable,
+            ),
+        ];
+
+        app.open_installed_app_picker(0);
+        let snapshot = app.build_installed_app_picker_snapshot();
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows[0].name, "Steam");
+
+        app.set_installed_app_picker_query("steam".into());
+        let snapshot = app.build_installed_app_picker_snapshot();
+        assert_eq!(snapshot.rows.len(), 2);
+        assert_eq!(snapshot.rows[0].name, "Steam");
+        assert_eq!(snapshot.rows[1].name, "steamcmd");
+    }
+
+    #[test]
+    fn test_installed_app_picker_ranks_exact_before_prefix_and_detail_matches() {
+        let mut app = sample_state();
+        app.ui.installed_app_picker.entries = vec![
+            InstalledAppCatalogEntry::new_path(
+                "code",
+                PathBuf::from("/usr/bin/code"),
+                InstalledAppCatalogSource::LinuxPathExecutable,
+            ),
+            InstalledAppCatalogEntry::new_path(
+                "code-server",
+                PathBuf::from("/usr/bin/code-server"),
+                InstalledAppCatalogSource::LinuxPathExecutable,
+            ),
+            InstalledAppCatalogEntry::new_path(
+                "Visual Studio",
+                PathBuf::from("/usr/share/applications/code.desktop"),
+                InstalledAppCatalogSource::LinuxDesktopEntry,
+            )
+            .with_detail("/usr/bin/code"),
+        ];
+
+        app.open_installed_app_picker(0);
+        app.set_installed_app_picker_query("code".into());
+
+        let snapshot = app.build_installed_app_picker_snapshot();
+        let names: Vec<String> = snapshot.rows.into_iter().map(|row| row.name).collect();
+        assert_eq!(names, vec!["code", "code-server", "Visual Studio"]);
     }
 }

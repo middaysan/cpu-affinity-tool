@@ -37,7 +37,7 @@ This is a control tool, not a promise of better FPS.
 - Save CPU core groups for different workloads
 - Launch apps with saved affinity and priority rules
 - Add apps from direct paths and launcher files with **Open App**
-- Add supported installed apps with **Find Installed** (`Start`-backed entries on Windows, `.desktop` entries on Linux beta)
+- Add supported installed apps with **Find Installed** (`Start`-backed entries on Windows, desktop entries plus matching `PATH` executables during search on Linux beta)
 - Re-apply affinity and priority while monitoring is enabled
 - Autorun selected apps with the tool
 - Add targets by drag and drop
@@ -115,7 +115,7 @@ If `state.json` already exists next to the executable, the app keeps using that 
 
 ### The app I want is not listed in Find Installed
 
-Use **Open App** instead. On Windows, **Find Installed** is a launch-safe subset of Start-backed apps. On Linux beta, it depends on available `.desktop` entries and may miss apps without a launcher file.
+Use **Open App** instead. On Windows, **Find Installed** is a launch-safe subset of Start-backed apps. On Linux beta, it primarily uses desktop entries and only surfaces matching `PATH` executables when you search, so it may still miss portable apps or targets outside normal launcher and shell paths.
 
 ### Affinity or priority is not applied
 

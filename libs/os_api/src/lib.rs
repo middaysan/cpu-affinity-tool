@@ -1,7 +1,8 @@
 mod catalog;
 mod process;
 pub use catalog::{
-    InstalledAppCatalogEntry, InstalledAppCatalogTarget, InstalledPackageRuntimeInfo,
+    InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
+    InstalledPackageRuntimeInfo,
 };
 pub use process::PriorityClass;
 
