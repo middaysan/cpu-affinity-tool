@@ -263,10 +263,7 @@ impl AppToRun {
     }
 
     pub fn primary_process_name(&self) -> Option<String> {
-        let name = self
-            .bin_path()?
-            .file_name()
-            .map(|name| name.to_string_lossy().trim().to_string())?;
+        let name = path_file_name_lossy(self.bin_path()?)?;
         (!name.is_empty()).then_some(name)
     }
 
@@ -384,6 +381,7 @@ pub fn normalize_process_name(candidate: &str) -> String {
 fn path_file_name_lossy(path: &Path) -> Option<String> {
     let raw = path.to_string_lossy();
     raw.rsplit(['/', '\\'])
+        .map(str::trim)
         .find(|segment| !segment.is_empty())
         .map(|segment| segment.to_string())
 }
