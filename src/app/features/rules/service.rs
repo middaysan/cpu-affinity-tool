@@ -211,6 +211,29 @@ pub fn remove_rule_from_group(
     None
 }
 
+pub fn move_rule_between_groups(
+    state: &mut AppStateStorage,
+    source_group_index: usize,
+    source_rule_index: usize,
+    target_group_index: usize,
+) -> Option<AppToRun> {
+    if source_group_index == target_group_index
+        || source_group_index >= state.groups.len()
+        || target_group_index >= state.groups.len()
+        || source_rule_index >= state.groups[source_group_index].programs.len()
+    {
+        return None;
+    }
+
+    let moved = state.groups[source_group_index]
+        .programs
+        .remove(source_rule_index);
+    state.groups[target_group_index]
+        .programs
+        .push(moved.clone());
+    Some(moved)
+}
+
 fn selected_cores(core_selection: &[bool]) -> Vec<usize> {
     core_selection
         .iter()

@@ -113,9 +113,9 @@ fn expected_migrated_cpu_schema(clusters: Vec<Vec<usize>>) -> CpuSchema {
     }
 }
 
-fn persist_explicit_v6_upgrade(state: &mut AppStateStorage, state_path: &Path) {
+fn persist_explicit_current_schema_upgrade(state: &mut AppStateStorage, state_path: &Path) {
     let rules = RulesContext::from_storage(state);
-    state.mark_ready_for_v6_save(rules.to_persisted_identities());
+    state.mark_ready_for_current_schema_save(rules.to_persisted_identities());
     state.try_save_to_path(state_path).unwrap();
 }
 
@@ -155,8 +155,8 @@ fn test_backup_rotation() {
 }
 
 #[test]
-fn test_load_v6_state_keeps_current_schema_without_rewrite() {
-    with_temp_state_path("v6_current", |state_path| {
+fn test_load_v7_state_keeps_current_schema_without_rewrite() {
+    with_temp_state_path("v7_current", |state_path| {
         let serialized = serde_json::to_string_pretty(&current_schema_state()).unwrap();
         fs::write(state_path, &serialized).unwrap();
 
@@ -165,6 +165,52 @@ fn test_load_v6_state_keeps_current_schema_without_rewrite() {
 
         assert_eq!(loaded.version, CURRENT_APP_STATE_VERSION);
         assert_eq!(persisted, serialized);
+    });
+}
+
+#[test]
+fn test_load_v7_state_respects_empty_tracked_process_names() {
+    with_temp_state_path("v7_empty_tracked_names", |state_path| {
+        let mut state = sample_state();
+        state.groups[0].programs[0].additional_processes.clear();
+        let serialized = serde_json::to_string_pretty(&state).unwrap();
+        fs::write(state_path, &serialized).unwrap();
+
+        let loaded = AppStateStorage::load_from_path(state_path);
+
+        assert!(loaded.groups[0].programs[0].additional_processes.is_empty());
+        assert_eq!(fs::read_to_string(state_path).unwrap(), serialized);
+    });
+}
+
+#[test]
+fn test_load_v6_state_backfills_primary_process_name_until_explicit_v7_save() {
+    with_temp_state_path("v6_tracked_name_backfill", |state_path| {
+        let mut state = sample_state_with_version(6);
+        state.groups[0].programs[0].additional_processes.clear();
+        let original = serde_json::to_string_pretty(&state).unwrap();
+        fs::write(state_path, &original).unwrap();
+
+        let mut loaded = AppStateStorage::load_from_path(state_path);
+
+        assert_eq!(loaded.version, 6);
+        assert_eq!(loaded.loaded_version, 6);
+        assert!(!loaded.pending_pre_v6_backup);
+        assert_eq!(
+            loaded.groups[0].programs[0].additional_processes,
+            vec!["Sample.exe".to_string()]
+        );
+        assert_eq!(fs::read_to_string(state_path).unwrap(), original);
+
+        persist_explicit_current_schema_upgrade(&mut loaded, state_path);
+        let persisted: Value =
+            serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
+        assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
+        assert_eq!(
+            persisted["groups"][0]["programs"][0]["additional_processes"],
+            json!(["Sample.exe"])
+        );
+        assert!(!state_path.with_file_name("state.json.pre-v6").exists());
     });
 }
 
@@ -207,7 +253,7 @@ fn test_load_v5_generic_state_refreshes_when_cpu_model_is_known_without_rewrite(
 }
 
 #[test]
-fn test_load_v3_state_migrates_in_memory_until_explicit_v6_save() {
+fn test_load_v3_state_migrates_in_memory_until_explicit_current_schema_save() {
     with_temp_state_path("v3_migration", |state_path| {
         let mut value = serde_json::to_value(sample_state_with_version(3)).unwrap();
         value["version"] = json!(3);
@@ -230,17 +276,20 @@ fn test_load_v3_state_migrates_in_memory_until_explicit_v6_save() {
         assert_eq!(loaded.version, 5);
         assert_eq!(loaded.loaded_version, 3);
         assert!(loaded.pending_pre_v6_backup);
-        assert!(loaded.groups[0].programs[0].additional_processes.is_empty());
+        assert_eq!(
+            loaded.groups[0].programs[0].additional_processes,
+            vec!["Sample.exe".to_string()]
+        );
         assert!(!state_path.with_file_name("state.json.old").exists());
         assert_eq!(fs::read_to_string(state_path).unwrap(), original);
 
-        persist_explicit_v6_upgrade(&mut loaded, state_path);
+        persist_explicit_current_schema_upgrade(&mut loaded, state_path);
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
         assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
         assert_eq!(
             persisted["groups"][0]["programs"][0]["additional_processes"],
-            json!([])
+            json!(["Sample.exe"])
         );
         assert!(persisted["rule_identities"].is_object());
         assert_eq!(
@@ -251,8 +300,8 @@ fn test_load_v3_state_migrates_in_memory_until_explicit_v6_save() {
 }
 
 #[test]
-fn test_load_v4_state_migrates_path_targets_losslessly_until_explicit_v6_save() {
-    with_temp_state_path("v4_to_v6_path_targets", |state_path| {
+fn test_load_v4_state_migrates_path_targets_losslessly_until_explicit_current_schema_save() {
+    with_temp_state_path("v4_to_current_path_targets", |state_path| {
         let legacy_v4 = json!({
             "version": 4,
             "groups": [{
@@ -304,11 +353,11 @@ fn test_load_v4_state_migrates_path_targets_losslessly_until_explicit_v6_save() 
         );
         assert_eq!(
             loaded.groups[0].programs[0].additional_processes,
-            vec!["sample_helper.exe".to_string()]
+            vec!["sample_helper.exe".to_string(), "Sample.exe".to_string()]
         );
         assert_eq!(fs::read_to_string(state_path).unwrap(), original);
 
-        persist_explicit_v6_upgrade(&mut loaded, state_path);
+        persist_explicit_current_schema_upgrade(&mut loaded, state_path);
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
         assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
@@ -337,7 +386,7 @@ fn test_build_generic_clusters_preserves_order_and_labels() {
 }
 
 #[test]
-fn test_load_v2_state_migrates_in_memory_until_explicit_v6_save() {
+fn test_load_v2_state_migrates_in_memory_until_explicit_current_schema_save() {
     with_temp_state_path("v2_migration", |state_path| {
         let legacy_v2 = json!({
             "version": 2,
@@ -371,7 +420,7 @@ fn test_load_v2_state_migrates_in_memory_until_explicit_v6_save() {
         assert!(!state_path.with_file_name("state.json.old").exists());
         assert_eq!(fs::read_to_string(state_path).unwrap(), original);
 
-        persist_explicit_v6_upgrade(&mut loaded, state_path);
+        persist_explicit_current_schema_upgrade(&mut loaded, state_path);
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
         assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
@@ -389,7 +438,7 @@ fn test_load_v2_state_migrates_in_memory_until_explicit_v6_save() {
 }
 
 #[test]
-fn test_load_legacy_state_defaults_monitor_flag_until_explicit_v6_save() {
+fn test_load_legacy_state_defaults_monitor_flag_until_explicit_current_schema_save() {
     with_temp_state_path("legacy_migration", |state_path| {
         let legacy = json!({
             "groups": [{
@@ -420,7 +469,7 @@ fn test_load_legacy_state_defaults_monitor_flag_until_explicit_v6_save() {
         assert!(!state_path.with_file_name("state.json.old").exists());
         assert_eq!(fs::read_to_string(state_path).unwrap(), original);
 
-        persist_explicit_v6_upgrade(&mut loaded, state_path);
+        persist_explicit_current_schema_upgrade(&mut loaded, state_path);
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
         assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
@@ -438,8 +487,8 @@ fn test_load_legacy_state_defaults_monitor_flag_until_explicit_v6_save() {
 }
 
 #[test]
-fn test_explicit_v5_save_upgrades_to_v6_and_persists_rule_identities() {
-    with_temp_state_path("v5_explicit_upgrade", |state_path| {
+fn test_explicit_v5_save_upgrades_to_current_schema_and_persists_rule_identities() {
+    with_temp_state_path("v5_explicit_current_upgrade", |state_path| {
         let v5_state = current_schema_state_with_version(5);
         let original = serde_json::to_string_pretty(&v5_state).unwrap();
         fs::write(state_path, &original).unwrap();
@@ -450,7 +499,7 @@ fn test_explicit_v5_save_upgrades_to_v6_and_persists_rule_identities() {
         assert!(loaded.pending_pre_v6_backup);
         assert!(loaded.rule_identities.is_none());
 
-        persist_explicit_v6_upgrade(&mut loaded, state_path);
+        persist_explicit_current_schema_upgrade(&mut loaded, state_path);
 
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();

@@ -29,6 +29,7 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     let version_check: VersionCheck = serde_json::from_str(data).ok()?;
 
     match version_check.version {
+        Some(7) => load_v7(data, path),
         Some(6) => load_v6(data, path),
         Some(5) => load_v5(data, path),
         Some(4) => load_v4(data, path),
@@ -38,15 +39,23 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     }
 }
 
+fn load_v7(data: &str, _path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    Some(state.finalize_load(7, false))
+}
+
 fn load_v6(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    state.backfill_tracked_process_names();
     Some(state.finalize_load(6, false))
 }
 
 fn load_v5(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    state.backfill_tracked_process_names();
     Some(state.finalize_load(5, true))
 }
 
@@ -55,6 +64,7 @@ fn load_v4(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     state.version = 5;
     state.rule_identities = None;
+    state.backfill_tracked_process_names();
     Some(state.finalize_load(4, true))
 }
 
@@ -62,6 +72,7 @@ fn load_v3(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
     state.version = 5;
     state.rule_identities = None;
+    state.backfill_tracked_process_names();
     Some(state.finalize_load(3, true))
 }
 
@@ -83,6 +94,7 @@ fn load_v2(data: &str, _path: &Path) -> Option<AppStateStorage> {
     };
 
     schema_refresh::refresh_migrated_schema(&mut migrated);
+    migrated.backfill_tracked_process_names();
     Some(migrated.finalize_load(2, true))
 }
 
@@ -104,6 +116,7 @@ fn load_legacy(data: &str, _path: &Path) -> Option<AppStateStorage> {
     };
 
     schema_refresh::refresh_migrated_schema(&mut migrated);
+    migrated.backfill_tracked_process_names();
     Some(migrated.finalize_load(0, true))
 }
 

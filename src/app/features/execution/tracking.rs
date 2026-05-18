@@ -3,7 +3,9 @@ use crate::app::features::execution::{
     resolve_installed_package_runtime_info_cached, InstalledPackageTrackingState,
 };
 use crate::app::features::rules::RulesContext;
-use crate::app::models::{AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, RunningApps};
+use crate::app::models::{
+    normalize_process_name, AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, RunningApps,
+};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::events::ShellEvent;
 use os_api::{InstalledPackageRuntimeInfo, OS};
@@ -21,7 +23,8 @@ struct ProcessSnapshot {
 #[derive(Debug, Clone)]
 enum ConfiguredProgramMatcher {
     Path {
-        names: Vec<String>,
+        primary_name: Option<String>,
+        fallback_names: Vec<String>,
         bin_path: PathBuf,
     },
     Installed {
@@ -166,13 +169,21 @@ fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgram
         for program in group.rules {
             let matcher = match &program.app.launch_target {
                 LaunchTarget::Path { bin_path, .. } => {
-                    let names = collect_path_candidate_names(&program.app);
-                    if names.is_empty() {
+                    let tracked_names = collect_tracked_process_names(&program.app);
+                    if tracked_names.is_empty() {
                         continue;
                     }
+                    let primary_name = program.app.primary_process_name_normalized();
+                    let fallback_names = tracked_names
+                        .iter()
+                        .filter(|name| Some(*name) != primary_name.as_ref())
+                        .cloned()
+                        .collect();
 
                     ConfiguredProgramMatcher::Path {
-                        names,
+                        primary_name: primary_name
+                            .filter(|primary| tracked_names.iter().any(|name| name == primary)),
+                        fallback_names,
                         bin_path: bin_path.clone(),
                     }
                 }
@@ -184,7 +195,7 @@ fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgram
             programs.push(ConfiguredProgramSnapshot {
                 key: program.app.get_key(),
                 display_name: program.app.name.clone(),
-                additional_processes_normalized: collect_additional_process_names(&program.app),
+                additional_processes_normalized: collect_tracked_process_names(&program.app),
                 matcher,
                 group_id: group.id.clone(),
                 rule_id: program.id,
@@ -195,69 +206,34 @@ fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgram
     programs
 }
 
-fn collect_path_candidate_names(program: &AppToRun) -> Vec<String> {
-    let mut names = Vec::new();
-
-    push_stem_name(&mut names, Some(program.name.as_str()));
-    push_path_stem_name(&mut names, program.bin_path());
-    push_path_stem_name(&mut names, program.dropped_path());
-
-    names
-}
-
-fn collect_additional_process_names(program: &AppToRun) -> Vec<String> {
+fn collect_tracked_process_names(program: &AppToRun) -> Vec<String> {
     let mut names = Vec::new();
 
     for process_name in &program.additional_processes {
-        push_stem_name(&mut names, Some(process_name));
+        push_process_name(&mut names, process_name);
     }
 
     names
 }
 
-fn push_stem_name(names: &mut Vec<String>, candidate: Option<&str>) {
-    let Some(candidate) = candidate else {
-        return;
-    };
-
+fn push_process_name(names: &mut Vec<String>, candidate: &str) {
     let normalized = normalize_process_name(candidate);
     if !normalized.is_empty() && !names.contains(&normalized) {
         names.push(normalized);
     }
 }
 
-fn push_path_stem_name(names: &mut Vec<String>, path: Option<&Path>) {
-    let stem = path
-        .map(|path| path.to_string_lossy())
-        .and_then(|path| {
-            path.rsplit(['/', '\\'])
-                .find(|segment| !segment.is_empty())
-                .map(|segment| segment.to_string())
-        })
-        .and_then(|name| name.split('.').next().map(|stem| stem.to_string()));
-    push_stem_name(names, stem.as_deref());
-}
-
 fn build_name_to_pids(snapshot: &ProcessSnapshot) -> HashMap<String, Vec<u32>> {
     let mut name_to_pids: HashMap<String, Vec<u32>> = HashMap::new();
 
     for (&pid, full_name) in &snapshot.names {
-        let name = full_name.split('.').next().unwrap_or("").to_lowercase();
+        let name = normalize_process_name(full_name);
         if !name.is_empty() {
             name_to_pids.entry(name).or_default().push(pid);
         }
     }
 
     name_to_pids
-}
-
-fn normalize_process_name(candidate: &str) -> String {
-    candidate
-        .split('.')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase()
 }
 
 fn build_aumid_to_seed_pids<O: RunningAppsOs>(
@@ -283,32 +259,28 @@ fn collect_path_verified_pids<O: RunningAppsOs>(
     name_to_pids: &HashMap<String, Vec<u32>>,
     os: &O,
 ) -> Vec<u32> {
-    let ConfiguredProgramMatcher::Path { names, bin_path } = matcher else {
+    let ConfiguredProgramMatcher::Path {
+        primary_name,
+        bin_path,
+        ..
+    } = matcher
+    else {
+        return Vec::new();
+    };
+    let Some(primary_name) = primary_name else {
         return Vec::new();
     };
 
     let mut verified_pids = Vec::new();
 
-    for name in names {
-        let target_lower = name.to_lowercase();
-
-        for (process_name, pids) in name_to_pids {
-            if !process_name.starts_with(&target_lower) {
+    if let Some(pids) = name_to_pids.get(primary_name) {
+        for &pid in pids {
+            if verified_pids.contains(&pid) {
                 continue;
             }
 
-            for &pid in pids {
-                if verified_pids.contains(&pid) {
-                    continue;
-                }
-
-                if process_name == &target_lower {
-                    if let Ok(image_path) = os.get_process_image_path(pid) {
-                        if path_eq_case_insensitive(&image_path, bin_path) {
-                            verified_pids.push(pid);
-                        }
-                    }
-                } else {
+            if let Ok(image_path) = os.get_process_image_path(pid) {
+                if path_eq_case_insensitive(&image_path, bin_path) {
                     verified_pids.push(pid);
                 }
             }
@@ -401,16 +373,10 @@ fn extend_with_named_processes(
     name_to_pids: &HashMap<String, Vec<u32>>,
 ) {
     for process_name in additional_processes {
-        if process_name.is_empty() {
-            continue;
-        }
-
-        for (candidate_name, pids) in name_to_pids {
-            if candidate_name.starts_with(process_name) {
-                for &pid in pids {
-                    if !tracked_pids.contains(&pid) {
-                        tracked_pids.push(pid);
-                    }
+        if let Some(pids) = name_to_pids.get(process_name) {
+            for &pid in pids {
+                if !tracked_pids.contains(&pid) {
+                    tracked_pids.push(pid);
                 }
             }
         }
@@ -455,13 +421,9 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
         let was_tracked = apps.apps.contains_key(&key);
 
         let mut detected_pids = match &configured.matcher {
-            ConfiguredProgramMatcher::Path { .. } => {
+            ConfiguredProgramMatcher::Path { fallback_names, .. } => {
                 let mut pids = collect_path_verified_pids(&configured.matcher, name_to_pids, os);
-                extend_with_named_processes(
-                    &mut pids,
-                    &configured.additional_processes_normalized,
-                    name_to_pids,
-                );
+                extend_with_named_processes(&mut pids, fallback_names, name_to_pids);
                 pids
             }
             ConfiguredProgramMatcher::Installed { aumid } => {
@@ -527,16 +489,17 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                 }
             }
 
-            if matches!(
-                &configured.matcher,
-                ConfiguredProgramMatcher::Installed { .. }
-            ) || !configured.additional_processes_normalized.is_empty()
-            {
-                extend_with_named_processes(
-                    &mut app.pids,
-                    &configured.additional_processes_normalized,
-                    name_to_pids,
-                );
+            match &configured.matcher {
+                ConfiguredProgramMatcher::Path { fallback_names, .. } => {
+                    extend_with_named_processes(&mut app.pids, fallback_names, name_to_pids);
+                }
+                ConfiguredProgramMatcher::Installed { .. } => {
+                    extend_with_named_processes(
+                        &mut app.pids,
+                        &configured.additional_processes_normalized,
+                        name_to_pids,
+                    );
+                }
             }
 
             extend_with_descendants(snapshot, &mut app.pids);
@@ -591,11 +554,16 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                 }
             }
         }
-        extend_with_named_processes(
-            &mut detected_pids,
-            &configured.additional_processes_normalized,
-            name_to_pids,
-        );
+        if matches!(
+            &configured.matcher,
+            ConfiguredProgramMatcher::Installed { .. }
+        ) {
+            extend_with_named_processes(
+                &mut detected_pids,
+                &configured.additional_processes_normalized,
+                name_to_pids,
+            );
+        }
         extend_with_descendants(snapshot, &mut detected_pids);
         retain_live_pids(&mut detected_pids, os);
 
@@ -731,7 +699,7 @@ mod tests {
             PriorityClass::High,
             false,
         );
-        app.additional_processes = vec!["helper.exe".to_string()];
+        app.additional_processes.push("helper.exe".to_string());
 
         AppStateStorage {
             version: 5,
@@ -866,26 +834,48 @@ mod tests {
         assert_eq!(configured[0].display_name, "game");
         assert_eq!(
             configured[0].additional_processes_normalized,
-            vec!["helper".to_string()]
+            vec!["game".to_string(), "helper".to_string()]
         );
 
-        let super::ConfiguredProgramMatcher::Path { names, .. } = &configured[0].matcher else {
+        let super::ConfiguredProgramMatcher::Path {
+            primary_name,
+            fallback_names,
+            ..
+        } = &configured[0].matcher
+        else {
             panic!("expected path matcher");
         };
-        assert!(names.contains(&"game".to_string()));
+        assert_eq!(primary_name.as_deref(), Some("game"));
+        assert_eq!(fallback_names, &vec!["helper".to_string()]);
+    }
+
+    #[test]
+    fn test_path_program_with_no_visible_tracked_names_has_no_hidden_fallbacks() {
+        let mut state = sample_path_program_state();
+        state.groups[0].programs[0].name = "Friendly Name".to_string();
+        state.groups[0].programs[0].additional_processes.clear();
+
+        let configured = collect_configured_programs(&state);
+
+        assert!(configured.is_empty());
     }
 
     #[test]
     fn test_build_name_to_pids_lowercases_names() {
         let snapshot = ProcessSnapshot {
             children_of: HashMap::new(),
-            names: HashMap::from([(10, "Game.exe".to_string()), (11, "HELPER.EXE".to_string())]),
+            names: HashMap::from([
+                (10, "Game.exe".to_string()),
+                (11, "HELPER.EXE".to_string()),
+                (12, "foo.bar.exe".to_string()),
+            ]),
         };
 
         let name_to_pids = build_name_to_pids(&snapshot);
 
         assert_eq!(name_to_pids.get("game"), Some(&vec![10]));
         assert_eq!(name_to_pids.get("helper"), Some(&vec![11]));
+        assert_eq!(name_to_pids.get("foo.bar"), Some(&vec![12]));
     }
 
     #[test]
@@ -955,6 +945,27 @@ mod tests {
     }
 
     #[test]
+    fn test_primary_process_name_does_not_prefix_match_helper_processes() {
+        let state = sample_path_program_state();
+        let configured = collect_configured_programs(&state);
+        let mut apps = RunningApps::default();
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::new(),
+                names: HashMap::from([(10, "gamehelper.exe".to_string())]),
+            }),
+            image_paths: HashMap::from([(10, PathBuf::from(r"C:\gamehelper.exe"))]),
+            live_pids: HashSet::from([10]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        assert!(!outcome.changed);
+        assert!(apps.apps.is_empty());
+    }
+
+    #[test]
     fn test_additional_processes_attach_extra_pids_to_same_path_app() {
         let state = sample_path_program_state();
         let configured = collect_configured_programs(&state);
@@ -981,6 +992,52 @@ mod tests {
             Some(vec![10, 11])
         );
         assert_eq!(os.aumid_lookup_count.get(), 0);
+    }
+
+    #[test]
+    fn test_explicit_fallback_process_name_can_cold_detect_path_app() {
+        let state = sample_path_program_state();
+        let configured = collect_configured_programs(&state);
+        let mut apps = RunningApps::default();
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::new(),
+                names: HashMap::from([(11, "helper.exe".to_string())]),
+            }),
+            image_paths: HashMap::new(),
+            live_pids: HashSet::from([11]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        let key = state.groups[0].programs[0].get_key();
+        assert!(outcome.changed);
+        assert_eq!(
+            apps.apps.get(&key).map(|app| app.pids.clone()),
+            Some(vec![11])
+        );
+    }
+
+    #[test]
+    fn test_explicit_fallback_process_names_match_exactly() {
+        let state = sample_path_program_state();
+        let configured = collect_configured_programs(&state);
+        let mut apps = RunningApps::default();
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::new(),
+                names: HashMap::from([(11, "helper64.exe".to_string())]),
+            }),
+            image_paths: HashMap::new(),
+            live_pids: HashSet::from([11]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        assert!(!outcome.changed);
+        assert!(apps.apps.is_empty());
     }
 
     #[test]

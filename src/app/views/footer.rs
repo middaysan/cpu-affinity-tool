@@ -5,8 +5,8 @@ use eframe::egui::{self, Color32, Layout, Margin, RichText, TopBottomPanel};
 /// Draws the bottom panel (footer) of the application.
 ///
 /// This panel contains:
-/// - A toggle button for enabling/disabling process monitoring
-/// - A label showing the current status of the monitoring feature
+/// - A toggle button for enabling/disabling automatic settings re-apply
+/// - A label showing the current status of the re-apply feature
 ///
 /// # Parameters
 ///
@@ -19,7 +19,7 @@ pub fn draw_bottom_panel(app: &mut AppState, ctx: &egui::Context) {
                 .inner_margin(Margin::same(4))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        // Get the current monitoring status
+                        // Get the current auto re-apply status
                         let monitoring_enabled = app.is_process_monitoring_enabled();
 
                         // Create the toggle button with appropriate icon and label
@@ -30,14 +30,14 @@ pub fn draw_bottom_panel(app: &mut AppState, ctx: &egui::Context) {
                         };
 
                         // Add the toggle button with hover text
-                        if ui.button(icon).on_hover_text("Automatically restores CPU affinity and priority\n settings if processes change them").clicked() {
+                        if ui.button(icon).on_hover_text("Automatically re-applies CPU affinity and priority\n settings if processes change them").clicked() {
                             app.toggle_process_monitoring();
                         }
 
                         ui.add_space(4.0);
                         // Add a label explaining the feature
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("Process Monitoring: ").color(ui.visuals().widgets.noninteractive.fg_stroke.color).small().strong());
+                            ui.label(RichText::new("Auto Re-apply: ").color(ui.visuals().widgets.noninteractive.fg_stroke.color).small().strong());
                             ui.label(RichText::new(label).color(color).small().strong());
                         });
 

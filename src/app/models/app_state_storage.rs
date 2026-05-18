@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Current version of the application state schema.
-pub const CURRENT_APP_STATE_VERSION: u32 = 6;
+pub const CURRENT_APP_STATE_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateStorageMode {
@@ -103,12 +103,22 @@ impl AppStateStorage {
         state_path::get_state_storage_mode()
     }
 
-    pub fn mark_ready_for_v6_save(&mut self, rule_identities: PersistedRuleIdentities) {
-        if self.loaded_version < CURRENT_APP_STATE_VERSION {
+    pub fn mark_ready_for_current_schema_save(&mut self, rule_identities: PersistedRuleIdentities) {
+        if self.loaded_version < 6 {
             self.pending_pre_v6_backup = true;
         }
         self.version = CURRENT_APP_STATE_VERSION;
         self.rule_identities = Some(rule_identities);
+    }
+
+    pub(crate) fn backfill_tracked_process_names(&mut self) -> bool {
+        let mut changed = false;
+        for group in &mut self.groups {
+            for program in &mut group.programs {
+                changed |= program.ensure_primary_process_name_tracked();
+            }
+        }
+        changed
     }
 
     pub(crate) fn finalize_load(

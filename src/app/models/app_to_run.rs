@@ -162,7 +162,7 @@ impl AppToRun {
             .unwrap_or("Unknown")
             .to_string();
 
-        Self {
+        let mut app = Self {
             name,
             launch_target: LaunchTarget::Path {
                 dropped_path,
@@ -172,7 +172,9 @@ impl AppToRun {
             additional_processes: Vec::new(),
             autorun,
             priority,
-        }
+        };
+        app.ensure_primary_process_name_tracked();
+        app
     }
 
     pub fn new_installed(
@@ -243,7 +245,11 @@ impl AppToRun {
             LaunchTarget::Path {
                 dropped_path,
                 bin_path,
-            } => format!("{} (src: {})", bin_path.display(), dropped_path.display()),
+            } => format!(
+                "{} (src: {})",
+                bin_path.display(),
+                self.dropped_path().unwrap_or(dropped_path).display()
+            ),
             LaunchTarget::Installed { aumid } => format!("Installed app AUMID: {aumid}"),
         }
     }
@@ -254,6 +260,77 @@ impl AppToRun {
 
     pub fn get_key(&self) -> AppRuntimeKey {
         self.runtime_key()
+    }
+
+    pub fn primary_process_name(&self) -> Option<String> {
+        let name = self
+            .bin_path()?
+            .file_name()
+            .map(|name| name.to_string_lossy().trim().to_string())?;
+        (!name.is_empty()).then_some(name)
+    }
+
+    pub fn primary_process_name_normalized(&self) -> Option<String> {
+        self.primary_process_name()
+            .map(|name| normalize_process_name(&name))
+            .filter(|name| !name.is_empty())
+    }
+
+    pub fn ensure_primary_process_name_tracked(&mut self) -> bool {
+        let Some(primary_name) = self.primary_process_name() else {
+            return false;
+        };
+        let primary_normalized = normalize_process_name(&primary_name);
+        if primary_normalized.is_empty() {
+            return false;
+        }
+
+        if self
+            .additional_processes
+            .iter()
+            .any(|name| normalize_process_name(name) == primary_normalized)
+        {
+            return false;
+        }
+
+        self.additional_processes.push(primary_name);
+        true
+    }
+
+    pub fn sync_primary_process_name_after_path_edit(&mut self, original: &AppToRun) -> bool {
+        let Some(old_primary) = original.primary_process_name_normalized() else {
+            return false;
+        };
+        let Some(new_primary_display) = self.primary_process_name() else {
+            return false;
+        };
+        let new_primary = normalize_process_name(&new_primary_display);
+        if new_primary.is_empty() || old_primary == new_primary {
+            return false;
+        }
+
+        let Some(old_position) = self
+            .additional_processes
+            .iter()
+            .position(|name| normalize_process_name(name) == old_primary)
+        else {
+            return false;
+        };
+
+        if self
+            .additional_processes
+            .iter()
+            .enumerate()
+            .any(|(index, name)| {
+                index != old_position && normalize_process_name(name) == new_primary
+            })
+        {
+            self.additional_processes.remove(old_position);
+        } else {
+            self.additional_processes[old_position] = new_primary_display;
+        }
+
+        true
     }
 
     pub fn display(&self) -> String {
@@ -280,6 +357,28 @@ impl AppToRun {
             LaunchTarget::Installed { aumid } => aumid.clone(),
         }
     }
+}
+
+pub fn normalize_process_name(candidate: &str) -> String {
+    let file_name = candidate
+        .rsplit(['/', '\\'])
+        .find(|segment| !segment.trim().is_empty())
+        .unwrap_or(candidate)
+        .trim();
+
+    if file_name.is_empty() {
+        return String::new();
+    }
+
+    let without_extension = file_name
+        .rsplit_once('.')
+        .and_then(|(stem, extension)| {
+            (!stem.trim().is_empty() && !extension.trim().is_empty()).then_some(stem)
+        })
+        .unwrap_or(file_name)
+        .trim();
+
+    without_extension.to_lowercase()
 }
 
 fn path_file_name_lossy(path: &Path) -> Option<String> {
@@ -353,7 +452,7 @@ fn normalized_path_identity(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppToRun, LaunchTarget};
+    use super::{normalize_process_name, AppToRun, LaunchTarget};
     use os_api::PriorityClass;
     use serde_json::json;
     use std::path::PathBuf;
@@ -382,6 +481,55 @@ mod tests {
 
         assert_ne!(path.runtime_key(), installed.runtime_key());
         assert_ne!(installed.runtime_key(), high.runtime_key());
+    }
+
+    #[test]
+    fn test_new_path_tracks_primary_process_name() {
+        let path = AppToRun::new_path(
+            PathBuf::from(r"C:\App.lnk"),
+            vec![],
+            PathBuf::from(r"C:\Program Files\App\foo.bar.exe"),
+            PriorityClass::Normal,
+            false,
+        );
+
+        assert_eq!(path.primary_process_name().as_deref(), Some("foo.bar.exe"));
+        assert_eq!(path.additional_processes, vec!["foo.bar.exe".to_string()]);
+    }
+
+    #[test]
+    fn test_process_name_normalization_strips_only_final_extension() {
+        assert_eq!(normalize_process_name(r"C:\Games\foo.bar.exe"), "foo.bar");
+        assert_eq!(normalize_process_name("/usr/bin/game"), "game");
+        assert_eq!(normalize_process_name(" GAME.EXE "), "game");
+        assert_eq!(normalize_process_name(""), "");
+    }
+
+    #[test]
+    fn test_sync_primary_process_name_after_path_edit_respects_user_removal() {
+        let original = AppToRun::new_path(
+            PathBuf::from(r"C:\App.lnk"),
+            vec![],
+            PathBuf::from(r"C:\old.exe"),
+            PriorityClass::Normal,
+            false,
+        );
+        let mut edited = original.clone();
+        if let Some(bin_path) = edited.bin_path_mut() {
+            *bin_path = PathBuf::from(r"C:\new.exe");
+        }
+
+        assert!(edited.sync_primary_process_name_after_path_edit(&original));
+        assert_eq!(edited.additional_processes, vec!["new.exe".to_string()]);
+
+        let mut removed = original.clone();
+        removed.additional_processes.clear();
+        if let Some(bin_path) = removed.bin_path_mut() {
+            *bin_path = PathBuf::from(r"C:\new.exe");
+        }
+
+        assert!(!removed.sync_primary_process_name_after_path_edit(&original));
+        assert!(removed.additional_processes.is_empty());
     }
 
     #[test]

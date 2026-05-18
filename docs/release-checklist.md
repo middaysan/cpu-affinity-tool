@@ -15,9 +15,10 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Confirm `README.md` and `AGENTS.md` describe Windows as the primary stable released platform and Linux as a separate beta prerelease track without stable parity.
 - Confirm `README.md` documents the administrator/UAC expectation from `app.manifest`.
 - Confirm version markers are aligned manually: release tag `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`.
-- Confirm the changelog and any release note summary call out the schema `v6` save boundary when applicable:
+- Confirm the changelog and any release note summary call out the schema `v7` save boundary when applicable:
   - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
-  - downgrade to older pre-`v6` binaries is unsupported after that first `v6` save
+  - `v6` to `v7` saves do not write `state.json.pre-v6*`
+  - downgrade to older binaries is unsupported after that first current-schema save
 - Review release-impacting files if they changed: `build.rs`, `app.manifest`, `assets/icon.ico`, `assets/cpu_presets.json`, `.github/workflows/release.yml`, and `.github/workflows/release-linux-beta.yml`.
 
 ## Build Verification

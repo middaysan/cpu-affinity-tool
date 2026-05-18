@@ -162,11 +162,14 @@ Persisted state facts:
   - Windows: `%LOCALAPPDATA%\CpuAffinityTool\state.json`
   - Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/cpu-affinity-tool/state.json`
 - there is no automatic migration or copy between the legacy sidecar path and the platform data path
-- current persisted schema version: `6`
+- current persisted schema version: `7`
 - schema `v5` and older formats are dual-read and normalized in memory without eager rewrite on load
-- the upgrade from pre-`v6` data to `v6` happens only on an explicit save path
-- before the first `v6` save after loading pre-`v6` state, persistence creates an additional `state.json.pre-v6`, `state.json.pre-v6-1`, and so on backup series
-- after the first `v6` save, downgrade to an older binary that only understands pre-`v6` state is unsupported
+- schema `v6` and older path-target app rules receive an in-memory one-time compatibility backfill that adds the primary executable filename to `additional_processes` when no normalized equivalent already exists
+- schema `v7` treats an empty `additional_processes` list as intentional user state and does not re-add the primary executable filename on load
+- the upgrade from pre-`v6` data or `v6` data to the current schema happens only on an explicit save path
+- before the first current-schema save after loading pre-`v6` state, persistence creates an additional `state.json.pre-v6`, `state.json.pre-v6-1`, and so on backup series
+- loading `v6` for upgrade to `v7` does not create a `pre-v6` backup
+- after the first current-schema save, downgrade to an older binary that only understands earlier state is unsupported
 - backup rotation uses `state.json.old`, `state.json.old1`, `state.json.old2`, and so on
 - persistence loading is split into `state_path`, `storage_io`, `migrations`, and `schema_refresh`
 
@@ -181,7 +184,8 @@ Key entities:
 - `LogManager` - in-memory runtime log and history
 
 Important contract facts:
-- `additional_processes` in `AppToRun` participates in runtime process matching and is not only UI metadata
+- `additional_processes` in `AppToRun` is the persisted backing field for the user-visible Tracked Process Names list and participates in runtime process matching
+- path-target app rules use their visible primary executable process name for exact process-name plus image-path verified tracking; other visible tracked process names are exact user-controlled fallback matches
 - `AppToRun` path targets store both source path and resolved executable path
 - `AppToRun` installed targets store Windows `AUMID` and do not expose user-editable args in the current contract
 - runtime tracking identity keeps the existing stable encoded key contract, but it now flows through typed `AppRuntimeKey` instead of raw `String` keys across runtime core

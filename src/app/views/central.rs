@@ -32,7 +32,20 @@ enum CentralAction {
         group_id: GroupId,
         rule_id: RuleId,
     },
+    MoveRuleToGroup {
+        source_group_id: GroupId,
+        rule_id: RuleId,
+        target_group_id: GroupId,
+    },
     ConsumeDroppedFiles(GroupId),
+}
+
+#[derive(Clone)]
+struct RuleDragPayload {
+    source_group_id: GroupId,
+    rule_id: RuleId,
+    preview_label: String,
+    preview_width: f32,
 }
 
 pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
@@ -44,6 +57,7 @@ pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
             });
         });
     });
+    render_rule_drag_preview(ctx);
 }
 
 #[cfg(target_os = "windows")]
@@ -92,7 +106,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
     for (group_index, group) in snapshot.groups.iter().enumerate() {
         let group_id = group.group_id.clone();
 
-        glass_frame(ui).outer_margin(5.0).show(ui, |ui| {
+        let group_response = glass_frame(ui).outer_margin(5.0).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
@@ -241,9 +255,31 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                             ui.add_space(4.0);
 
-                            let app_button = egui::Button::new(RichText::new(&program.name).strong());
-                            let response =
-                                ui.add_sized([ui.available_width() - 40.0, 20.0], app_button);
+                            let app_button_id = (
+                                "central-rule-drag",
+                                group_id.0.as_str(),
+                                program.rule_id.0.as_str(),
+                            );
+                            let app_response = ui
+                                .push_id(app_button_id, |ui| {
+                                    ui.add_sized(
+                                        [ui.available_width() - 40.0, 20.0],
+                                        egui::Button::new(RichText::new(&program.name).strong())
+                                            .sense(egui::Sense::click_and_drag()),
+                                    )
+                                })
+                                .inner
+                                .on_hover_text(program.launch_target_detail.clone());
+                            let drag_payload = RuleDragPayload {
+                                source_group_id: group_id.clone(),
+                                rule_id: program.rule_id.clone(),
+                                preview_label: program.name.clone(),
+                                preview_width: app_response.rect.width(),
+                            };
+                            app_response.dnd_set_drag_payload(drag_payload);
+                            let app_was_dragged = app_response.drag_started()
+                                || app_response.dragged()
+                                || app_response.drag_stopped();
 
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui
@@ -258,10 +294,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                                 }
                             });
 
-                            if response
-                                .on_hover_text(program.launch_target_detail.clone())
-                                .clicked()
-                            {
+                            if app_response.clicked() && !app_was_dragged {
                                 actions.push(CentralAction::RunGroupProgram {
                                     group_id: group_id.clone(),
                                     rule_id: program.rule_id.clone(),
@@ -294,6 +327,23 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                 }
             }
         });
+
+        let dropped_rule_here = ctx.input(|i| i.pointer.any_released())
+            && ctx
+                .pointer_interact_pos()
+                .is_some_and(|pos| group_response.response.rect.contains(pos));
+        let dropped_rule = if dropped_rule_here {
+            egui::DragAndDrop::take_payload::<RuleDragPayload>(ctx)
+        } else {
+            None
+        };
+        if let Some(payload) = dropped_rule {
+            actions.push(CentralAction::MoveRuleToGroup {
+                source_group_id: payload.source_group_id.clone(),
+                rule_id: payload.rule_id.clone(),
+                target_group_id: group_id,
+            });
+        }
     }
 
     if let Some(group_id) = drop_target {
@@ -301,6 +351,30 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
     }
 
     actions
+}
+
+fn render_rule_drag_preview(ctx: &egui::Context) {
+    let Some(payload) = egui::DragAndDrop::payload::<RuleDragPayload>(ctx) else {
+        return;
+    };
+    let Some(pointer_pos) = ctx.pointer_interact_pos() else {
+        return;
+    };
+
+    let width = payload.preview_width.clamp(140.0, 360.0);
+    let size = Vec2::new(width, 20.0);
+
+    egui::Area::new(egui::Id::new("central-rule-drag-preview"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pointer_pos - size / 2.0)
+        .constrain(false)
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.add_sized(
+                [size.x, size.y],
+                egui::Button::new(RichText::new(&payload.preview_label).strong()),
+            );
+        });
 }
 
 fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
@@ -335,6 +409,13 @@ fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
             }
             CentralAction::RunGroupProgram { group_id, rule_id } => {
                 app.run_group_program(group_id, rule_id);
+            }
+            CentralAction::MoveRuleToGroup {
+                source_group_id,
+                rule_id,
+                target_group_id,
+            } => {
+                let _ = app.move_rule_to_group(source_group_id, rule_id, target_group_id);
             }
             CentralAction::ConsumeDroppedFiles(group_id) => {
                 let _ = app.consume_dropped_files_into_group(group_id);

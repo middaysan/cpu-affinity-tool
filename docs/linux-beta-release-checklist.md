@@ -13,9 +13,10 @@ Use this checklist with `docs/release-process.md`.
 - Confirm `README.md` and `AGENTS.md` describe Linux as a desktop beta path with prerelease artifacts under `linux-beta-v*` tags.
 - Confirm the base version in `Cargo.toml` matches the `X.Y.Z` segment of the Linux beta tag you plan to push.
 - Confirm the beta changelog exists at `changelogs/linux-beta-vX.Y.Z-N.txt`.
-- Confirm the prerelease notes call out the schema `v6` save boundary when applicable:
+- Confirm the prerelease notes call out the schema `v7` save boundary when applicable:
   - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
-  - downgrade to older pre-`v6` binaries is unsupported after that first `v6` save
+  - `v6` to `v7` saves do not write `state.json.pre-v6*`
+  - downgrade to older binaries is unsupported after that first current-schema save
 - Review release-impacting files if they changed: `assets/cpu_presets.json`, `.github/workflows/ci.yml`, `.github/workflows/release-linux-beta.yml`, `README.md`, `docs/release-process.md`, and `AGENTS.md`.
 
 ## Build Verification
@@ -34,7 +35,7 @@ Use this checklist with `docs/release-process.md`.
 - Confirm the window opens and the detected CPU core count looks correct.
 - Add an app target by path or `.desktop` entry and confirm it appears once.
 - Launch the target and confirm affinity and priority are applied as expected.
-- If monitoring is expected for the beta, confirm re-apply behavior and logs still work.
+- If Auto Re-apply is expected for the beta, confirm correction behavior and logs still work.
 - Treat startup failures, incorrect CPU topology, launch failures, missing logs, or broken affinity application as beta-blocking until resolved or explicitly downgraded.
 
 ## Release Notes And Distribution

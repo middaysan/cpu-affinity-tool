@@ -10,13 +10,13 @@ It is useful when you want:
 
 - repeatable launch rules
 - a small GUI focused on CPU affinity and priority
-- monitoring that can re-apply settings after launch
+- Auto Re-apply behavior that can restore settings after launch
 
 It is not trying to be a full replacement for every Windows process automation tool.
 
 ## Comparison table
 
-| Tool | Saved launch rules | Monitoring / re-apply | Convenience | Complexity | Cost / availability | Scope |
+| Tool | Saved launch rules | Auto Re-apply | Convenience | Complexity | Cost / availability | Scope |
 | --- | --- | --- | --- | --- | --- | --- |
 | CPU Affinity Tool | Yes | Yes | High for the supported workflow | Low | Open source, self-hosted binary | Narrow, focused affinity and priority workflow |
 | Task Manager | No | No | Medium for one-off changes | Low | Included with Windows | Manual one-shot process tweaks |

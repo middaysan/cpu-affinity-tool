@@ -193,13 +193,13 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                     ui.add_space(10.0);
                 }
 
-                ui.label(RichText::new("Additional Process Names (Auto-track):").strong());
+                ui.label(RichText::new("Tracked Process Names:").strong());
                 ui.add_space(5.0);
 
                 let mut proc_to_remove = None;
                 if selected_app.additional_processes.is_empty() {
                     ui.label(
-                        RichText::new("No additional processes defined.")
+                        RichText::new("No tracked process names defined.")
                             .weak()
                             .italics(),
                     );
