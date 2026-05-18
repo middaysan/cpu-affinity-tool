@@ -48,7 +48,7 @@ pub fn draw_bottom_panel(app: &mut AppState, ctx: &egui::Context) {
                     // Add a label explaining the feature
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("Auto Re-apply App Process Affinity: ")
+                            RichText::new("Auto Re-apply Affinity and Priority: ")
                                 .color(ui.visuals().widgets.noninteractive.fg_stroke.color)
                                 .small()
                                 .strong(),

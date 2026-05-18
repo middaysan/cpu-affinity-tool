@@ -7,7 +7,7 @@ It is intentionally narrow and truthful:
 - stable releases are Windows-only
 - Windows stable tags publish `cpu-affinity-tool.exe`
 - Linux beta prerelease tags publish a raw Linux binary, a `tar.gz`, and `SHA256SUMS.txt`
-- CI also validates the Linux desktop beta path from source before either release track is used
+- CI validates the Linux beta build/test/clippy path from source on pinned Ubuntu runners; desktop-session smoke remains manual beta validation
 - there is no installer, AppImage, Flatpak, code signing, or winget package in the current release contract
 
 ## Source of truth
@@ -30,20 +30,23 @@ Release publishing is tag-based.
 Normal branch and pull-request CI runs both:
 
 - the Windows release-path validation job
-- the Linux desktop beta validation job
+- the Linux beta build/test validation job on `ubuntu-24.04`
 
 Stable Windows publishing and Linux beta publishing are separate workflows with separate tag namespaces.
 
 When a stable tag matching `v*` is pushed:
 
 1. GitHub Actions runs the Windows release job
-2. the workflow runs formatting, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `libs/os_api` tests, `cargo test --features windows --bin cpu-affinity-tool`, and `cargo build --release --features windows --bin cpu-affinity-tool`
-3. the workflow uploads `cpu-affinity-tool.exe`
-4. GitHub Release is created with the body from `changelogs/vX.Y.Z.txt`
+2. the workflow validates the tag format against `vX.Y.Z`
+3. the workflow confirms `Cargo.toml` version matches `X.Y.Z`
+4. the workflow requires `changelogs/vX.Y.Z.txt`
+5. the workflow runs formatting, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `libs/os_api` tests, `cargo test --features windows --bin cpu-affinity-tool`, and `cargo build --release --features windows --bin cpu-affinity-tool`
+6. the workflow uploads `cpu-affinity-tool.exe`
+7. a publish job on `ubuntu-24.04` creates the GitHub Release with the body from `changelogs/vX.Y.Z.txt`
 
 When a Linux beta tag matching `linux-beta-v*` is pushed:
 
-1. GitHub Actions runs the Linux beta prerelease job on `ubuntu-latest`
+1. GitHub Actions runs the Linux beta prerelease job on `ubuntu-24.04`
 2. the workflow validates the tag format against `linux-beta-vX.Y.Z-N`
 3. the workflow confirms `Cargo.toml` version matches `X.Y.Z`
 4. the workflow requires `changelogs/linux-beta-vX.Y.Z-N.txt`

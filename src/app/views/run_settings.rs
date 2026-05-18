@@ -198,11 +198,12 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
 
                 let mut proc_to_remove = None;
                 if selected_app.additional_processes.is_empty() {
-                    ui.label(
-                        RichText::new("No tracked process names defined.")
-                            .weak()
-                            .italics(),
-                    );
+                    let empty_text = if selected_app.is_path_target() {
+                        "Process-name rediscovery is off for this path app. Add a name to let Auto Re-apply find it later."
+                    } else {
+                        "No tracked process names defined."
+                    };
+                    ui.label(RichText::new(empty_text).weak().italics());
                 } else {
                     for (i, proc_name) in selected_app.additional_processes.iter_mut().enumerate() {
                         ui.horizontal(|ui| {

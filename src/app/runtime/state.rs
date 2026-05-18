@@ -1202,6 +1202,15 @@ mod tests {
         app
     }
 
+    fn edit_first_rule(app: &mut AppState, updated: AppToRun) {
+        app.ui.current_window = WindowRoute::AppRunSettings;
+        app.ui.app_edit_state.target = Some(RuleEditorTarget {
+            group_id: group_id(app, 0),
+            rule_id: rule_id(app, 0, 0),
+        });
+        app.ui.app_edit_state.current_edit = Some(updated);
+    }
+
     #[test]
     fn test_commit_group_form_session_preserves_invalid_create_closeout() {
         let mut app = sample_state();
@@ -1232,11 +1241,6 @@ mod tests {
     #[test]
     fn test_commit_current_app_edit_session_updates_and_closes() {
         let mut app = sample_state();
-        app.ui.current_window = WindowRoute::AppRunSettings;
-        app.ui.app_edit_state.target = Some(RuleEditorTarget {
-            group_id: group_id(&app, 0),
-            rule_id: rule_id(&app, 0, 0),
-        });
         let mut updated = AppToRun::new_path(
             PathBuf::from(r"C:\Sample.lnk"),
             vec!["--debug".to_string()],
@@ -1246,7 +1250,7 @@ mod tests {
         );
         updated.name = "Updated".to_string();
         updated.additional_processes = vec!["helper.exe".to_string()];
-        app.ui.app_edit_state.current_edit = Some(updated);
+        edit_first_rule(&mut app, updated);
 
         app.commit_current_app_edit_session();
 
@@ -1266,6 +1270,70 @@ mod tests {
         ));
         assert!(app.ui.app_edit_state.current_edit.is_none());
         assert!(app.ui.app_edit_state.target.is_none());
+    }
+
+    #[test]
+    fn test_commit_current_app_edit_session_replaces_primary_tracked_name() {
+        let mut app = sample_state();
+        let mut updated = app.persistent_state.read().unwrap().groups[0].programs[0].clone();
+        *updated.bin_path_mut().unwrap() = PathBuf::from(r"C:\Updated.exe");
+        updated.additional_processes = vec!["Sample.exe".to_string(), "helper.exe".to_string()];
+        edit_first_rule(&mut app, updated);
+
+        app.commit_current_app_edit_session();
+
+        let state = app.persistent_state.read().unwrap();
+        assert_eq!(
+            state.groups[0].programs[0].additional_processes,
+            vec!["Updated.exe".to_string(), "helper.exe".to_string()]
+        );
+        drop(state);
+        assert_eq!(app.save_count(), 1);
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::Groups(GroupRoute::List)
+        ));
+        assert!(app.ui.app_edit_state.current_edit.is_none());
+        assert!(app.ui.app_edit_state.target.is_none());
+    }
+
+    #[test]
+    fn test_commit_current_app_edit_session_respects_removed_primary_tracked_name() {
+        let mut app = sample_state();
+        let mut updated = app.persistent_state.read().unwrap().groups[0].programs[0].clone();
+        *updated.bin_path_mut().unwrap() = PathBuf::from(r"C:\Updated.exe");
+        updated.additional_processes.clear();
+        edit_first_rule(&mut app, updated);
+
+        app.commit_current_app_edit_session();
+
+        let state = app.persistent_state.read().unwrap();
+        assert!(state.groups[0].programs[0].additional_processes.is_empty());
+        drop(state);
+        assert_eq!(app.save_count(), 1);
+    }
+
+    #[test]
+    fn test_commit_current_app_edit_session_removes_old_primary_when_new_primary_exists() {
+        let mut app = sample_state();
+        let mut updated = app.persistent_state.read().unwrap().groups[0].programs[0].clone();
+        *updated.bin_path_mut().unwrap() = PathBuf::from(r"C:\Updated.exe");
+        updated.additional_processes = vec![
+            "Sample.exe".to_string(),
+            "Updated.exe".to_string(),
+            "helper.exe".to_string(),
+        ];
+        edit_first_rule(&mut app, updated);
+
+        app.commit_current_app_edit_session();
+
+        let state = app.persistent_state.read().unwrap();
+        assert_eq!(
+            state.groups[0].programs[0].additional_processes,
+            vec!["Updated.exe".to_string(), "helper.exe".to_string()]
+        );
+        drop(state);
+        assert_eq!(app.save_count(), 1);
     }
 
     #[test]

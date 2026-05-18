@@ -17,7 +17,7 @@ Confirm that the shipped Windows binary starts correctly, applies its core launc
 | `.url` / URI-handler path | Registered handler resolves and launches the correct target when such a handler is available on the test machine | Yes, if the release contract depends on supported URI launch flows |
 | Already-running app launch | Existing window is focused or reused without spawning an unintended duplicate instance | Yes |
 | Single-run and `Run All` | Individual launch and group launch both work without missing or duplicate starts | Yes |
-| Auto Re-apply App Process Affinity toggle and notifications | Auto Re-apply App Process Affinity state can be toggled, corrections still apply when enabled, and expected notifications or logs appear | Yes |
+| Auto Re-apply Affinity and Priority toggle and notifications | Auto Re-apply Affinity and Priority state can be toggled, corrections still apply when enabled, and expected notifications or logs appear | Yes |
 | Tray hide / restore | App can hide to tray and restore cleanly without becoming unresponsive | Yes |
 | Theme persistence across restart | Theme changes persist after closing and reopening the app | Yes |
 | Logs visible and clearable | Logs appear in chronological order and can be cleared without breaking later logging | Yes |

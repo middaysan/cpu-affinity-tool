@@ -41,7 +41,7 @@ Repository binaries:
 
 Current platform reality:
 - Windows is the primary released and explicitly supported platform
-- Linux code exists as a CI-validated desktop beta path from source for `x86_64` `glibc` desktop sessions on `X11` or `Wayland`
+- Linux code exists as a CI build/test/clippy validated desktop beta path from source for `x86_64` `glibc`; desktop sessions on `X11` or `Wayland` are covered by manual beta smoke validation
 - Linux also has a separate beta prerelease artifact contract under `linux-beta-v*` tags, but it is not part of the stable release contract
 - the project must not be described as a fully cross-platform desktop app
 
@@ -308,18 +308,19 @@ Local verification commands:
 Current CI facts:
 - runners:
   - `windows-latest` for the Windows release-path job
-  - `ubuntu-latest` for the Linux desktop beta job
-- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, and verifies the Linux beta binary on `ubuntu-latest`
+  - `ubuntu-24.04` for the Linux desktop beta job
+- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, and verifies the Linux beta binary on `ubuntu-24.04`
 - tests are part of the committed CI contract for `ci.yml`
 - the Windows CI job validates the feature-gated Windows binary path explicitly with `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --features windows --bin cpu-affinity-tool`, and `cargo build --release --features windows --bin cpu-affinity-tool`
 
 Current release facts:
 - stable GitHub Release workflow reacts to pushed tags matching `v*`
+- the stable release workflow validates that the tag matches `vX.Y.Z`, that `Cargo.toml` version matches `X.Y.Z`, and that `changelogs/vX.Y.Z.txt` exists before building
 - the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, and then builds `cpu-affinity-tool.exe` with `cargo build --release --features windows --bin cpu-affinity-tool` in the same runner before upload
-- the stable release workflow publishes `cpu-affinity-tool.exe`
+- the stable release publish job runs on `ubuntu-24.04` and publishes `cpu-affinity-tool.exe`
 - stable release target: `x86_64-pc-windows-msvc`
 - Linux beta prerelease workflow reacts to pushed tags matching `linux-beta-v*`
-- the Linux beta prerelease workflow runs on `ubuntu-latest`, installs the Linux GUI build dependencies, runs `cargo fmt --all -- --check`, `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features linux --bin cpu-affinity-tool-linux`, and then builds `cpu-affinity-tool-linux`
+- the Linux beta prerelease workflow runs on `ubuntu-24.04`, installs the Linux GUI build dependencies, runs `cargo fmt --all -- --check`, `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features linux --bin cpu-affinity-tool-linux`, and then builds `cpu-affinity-tool-linux`
 - the Linux beta prerelease workflow validates that `Cargo.toml` version matches the `X.Y.Z` part of the tag and that `changelogs/linux-beta-vX.Y.Z-N.txt` exists
 - the Linux beta prerelease workflow publishes `cpu-affinity-tool-linux-x86_64`, `cpu-affinity-tool-linux-x86_64.tar.gz`, and `SHA256SUMS.txt` with `prerelease: true`
 - installer packaging, AppImage, Flatpak, code signing, winget, choco, and similar distribution steps are currently absent
@@ -333,7 +334,7 @@ Additional release facts:
 - manual Linux beta pre-release validation lives in `docs/linux-beta-release-checklist.md`
 - `docs/release-process.md` documents the current automated stable tag-release flow, Linux beta prerelease flow, and their current artifact limits
 - version truth is split across Git tag, `Cargo.toml`, and `changelogs/`
-- that version sync is still manual
+- that version sync is still manual before tagging, then the stable and Linux beta workflows validate the relevant tag, `Cargo.toml`, and changelog inputs
 
 Release-impacting artifacts:
 - `build.rs`

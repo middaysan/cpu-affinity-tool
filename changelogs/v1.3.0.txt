@@ -1,0 +1,62 @@
+## [1.3.0] - 2026-05-19
+
+### Added
+- **Drag apps between CPU groups**:
+  - Apps can now be moved between groups with drag and drop.
+  - Moves preserve the existing app rule exactly, including priority, launch arguments, autorun, and tracked process names.
+  - The app keeps its stable rule identity while adopting the target group's CPU cores on the next Auto Re-apply pass.
+- **Reorder apps inside a group**:
+  - Existing app rules can now be reordered by dragging within the same group.
+  - Drop placement indicators show where the app will land before release.
+- **Explicit tracked process names**:
+  - Path-based apps now seed their primary executable name into **Tracked Process Names**.
+  - Users can see and edit the process-name fallbacks used for rediscovery.
+
+### Changed
+- **Process tracking is more predictable**:
+  - Hidden matching from display names and dropped shortcut names was removed.
+  - Path targets use the primary executable name with image-path verification, while additional names act as explicit exact-match fallbacks.
+  - Process-name normalization now trims path segments, lowercases names, and removes only the final extension.
+- **Clearer Auto Re-apply wording**:
+  - The former **Process Monitoring** wording is now **Auto Re-apply Affinity and Priority**.
+  - Help text now describes that the app keeps tracked processes on assigned CPU cores and restores priority if settings drift.
+- **Linux beta contract is pinned**:
+  - Linux CI and Linux beta prerelease automation now use `ubuntu-24.04`.
+  - Documentation now separates automated Linux build/test/clippy validation from manual X11/Wayland desktop-session smoke testing.
+
+### Fixed
+- **Store app host-process tracking**:
+  - Generic Windows host/container processes such as `backgroundTaskHost.exe`, `RuntimeBroker.exe`, and `ApplicationFrameHost.exe` are no longer auto-managed as Store app processes.
+  - Host processes may still be used as discovery seeds, but they do not receive affinity or priority and do not keep an app marked as Running.
+  - Users can still explicitly add a host process name in **Tracked Process Names** if they intentionally want that override.
+- **Drag-and-drop stability**:
+  - Duplicate cross-group drops are rejected without saving partial state.
+  - Stale drag payloads are ignored.
+  - Click-to-run and app settings buttons continue to work independently from drag gestures.
+- **Linux launch behavior**:
+  - Invalid affinity masks fail before spawning a process.
+  - After a successful spawn, affinity and priority are applied best-effort and independently.
+  - Short-lived launched children are reaped in the background to avoid zombie processes.
+
+### State and Compatibility
+- Persisted state schema is now `v7`.
+- Existing `v6` and older path-app rules receive a one-time compatibility backfill for their primary executable tracked process name.
+- Existing `v7` empty tracked-process lists are respected as intentional user state.
+- Pre-`v6` backup behavior remains limited to states loaded from schema versions older than `v6`.
+
+### Testing
+- Verified local gates:
+  - `cargo fmt --all -- --check`
+  - `cargo test --manifest-path libs/os_api/Cargo.toml`
+  - `cargo test --features windows --bin cpu-affinity-tool`
+  - `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`
+  - `cargo test --features linux --bin cpu-affinity-tool-linux`
+  - `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`
+  - `cargo check --manifest-path libs/os_api/Cargo.toml --target x86_64-unknown-linux-gnu`
+  - `cargo clippy --manifest-path libs/os_api/Cargo.toml --target x86_64-unknown-linux-gnu -- -D warnings`
+  - `cargo build --release --features windows --bin cpu-affinity-tool`
+  - `cargo build --release --features linux --bin cpu-affinity-tool-linux`
+
+### Notes
+- Windows remains the primary stable release platform.
+- Linux remains a beta path with source builds, CI validation, and manual desktop-session smoke validation.

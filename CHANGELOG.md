@@ -4,6 +4,26 @@ This file is the consolidated high-level project history.
 
 Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
+## [1.3.0] - 2026-05-19
+
+### Added
+
+- Drag-and-drop app moves between CPU groups while preserving each app rule configuration
+- Drag-and-drop app reordering inside the same group with placement feedback
+- Explicit **Tracked Process Names** controls for transparent process-name rediscovery
+
+### Changed
+
+- Process matching now treats tracked process names as explicit exact-match fallbacks
+- The monitoring toggle is now labeled **Auto Re-apply Affinity and Priority**
+- Linux beta CI and prerelease automation now use a pinned Ubuntu 24.04 runner
+
+### Fixed
+
+- Store app tracking no longer auto-manages generic Windows host processes such as `backgroundTaskHost.exe`
+- Linux launch handling now validates affinity before spawn, applies post-spawn settings best-effort, and reaps child processes
+- Duplicate drag-and-drop moves are rejected without mutating saved state
+
 ## [1.2.1] - 2026-04-21
 
 ### Added

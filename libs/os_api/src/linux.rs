@@ -5,6 +5,10 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread;
+use std::time::Duration;
 
 use libc::{
     PRIO_PROCESS, SCHED_FIFO, SCHED_RR, getpriority, pid_t, sched_getscheduler, sched_param,
@@ -35,6 +39,14 @@ struct DesktopEntry {
     no_display: bool,
     entry_type: Option<String>,
 }
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PostSpawnSettingsResult {
+    affinity_error: Option<String>,
+    priority_error: Option<String>,
+}
+
+static CHILD_REAPER: OnceLock<Sender<Child>> = OnceLock::new();
 
 impl OS {
     pub const fn supports_hide_to_tray() -> bool {
@@ -139,13 +151,76 @@ impl OS {
             .map_err(|e| format!("spawn {:?} failed: {e}", target))
     }
 
-    fn set_affinity(child: &Child, mask: usize) -> Result<(), String> {
+    fn set_affinity_for_pid(pid: u32, mask: usize) -> Result<(), String> {
         let cpu_set = Self::cpuset_from_mask(mask)?;
-        sched_setaffinity(Self::pid(child.id()), &cpu_set).map_err(|e| e.to_string())
+        sched_setaffinity(Self::pid(pid), &cpu_set).map_err(|e| e.to_string())
     }
 
-    fn set_priority(child: &Child, priority: PriorityClass) -> Result<(), String> {
-        Self::set_priority_for_pid(child.id() as pid_t, priority)
+    fn apply_post_spawn_settings<F, G>(
+        pid: u32,
+        mask: usize,
+        priority: PriorityClass,
+        set_affinity: F,
+        set_priority: G,
+    ) -> PostSpawnSettingsResult
+    where
+        F: FnOnce(u32, usize) -> Result<(), String>,
+        G: FnOnce(u32, PriorityClass) -> Result<(), String>,
+    {
+        let affinity_error = set_affinity(pid, mask).err();
+        let priority_error = set_priority(pid, priority).err();
+
+        PostSpawnSettingsResult {
+            affinity_error,
+            priority_error,
+        }
+    }
+
+    fn child_reaper_sender() -> &'static Sender<Child> {
+        CHILD_REAPER.get_or_init(|| {
+            let (tx, rx) = mpsc::channel();
+            let _ = thread::Builder::new()
+                .name("cpu-affinity-tool-linux-child-reaper".to_string())
+                .spawn(move || Self::run_child_reaper(rx));
+            tx
+        })
+    }
+
+    fn reap_child(child: Child) {
+        if let Err(mpsc::SendError(child)) = Self::child_reaper_sender().send(child) {
+            let _ = thread::Builder::new()
+                .name("cpu-affinity-tool-linux-child-reaper-fallback".to_string())
+                .spawn(move || {
+                    let mut child = child;
+                    let _ = child.wait();
+                });
+        }
+    }
+
+    fn run_child_reaper(rx: Receiver<Child>) {
+        let mut children = Vec::new();
+        let mut disconnected = false;
+
+        while !disconnected || !children.is_empty() {
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(child) => children.push(child),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => disconnected = true,
+            }
+
+            let mut index = 0;
+            while index < children.len() {
+                match children[index].try_wait() {
+                    Ok(Some(_)) | Err(_) => {
+                        let mut child = children.swap_remove(index);
+                        let _ = child.wait();
+                    }
+                    Ok(None) => {
+                        index += 1;
+                    }
+                }
+            }
+        }
     }
 
     fn resolve_non_absolute_command(command: &str) -> Option<PathBuf> {
@@ -227,11 +302,9 @@ impl OS {
 
             match chars.next() {
                 Some('%') => out.push('%'),
-                Some(code)
-                    if matches!(
-                        code,
-                        'f' | 'F' | 'u' | 'U' | 'd' | 'D' | 'n' | 'N' | 'i' | 'c' | 'k' | 'v' | 'm'
-                    ) => {}
+                Some(
+                    'f' | 'F' | 'u' | 'U' | 'd' | 'D' | 'n' | 'N' | 'i' | 'c' | 'k' | 'v' | 'm',
+                ) => {}
                 Some(code) => {
                     out.push('%');
                     out.push(code);
@@ -492,12 +565,9 @@ impl OS {
         Some(stem.to_string())
     }
 
-    fn list_desktop_catalog_entries() -> Vec<InstalledAppCatalogEntry> {
-        let mut desktop_files = Vec::new();
-        for dir in Self::desktop_file_search_dirs() {
-            Self::collect_desktop_files(&dir, &mut desktop_files);
-        }
-
+    fn list_desktop_catalog_entries_from_files(
+        desktop_files: Vec<PathBuf>,
+    ) -> Vec<InstalledAppCatalogEntry> {
         let mut entries = Vec::new();
         let mut seen = HashSet::new();
 
@@ -544,10 +614,19 @@ impl OS {
         entries
     }
 
+    fn list_desktop_catalog_entries() -> Vec<InstalledAppCatalogEntry> {
+        let mut desktop_files = Vec::new();
+        for dir in Self::desktop_file_search_dirs() {
+            Self::collect_desktop_files(&dir, &mut desktop_files);
+        }
+
+        Self::list_desktop_catalog_entries_from_files(desktop_files)
+    }
+
     fn list_path_catalog_entries_from_dirs(dirs: &[PathBuf]) -> Vec<InstalledAppCatalogEntry> {
         let mut executable_paths = Vec::new();
         for dir in dirs {
-            Self::collect_path_executables(&dir, &mut executable_paths);
+            Self::collect_path_executables(dir, &mut executable_paths);
         }
 
         let mut entries = Vec::new();
@@ -670,11 +749,21 @@ impl OS {
         priority: PriorityClass,
     ) -> Result<u32, String> {
         let mask = Self::compose_mask_from_cores(cores)?;
+        let _ = Self::cpuset_from_mask(mask)?;
         let child = Self::spawn(&file_path, &args)?;
         let pid = child.id();
 
-        Self::set_affinity(&child, mask)?;
-        Self::set_priority(&child, priority)?;
+        let PostSpawnSettingsResult {
+            affinity_error: _affinity_error,
+            priority_error: _priority_error,
+        } = Self::apply_post_spawn_settings(
+            pid,
+            mask,
+            priority,
+            Self::set_affinity_for_pid,
+            |pid, priority| Self::set_priority_for_pid(pid as pid_t, priority),
+        );
+        Self::reap_child(child);
 
         Ok(pid)
     }
@@ -865,10 +954,17 @@ impl OS {
 #[cfg(test)]
 mod tests {
     use super::OS;
-    use crate::{InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget};
+    use crate::{
+        InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
+        PriorityClass,
+    };
+    use std::cell::Cell;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_suffix() -> String {
@@ -920,6 +1016,200 @@ mod tests {
                 "--title=Hello".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_desktop_file_handles_env_args_and_field_codes() {
+        let unique = unique_suffix();
+        let temp_dir = std::env::temp_dir().join(format!("codex-linux-desktop-parse-{unique}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let _guard = TempDirGuard::new(temp_dir.clone());
+
+        let executable = temp_dir.join("sample-app");
+        fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let desktop_file = temp_dir.join("sample.desktop");
+        fs::write(
+            &desktop_file,
+            format!(
+                "[Desktop Entry]\nName=Sample\nType=Application\nExec=env FOO=bar {} --profile default %u\n",
+                executable.display()
+            ),
+        )
+        .unwrap();
+
+        let (target, args) = OS::parse_dropped_file(desktop_file).unwrap();
+
+        assert_eq!(target, executable);
+        assert_eq!(args, vec!["--profile".to_string(), "default".to_string()]);
+    }
+
+    #[test]
+    fn test_list_desktop_catalog_entries_filters_and_preserves_valid_entry() {
+        let unique = unique_suffix();
+        let temp_dir = std::env::temp_dir().join(format!("codex-linux-desktop-list-{unique}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let _guard = TempDirGuard::new(temp_dir.clone());
+
+        let executable = temp_dir.join("sample-app");
+        fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let valid = temp_dir.join("valid.desktop");
+        fs::write(
+            &valid,
+            format!(
+                "[Desktop Entry]\nName=Valid App\nType=Application\nExec={}\n",
+                executable.display()
+            ),
+        )
+        .unwrap();
+        let hidden = temp_dir.join("hidden.desktop");
+        fs::write(
+            &hidden,
+            format!(
+                "[Desktop Entry]\nName=Hidden\nType=Application\nHidden=true\nExec={}\n",
+                executable.display()
+            ),
+        )
+        .unwrap();
+        let no_display = temp_dir.join("nodisplay.desktop");
+        fs::write(
+            &no_display,
+            format!(
+                "[Desktop Entry]\nName=No Display\nType=Application\nNoDisplay=true\nExec={}\n",
+                executable.display()
+            ),
+        )
+        .unwrap();
+        let non_application = temp_dir.join("link.desktop");
+        fs::write(
+            &non_application,
+            format!(
+                "[Desktop Entry]\nName=Link\nType=Link\nExec={}\n",
+                executable.display()
+            ),
+        )
+        .unwrap();
+        let missing_exec = temp_dir.join("missing-exec.desktop");
+        fs::write(
+            &missing_exec,
+            "[Desktop Entry]\nName=Missing Exec\nType=Application\n",
+        )
+        .unwrap();
+        let unresolved = temp_dir.join("unresolved.desktop");
+        fs::write(
+            &unresolved,
+            "[Desktop Entry]\nName=Unresolved\nType=Application\nExec=/definitely/missing/codex-linux-test\n",
+        )
+        .unwrap();
+
+        let entries = OS::list_desktop_catalog_entries_from_files(vec![
+            valid.clone(),
+            hidden,
+            no_display,
+            non_application,
+            missing_exec,
+            unresolved,
+        ]);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Valid App");
+        assert_eq!(
+            entries[0].source,
+            InstalledAppCatalogSource::LinuxDesktopEntry
+        );
+        assert_eq!(entries[0].target, InstalledAppCatalogTarget::Path(valid));
+        assert_eq!(entries[0].detail, executable.display().to_string());
+    }
+
+    #[test]
+    fn test_post_spawn_settings_attempt_priority_after_affinity_failure() {
+        let priority_called = Cell::new(false);
+
+        let result = OS::apply_post_spawn_settings(
+            42,
+            1,
+            PriorityClass::High,
+            |pid, mask| {
+                assert_eq!(pid, 42);
+                assert_eq!(mask, 1);
+                Err("affinity failed".to_string())
+            },
+            |pid, priority| {
+                priority_called.set(true);
+                assert_eq!(pid, 42);
+                assert_eq!(priority, PriorityClass::High);
+                Ok(())
+            },
+        );
+
+        assert!(priority_called.get());
+        assert_eq!(result.affinity_error, Some("affinity failed".to_string()));
+        assert_eq!(result.priority_error, None);
+    }
+
+    #[test]
+    fn test_post_spawn_settings_keep_priority_error_best_effort() {
+        let result = OS::apply_post_spawn_settings(
+            42,
+            1,
+            PriorityClass::Realtime,
+            |_, _| Ok(()),
+            |_, _| Err("priority failed".to_string()),
+        );
+
+        assert_eq!(result.affinity_error, None);
+        assert_eq!(result.priority_error, Some("priority failed".to_string()));
+    }
+
+    #[test]
+    fn test_run_fails_before_spawn_for_empty_affinity_mask() {
+        let err = OS::run(
+            PathBuf::from("/bin/sh"),
+            Vec::new(),
+            &[],
+            PriorityClass::Normal,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("affinity mask is empty"));
+    }
+
+    #[test]
+    fn test_run_reports_spawn_failure() {
+        let err = OS::run(
+            PathBuf::from("/definitely/missing/codex-linux-test"),
+            Vec::new(),
+            &[0],
+            PriorityClass::Normal,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("spawn"));
+    }
+
+    #[test]
+    fn test_child_reaper_waits_for_short_lived_child() {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || OS::run_child_reaper(rx));
+
+        tx.send(child).unwrap();
+        drop(tx);
+
+        handle.join().unwrap();
     }
 
     #[test]

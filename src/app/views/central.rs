@@ -1,5 +1,5 @@
-use crate::app::models::AppStatus;
-use crate::app::runtime::AppState;
+use crate::app::models::{AppRuntimeKey, AppStatus};
+use crate::app::runtime::{AppState, CentralPanelSnapshot};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::presenters::shared_elements::glass_frame;
 use eframe::egui::{self, Align, CentralPanel, Color32, Layout, RichText, ScrollArea, Vec2};
@@ -38,6 +38,7 @@ enum CentralAction {
         target_group_id: GroupId,
         target_rule_index: usize,
     },
+    LogMessage(String),
     ConsumeDroppedFiles(GroupId),
 }
 
@@ -45,8 +46,17 @@ enum CentralAction {
 struct RuleDragPayload {
     source_group_id: GroupId,
     rule_id: RuleId,
+    app_key: AppRuntimeKey,
     preview_label: String,
     preview_width: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleDropClassification {
+    Valid,
+    SamePosition,
+    DuplicateInTarget,
+    StalePayload,
 }
 
 pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
@@ -120,6 +130,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
         let group_id = group.group_id.clone();
         let mut target_rule_index = None;
         let mut drop_indicator = None;
+        let mut rejected_rule_drop = None;
 
         let group_response = glass_frame(ui).outer_margin(5.0).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -288,6 +299,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                             let drag_payload = RuleDragPayload {
                                 source_group_id: group_id.clone(),
                                 rule_id: program.rule_id.clone(),
+                                app_key: program.app_key.clone(),
                                 preview_label: program.name.clone(),
                                 preview_width: app_response.rect.width(),
                             };
@@ -327,24 +339,28 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                                             program_index + 1
                                         };
                                     target_rule_index = Some(insert_index);
-                                    if active_rule_payload.as_deref().is_some_and(|payload| {
-                                        let source_index = group
-                                            .programs
-                                            .iter()
-                                            .position(|program| program.rule_id == payload.rule_id);
-                                        !is_same_position_rule_drop(
+                                    if let Some(payload) = active_rule_payload.as_deref() {
+                                        match classify_rule_drop(
+                                            &snapshot,
                                             payload,
                                             &group.group_id,
-                                            source_index,
                                             insert_index,
-                                        )
-                                    }) {
-                                        let y = if insert_index == program_index {
-                                            row_response.response.rect.top()
-                                        } else {
-                                            row_response.response.rect.bottom()
-                                        };
-                                        drop_indicator = Some((row_response.response.rect, y));
+                                        ) {
+                                            RuleDropClassification::Valid => {
+                                                let y = if insert_index == program_index {
+                                                    row_response.response.rect.top()
+                                                } else {
+                                                    row_response.response.rect.bottom()
+                                                };
+                                                drop_indicator =
+                                                    Some((row_response.response.rect, y));
+                                            }
+                                            RuleDropClassification::DuplicateInTarget => {
+                                                rejected_rule_drop = Some("Already in this group");
+                                            }
+                                            RuleDropClassification::SamePosition
+                                            | RuleDropClassification::StalePayload => {}
+                                        }
                                     }
                                 }
                             }
@@ -376,30 +392,34 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
             }
         });
 
-        if drop_indicator.is_none() {
+        if drop_indicator.is_none() && target_rule_index.is_none() {
             if let Some(pos) = rule_drag_pos {
                 let append_index = group.programs.len();
-                if group_response.response.rect.contains(pos)
-                    && active_rule_payload.as_deref().is_some_and(|payload| {
-                        let source_index = group
-                            .programs
-                            .iter()
-                            .position(|program| program.rule_id == payload.rule_id);
-                        !is_same_position_rule_drop(
-                            payload,
-                            &group.group_id,
-                            source_index,
-                            append_index,
-                        )
-                    })
-                {
-                    let rect = group_response.response.rect.shrink2(Vec2::new(14.0, 8.0));
-                    drop_indicator = Some((rect, rect.bottom()));
+                if group_response.response.rect.contains(pos) {
+                    if let Some(payload) = active_rule_payload.as_deref() {
+                        match classify_rule_drop(&snapshot, payload, &group.group_id, append_index)
+                        {
+                            RuleDropClassification::Valid => {
+                                let rect =
+                                    group_response.response.rect.shrink2(Vec2::new(14.0, 8.0));
+                                drop_indicator = Some((rect, rect.bottom()));
+                                target_rule_index.get_or_insert(append_index);
+                            }
+                            RuleDropClassification::DuplicateInTarget => {
+                                rejected_rule_drop = Some("Already in this group");
+                            }
+                            RuleDropClassification::SamePosition
+                            | RuleDropClassification::StalePayload => {}
+                        }
+                    }
                 }
             }
         }
         if let Some((rect, y)) = drop_indicator {
             paint_rule_drop_indicator(ui, rect, y);
+        }
+        if let Some(message) = rejected_rule_drop {
+            paint_rule_drop_rejection(ctx, message);
         }
 
         let dropped_rule_here =
@@ -410,12 +430,24 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
             None
         };
         if let Some(payload) = dropped_rule {
-            actions.push(CentralAction::MoveRuleToGroup {
-                source_group_id: payload.source_group_id.clone(),
-                rule_id: payload.rule_id.clone(),
-                target_group_id: group_id,
-                target_rule_index: target_rule_index.unwrap_or(group.programs.len()),
-            });
+            let target_rule_index = target_rule_index.unwrap_or(group.programs.len());
+            match classify_rule_drop(&snapshot, &payload, &group_id, target_rule_index) {
+                RuleDropClassification::Valid => {
+                    actions.push(CentralAction::MoveRuleToGroup {
+                        source_group_id: payload.source_group_id.clone(),
+                        rule_id: payload.rule_id.clone(),
+                        target_group_id: group_id,
+                        target_rule_index,
+                    });
+                }
+                RuleDropClassification::DuplicateInTarget => {
+                    actions.push(CentralAction::LogMessage(format!(
+                        "Cannot move app '{}': target group '{}' already contains the same launch rule",
+                        payload.preview_label, group.name
+                    )));
+                }
+                RuleDropClassification::SamePosition | RuleDropClassification::StalePayload => {}
+            }
         }
     }
 
@@ -426,19 +458,58 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
     actions
 }
 
-fn is_same_position_rule_drop(
+fn classify_rule_drop(
+    snapshot: &CentralPanelSnapshot,
     payload: &RuleDragPayload,
-    group_id: &GroupId,
-    source_rule_index: Option<usize>,
+    target_group_id: &GroupId,
     target_rule_index: usize,
-) -> bool {
-    if &payload.source_group_id != group_id {
-        return false;
+) -> RuleDropClassification {
+    let Some(source_group) = snapshot
+        .groups
+        .iter()
+        .find(|group| group.group_id == payload.source_group_id)
+    else {
+        return RuleDropClassification::StalePayload;
+    };
+    let Some((source_rule_index, source_program)) = source_group
+        .programs
+        .iter()
+        .enumerate()
+        .find(|(_, program)| program.rule_id == payload.rule_id)
+    else {
+        return RuleDropClassification::StalePayload;
+    };
+    if source_program.app_key != payload.app_key {
+        return RuleDropClassification::StalePayload;
     }
 
-    source_rule_index.is_some_and(|source_index| {
-        target_rule_index == source_index || target_rule_index == source_index + 1
-    })
+    let Some(target_group) = snapshot
+        .groups
+        .iter()
+        .find(|group| &group.group_id == target_group_id)
+    else {
+        return RuleDropClassification::StalePayload;
+    };
+    if target_rule_index > target_group.programs.len() {
+        return RuleDropClassification::StalePayload;
+    }
+
+    if &payload.source_group_id == target_group_id
+        && (target_rule_index == source_rule_index || target_rule_index == source_rule_index + 1)
+    {
+        return RuleDropClassification::SamePosition;
+    }
+
+    if &payload.source_group_id != target_group_id
+        && target_group
+            .programs
+            .iter()
+            .any(|program| program.app_key == payload.app_key)
+    {
+        return RuleDropClassification::DuplicateInTarget;
+    }
+
+    RuleDropClassification::Valid
 }
 
 fn paint_rule_drop_indicator(ui: &egui::Ui, rect: egui::Rect, y: f32) {
@@ -457,6 +528,23 @@ fn paint_rule_drop_indicator(ui: &egui::Ui, rect: egui::Rect, y: f32) {
     );
     ui.painter().circle_filled(egui::pos2(left, y), 3.0, color);
     ui.painter().circle_filled(egui::pos2(right, y), 3.0, color);
+}
+
+fn paint_rule_drop_rejection(ctx: &egui::Context, message: &str) {
+    ctx.output_mut(|output| output.cursor_icon = egui::CursorIcon::NotAllowed);
+
+    let Some(pointer_pos) = ctx.pointer_interact_pos() else {
+        return;
+    };
+
+    egui::Area::new(egui::Id::new("central-rule-drop-rejection"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pointer_pos + Vec2::new(14.0, 14.0))
+        .constrain(false)
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.label(RichText::new(message).small().strong());
+        });
 }
 
 fn render_rule_drag_preview(ctx: &egui::Context) {
@@ -529,9 +617,204 @@ fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
                     target_rule_index,
                 );
             }
+            CentralAction::LogMessage(message) => {
+                app.log_manager.add_entry(message);
+            }
             CentralAction::ConsumeDroppedFiles(group_id) => {
                 let _ = app.consume_dropped_files_into_group(group_id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::models::AppToRun;
+    use crate::app::runtime::{CentralGroupSnapshot, CentralProgramSnapshot};
+    use os_api::PriorityClass;
+
+    fn app_key(name: &str) -> AppRuntimeKey {
+        AppToRun::new_path(
+            PathBuf::from(format!(r"C:\{name}.lnk")),
+            Vec::new(),
+            PathBuf::from(format!(r"C:\{name}.exe")),
+            PriorityClass::Normal,
+            false,
+        )
+        .get_key()
+    }
+
+    fn program(rule_id: &str, name: &str, app_key: AppRuntimeKey) -> CentralProgramSnapshot {
+        CentralProgramSnapshot {
+            rule_id: RuleId(rule_id.to_string()),
+            name: name.to_string(),
+            launch_target_detail: name.to_string(),
+            app_key,
+        }
+    }
+
+    fn group(
+        group_id: &str,
+        name: &str,
+        programs: Vec<CentralProgramSnapshot>,
+    ) -> CentralGroupSnapshot {
+        CentralGroupSnapshot {
+            group_id: GroupId(group_id.to_string()),
+            name: name.to_string(),
+            cores: vec![0],
+            is_hidden: false,
+            run_all_button: true,
+            programs,
+        }
+    }
+
+    fn payload(group_id: &str, rule_id: &str, app_key: AppRuntimeKey) -> RuleDragPayload {
+        RuleDragPayload {
+            source_group_id: GroupId(group_id.to_string()),
+            rule_id: RuleId(rule_id.to_string()),
+            app_key,
+            preview_label: "Sample".to_string(),
+            preview_width: 240.0,
+        }
+    }
+
+    #[test]
+    fn test_rule_drop_classifier_accepts_cross_group_non_duplicate() {
+        let sample_key = app_key("Sample");
+        let other_key = app_key("Other");
+        let snapshot = CentralPanelSnapshot {
+            groups: vec![
+                group(
+                    "group-a",
+                    "Games",
+                    vec![program("rule-a", "Sample", sample_key.clone())],
+                ),
+                group(
+                    "group-b",
+                    "Background",
+                    vec![program("rule-b", "Other", other_key)],
+                ),
+            ],
+        };
+
+        assert_eq!(
+            classify_rule_drop(
+                &snapshot,
+                &payload("group-a", "rule-a", sample_key),
+                &GroupId("group-b".to_string()),
+                1,
+            ),
+            RuleDropClassification::Valid
+        );
+    }
+
+    #[test]
+    fn test_rule_drop_classifier_rejects_cross_group_duplicate() {
+        let sample_key = app_key("Sample");
+        let snapshot = CentralPanelSnapshot {
+            groups: vec![
+                group(
+                    "group-a",
+                    "Games",
+                    vec![program("rule-a", "Sample", sample_key.clone())],
+                ),
+                group(
+                    "group-b",
+                    "Background",
+                    vec![program("rule-b", "Sample Copy", sample_key.clone())],
+                ),
+            ],
+        };
+
+        assert_eq!(
+            classify_rule_drop(
+                &snapshot,
+                &payload("group-a", "rule-a", sample_key),
+                &GroupId("group-b".to_string()),
+                1,
+            ),
+            RuleDropClassification::DuplicateInTarget
+        );
+    }
+
+    #[test]
+    fn test_rule_drop_classifier_accepts_same_group_reorder() {
+        let sample_key = app_key("Sample");
+        let other_key = app_key("Other");
+        let snapshot = CentralPanelSnapshot {
+            groups: vec![group(
+                "group-a",
+                "Games",
+                vec![
+                    program("rule-a", "Sample", sample_key.clone()),
+                    program("rule-b", "Other", other_key),
+                ],
+            )],
+        };
+
+        assert_eq!(
+            classify_rule_drop(
+                &snapshot,
+                &payload("group-a", "rule-a", sample_key),
+                &GroupId("group-a".to_string()),
+                2,
+            ),
+            RuleDropClassification::Valid
+        );
+    }
+
+    #[test]
+    fn test_rule_drop_classifier_marks_same_position_noop() {
+        let sample_key = app_key("Sample");
+        let snapshot = CentralPanelSnapshot {
+            groups: vec![group(
+                "group-a",
+                "Games",
+                vec![program("rule-a", "Sample", sample_key.clone())],
+            )],
+        };
+
+        assert_eq!(
+            classify_rule_drop(
+                &snapshot,
+                &payload("group-a", "rule-a", sample_key.clone()),
+                &GroupId("group-a".to_string()),
+                0,
+            ),
+            RuleDropClassification::SamePosition
+        );
+        assert_eq!(
+            classify_rule_drop(
+                &snapshot,
+                &payload("group-a", "rule-a", sample_key),
+                &GroupId("group-a".to_string()),
+                1,
+            ),
+            RuleDropClassification::SamePosition
+        );
+    }
+
+    #[test]
+    fn test_rule_drop_classifier_rejects_stale_payload() {
+        let sample_key = app_key("Sample");
+        let stale_key = app_key("Stale");
+        let snapshot = CentralPanelSnapshot {
+            groups: vec![group(
+                "group-a",
+                "Games",
+                vec![program("rule-a", "Sample", sample_key)],
+            )],
+        };
+
+        assert_eq!(
+            classify_rule_drop(
+                &snapshot,
+                &payload("group-a", "rule-a", stale_key),
+                &GroupId("group-a".to_string()),
+                0,
+            ),
+            RuleDropClassification::StalePayload
+        );
     }
 }

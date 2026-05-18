@@ -9,12 +9,12 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 
 - Confirm the release stays Windows-only: `.github/workflows/release.yml` should publish only `cpu-affinity-tool.exe` for `x86_64-pc-windows-msvc`.
 - Confirm Linux beta prereleases stay isolated: `.github/workflows/release-linux-beta.yml` should publish only Linux beta prerelease assets for tags matching `linux-beta-v*`.
-- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs separate Windows and Linux beta jobs, cancels superseded runs per branch or PR, restores Rust cache, runs shared formatting and `libs/os_api` tests, keeps the Windows release-path checks on `windows-latest`, and verifies the Linux beta binary on `ubuntu-latest`.
-- Confirm the tag-release gate matches reality: `.github/workflows/release.yml` runs the same formatting, lint, `libs/os_api`, and root test gates and then builds the Windows artifact in the same Windows job before publishing it.
+- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs separate Windows and Linux beta jobs, cancels superseded runs per branch or PR, restores Rust cache, runs shared formatting and `libs/os_api` tests, keeps the Windows release-path checks on `windows-latest`, and verifies the Linux beta binary on `ubuntu-24.04`.
+- Confirm the tag-release gate matches reality: `.github/workflows/release.yml` validates `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`, runs the same formatting, lint, `libs/os_api`, and root test gates, and then builds the Windows artifact in the same Windows job before publishing it.
 - Confirm no project docs claim full cross-platform support or Linux release parity.
 - Confirm `README.md` and `AGENTS.md` describe Windows as the primary stable released platform and Linux as a separate beta prerelease track without stable parity.
 - Confirm `README.md` documents the administrator/UAC expectation from `app.manifest`.
-- Confirm version markers are aligned manually: release tag `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`.
+- Confirm version markers are aligned manually before tagging: release tag `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`. The workflow validates these again after the tag is pushed.
 - Confirm the changelog and any release note summary call out the schema `v7` save boundary when applicable:
   - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
   - `v6` to `v7` saves do not write `state.json.pre-v6*`

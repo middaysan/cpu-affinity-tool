@@ -215,6 +215,88 @@ fn test_load_v6_state_backfills_primary_process_name_until_explicit_v7_save() {
 }
 
 #[test]
+fn test_load_v5_state_backfills_tracked_names_until_explicit_v7_save() {
+    with_temp_state_path("v5_tracked_name_backfill", |state_path| {
+        let mut state = sample_state_with_version(5);
+        state.groups[0].programs = vec![
+            AppToRun::new_path(
+                PathBuf::from(r"C:\MissingTracked.lnk"),
+                Vec::new(),
+                PathBuf::from(r"C:\MissingTracked.exe"),
+                PriorityClass::Normal,
+                false,
+            ),
+            AppToRun::new_path(
+                PathBuf::from(r"C:\EmptyTracked.lnk"),
+                Vec::new(),
+                PathBuf::from(r"C:\EmptyTracked.exe"),
+                PriorityClass::Normal,
+                false,
+            ),
+            AppToRun::new_path(
+                PathBuf::from(r"C:\ExistingTracked.lnk"),
+                Vec::new(),
+                PathBuf::from(r"C:\ExistingTracked.exe"),
+                PriorityClass::Normal,
+                false,
+            ),
+        ];
+        state.groups[0].programs[1].additional_processes.clear();
+        state.groups[0].programs[2].additional_processes = vec!["existingtracked.EXE".to_string()];
+
+        let mut value = serde_json::to_value(&state).unwrap();
+        value["groups"][0]["programs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("additional_processes");
+
+        let original = serde_json::to_string_pretty(&value).unwrap();
+        fs::write(state_path, &original).unwrap();
+
+        let mut loaded = AppStateStorage::load_from_path(state_path);
+
+        assert_eq!(loaded.version, 5);
+        assert_eq!(loaded.loaded_version, 5);
+        assert!(loaded.pending_pre_v6_backup);
+        assert_eq!(
+            loaded.groups[0].programs[0].additional_processes,
+            vec!["MissingTracked.exe".to_string()]
+        );
+        assert_eq!(
+            loaded.groups[0].programs[1].additional_processes,
+            vec!["EmptyTracked.exe".to_string()]
+        );
+        assert_eq!(
+            loaded.groups[0].programs[2].additional_processes,
+            vec!["existingtracked.EXE".to_string()]
+        );
+        assert_eq!(fs::read_to_string(state_path).unwrap(), original);
+
+        persist_explicit_current_schema_upgrade(&mut loaded, state_path);
+        let persisted: Value =
+            serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
+        assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
+        assert!(persisted["rule_identities"].is_object());
+        assert_eq!(
+            persisted["groups"][0]["programs"][0]["additional_processes"],
+            json!(["MissingTracked.exe"])
+        );
+        assert_eq!(
+            persisted["groups"][0]["programs"][1]["additional_processes"],
+            json!(["EmptyTracked.exe"])
+        );
+        assert_eq!(
+            persisted["groups"][0]["programs"][2]["additional_processes"],
+            json!(["existingtracked.EXE"])
+        );
+        assert_eq!(
+            fs::read_to_string(state_path.with_file_name("state.json.pre-v6")).unwrap(),
+            original
+        );
+    });
+}
+
+#[test]
 fn test_load_v5_generic_state_refreshes_when_cpu_model_is_known_without_rewrite() {
     with_temp_state_path("v5_generic", |state_path| {
         let generic = AppStateStorage {

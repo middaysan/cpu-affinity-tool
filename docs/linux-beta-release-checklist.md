@@ -8,7 +8,7 @@ Use this checklist with `docs/release-process.md`.
 
 - Confirm the Linux beta release stays isolated: `.github/workflows/release-linux-beta.yml` should trigger only for tags matching `linux-beta-v*` and should publish only Linux beta prerelease assets.
 - Confirm the stable Windows release path remains separate: `.github/workflows/release.yml` should still react only to stable tags matching `v*`.
-- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs separate Windows and Linux beta jobs, and the Linux beta job still verifies formatting, Linux clippy, `libs/os_api` tests, Linux binary tests, and the Linux release build.
+- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs separate Windows and Linux beta jobs, and the Linux beta job still verifies formatting, Linux clippy, `libs/os_api` tests, Linux binary tests, and the Linux release build on `ubuntu-24.04`.
 - Confirm no project docs claim full cross-platform support, Linux stable parity, AppImage support, or Flatpak support.
 - Confirm `README.md` and `AGENTS.md` describe Linux as a desktop beta path with prerelease artifacts under `linux-beta-v*` tags.
 - Confirm the base version in `Cargo.toml` matches the `X.Y.Z` segment of the Linux beta tag you plan to push.
@@ -35,7 +35,7 @@ Use this checklist with `docs/release-process.md`.
 - Confirm the window opens and the detected CPU core count looks correct.
 - Add an app target by path or `.desktop` entry and confirm it appears once.
 - Launch the target and confirm affinity and priority are applied as expected.
-- If Auto Re-apply App Process Affinity is expected for the beta, confirm correction behavior and logs still work.
+- If Auto Re-apply Affinity and Priority is expected for the beta, confirm correction behavior and logs still work.
 - Treat startup failures, incorrect CPU topology, launch failures, missing logs, or broken affinity application as beta-blocking until resolved or explicitly downgraded.
 
 ## Release Notes And Distribution

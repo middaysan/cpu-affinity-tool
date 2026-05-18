@@ -18,11 +18,11 @@ env:
 jobs:
   build-and-release-linux-beta:
     name: Check, Build, and Publish Linux Beta Prerelease
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Linux GUI build dependencies
         run: |
@@ -136,7 +136,7 @@ jobs:
           echo "artifact_dir=$ARTIFACT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Create Linux beta prerelease
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           name: CPU Affinity Tool Linux Beta v${{ steps.meta.outputs.display_version }}
           draft: false

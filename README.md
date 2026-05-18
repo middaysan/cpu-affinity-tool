@@ -3,7 +3,7 @@
 Windows utility for managing CPU affinity of games and background applications.
 
 - Primary stable released platform: Windows
-- Linux desktop beta: source build on `x86_64` `glibc` desktop sessions with `X11` or `Wayland`, plus prerelease artifacts under `linux-beta-v*` tags
+- Linux desktop beta: source build on `x86_64` `glibc`, manual smoke on `X11` or `Wayland`, plus prerelease artifacts under `linux-beta-v*` tags
 - Stable download artifact: Windows only
 - Linux beta prereleases: [GitHub Releases](https://github.com/middaysan/cpu-affinity-tool/releases)
 - Download: [Latest Release](https://github.com/middaysan/cpu-affinity-tool/releases/latest)
@@ -38,7 +38,7 @@ This is a control tool, not a promise of better FPS.
 - Launch apps with saved affinity and priority rules
 - Add apps from direct paths and launcher files with **Open App**
 - Add supported installed apps with **Find Installed** (`Start`-backed entries on Windows, desktop entries plus matching `PATH` executables during search on Linux beta)
-- Re-apply affinity and priority while Auto Re-apply App Process Affinity is enabled
+- Re-apply affinity and priority while Auto Re-apply Affinity and Priority is enabled
 - Autorun selected apps with the tool
 - Add targets by drag and drop
 - Inspect launch and automatic CPU affinity re-apply activity in the built-in log view
@@ -68,11 +68,11 @@ For a longer explanation, see [docs/why.md](docs/why.md).
 3. Create a CPU core group for the workload you want to isolate.
 4. Add an app with **Open App**, **Find Installed**, or drag and drop.
 5. Set the desired affinity and priority, then save the rule.
-6. Launch the app from the tool and keep Auto Re-apply App Process Affinity enabled if you want settings re-applied automatically.
+6. Launch the app from the tool and keep Auto Re-apply Affinity and Priority enabled if you want settings re-applied automatically.
 
 ## Comparison
 
-| Tool | Saved launch rules | Auto Re-apply App Process Affinity | Complexity | Best fit |
+| Tool | Saved launch rules | Auto Re-apply Affinity and Priority | Complexity | Best fit |
 | --- | --- | --- | --- | --- |
 | CPU Affinity Tool | Yes | Yes | Low | Focused Windows affinity workflows with saved rules |
 | Task Manager | No | No | Low | One-off manual changes |
@@ -105,7 +105,7 @@ It overlaps with a narrower part of that use case. CPU Affinity Tool is a focuse
 
 ### Is Linux or macOS supported?
 
-Windows is the only stable published release artifact today. Linux has a desktop beta path from source for `x86_64` `glibc` systems running a normal desktop session on `X11` or `Wayland`, and Linux beta prereleases are published separately under `linux-beta-v*` tags. There is still no stable Linux release, installer, AppImage, or Flatpak. macOS is not supported.
+Windows is the only stable published release artifact today. Linux has a desktop beta path from source for `x86_64` `glibc` systems; normal desktop sessions on `X11` or `Wayland` are covered by manual beta smoke validation, and Linux beta prereleases are published separately under `linux-beta-v*` tags. There is still no stable Linux release, installer, AppImage, or Flatpak. macOS is not supported.
 
 ### Where is the configuration stored?
 
@@ -120,12 +120,12 @@ Use **Open App** instead. On Windows, **Find Installed** is a launch-safe subset
 ### Affinity or priority is not applied
 
 - Make sure you launched the target from CPU Affinity Tool
-- Keep Auto Re-apply App Process Affinity enabled if the app changes settings after launch
+- Keep Auto Re-apply Affinity and Priority enabled if the app changes settings after launch
 - Verify that you accepted the UAC prompt and the tool is running elevated
 
 ### The application overrides the configured settings
 
-Some applications spawn helper processes or reset their own settings. Auto Re-apply App Process Affinity is designed to correct that, but it may not cover every application behavior.
+Some applications spawn helper processes or reset their own settings. Auto Re-apply Affinity and Priority is designed to correct that, but it may not cover every application behavior.
 
 ### Windows security software or antivirus prompts appear
 
@@ -159,7 +159,8 @@ cargo build --release --features linux --bin cpu-affinity-tool-linux
 Linux beta notes:
 
 - supported target: `x86_64` Linux with `glibc`
-- expected environment: desktop session on `X11` or `Wayland`
+- expected environment for manual beta smoke: desktop session on `X11` or `Wayland`
+- Linux CI and prerelease builds run on pinned `ubuntu-24.04` GitHub-hosted runners
 - Debian/Ubuntu-like systems may need `libclang-dev libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev` before building
 - Linux beta prereleases are published separately under `linux-beta-v*` tags as a raw binary, `tar.gz`, and `SHA256SUMS.txt`
 - Linux still does not have a stable published release artifact
