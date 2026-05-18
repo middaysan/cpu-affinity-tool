@@ -1,6 +1,7 @@
 use crate::app::models::AppStatus;
 use crate::app::runtime::AppState;
-use crate::app::views::shared_elements::glass_frame;
+use crate::app::shared::ids::{GroupId, RuleId};
+use crate::app::shell::presenters::shared_elements::glass_frame;
 use eframe::egui::{self, Align, CentralPanel, Color32, Layout, RichText, ScrollArea, Vec2};
 use std::path::PathBuf;
 
@@ -10,30 +11,28 @@ const ICON_EDIT: &str = "\u{2699}";
 const ICON_SHOW: &str = "\u{1F441}";
 
 enum CentralAction {
-    MoveGroup {
-        from: usize,
-        to: usize,
-    },
-    StartEditGroup(usize),
+    MoveGroupUp(GroupId),
+    MoveGroupDown(GroupId),
+    StartEditGroup(GroupId),
     ToggleGroupHidden {
-        index: usize,
+        group_id: GroupId,
         is_hidden: bool,
     },
     AddSelectedFiles {
-        group_index: usize,
+        group_id: GroupId,
         paths: Vec<PathBuf>,
     },
-    OpenInstalledAppPicker(usize),
+    OpenInstalledAppPicker(GroupId),
     OpenAppRunSettings {
-        group_index: usize,
-        program_index: usize,
+        group_id: GroupId,
+        rule_id: RuleId,
     },
-    RunGroup(usize),
+    RunGroup(GroupId),
     RunGroupProgram {
-        group_index: usize,
-        program_index: usize,
+        group_id: GroupId,
+        rule_id: RuleId,
     },
-    ConsumeDroppedFiles(usize),
+    ConsumeDroppedFiles(GroupId),
 }
 
 pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
@@ -90,8 +89,8 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
     let snapshot = app.build_central_panel_snapshot();
     let groups_len = snapshot.groups.len();
 
-    for group in snapshot.groups {
-        let group_index = group.group_index;
+    for (group_index, group) in snapshot.groups.iter().enumerate() {
+        let group_id = group.group_id.clone();
 
         glass_frame(ui).outer_margin(5.0).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -103,10 +102,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                             .on_hover_text("Move group up")
                             .clicked()
                         {
-                            actions.push(CentralAction::MoveGroup {
-                                from: group_index,
-                                to: group_index - 1,
-                            });
+                            actions.push(CentralAction::MoveGroupUp(group_id.clone()));
                         }
                     } else {
                         ui.add_enabled(false, egui::Button::new(ICON_MOVE_UP));
@@ -118,10 +114,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                             .on_hover_text("Move group down")
                             .clicked()
                         {
-                            actions.push(CentralAction::MoveGroup {
-                                from: group_index + 1,
-                                to: group_index,
-                            });
+                            actions.push(CentralAction::MoveGroupDown(group_id.clone()));
                         }
                     } else {
                         ui.add_enabled(false, egui::Button::new(ICON_MOVE_DOWN));
@@ -144,7 +137,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         .on_hover_text("Edit group settings")
                         .clicked()
                     {
-                        actions.push(CentralAction::StartEditGroup(group_index));
+                        actions.push(CentralAction::StartEditGroup(group_id.clone()));
                     }
 
                     ui.separator();
@@ -162,7 +155,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 
                     if ui.button(hide_text).on_hover_text(hover_text).clicked() {
                         actions.push(CentralAction::ToggleGroupHidden {
-                            index: group_index,
+                            group_id: group_id.clone(),
                             is_hidden: !group.is_hidden,
                         });
                     }
@@ -173,17 +166,20 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         .clicked()
                     {
                         if let Some(paths) = pick_open_app_files() {
-                            actions.push(CentralAction::AddSelectedFiles { group_index, paths });
+                            actions.push(CentralAction::AddSelectedFiles {
+                                group_id: group_id.clone(),
+                                paths,
+                            });
                         }
                     }
 
-                    if os_api::OS::supports_installed_app_picker()
+                    if crate::app::adapters::discovery::supports_installed_app_picker()
                         && ui
                             .button("Find Installed")
                             .on_hover_text(installed_app_hover_text())
                             .clicked()
                     {
-                        actions.push(CentralAction::OpenInstalledAppPicker(group_index));
+                        actions.push(CentralAction::OpenInstalledAppPicker(group_id.clone()));
                     }
 
                     if group.run_all_button
@@ -195,7 +191,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                             .on_hover_text("Run all apps in group")
                             .clicked()
                     {
-                        actions.push(CentralAction::RunGroup(group_index));
+                        actions.push(CentralAction::RunGroup(group_id.clone()));
                     }
                 });
             });
@@ -214,7 +210,6 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         );
                     });
                 } else {
-                    let len = group.programs.len();
                     for program in &group.programs {
                         let app_status = app.get_app_status_sync(&program.app_key);
 
@@ -257,8 +252,8 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                                     .clicked()
                                 {
                                     actions.push(CentralAction::OpenAppRunSettings {
-                                        group_index: program.group_index,
-                                        program_index: program.program_index,
+                                        group_id: group_id.clone(),
+                                        rule_id: program.rule_id.clone(),
                                     });
                                 }
                             });
@@ -268,13 +263,17 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                                 .clicked()
                             {
                                 actions.push(CentralAction::RunGroupProgram {
-                                    group_index: program.group_index,
-                                    program_index: program.program_index,
+                                    group_id: group_id.clone(),
+                                    rule_id: program.rule_id.clone(),
                                 });
                             }
                         });
 
-                        if program.program_index < len - 1 {
+                        if group
+                            .programs
+                            .last()
+                            .is_some_and(|last| last.rule_id != program.rule_id)
+                        {
                             ui.add_space(2.0);
                         }
                     }
@@ -291,14 +290,14 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                 let rect = ui.min_rect();
                 let hover_pos = ctx.input(|i| i.pointer.hover_pos().unwrap_or_default());
                 if rect.contains(hover_pos) {
-                    drop_target = Some(group_index);
+                    drop_target = Some(group_id.clone());
                 }
             }
         });
     }
 
-    if let Some(group_index) = drop_target {
-        actions.push(CentralAction::ConsumeDroppedFiles(group_index));
+    if let Some(group_id) = drop_target {
+        actions.push(CentralAction::ConsumeDroppedFiles(group_id));
     }
 
     actions
@@ -307,38 +306,38 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
 fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
     for action in actions {
         match action {
-            CentralAction::MoveGroup { from, to } => {
-                app.swap_groups(from, to);
+            CentralAction::MoveGroupUp(group_id) => {
+                let _ = app.move_group_up(group_id);
             }
-            CentralAction::StartEditGroup(group_index) => {
-                app.start_editing_group(group_index);
+            CentralAction::MoveGroupDown(group_id) => {
+                let _ = app.move_group_down(group_id);
             }
-            CentralAction::ToggleGroupHidden { index, is_hidden } => {
-                app.set_group_is_hidden(index, is_hidden);
+            CentralAction::StartEditGroup(group_id) => {
+                app.start_editing_group(group_id);
             }
-            CentralAction::AddSelectedFiles { group_index, paths } => {
-                app.add_selected_files_to_group(group_index, paths);
-            }
-            CentralAction::OpenInstalledAppPicker(group_index) => {
-                app.open_installed_app_picker(group_index);
-            }
-            CentralAction::OpenAppRunSettings {
-                group_index,
-                program_index,
+            CentralAction::ToggleGroupHidden {
+                group_id,
+                is_hidden,
             } => {
-                app.open_app_run_settings(group_index, program_index);
+                app.set_group_is_hidden(group_id, is_hidden);
             }
-            CentralAction::RunGroup(group_index) => {
-                app.run_group(group_index);
+            CentralAction::AddSelectedFiles { group_id, paths } => {
+                app.add_selected_files_to_group(group_id, paths);
             }
-            CentralAction::RunGroupProgram {
-                group_index,
-                program_index,
-            } => {
-                app.run_group_program(group_index, program_index);
+            CentralAction::OpenInstalledAppPicker(group_id) => {
+                app.open_installed_app_picker(group_id);
             }
-            CentralAction::ConsumeDroppedFiles(group_index) => {
-                let _ = app.consume_dropped_files_into_group(group_index);
+            CentralAction::OpenAppRunSettings { group_id, rule_id } => {
+                app.open_app_run_settings(group_id, rule_id);
+            }
+            CentralAction::RunGroup(group_id) => {
+                app.run_group(group_id);
+            }
+            CentralAction::RunGroupProgram { group_id, rule_id } => {
+                app.run_group_program(group_id, rule_id);
+            }
+            CentralAction::ConsumeDroppedFiles(group_id) => {
+                let _ = app.consume_dropped_files_into_group(group_id);
             }
         }
     }

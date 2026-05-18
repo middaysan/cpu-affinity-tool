@@ -1,0 +1,16 @@
+#[path = "../../views/central.rs"]
+pub mod central;
+#[path = "../../views/footer.rs"]
+pub mod footer;
+#[path = "../../views/group_editor.rs"]
+pub mod group_editor;
+#[path = "../../views/header.rs"]
+pub mod header;
+#[path = "../../views/installed_app_picker.rs"]
+pub mod installed_app_picker;
+#[path = "../../views/logs.rs"]
+pub mod logs;
+#[path = "../../views/run_settings.rs"]
+pub mod run_settings;
+#[path = "../../views/shared_elements.rs"]
+pub mod shared_elements;

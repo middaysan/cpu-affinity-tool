@@ -1,8 +1,9 @@
-use crate::app::models::{AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, LogManager};
-use crate::app::runtime::runtime_registry::{
-    ensure_package_owner_claim, InstalledPackageTrackingState,
+use crate::app::features::execution::{
+    ensure_package_owner_claim, InstalledPackageTrackingState, RuntimeRegistry,
 };
-use crate::app::runtime::RuntimeRegistry;
+use crate::app::features::rules::RulesContext;
+use crate::app::models::{AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, LogManager};
+use crate::app::shared::ids::{GroupId, RuleId};
 use os_api::{InstalledPackageRuntimeInfo, PriorityClass, OS};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -29,8 +30,8 @@ struct PostLaunchCorrectionRequest {
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     app_key: AppRuntimeKey,
     initial_pid: u32,
-    group_index: usize,
-    prog_index: usize,
+    group_id: GroupId,
+    rule_id: RuleId,
     group_cores: Vec<usize>,
     priority: PriorityClass,
     expected_aumid: String,
@@ -198,11 +199,29 @@ fn run_app_with_affinity_sync_with_os<O: LaunchOs>(
         }
     };
 
+    let (group_id, rule_id) = {
+        let state = persistent_state.read().unwrap();
+        let rules = RulesContext::from_storage(&state);
+        let Some(group_id) = rules.group_id_for_index(group_index) else {
+            log_manager.add_important_sticky_once(format!(
+                "Error: Missing group id for group index {group_index}"
+            ));
+            return;
+        };
+        let Some(rule_id) = rules.rule_id_for_index(group_index, prog_index) else {
+            log_manager.add_important_sticky_once(format!(
+                "Error: Missing rule id for rule index {prog_index} in group {group_index}"
+            ));
+            return;
+        };
+        (group_id, rule_id)
+    };
+
     run_launch_decision(
         runtime,
         log_manager,
-        group_index,
-        prog_index,
+        group_id,
+        rule_id,
         app_to_run,
         group_cores,
         os,
@@ -212,8 +231,8 @@ fn run_app_with_affinity_sync_with_os<O: LaunchOs>(
 fn run_launch_decision<O: LaunchOs>(
     runtime: &RuntimeRegistry,
     log_manager: &mut LogManager,
-    group_index: usize,
-    prog_index: usize,
+    group_id: GroupId,
+    rule_id: RuleId,
     app_to_run: AppToRun,
     group_cores: Vec<usize>,
     os: &O,
@@ -290,16 +309,23 @@ fn run_launch_decision<O: LaunchOs>(
                 let _ = os.set_process_priority_by_pid(pid, priority);
             }
 
-            record_started_pid(runtime, log_manager, &app_key, pid, group_index, prog_index);
+            record_started_pid(
+                runtime,
+                log_manager,
+                &app_key,
+                pid,
+                group_id.clone(),
+                rule_id.clone(),
+            );
 
             if let LaunchTarget::Installed { aumid } = &app_to_run.launch_target {
                 spawn_post_launch_correction(PostLaunchCorrectionRequest {
-                    running_apps: runtime.running_apps.clone(),
-                    installed_package_tracking: runtime.installed_package_tracking.clone(),
+                    running_apps: runtime.running_apps_handle(),
+                    installed_package_tracking: runtime.installed_package_tracking_handle(),
                     app_key,
                     initial_pid: pid,
-                    group_index,
-                    prog_index,
+                    group_id,
+                    rule_id,
                     group_cores,
                     priority,
                     expected_aumid: aumid.clone(),
@@ -317,13 +343,13 @@ fn record_started_pid(
     log_manager: &mut LogManager,
     app_key: &AppRuntimeKey,
     pid: u32,
-    group_index: usize,
-    prog_index: usize,
+    group_id: GroupId,
+    rule_id: RuleId,
 ) {
     let is_new_app = !runtime.contains_app(app_key);
 
     if is_new_app {
-        let added = runtime.add_running_app(app_key, pid, group_index, prog_index);
+        let added = runtime.add_running_app(app_key, pid, group_id, rule_id);
         if added {
             log_manager.add_entry(format!("App started with PID: {pid}"));
         } else {
@@ -377,8 +403,8 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                         apps.add_app(
                             &request.app_key,
                             request.initial_pid,
-                            request.group_index,
-                            request.prog_index,
+                            request.group_id.clone(),
+                            request.rule_id.clone(),
                         );
                     }
 
@@ -595,8 +621,9 @@ mod tests {
         collect_autorun_items, post_launch_correction_poll_with_os, record_started_pid,
         run_app_with_affinity_sync_with_os, run_launch_decision, LaunchOs, LaunchProcessSnapshot,
     };
+    use crate::app::features::execution::RuntimeRegistry;
     use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, LogManager};
-    use crate::app::runtime::RuntimeRegistry;
+    use crate::app::shared::ids::{GroupId, RuleId};
     use os_api::{InstalledPackageRuntimeInfo, PriorityClass};
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -726,6 +753,9 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            rule_identities: None,
+            loaded_version: 5,
+            pending_pre_v6_backup: false,
         }))
     }
 
@@ -737,6 +767,14 @@ mod tests {
             PriorityClass::High,
             false,
         )
+    }
+
+    fn group_id(value: usize) -> GroupId {
+        GroupId(format!("group-{value}"))
+    }
+
+    fn rule_id(value: usize) -> RuleId {
+        RuleId(format!("rule-{value}"))
     }
 
     #[test]
@@ -757,7 +795,7 @@ mod tests {
         let runtime = RuntimeRegistry::new();
         let app = sample_app();
         let app_key = app.get_key();
-        assert!(runtime.add_running_app(&app_key, 41, 3, 4));
+        assert!(runtime.add_running_app(&app_key, 41, group_id(3), rule_id(4)));
         assert!(runtime.add_pid_to_existing_app(&app_key, 42));
         let mut log_manager = LogManager::default();
         let os = FakeLaunchOs {
@@ -766,7 +804,15 @@ mod tests {
             ..Default::default()
         };
 
-        run_launch_decision(&runtime, &mut log_manager, 3, 4, app, vec![0, 2], &os);
+        run_launch_decision(
+            &runtime,
+            &mut log_manager,
+            group_id(3),
+            rule_id(4),
+            app,
+            vec![0, 2],
+            &os,
+        );
 
         assert!(os.run_calls.borrow().is_empty());
         assert_eq!(os.affinity_calls.borrow().as_slice(), &[(41, 5), (42, 5)]);
@@ -785,14 +831,22 @@ mod tests {
         let runtime = RuntimeRegistry::new();
         let app = sample_app();
         let app_key = app.get_key();
-        assert!(runtime.add_running_app(&app_key, 77, 0, 0));
+        assert!(runtime.add_running_app(&app_key, 77, group_id(0), rule_id(0)));
         let mut log_manager = LogManager::default();
         let os = FakeLaunchOs {
             run_result: RefCell::new(Ok(555)),
             ..Default::default()
         };
 
-        run_launch_decision(&runtime, &mut log_manager, 0, 0, app, vec![1, 3], &os);
+        run_launch_decision(
+            &runtime,
+            &mut log_manager,
+            group_id(0),
+            rule_id(0),
+            app,
+            vec![1, 3],
+            &os,
+        );
 
         assert!(os.run_calls.borrow().is_empty());
         assert!(log_manager
@@ -855,10 +909,24 @@ mod tests {
         let runtime = RuntimeRegistry::new();
         let mut log_manager = LogManager::default();
         let key = sample_app().get_key();
-        assert!(runtime.add_running_app(&key, 41, 1, 2));
+        assert!(runtime.add_running_app(&key, 41, group_id(1), rule_id(2)));
 
-        record_started_pid(&runtime, &mut log_manager, &key, 5150, 1, 2);
-        record_started_pid(&runtime, &mut log_manager, &key, 5150, 1, 2);
+        record_started_pid(
+            &runtime,
+            &mut log_manager,
+            &key,
+            5150,
+            group_id(1),
+            rule_id(2),
+        );
+        record_started_pid(
+            &runtime,
+            &mut log_manager,
+            &key,
+            5150,
+            group_id(1),
+            rule_id(2),
+        );
 
         let pids = runtime.get_running_app_pids(&key).unwrap();
         assert!(pids.contains(&41));
@@ -878,7 +946,15 @@ mod tests {
             ..Default::default()
         };
 
-        run_launch_decision(&runtime, &mut log_manager, 0, 0, sample_app(), vec![0], &os);
+        run_launch_decision(
+            &runtime,
+            &mut log_manager,
+            group_id(0),
+            rule_id(0),
+            sample_app(),
+            vec![0],
+            &os,
+        );
 
         assert_eq!(
             log_manager
@@ -906,7 +982,15 @@ mod tests {
             ..Default::default()
         };
 
-        run_launch_decision(&runtime, &mut log_manager, 0, 0, app, vec![0, 2], &os);
+        run_launch_decision(
+            &runtime,
+            &mut log_manager,
+            group_id(0),
+            rule_id(0),
+            app,
+            vec![0, 2],
+            &os,
+        );
 
         assert!(os.run_calls.borrow().is_empty());
         assert_eq!(
@@ -1064,7 +1148,15 @@ mod tests {
             ..Default::default()
         };
 
-        run_launch_decision(&runtime, &mut log_manager, 0, 0, app, vec![0, 2], &os);
+        run_launch_decision(
+            &runtime,
+            &mut log_manager,
+            group_id(0),
+            rule_id(0),
+            app,
+            vec![0, 2],
+            &os,
+        );
 
         assert_eq!(runtime.get_running_app_pids(&app_key), Some(vec![4321]));
         assert_eq!(

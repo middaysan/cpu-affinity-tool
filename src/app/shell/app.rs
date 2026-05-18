@@ -1,13 +1,20 @@
-use crate::app::navigation::{GroupRoute, WindowRoute};
-use crate::app::runtime::{monitors, startup, AppState};
-use crate::app::views::{
+use crate::app::features::diagnostics;
+use crate::app::features::execution;
+use crate::app::features::execution::InstalledPackageTrackingState;
+use crate::app::models::RunningApps;
+use crate::app::runtime::AppState;
+use crate::app::shell::events::ShellEvent;
+use crate::app::shell::presenters::{
     central, footer, group_editor, header, installed_app_picker, logs, run_settings,
 };
+use crate::app::shell::{GroupRoute, WindowRoute};
 use crate::tray::{init_tray, TrayCmd};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tokio::sync::RwLock as TokioRwLock;
 
 pub struct App {
     pub state: AppState,
@@ -43,13 +50,7 @@ impl App {
         }
 
         let mut state = AppState::new();
-        startup::log_startup(&mut state);
-        state.runtime.monitor_rx = Some(monitors::spawn_monitors(
-            state.runtime.running_apps.clone(),
-            state.runtime.installed_package_tracking.clone(),
-            state.persistent_state.clone(),
-            cc.egui_ctx.clone(),
-        ));
+        Self::bootstrap_runtime(&mut state, &cc.egui_ctx, execution::spawn_monitors);
 
         #[cfg(target_os = "windows")]
         let mut hwnd = None;
@@ -72,8 +73,6 @@ impl App {
                 }
             }
         }
-
-        state.start_app_with_autorun();
 
         #[cfg(target_os = "windows")]
         let tray_res = if let Some(hwnd_value) = hwnd {
@@ -118,33 +117,129 @@ impl App {
             }
         }
     }
+
+    fn bootstrap_runtime<F>(state: &mut AppState, _egui_ctx: &egui::Context, spawn_monitors: F)
+    where
+        F: FnOnce(
+            Arc<TokioRwLock<RunningApps>>,
+            Arc<RwLock<InstalledPackageTrackingState>>,
+            Arc<RwLock<crate::app::models::AppStateStorage>>,
+        ) -> Receiver<ShellEvent>,
+    {
+        diagnostics::log_startup(&mut state.log_manager, &state.persistent_state);
+        state.runtime.monitor_rx = Some(spawn_monitors(
+            state.runtime.running_apps_handle(),
+            state.runtime.installed_package_tracking_handle(),
+            state.persistent_state.clone(),
+        ));
+        state.start_app_with_autorun();
+    }
+
+    #[cfg(test)]
+    fn new_for_test(state: AppState) -> Self {
+        Self {
+            state,
+            tray_rx: None,
+            #[cfg(target_os = "windows")]
+            _tray_icon_guard: None,
+            #[cfg(target_os = "windows")]
+            hwnd: None,
+            is_hidden: false,
+        }
+    }
 }
 
 impl eframe::App for App {
-    /// The main update method called by the eframe framework on each frame.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 1. Handle commands from the system tray
         self.handle_tray_events(ctx);
-
-        // 2. Handle notifications from background monitors
-        self.handle_monitor_events();
-
-        // 3. Poll background refresh tasks owned by AppState
+        self.handle_monitor_events(ctx);
         self.state.poll_installed_app_picker_refresh();
 
-        // 4. Visibility check and minimization handling
         if !self.should_render(ctx) {
             return;
         }
 
-        // 5. Apply UI theme
         self.apply_theme(ctx);
-
-        // 6. Handle file drops
         self.handle_file_drops(ctx);
-
-        // 7. Render main UI
         self.render_main_ui(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+    use crate::app::models::{AppStateStorage, CpuSchema};
+    use crate::app::runtime::AppState;
+    use crate::app::shell::events::ShellEvent;
+    use eframe::egui;
+    use std::sync::mpsc;
+    use std::sync::{Arc, RwLock};
+
+    fn sample_state() -> AppState {
+        AppState::new_for_test(
+            Arc::new(RwLock::new(AppStateStorage {
+                version: 5,
+                groups: vec![],
+                cpu_schema: CpuSchema {
+                    model: "Test CPU".to_string(),
+                    clusters: Vec::new(),
+                },
+                theme_index: 0,
+                process_monitoring_enabled: false,
+                rule_identities: None,
+                loaded_version: 5,
+                pending_pre_v6_backup: false,
+            })),
+            4,
+        )
+    }
+
+    #[test]
+    fn test_bootstrap_runtime_logs_startup_and_drains_monitor_notifications() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::channel();
+        let mut state = sample_state();
+
+        App::bootstrap_runtime(&mut state, &ctx, move |_, _, _| rx);
+
+        assert!(state.runtime.monitor_rx.is_some());
+        assert!(state
+            .log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message == "Application started"));
+        assert!(state
+            .log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.starts_with("Detected CPU:")));
+
+        let mut app = App::new_for_test(state);
+        tx.send(ShellEvent::Warning("WARNING: monitor warning".to_string()))
+            .unwrap();
+        tx.send(ShellEvent::Monitor("MONITOR: corrected".to_string()))
+            .unwrap();
+
+        app.handle_monitor_events(&ctx);
+
+        assert!(app
+            .state
+            .log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message == "WARNING: monitor warning"));
+        assert!(app
+            .state
+            .log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message == "MONITOR: corrected"));
+        assert!(app
+            .state
+            .runtime
+            .monitor_rx
+            .as_ref()
+            .is_some_and(|rx| rx.try_recv().is_err()));
     }
 }
 
@@ -165,15 +260,25 @@ impl App {
         }
     }
 
-    fn handle_monitor_events(&mut self) {
+    fn handle_monitor_events(&mut self, ctx: &egui::Context) {
+        let mut repaint_requested = false;
+
         if let Some(rx) = &self.state.runtime.monitor_rx {
-            while let Ok(msg) = rx.try_recv() {
-                if msg.starts_with("WARNING:") {
-                    self.state.log_manager.add_sticky_once(msg);
-                } else {
-                    self.state.log_manager.add_entry(msg);
+            while let Ok(event) = rx.try_recv() {
+                if let Some((message, sticky)) = event.legacy_log_message() {
+                    if sticky {
+                        self.state.log_manager.add_sticky_once(message.to_string());
+                    } else {
+                        self.state.log_manager.add_entry(message.to_string());
+                    }
                 }
+
+                repaint_requested |= event.needs_repaint();
             }
+        }
+
+        if repaint_requested {
+            ctx.request_repaint();
         }
     }
 
@@ -183,7 +288,7 @@ impl App {
             return false;
         }
 
-        if os_api::OS::supports_hide_to_tray()
+        if crate::app::adapters::os::supports_hide_to_tray()
             && ctx.input(|i| i.viewport().minimized == Some(true))
         {
             self.hide_to_tray(ctx);
@@ -198,8 +303,8 @@ impl App {
 
         #[cfg(target_os = "windows")]
         if let Some(hwnd) = self.hwnd {
-            os_api::OS::set_taskbar_visible(hwnd, false);
-            os_api::OS::restore_and_focus(hwnd);
+            crate::app::adapters::os::set_taskbar_visible(hwnd, false);
+            crate::app::adapters::os::restore_and_focus_window(hwnd);
         }
 
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
@@ -213,8 +318,8 @@ impl App {
 
         #[cfg(target_os = "windows")]
         if let Some(hwnd) = self.hwnd {
-            os_api::OS::set_taskbar_visible(hwnd, true);
-            os_api::OS::restore_and_focus(hwnd);
+            crate::app::adapters::os::set_taskbar_visible(hwnd, true);
+            crate::app::adapters::os::restore_and_focus_window(hwnd);
         }
 
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
@@ -223,7 +328,6 @@ impl App {
         ctx.request_repaint();
     }
 
-    /// Applies the selected UI theme (light/dark).
     fn apply_theme(&self, ctx: &egui::Context) {
         let theme_index = self.state.get_theme_index();
         let visuals = match theme_index {

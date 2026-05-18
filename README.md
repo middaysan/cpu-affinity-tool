@@ -146,7 +146,7 @@ Supported build targets:
 Windows release build:
 
 ```bash
-cargo build --release --bin cpu-affinity-tool
+cargo build --release --features windows --bin cpu-affinity-tool
 ```
 
 Linux beta run/build:
@@ -169,10 +169,10 @@ Useful verification commands:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy -- -D warnings
+cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings
 cargo test --manifest-path libs/os_api/Cargo.toml
-cargo test
-cargo build --release
+cargo test --features windows --bin cpu-affinity-tool
+cargo build --release --features windows --bin cpu-affinity-tool
 cargo test --features linux --bin cpu-affinity-tool-linux
 cargo build --release --features linux --bin cpu-affinity-tool-linux
 ```

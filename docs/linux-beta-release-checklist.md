@@ -13,6 +13,9 @@ Use this checklist with `docs/release-process.md`.
 - Confirm `README.md` and `AGENTS.md` describe Linux as a desktop beta path with prerelease artifacts under `linux-beta-v*` tags.
 - Confirm the base version in `Cargo.toml` matches the `X.Y.Z` segment of the Linux beta tag you plan to push.
 - Confirm the beta changelog exists at `changelogs/linux-beta-vX.Y.Z-N.txt`.
+- Confirm the prerelease notes call out the schema `v6` save boundary when applicable:
+  - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
+  - downgrade to older pre-`v6` binaries is unsupported after that first `v6` save
 - Review release-impacting files if they changed: `assets/cpu_presets.json`, `.github/workflows/ci.yml`, `.github/workflows/release-linux-beta.yml`, `README.md`, `docs/release-process.md`, and `AGENTS.md`.
 
 ## Build Verification

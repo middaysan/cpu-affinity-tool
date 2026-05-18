@@ -1,5 +1,7 @@
-use crate::app::models::{AppRuntimeKey, AppStateStorage, CoreGroup, RunningApps};
-use eframe::egui;
+use crate::app::features::rules::RulesContext;
+use crate::app::models::{AppRuntimeKey, AppStateStorage, RunningApps};
+use crate::app::shared::ids::{GroupId, RuleId};
+use crate::app::shell::events::ShellEvent;
 use os_api::{PriorityClass, OS};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -8,8 +10,8 @@ use tokio::sync::RwLock as TokioRwLock;
 #[derive(Debug, Clone)]
 struct ProgramRuntimeSettings {
     name: String,
-    group_index: usize,
-    prog_index: usize,
+    group_id: GroupId,
+    rule_id: RuleId,
     expected_mask: usize,
     expected_priority: PriorityClass,
 }
@@ -58,8 +60,7 @@ impl ProcessSettingsOs for RealProcessSettingsOs {
 pub async fn run_process_settings_monitor(
     running_apps: Arc<TokioRwLock<RunningApps>>,
     app_state: Arc<RwLock<AppStateStorage>>,
-    ctx: egui::Context,
-    monitor_tx: std::sync::mpsc::Sender<String>,
+    monitor_tx: std::sync::mpsc::Sender<ShellEvent>,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
     let mut os = RealProcessSettingsOs;
@@ -67,45 +68,51 @@ pub async fn run_process_settings_monitor(
     loop {
         interval.tick().await;
 
-        let (groups, monitoring_enabled) = {
+        let (state_snapshot, monitoring_enabled) = {
             let state = match app_state.read() {
                 Ok(guard) => guard,
                 Err(_) => {
-                    let _ = monitor_tx.send(
+                    let _ = monitor_tx.send(ShellEvent::Warning(
                         "WARNING: persistent_state lock poisoned, skipping monitor iteration"
                             .to_string(),
-                    );
+                    ));
                     continue;
                 }
             };
-            (state.groups.clone(), state.process_monitoring_enabled)
+            (state.clone(), state.process_monitoring_enabled)
         };
 
         if let Ok(mut apps) = running_apps.try_write() {
-            let outcome =
-                process_settings_iteration_with_os(&mut apps, &groups, monitoring_enabled, &mut os);
+            let outcome = process_settings_iteration_with_os(
+                &mut apps,
+                &state_snapshot,
+                monitoring_enabled,
+                &mut os,
+            );
 
             if !outcome.notifications.is_empty() {
                 for message in outcome.notifications {
-                    let _ = monitor_tx.send(format!("MONITOR: {}", message));
+                    let _ = monitor_tx.send(ShellEvent::Monitor(format!("MONITOR: {}", message)));
                     #[cfg(debug_assertions)]
                     println!("MONITOR: {}", message);
                 }
             }
 
             if outcome.changed {
-                ctx.request_repaint();
+                let _ = monitor_tx.send(ShellEvent::RuntimeStateChanged);
             }
         }
     }
 }
 
 fn collect_program_settings(
-    groups: &[CoreGroup],
+    state: &AppStateStorage,
 ) -> HashMap<AppRuntimeKey, ProgramRuntimeSettings> {
     let mut settings = HashMap::new();
+    let rules = RulesContext::from_storage(state);
+    let snapshot = rules.snapshot(state);
 
-    for (group_index, group) in groups.iter().enumerate() {
+    for group in snapshot.groups {
         let mut expected_mask = 0usize;
         for &core_index in &group.cores {
             if core_index < (std::mem::size_of::<usize>() * 8) {
@@ -113,15 +120,15 @@ fn collect_program_settings(
             }
         }
 
-        for (prog_index, program) in group.programs.iter().enumerate() {
+        for program in group.rules {
             settings.insert(
-                program.get_key(),
+                program.app.get_key(),
                 ProgramRuntimeSettings {
-                    name: program.name.clone(),
-                    group_index,
-                    prog_index,
+                    name: program.app.name.clone(),
+                    group_id: group.id.clone(),
+                    rule_id: program.id,
                     expected_mask,
-                    expected_priority: program.priority,
+                    expected_priority: program.app.priority,
                 },
             );
         }
@@ -132,17 +139,17 @@ fn collect_program_settings(
 
 fn process_settings_iteration_with_os<O: ProcessSettingsOs>(
     apps: &mut RunningApps,
-    groups: &[CoreGroup],
+    state: &AppStateStorage,
     monitoring_enabled: bool,
     os: &mut O,
 ) -> ProcessSettingsIterationOutcome {
-    let key_to_settings = collect_program_settings(groups);
+    let key_to_settings = collect_program_settings(state);
     let mut outcome = ProcessSettingsIterationOutcome::default();
 
     for (app_key, app) in apps.apps.iter_mut() {
         if let Some(settings) = key_to_settings.get(app_key) {
-            app.group_index = settings.group_index;
-            app.prog_index = settings.prog_index;
+            app.group_id = settings.group_id.clone();
+            app.rule_id = settings.rule_id.clone();
 
             let mut all_matched = true;
 
@@ -194,6 +201,7 @@ fn process_settings_iteration_with_os<O: ProcessSettingsOs>(
 mod tests {
     use super::{process_settings_iteration_with_os, ProcessSettingsOs};
     use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, RunningApps};
+    use crate::app::shared::ids::{GroupId, RuleId};
     use os_api::PriorityClass;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -289,33 +297,45 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            rule_identities: None,
+            loaded_version: 5,
+            pending_pre_v6_backup: false,
         }
     }
 
+    fn group_id(value: usize) -> GroupId {
+        GroupId(format!("group-{value}"))
+    }
+
+    fn rule_id(value: usize) -> RuleId {
+        RuleId(format!("rule-{value}"))
+    }
+
     #[test]
-    fn test_remap_group_and_program_indices_by_app_key() {
+    fn test_remap_group_and_rule_ids_by_app_key() {
         let state = sample_state();
         let key = state.groups[1].programs[0].get_key();
         let mut apps = RunningApps::default();
-        apps.add_app(&key, 77, 1, 0);
+        apps.add_app(&key, 77, group_id(1), rule_id(0));
         if let Some(app) = apps.apps.get_mut(&key) {
-            app.group_index = 9;
-            app.prog_index = 9;
+            app.group_id = group_id(9);
+            app.rule_id = rule_id(9);
         }
 
-        let reordered_groups = vec![state.groups[1].clone()];
+        let mut reordered_state = state.clone();
+        reordered_state.groups = vec![state.groups[1].clone()];
         let mut os = FakeProcessSettingsOs::new(
             HashMap::from([(77, 0b110)]),
             HashMap::from([(77, PriorityClass::High)]),
         );
 
         let outcome =
-            process_settings_iteration_with_os(&mut apps, &reordered_groups, false, &mut os);
+            process_settings_iteration_with_os(&mut apps, &reordered_state, false, &mut os);
 
         assert!(!outcome.changed);
         let app = apps.apps.get(&key).unwrap();
-        assert_eq!(app.group_index, 0);
-        assert_eq!(app.prog_index, 0);
+        assert_eq!(app.group_id, group_id(0));
+        assert_eq!(app.rule_id, rule_id(0));
     }
 
     #[test]
@@ -323,13 +343,13 @@ mod tests {
         let state = sample_state();
         let key = state.groups[1].programs[0].get_key();
         let mut apps = RunningApps::default();
-        apps.add_app(&key, 88, 1, 0);
+        apps.add_app(&key, 88, group_id(1), rule_id(0));
         let mut os = FakeProcessSettingsOs::new(
             HashMap::from([(88, 0b001)]),
             HashMap::from([(88, PriorityClass::Normal)]),
         );
 
-        let outcome = process_settings_iteration_with_os(&mut apps, &state.groups, false, &mut os);
+        let outcome = process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
 
         assert!(outcome.changed);
         assert!(outcome.notifications.is_empty());
@@ -343,13 +363,13 @@ mod tests {
         let state = sample_state();
         let key = state.groups[1].programs[0].get_key();
         let mut apps = RunningApps::default();
-        apps.add_app(&key, 89, 1, 0);
+        apps.add_app(&key, 89, group_id(1), rule_id(0));
         let mut os = FakeProcessSettingsOs::new(
             HashMap::from([(89, 0b001)]),
             HashMap::from([(89, PriorityClass::Normal)]),
         );
 
-        let outcome = process_settings_iteration_with_os(&mut apps, &state.groups, true, &mut os);
+        let outcome = process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
 
         assert!(outcome.changed);
         assert_eq!(os.affinity_sets, vec![(89, 0b110)]);
@@ -363,17 +383,17 @@ mod tests {
         let state = sample_state();
         let key = state.groups[1].programs[0].get_key();
         let mut apps = RunningApps::default();
-        apps.add_app(&key, 90, 1, 0);
+        apps.add_app(&key, 90, group_id(1), rule_id(0));
         let mut os = FakeProcessSettingsOs::new(
             HashMap::from([(90, 0b001)]),
             HashMap::from([(90, PriorityClass::Normal)]),
         );
 
-        let first = process_settings_iteration_with_os(&mut apps, &state.groups, true, &mut os);
+        let first = process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
         assert!(first.changed);
         assert!(!apps.apps.get(&key).unwrap().settings_matched);
 
-        let second = process_settings_iteration_with_os(&mut apps, &state.groups, true, &mut os);
+        let second = process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
         assert!(second.changed);
         assert!(second.notifications.is_empty());
         assert!(apps.apps.get(&key).unwrap().settings_matched);
@@ -384,13 +404,13 @@ mod tests {
         let state = sample_state();
         let key = state.groups[0].programs[0].get_key();
         let mut apps = RunningApps::default();
-        apps.add_app(&key, 91, 0, 0);
+        apps.add_app(&key, 91, group_id(0), rule_id(0));
         let mut os = FakeProcessSettingsOs::new(
             HashMap::from([(91, 0b001)]),
             HashMap::from([(91, PriorityClass::Normal)]),
         );
 
-        let outcome = process_settings_iteration_with_os(&mut apps, &state.groups, true, &mut os);
+        let outcome = process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
 
         assert!(!outcome.changed);
         assert!(outcome.notifications.is_empty());

@@ -1,11 +1,15 @@
+use crate::app::adapters::storage::StorageAdapter;
+use crate::app::features::execution::{self, RuntimeRegistry};
+use crate::app::features::preferences;
+use crate::app::features::rules::{self, RulesContext};
 use crate::app::models::cpu_schema::CpuSchema;
 use crate::app::models::{
     effective_total_threads, AddAppsOutcome, AppRuntimeKey, AppStateStorage, AppStatus, AppToRun,
     LogManager, StateStorageMode,
 };
-use crate::app::navigation::{GroupRoute, WindowRoute};
-use crate::app::runtime::commands::{apps, groups, launch, preferences};
-use crate::app::runtime::{RuntimeRegistry, UiState};
+use crate::app::shared::ids::{GroupId, RuleId};
+use crate::app::shell::UiSession;
+use crate::app::shell::{GroupRoute, WindowRoute};
 use os_api::InstalledAppCatalogEntry;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, TryRecvError};
@@ -13,8 +17,7 @@ use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CentralProgramSnapshot {
-    pub group_index: usize,
-    pub program_index: usize,
+    pub rule_id: RuleId,
     pub name: String,
     pub launch_target_detail: String,
     pub app_key: AppRuntimeKey,
@@ -22,7 +25,7 @@ pub(crate) struct CentralProgramSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CentralGroupSnapshot {
-    pub group_index: usize,
+    pub group_id: GroupId,
     pub name: String,
     pub cores: Vec<usize>,
     pub is_hidden: bool,
@@ -54,7 +57,8 @@ pub(crate) struct InstalledAppPickerSnapshot {
 /// Facade combining persisted, transient UI, and runtime tracking state.
 pub struct AppState {
     pub(crate) persistent_state: Arc<RwLock<AppStateStorage>>,
-    pub(crate) ui: UiState,
+    pub(crate) rules: RulesContext,
+    pub(crate) ui: UiSession,
     pub(crate) runtime: RuntimeRegistry,
     pub(crate) log_manager: LogManager,
     #[cfg(test)]
@@ -63,12 +67,48 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        let storage = StorageAdapter::load();
+        let persistent_state = storage.shared();
+        let rules = persistent_state
+            .read()
+            .map(|state| RulesContext::from_storage(&state))
+            .unwrap_or_default();
+        if let Ok(mut state) = persistent_state.write() {
+            if state.rule_identities.is_none() {
+                state.rule_identities = Some(rules.to_persisted_identities());
+            }
+        }
         Self {
-            persistent_state: Arc::new(RwLock::new(AppStateStorage::load_state())),
-            ui: UiState::new(effective_total_threads()),
+            persistent_state,
+            rules,
+            ui: UiSession::new(effective_total_threads()),
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
             #[cfg(test)]
+            save_count: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        persistent_state: Arc<RwLock<AppStateStorage>>,
+        total_threads: usize,
+    ) -> Self {
+        let rules = persistent_state
+            .read()
+            .map(|state| RulesContext::from_storage(&state))
+            .unwrap_or_default();
+        if let Ok(mut state) = persistent_state.write() {
+            if state.rule_identities.is_none() {
+                state.rule_identities = Some(rules.to_persisted_identities());
+            }
+        }
+        Self {
+            persistent_state,
+            rules,
+            ui: UiSession::new(total_threads),
+            runtime: RuntimeRegistry::new(),
+            log_manager: LogManager::default(),
             save_count: 0,
         }
     }
@@ -79,6 +119,16 @@ impl AppState {
     }
 
     fn persist_state(&mut self) -> bool {
+        self.reconcile_rules();
+
+        if let Ok(mut state) = self.persistent_state.write() {
+            state.mark_ready_for_v6_save(self.rules.to_persisted_identities());
+        } else {
+            self.log_manager
+                .add_sticky_once("WARNING: persistent_state lock poisoned during save".into());
+            return false;
+        }
+
         #[cfg(test)]
         {
             self.save_count += 1;
@@ -87,8 +137,8 @@ impl AppState {
 
         #[cfg(not(test))]
         {
-            let save_result = match self.persistent_state.read() {
-                Ok(state) => state.try_save_state(),
+            let save_result = match self.persistent_state.write() {
+                Ok(mut state) => state.try_save_state(),
                 Err(_) => {
                     self.log_manager.add_sticky_once(
                         "WARNING: persistent_state lock poisoned during save".into(),
@@ -107,29 +157,51 @@ impl AppState {
         }
     }
 
-    pub fn build_central_panel_snapshot(&self) -> CentralPanelSnapshot {
+    fn reconcile_rules(&mut self) {
+        if let Ok(state) = self.persistent_state.read() {
+            self.rules.reconcile_with_storage(&state);
+        }
+    }
+
+    fn group_index_for_id(&mut self, group_id: &GroupId) -> Option<usize> {
+        self.reconcile_rules();
+        self.rules.group_index_for_id(group_id)
+    }
+
+    fn rule_indices_for_ids(
+        &mut self,
+        group_id: &GroupId,
+        rule_id: &RuleId,
+    ) -> Option<(usize, usize)> {
+        self.reconcile_rules();
+        let group_index = self.rules.group_index_for_id(group_id)?;
+        let rule_index = self.rules.rule_index_for_id(group_index, rule_id)?;
+        Some((group_index, rule_index))
+    }
+
+    pub fn build_central_panel_snapshot(&mut self) -> CentralPanelSnapshot {
+        self.reconcile_rules();
         match self.persistent_state.read() {
             Ok(state) => CentralPanelSnapshot {
-                groups: state
+                groups: self
+                    .rules
+                    .snapshot(&state)
                     .groups
-                    .iter()
-                    .enumerate()
-                    .map(|(group_index, group)| CentralGroupSnapshot {
-                        group_index,
-                        name: group.name.clone(),
-                        cores: group.cores.clone(),
+                    .into_iter()
+                    .map(|group| CentralGroupSnapshot {
+                        group_id: group.id,
+                        name: group.name,
+                        cores: group.cores,
                         is_hidden: group.is_hidden,
-                        run_all_button: group.run_all_button,
+                        run_all_button: group.run_all_enabled,
                         programs: group
-                            .programs
+                            .rules
                             .iter()
-                            .enumerate()
-                            .map(|(program_index, program)| CentralProgramSnapshot {
-                                group_index,
-                                program_index,
-                                name: program.name.clone(),
-                                launch_target_detail: program.launch_target_detail(),
-                                app_key: program.get_key(),
+                            .map(|program| CentralProgramSnapshot {
+                                rule_id: program.id.clone(),
+                                name: program.app.name.clone(),
+                                launch_target_detail: program.app.launch_target_detail(),
+                                app_key: program.app.get_key(),
                             })
                             .collect(),
                     })
@@ -146,8 +218,12 @@ impl AppState {
         }
     }
 
-    pub fn set_group_is_hidden(&mut self, index: usize, is_hidden: bool) {
-        if groups::set_group_is_hidden(&self.persistent_state, index, is_hidden) {
+    pub fn set_group_is_hidden(&mut self, group_id: GroupId, is_hidden: bool) {
+        let Some(group_index) = self.group_index_for_id(&group_id) else {
+            return;
+        };
+
+        if rules::set_group_is_hidden(&self.persistent_state, group_index, is_hidden) {
             let _ = self.persist_state();
         }
     }
@@ -175,17 +251,51 @@ impl AppState {
     }
 
     pub fn swap_groups(&mut self, index1: usize, index2: usize) -> bool {
-        let swapped = groups::swap_groups(&self.persistent_state, index1, index2);
+        let swapped = rules::swap_groups(&self.persistent_state, index1, index2);
         if swapped {
+            self.rules.swap_groups(index1, index2);
             let _ = self.persist_state();
         }
         swapped
     }
 
-    pub fn add_selected_files_to_group(&mut self, group_index: usize, paths: Vec<PathBuf>) {
+    pub fn move_group_up(&mut self, group_id: GroupId) -> bool {
+        let Some(group_index) = self.group_index_for_id(&group_id) else {
+            return false;
+        };
+
+        if group_index == 0 {
+            return false;
+        }
+
+        self.swap_groups(group_index, group_index - 1)
+    }
+
+    pub fn move_group_down(&mut self, group_id: GroupId) -> bool {
+        let Some(group_index) = self.group_index_for_id(&group_id) else {
+            return false;
+        };
+
+        let groups_len = match self.persistent_state.read() {
+            Ok(state) => state.groups.len(),
+            Err(_) => return false,
+        };
+
+        if group_index + 1 >= groups_len {
+            return false;
+        }
+
+        self.swap_groups(group_index + 1, group_index)
+    }
+
+    pub fn add_selected_files_to_group(&mut self, group_id: GroupId, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
         }
+
+        let Some(group_index) = self.group_index_for_id(&group_id) else {
+            return;
+        };
 
         let attempted_count = paths.len();
         let group_name = self.get_group_name(group_index).unwrap_or_default();
@@ -193,20 +303,26 @@ impl AppState {
             "Adding app targets to group: {group_name}, paths: {paths:?}"
         ));
 
-        let outcome = apps::add_apps_to_group(&self.persistent_state, group_index, paths);
-        self.handle_add_apps_outcome(&group_name, attempted_count, outcome);
+        let outcome = rules::add_apps_to_group(&self.persistent_state, group_index, paths);
+        self.handle_add_apps_outcome(group_index, &group_name, attempted_count, outcome);
     }
 
     pub fn add_installed_app_to_group(
         &mut self,
-        group_index: usize,
+        group_id: GroupId,
         entry: InstalledAppCatalogEntry,
     ) {
+        let Some(group_index) = self.group_index_for_id(&group_id) else {
+            return;
+        };
+
         let group_name = self.get_group_name(group_index).unwrap_or_default();
         let app_name = entry.name.clone();
-        let outcome = apps::add_installed_app_to_group(&self.persistent_state, group_index, entry);
+        let outcome = rules::add_installed_app_to_group(&self.persistent_state, group_index, entry);
 
         if outcome.added_count > 0 {
+            self.rules
+                .append_rules_to_group(group_index, outcome.added_count);
             let _ = self.persist_state();
             self.log_manager.add_entry(format!(
                 "Added installed app '{app_name}' to group: {group_name}"
@@ -219,7 +335,7 @@ impl AppState {
         }
     }
 
-    pub fn consume_dropped_files_into_group(&mut self, group_index: usize) -> bool {
+    pub fn consume_dropped_files_into_group(&mut self, group_id: GroupId) -> bool {
         let Some(files) = self.ui.dropped_files.take() else {
             return false;
         };
@@ -228,22 +344,29 @@ impl AppState {
             return false;
         }
 
+        let Some(group_index) = self.group_index_for_id(&group_id) else {
+            return false;
+        };
+
         let files_count = files.len();
         let group_name = self.get_group_name(group_index).unwrap_or_default();
 
-        let outcome = apps::add_apps_to_group(&self.persistent_state, group_index, files);
-        self.handle_add_apps_outcome(&group_name, files_count, outcome);
+        let outcome = rules::add_apps_to_group(&self.persistent_state, group_index, files);
+        self.handle_add_apps_outcome(group_index, &group_name, files_count, outcome);
 
         true
     }
 
     fn handle_add_apps_outcome(
         &mut self,
+        group_index: usize,
         group_name: &str,
         attempted_count: usize,
         outcome: AddAppsOutcome,
     ) {
         if outcome.added_count > 0 {
+            self.rules
+                .append_rules_to_group(group_index, outcome.added_count);
             let _ = self.persist_state();
 
             if outcome.added_count == attempted_count {
@@ -268,7 +391,7 @@ impl AppState {
     }
 
     pub fn start_app_with_autorun(&mut self) {
-        launch::start_app_with_autorun(
+        execution::start_app_with_autorun(
             &self.persistent_state,
             &self.runtime,
             &mut self.log_manager,
@@ -293,28 +416,46 @@ impl AppState {
     }
 
     pub fn commit_group_form_session(&mut self) {
-        let should_save = if let Some(index) = self.ui.group_form.editing_index {
-            let selected_cores: Vec<usize> = self
-                .ui
-                .group_form
-                .core_selection
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &selected)| if selected { Some(i) } else { None })
-                .collect();
+        let should_save = if let Some(group_id) = self.ui.group_form.editing_group_id.clone() {
+            let Some(index) = self.group_index_for_id(&group_id) else {
+                self.ui.reset_group_form();
+                self.ui
+                    .set_current_window(WindowRoute::Groups(GroupRoute::List));
+                return;
+            };
 
-            groups::update_group_properties(
+            match rules::update_group_properties(
                 &self.persistent_state,
                 index,
                 self.ui.group_form.group_name.clone(),
-                selected_cores,
+                &self.ui.group_form.core_selection,
                 self.ui.group_form.run_all_enabled,
-            )
+            ) {
+                Ok(updated) => updated,
+                Err(err) => {
+                    self.log_manager.add_entry(err);
+                    false
+                }
+            }
         } else {
-            groups::create_group(&self.persistent_state, &mut self.ui, &mut self.log_manager)
+            match rules::create_group(
+                &self.persistent_state,
+                &self.ui.group_form.group_name,
+                &self.ui.group_form.core_selection,
+                self.ui.group_form.run_all_enabled,
+            ) {
+                Ok(()) => true,
+                Err(err) => {
+                    self.log_manager.add_entry(err);
+                    false
+                }
+            }
         };
 
         if should_save {
+            if self.ui.group_form.editing_group_id.is_none() {
+                self.rules.append_group();
+            }
             let _ = self.persist_state();
         }
 
@@ -324,9 +465,12 @@ impl AppState {
     }
 
     pub fn delete_current_group_form_target(&mut self) {
-        if let Some(index) = self.ui.group_form.editing_index {
-            if groups::remove_group(&self.persistent_state, index) {
-                let _ = self.persist_state();
+        if let Some(group_id) = self.ui.group_form.editing_group_id.clone() {
+            if let Some(index) = self.group_index_for_id(&group_id) {
+                if rules::remove_group(&self.persistent_state, index) {
+                    self.rules.remove_group(index);
+                    let _ = self.persist_state();
+                }
             }
         }
 
@@ -353,13 +497,30 @@ impl AppState {
         self.ui.set_current_window(window);
     }
 
-    pub fn start_editing_group(&mut self, group_index: usize) {
-        groups::start_editing_group(
-            &self.persistent_state,
-            &mut self.ui,
-            &mut self.log_manager,
-            group_index,
-        );
+    pub fn start_editing_group(&mut self, group_id: GroupId) {
+        let Some(group_index) = self.group_index_for_id(&group_id) else {
+            return;
+        };
+
+        if let Some(group) = rules::load_group_for_edit(&self.persistent_state, group_index) {
+            let total_cores = self.ui.group_form.core_selection.len();
+            let mut selection = vec![false; total_cores];
+            for core in group.selected_cores {
+                if core < total_cores {
+                    selection[core] = true;
+                }
+            }
+            self.ui.group_form.core_selection = selection;
+            self.ui.group_form.group_name = group.name;
+            self.ui.group_form.run_all_enabled = group.run_all_enabled;
+            self.ui.group_form.last_clicked_core = None;
+            self.ui.current_window = WindowRoute::Groups(GroupRoute::Edit);
+        } else {
+            self.log_manager
+                .add_entry(format!("Group with index {group_index} not found"));
+            return;
+        }
+        self.ui.group_form.editing_group_id = Some(group_id);
     }
 
     fn run_app_with_affinity_sync(
@@ -368,7 +529,7 @@ impl AppState {
         prog_index: usize,
         app_to_run: AppToRun,
     ) {
-        launch::run_app_with_affinity_sync(
+        execution::run_app_with_affinity_sync(
             &self.persistent_state,
             &self.runtime,
             &mut self.log_manager,
@@ -378,13 +539,22 @@ impl AppState {
         );
     }
 
-    pub fn run_group_program(&mut self, group_index: usize, program_index: usize) {
+    pub fn run_group_program(&mut self, group_id: GroupId, rule_id: RuleId) {
+        let Some((group_index, program_index)) = self.rule_indices_for_ids(&group_id, &rule_id)
+        else {
+            return;
+        };
+
         if let Some(app_to_run) = self.get_group_program(group_index, program_index) {
             self.run_app_with_affinity_sync(group_index, program_index, app_to_run);
         }
     }
 
-    pub fn run_group(&mut self, group_index: usize) {
+    pub fn run_group(&mut self, group_id: GroupId) {
+        let Some(group_index) = self.group_index_for_id(&group_id) else {
+            return;
+        };
+
         let Some(programs) = self.get_group_programs(group_index) else {
             return;
         };
@@ -413,9 +583,9 @@ impl AppState {
         self.ui.current_tip(current_time)
     }
 
-    pub fn open_installed_app_picker(&mut self, group_index: usize) {
+    pub fn open_installed_app_picker(&mut self, group_id: GroupId) {
         let picker = &mut self.ui.installed_app_picker;
-        picker.target_group_index = Some(group_index);
+        picker.target_group_id = Some(group_id);
         picker.query.clear();
         picker.last_error = None;
         picker.needs_focus = true;
@@ -513,7 +683,7 @@ impl AppState {
         self.ui.installed_app_picker.refresh_rx = Some(rx);
 
         std::thread::spawn(move || {
-            let _ = tx.send(os_api::OS::list_supported_start_apps());
+            let _ = tx.send(crate::app::adapters::discovery::list_supported_start_apps());
         });
     }
 
@@ -577,7 +747,7 @@ impl AppState {
     }
 
     pub fn confirm_selected_installed_app(&mut self) -> bool {
-        let Some(group_index) = self.ui.installed_app_picker.target_group_index else {
+        let Some(group_id) = self.ui.installed_app_picker.target_group_id.clone() else {
             return false;
         };
 
@@ -600,48 +770,83 @@ impl AppState {
             return false;
         };
 
-        self.add_installed_app_to_group(group_index, entry);
+        self.add_installed_app_to_group(group_id, entry);
         self.close_installed_app_picker();
         true
     }
 
-    pub fn open_app_run_settings(&mut self, group_index: usize, program_index: usize) {
-        apps::open_app_edit_session(&mut self.ui, group_index, program_index);
+    pub fn open_app_run_settings(&mut self, group_id: GroupId, rule_id: RuleId) {
+        self.ui.app_edit_state.current_edit = None;
+        self.ui.app_edit_state.target =
+            Some(crate::app::shell::sessions::RuleEditorTarget { group_id, rule_id });
+        self.ui.current_window = WindowRoute::AppRunSettings;
     }
 
     pub fn close_app_run_settings(&mut self) {
-        apps::close_app_edit_session(&mut self.ui);
+        self.ui.app_edit_state.current_edit = None;
+        self.ui.app_edit_state.target = None;
+        self.ui.current_window = WindowRoute::Groups(GroupRoute::List);
     }
 
-    pub fn ensure_current_edit_loaded(&mut self, group_idx: usize, prog_idx: usize) -> bool {
-        apps::ensure_current_edit_loaded(&self.persistent_state, &mut self.ui, group_idx, prog_idx)
+    pub fn ensure_current_edit_loaded(&mut self) -> bool {
+        let Some(target) = self.ui.app_edit_state.target.clone() else {
+            self.close_app_run_settings();
+            return false;
+        };
+
+        let Some((group_idx, prog_idx)) =
+            self.rule_indices_for_ids(&target.group_id, &target.rule_id)
+        else {
+            self.close_app_run_settings();
+            return false;
+        };
+
+        if self.ui.app_edit_state.current_edit.is_none() {
+            if let Some(original) = rules::load_rule(&self.persistent_state, group_idx, prog_idx) {
+                self.ui.app_edit_state.current_edit = Some(original);
+            } else {
+                self.close_app_run_settings();
+                return false;
+            }
+        }
+
+        true
     }
 
     pub fn commit_current_app_edit_session(&mut self) {
-        if let (Some((group_idx, prog_idx)), Some(updated_app)) = (
-            self.ui.app_edit_state.run_settings,
+        if let (Some(target), Some(updated_app)) = (
+            self.ui.app_edit_state.target.clone(),
             self.ui.app_edit_state.current_edit.clone(),
         ) {
-            if apps::update_program(&self.persistent_state, group_idx, prog_idx, updated_app) {
-                let _ = self.persist_state();
+            if let Some((group_idx, prog_idx)) =
+                self.rule_indices_for_ids(&target.group_id, &target.rule_id)
+            {
+                if rules::update_rule(&self.persistent_state, group_idx, prog_idx, updated_app) {
+                    let _ = self.persist_state();
+                }
             }
         }
 
-        apps::close_app_edit_session(&mut self.ui);
+        self.close_app_run_settings();
     }
 
     pub fn delete_current_app_edit_target(&mut self) {
-        if let Some((group_idx, prog_idx)) = self.ui.app_edit_state.run_settings {
-            if let Some(path) =
-                apps::remove_app_from_group(&self.persistent_state, group_idx, prog_idx)
+        if let Some(target) = self.ui.app_edit_state.target.clone() {
+            if let Some((group_idx, prog_idx)) =
+                self.rule_indices_for_ids(&target.group_id, &target.rule_id)
             {
-                let _ = self.persist_state();
-                self.log_manager
-                    .add_entry(format!("Removing app: {}", path));
+                if let Some(path) =
+                    rules::remove_rule_from_group(&self.persistent_state, group_idx, prog_idx)
+                {
+                    self.rules.remove_rule(group_idx, prog_idx);
+                    let _ = self.persist_state();
+                    self.log_manager
+                        .add_entry(format!("Removing app: {}", path));
+                }
             }
         }
 
-        apps::close_app_edit_session(&mut self.ui);
+        self.close_app_run_settings();
     }
 
     pub fn clear_logs(&mut self) {
@@ -649,16 +854,16 @@ impl AppState {
     }
 
     pub fn active_data_dir(&self) -> PathBuf {
-        AppStateStorage::active_data_dir()
+        StorageAdapter::active_data_dir()
     }
 
     pub fn active_storage_mode(&self) -> StateStorageMode {
-        AppStateStorage::active_storage_mode()
+        StorageAdapter::active_storage_mode()
     }
 
     pub fn open_active_data_dir(&mut self) {
         let data_dir = self.active_data_dir();
-        if let Err(err) = os_api::OS::open_directory(&data_dir) {
+        if let Err(err) = crate::app::adapters::os::open_directory(&data_dir) {
             self.log_manager.add_important_sticky_once(format!(
                 "ERROR: Failed to open data folder '{}': {err}",
                 data_dir.display()
@@ -736,7 +941,7 @@ impl AppState {
 
     fn reset_installed_app_picker_session(&mut self) {
         let picker = &mut self.ui.installed_app_picker;
-        picker.target_group_index = None;
+        picker.target_group_id = None;
         picker.query.clear();
         picker.selected_entry_index = None;
         picker.is_refreshing = false;
@@ -749,45 +954,70 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::AppState;
+    use crate::app::features::execution::RuntimeRegistry;
+    use crate::app::features::rules::RulesContext;
     use crate::app::models::{
         AppStateStorage, AppToRun, CoreGroup, CpuSchema, LaunchTarget, LogManager,
     };
-    use crate::app::navigation::{GroupRoute, WindowRoute};
-    use crate::app::runtime::{RuntimeRegistry, UiState};
+    use crate::app::shared::ids::{GroupId, RuleId};
+    use crate::app::shell::sessions::RuleEditorTarget;
+    use crate::app::shell::UiSession;
+    use crate::app::shell::{GroupRoute, WindowRoute};
     use os_api::PriorityClass;
     use os_api::{InstalledAppCatalogEntry, InstalledAppCatalogSource};
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
 
     fn sample_state() -> AppState {
+        let persistent_state = Arc::new(RwLock::new(AppStateStorage {
+            version: 5,
+            groups: vec![CoreGroup {
+                name: "Games".to_string(),
+                cores: vec![0, 1],
+                programs: vec![AppToRun::new_path(
+                    PathBuf::from(r"C:\Sample.lnk"),
+                    vec![],
+                    PathBuf::from(r"C:\Sample.exe"),
+                    PriorityClass::Normal,
+                    false,
+                )],
+                is_hidden: false,
+                run_all_button: true,
+            }],
+            cpu_schema: CpuSchema {
+                model: "Test CPU".to_string(),
+                clusters: Vec::new(),
+            },
+            theme_index: 0,
+            process_monitoring_enabled: false,
+            rule_identities: None,
+            loaded_version: 5,
+            pending_pre_v6_backup: false,
+        }));
+
+        let rules = persistent_state
+            .read()
+            .map(|state| RulesContext::from_storage(&state))
+            .unwrap();
+
         AppState {
-            persistent_state: Arc::new(RwLock::new(AppStateStorage {
-                version: 5,
-                groups: vec![CoreGroup {
-                    name: "Games".to_string(),
-                    cores: vec![0, 1],
-                    programs: vec![AppToRun::new_path(
-                        PathBuf::from(r"C:\Sample.lnk"),
-                        vec![],
-                        PathBuf::from(r"C:\Sample.exe"),
-                        PriorityClass::Normal,
-                        false,
-                    )],
-                    is_hidden: false,
-                    run_all_button: true,
-                }],
-                cpu_schema: CpuSchema {
-                    model: "Test CPU".to_string(),
-                    clusters: Vec::new(),
-                },
-                theme_index: 0,
-                process_monitoring_enabled: false,
-            })),
-            ui: UiState::new(4),
+            persistent_state,
+            rules,
+            ui: UiSession::new(4),
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
             save_count: 0,
         }
+    }
+
+    fn group_id(app: &AppState, index: usize) -> GroupId {
+        app.rules.group_id_for_index(index).unwrap()
+    }
+
+    fn rule_id(app: &AppState, group_index: usize, rule_index: usize) -> RuleId {
+        app.rules
+            .rule_id_for_index(group_index, rule_index)
+            .unwrap()
     }
 
     #[test]
@@ -821,7 +1051,10 @@ mod tests {
     fn test_commit_current_app_edit_session_updates_and_closes() {
         let mut app = sample_state();
         app.ui.current_window = WindowRoute::AppRunSettings;
-        app.ui.app_edit_state.run_settings = Some((0, 0));
+        app.ui.app_edit_state.target = Some(RuleEditorTarget {
+            group_id: group_id(&app, 0),
+            rule_id: rule_id(&app, 0, 0),
+        });
         let mut updated = AppToRun::new_path(
             PathBuf::from(r"C:\Sample.lnk"),
             vec!["--debug".to_string()],
@@ -850,7 +1083,7 @@ mod tests {
             WindowRoute::Groups(GroupRoute::List)
         ));
         assert!(app.ui.app_edit_state.current_edit.is_none());
-        assert!(app.ui.app_edit_state.run_settings.is_none());
+        assert!(app.ui.app_edit_state.target.is_none());
     }
 
     #[test]
@@ -876,7 +1109,7 @@ mod tests {
         assert_eq!(app.persistent_state.read().unwrap().groups.len(), 2);
         assert_eq!(app.save_count(), 1);
 
-        app.ui.group_form.editing_index = Some(1);
+        app.ui.group_form.editing_group_id = Some(group_id(&app, 1));
         app.delete_current_group_form_target();
         assert_eq!(app.persistent_state.read().unwrap().groups.len(), 1);
         assert_eq!(app.save_count(), 2);
@@ -885,7 +1118,10 @@ mod tests {
     #[test]
     fn test_delete_current_app_edit_target_saves_once() {
         let mut app = sample_state();
-        app.ui.app_edit_state.run_settings = Some((0, 0));
+        app.ui.app_edit_state.target = Some(RuleEditorTarget {
+            group_id: group_id(&app, 0),
+            rule_id: rule_id(&app, 0, 0),
+        });
 
         app.delete_current_app_edit_target();
 
@@ -909,7 +1145,10 @@ mod tests {
     fn test_add_selected_files_partial_success_saves_once() {
         let mut app = sample_state();
 
-        app.add_selected_files_to_group(0, vec![r"C:\valid.exe".into(), r"C:\broken".into()]);
+        app.add_selected_files_to_group(
+            group_id(&app, 0),
+            vec![r"C:\valid.exe".into(), r"C:\broken".into()],
+        );
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(state.groups[0].programs.len(), 2);
@@ -926,7 +1165,7 @@ mod tests {
     fn test_add_selected_files_all_invalid_does_not_save() {
         let mut app = sample_state();
 
-        app.add_selected_files_to_group(0, vec![r"C:\broken".into()]);
+        app.add_selected_files_to_group(group_id(&app, 0), vec![r"C:\broken".into()]);
 
         assert_eq!(
             app.persistent_state.read().unwrap().groups[0]
@@ -938,8 +1177,8 @@ mod tests {
     }
 
     #[test]
-    fn test_central_snapshot_preserves_indices() {
-        let app = sample_state();
+    fn test_central_snapshot_preserves_logical_ids() {
+        let mut app = sample_state();
         app.persistent_state
             .write()
             .unwrap()
@@ -955,10 +1194,9 @@ mod tests {
         let snapshot = app.build_central_panel_snapshot();
 
         assert_eq!(snapshot.groups.len(), 2);
-        assert_eq!(snapshot.groups[0].group_index, 0);
-        assert_eq!(snapshot.groups[0].programs[0].group_index, 0);
-        assert_eq!(snapshot.groups[0].programs[0].program_index, 0);
-        assert_eq!(snapshot.groups[1].group_index, 1);
+        assert_eq!(snapshot.groups[0].group_id, group_id(&app, 0));
+        assert_eq!(snapshot.groups[0].programs[0].rule_id, rule_id(&app, 0, 0));
+        assert_eq!(snapshot.groups[1].group_id, group_id(&app, 1));
         assert!(snapshot.groups[1].is_hidden);
     }
 
@@ -978,8 +1216,11 @@ mod tests {
             ),
         ];
 
-        app.open_installed_app_picker(0);
-        assert_eq!(app.ui.installed_app_picker.target_group_index, Some(0));
+        app.open_installed_app_picker(group_id(&app, 0));
+        assert_eq!(
+            app.ui.installed_app_picker.target_group_id,
+            Some(group_id(&app, 0))
+        );
         assert!(matches!(
             app.ui.current_window,
             WindowRoute::InstalledAppPicker
@@ -1004,7 +1245,7 @@ mod tests {
             app.ui.current_window,
             WindowRoute::Groups(GroupRoute::List)
         ));
-        assert!(app.ui.installed_app_picker.target_group_index.is_none());
+        assert!(app.ui.installed_app_picker.target_group_id.is_none());
         assert!(app.ui.installed_app_picker.query.is_empty());
     }
 
@@ -1017,7 +1258,7 @@ mod tests {
             InstalledAppCatalogSource::WindowsAppsFolder,
         )];
 
-        app.open_installed_app_picker(0);
+        app.open_installed_app_picker(group_id(&app, 0));
         assert!(app.confirm_selected_installed_app());
 
         let state = app.persistent_state.read().unwrap();
@@ -1036,7 +1277,7 @@ mod tests {
             app.ui.current_window,
             WindowRoute::Groups(GroupRoute::List)
         ));
-        assert!(app.ui.installed_app_picker.target_group_index.is_none());
+        assert!(app.ui.installed_app_picker.target_group_id.is_none());
     }
 
     #[test]
@@ -1048,7 +1289,7 @@ mod tests {
             "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
             InstalledAppCatalogSource::WindowsAppsFolder,
         )];
-        app.open_installed_app_picker(0);
+        app.open_installed_app_picker(group_id(&app, 0));
         app.ui.installed_app_picker.query = "spot".into();
         app.ui.installed_app_picker.last_error = Some("boom".into());
         app.ui.installed_app_picker.is_refreshing = true;
@@ -1057,7 +1298,7 @@ mod tests {
         app.set_current_window(WindowRoute::Logs);
 
         assert!(matches!(app.ui.current_window, WindowRoute::Logs));
-        assert!(app.ui.installed_app_picker.target_group_index.is_none());
+        assert!(app.ui.installed_app_picker.target_group_id.is_none());
         assert!(app.ui.installed_app_picker.query.is_empty());
         assert!(app.ui.installed_app_picker.last_error.is_none());
         assert!(!app.ui.installed_app_picker.is_refreshing);
@@ -1082,7 +1323,7 @@ mod tests {
             ),
         ];
 
-        app.open_installed_app_picker(0);
+        app.open_installed_app_picker(group_id(&app, 0));
         let snapshot = app.build_installed_app_picker_snapshot();
         assert_eq!(snapshot.rows.len(), 1);
         assert_eq!(snapshot.rows[0].name, "Steam");
@@ -1116,7 +1357,7 @@ mod tests {
             .with_detail("/usr/bin/code"),
         ];
 
-        app.open_installed_app_picker(0);
+        app.open_installed_app_picker(group_id(&app, 0));
         app.set_installed_app_picker_query("code".into());
 
         let snapshot = app.build_installed_app_picker_snapshot();

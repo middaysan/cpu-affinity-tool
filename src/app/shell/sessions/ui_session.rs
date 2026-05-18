@@ -1,8 +1,6 @@
-use crate::app::navigation::{GroupRoute, WindowRoute};
-use crate::app::runtime::{GroupFormState, RunAppEditState};
-use os_api::InstalledAppCatalogEntry;
+use crate::app::shell::sessions::{GroupFormSession, InstalledAppPickerSession, RuleEditorSession};
+use crate::app::shell::{GroupRoute, WindowRoute};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
 
 #[cfg(target_os = "windows")]
 const TIPS: [&str; 5] = [
@@ -22,51 +20,39 @@ const TIPS: [&str; 5] = [
     "💡 Tip: Use the theme toggle button in the top-left corner to switch between light, dark, and system themes",
 ];
 
-#[derive(Default)]
-pub(crate) struct InstalledAppPickerState {
-    pub(crate) target_group_index: Option<usize>,
-    pub(crate) query: String,
-    pub(crate) entries: Vec<InstalledAppCatalogEntry>,
-    pub(crate) selected_entry_index: Option<usize>,
-    pub(crate) is_refreshing: bool,
-    pub(crate) last_error: Option<String>,
-    pub(crate) needs_focus: bool,
-    pub(crate) refresh_rx: Option<Receiver<Result<Vec<InstalledAppCatalogEntry>, String>>>,
+/// Transient UI state owned by the shell layer.
+pub struct UiSession {
+    pub current_window: WindowRoute,
+    pub group_form: GroupFormSession,
+    pub app_edit_state: RuleEditorSession,
+    pub dropped_files: Option<Vec<PathBuf>>,
+    pub current_tip_index: usize,
+    pub tip_change_interval: f64,
+    pub last_tip_change_time: f64,
+    pub installed_app_picker: InstalledAppPickerSession,
 }
 
-/// Transient UI state owned by the runtime layer.
-pub struct UiState {
-    pub(crate) current_window: WindowRoute,
-    pub(crate) group_form: GroupFormState,
-    pub(crate) app_edit_state: RunAppEditState,
-    pub(crate) dropped_files: Option<Vec<PathBuf>>,
-    pub(crate) current_tip_index: usize,
-    pub(crate) tip_change_interval: f64,
-    pub(crate) last_tip_change_time: f64,
-    pub(crate) installed_app_picker: InstalledAppPickerState,
-}
-
-impl UiState {
+impl UiSession {
     pub fn new(total_threads: usize) -> Self {
         Self {
             current_window: WindowRoute::Groups(GroupRoute::List),
-            group_form: GroupFormState {
-                editing_index: None,
+            group_form: GroupFormSession {
+                editing_group_id: None,
                 editing_selection: None,
                 core_selection: vec![false; total_threads],
                 group_name: String::new(),
                 run_all_enabled: false,
                 last_clicked_core: None,
             },
-            app_edit_state: RunAppEditState {
+            app_edit_state: RuleEditorSession {
                 current_edit: None,
-                run_settings: None,
+                target: None,
             },
             dropped_files: None,
             current_tip_index: 0,
             tip_change_interval: 120.0,
             last_tip_change_time: 0.0,
-            installed_app_picker: InstalledAppPickerState::default(),
+            installed_app_picker: InstalledAppPickerSession::default(),
         }
     }
 
@@ -91,12 +77,12 @@ impl UiState {
 
 #[cfg(test)]
 mod tests {
-    use super::UiState;
-    use crate::app::navigation::{GroupRoute, WindowRoute};
+    use super::UiSession;
+    use crate::app::shell::{GroupRoute, WindowRoute};
 
     #[test]
     fn test_new_initializes_default_ui_state() {
-        let state = UiState::new(6);
+        let state = UiSession::new(6);
         assert!(matches!(
             state.current_window,
             WindowRoute::Groups(GroupRoute::List)
@@ -108,7 +94,7 @@ mod tests {
 
     #[test]
     fn test_current_tip_rotates_only_after_interval() {
-        let mut state = UiState::new(4);
+        let mut state = UiSession::new(4);
         let first = state.current_tip(0.0).to_string();
         let still_first = state.current_tip(60.0).to_string();
         let second = state.current_tip(120.0).to_string();
@@ -119,8 +105,8 @@ mod tests {
 
     #[test]
     fn test_new_initializes_installed_app_picker_closed() {
-        let state = UiState::new(4);
-        assert!(state.installed_app_picker.target_group_index.is_none());
+        let state = UiSession::new(4);
+        assert!(state.installed_app_picker.target_group_id.is_none());
         assert!(state.installed_app_picker.entries.is_empty());
         assert!(state.installed_app_picker.selected_entry_index.is_none());
     }

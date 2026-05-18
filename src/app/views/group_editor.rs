@@ -1,12 +1,13 @@
 use crate::app::models::{CoreInfo, CoreType, CpuSchema};
-use crate::app::runtime::{AppState, GroupFormState};
-use crate::app::views::shared_elements::glass_frame;
+use crate::app::runtime::AppState;
+use crate::app::shell::presenters::shared_elements::glass_frame;
+use crate::app::shell::GroupFormSession;
 use eframe::egui::{self, CentralPanel, RichText};
 
 /// Form for creating/editing a group: divided into rendering the name and the section with cores and clusters.
 fn draw_group_form_ui(
     ui: &mut egui::Ui,
-    groups: &mut GroupFormState,
+    groups: &mut GroupFormSession,
     cpu_schema: &mut CpuSchema,
     is_edit: bool,
     on_save: &mut dyn FnMut(),
@@ -78,7 +79,7 @@ fn draw_group_form_ui(
 }
 
 /// Rendering the CPU cores section: a list of already created clusters and a panel of free cores.
-fn draw_cpu_cores_ui(ui: &mut egui::Ui, groups: &mut GroupFormState, cpu_schema: &mut CpuSchema) {
+fn draw_cpu_cores_ui(ui: &mut egui::Ui, groups: &mut GroupFormSession, cpu_schema: &mut CpuSchema) {
     ui.with_layout(
         egui::Layout::top_down_justified(egui::Align::Center),
         |ui| {
@@ -158,7 +159,7 @@ fn get_core_color(core_type: CoreType, dark_mode: bool) -> egui::Color32 {
     }
 }
 
-fn draw_core_buttons(ui: &mut egui::Ui, groups: &mut GroupFormState, cores: &mut [CoreInfo]) {
+fn draw_core_buttons(ui: &mut egui::Ui, groups: &mut GroupFormSession, cores: &mut [CoreInfo]) {
     let dark_mode = ui.visuals().dark_mode;
     let all_selected_color = if dark_mode {
         egui::Color32::from_rgb(61, 79, 3)

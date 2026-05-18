@@ -6,13 +6,14 @@ mod storage_io;
 #[cfg(test)]
 mod tests;
 
+use crate::app::features::rules::PersistedRuleIdentities;
 use crate::app::models::core_group::CoreGroup;
 use crate::app::models::cpu_schema::CpuSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Current version of the application state schema.
-pub const CURRENT_APP_STATE_VERSION: u32 = 5;
+pub const CURRENT_APP_STATE_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateStorageMode {
@@ -45,6 +46,13 @@ pub struct AppStateStorage {
     /// Flag indicating whether process monitoring is enabled
     #[serde(default)]
     pub process_monitoring_enabled: bool,
+    /// Persisted logical identities for groups and rules in schema v6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_identities: Option<PersistedRuleIdentities>,
+    #[serde(skip)]
+    pub(crate) loaded_version: u32,
+    #[serde(skip)]
+    pub(crate) pending_pre_v6_backup: bool,
 }
 
 impl AppStateStorage {
@@ -54,7 +62,7 @@ impl AppStateStorage {
         Self::load_from_path(&path)
     }
 
-    fn load_from_path(path: &Path) -> AppStateStorage {
+    pub(crate) fn load_from_path(path: &Path) -> AppStateStorage {
         storage_io::read_state_file(path)
             .and_then(|data| migrations::load_from_data(&data, path))
             .unwrap_or_else(|| {
@@ -72,9 +80,19 @@ impl AppStateStorage {
     }
 
     #[cfg_attr(test, allow(dead_code))]
-    pub fn try_save_state(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn try_save_state(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let path = state_path::get_state_path();
-        self.save_to_path(&path)
+        self.try_save_to_path(&path)
+    }
+
+    fn try_save_to_path(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        if self.pending_pre_v6_backup {
+            storage_io::backup_pre_v6_state_file(path)?;
+        }
+        self.save_to_path(path)?;
+        self.loaded_version = self.version;
+        self.pending_pre_v6_backup = false;
+        Ok(())
     }
 
     pub fn active_data_dir() -> PathBuf {
@@ -83,5 +101,23 @@ impl AppStateStorage {
 
     pub fn active_storage_mode() -> StateStorageMode {
         state_path::get_state_storage_mode()
+    }
+
+    pub fn mark_ready_for_v6_save(&mut self, rule_identities: PersistedRuleIdentities) {
+        if self.loaded_version < CURRENT_APP_STATE_VERSION {
+            self.pending_pre_v6_backup = true;
+        }
+        self.version = CURRENT_APP_STATE_VERSION;
+        self.rule_identities = Some(rule_identities);
+    }
+
+    pub(crate) fn finalize_load(
+        mut self,
+        loaded_version: u32,
+        pending_pre_v6_backup: bool,
+    ) -> Self {
+        self.loaded_version = loaded_version;
+        self.pending_pre_v6_backup = pending_pre_v6_backup;
+        self
     }
 }

@@ -1,14 +1,28 @@
 use crate::app::models::{AppRuntimeKey, AppStatus, RunningApps};
+use crate::app::shared::ids::{GroupId, RuleId};
+use crate::app::shell::events::ShellEvent;
 use os_api::InstalledPackageRuntimeInfo;
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 
+#[derive(Default)]
+pub struct ExecutionStore {
+    running_apps: Arc<TokioRwLock<RunningApps>>,
+    installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
+    running_apps_statuses: HashMap<AppRuntimeKey, AppStatus>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct InstalledPackageTrackingState {
     metadata_by_aumid: HashMap<String, Result<InstalledPackageRuntimeInfo, String>>,
     package_owner_by_family: HashMap<String, AppRuntimeKey>,
+}
+
+pub struct RuntimeRegistry {
+    pub(crate) store: ExecutionStore,
+    pub(crate) monitor_rx: Option<Receiver<ShellEvent>>,
 }
 
 fn normalize_aumid_key(aumid: &str) -> String {
@@ -19,15 +33,7 @@ fn normalize_package_family_key(package_family_name: &str) -> String {
     package_family_name.to_lowercase()
 }
 
-/// Runtime-only process tracking state.
-pub struct RuntimeRegistry {
-    pub(crate) running_apps: Arc<TokioRwLock<RunningApps>>,
-    pub(crate) installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
-    pub(crate) running_apps_statuses: HashMap<AppRuntimeKey, AppStatus>,
-    pub(crate) monitor_rx: Option<Receiver<String>>,
-}
-
-impl RuntimeRegistry {
+impl ExecutionStore {
     pub fn new() -> Self {
         Self {
             running_apps: Arc::new(TokioRwLock::new(RunningApps::default())),
@@ -35,8 +41,15 @@ impl RuntimeRegistry {
                 InstalledPackageTrackingState::default(),
             )),
             running_apps_statuses: HashMap::new(),
-            monitor_rx: None,
         }
+    }
+
+    pub fn running_apps_handle(&self) -> Arc<TokioRwLock<RunningApps>> {
+        self.running_apps.clone()
+    }
+
+    pub fn installed_package_tracking_handle(&self) -> Arc<RwLock<InstalledPackageTrackingState>> {
+        self.installed_package_tracking.clone()
     }
 
     pub(crate) fn resolve_installed_package_runtime_info_with<F>(
@@ -58,12 +71,12 @@ impl RuntimeRegistry {
         &self,
         app_key: &AppRuntimeKey,
         pid: u32,
-        group_index: usize,
-        prog_index: usize,
+        group_id: GroupId,
+        rule_id: RuleId,
     ) -> bool {
         match self.running_apps.try_write() {
             Ok(mut apps) => {
-                apps.add_app(app_key, pid, group_index, prog_index);
+                apps.add_app(app_key, pid, group_id, rule_id);
                 true
             }
             Err(_) => false,
@@ -120,6 +133,61 @@ impl RuntimeRegistry {
         } else {
             None
         }
+    }
+}
+
+impl RuntimeRegistry {
+    pub fn new() -> Self {
+        Self {
+            store: ExecutionStore::new(),
+            monitor_rx: None,
+        }
+    }
+
+    pub fn running_apps_handle(&self) -> Arc<TokioRwLock<RunningApps>> {
+        self.store.running_apps_handle()
+    }
+
+    pub fn installed_package_tracking_handle(&self) -> Arc<RwLock<InstalledPackageTrackingState>> {
+        self.store.installed_package_tracking_handle()
+    }
+
+    pub(crate) fn resolve_installed_package_runtime_info_with<F>(
+        &self,
+        aumid: &str,
+        resolver: F,
+    ) -> Result<InstalledPackageRuntimeInfo, String>
+    where
+        F: FnOnce(&str) -> Result<InstalledPackageRuntimeInfo, String>,
+    {
+        self.store
+            .resolve_installed_package_runtime_info_with(aumid, resolver)
+    }
+
+    pub fn add_running_app(
+        &self,
+        app_key: &AppRuntimeKey,
+        pid: u32,
+        group_id: GroupId,
+        rule_id: RuleId,
+    ) -> bool {
+        self.store.add_running_app(app_key, pid, group_id, rule_id)
+    }
+
+    pub fn contains_app(&self, app_key: &AppRuntimeKey) -> bool {
+        self.store.contains_app(app_key)
+    }
+
+    pub fn add_pid_to_existing_app(&self, app_key: &AppRuntimeKey, pid: u32) -> bool {
+        self.store.add_pid_to_existing_app(app_key, pid)
+    }
+
+    pub fn get_app_status_sync(&mut self, app_key: &AppRuntimeKey) -> AppStatus {
+        self.store.get_app_status_sync(app_key)
+    }
+
+    pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
+        self.store.get_running_app_pids(app_key)
     }
 }
 
@@ -195,6 +263,7 @@ mod tests {
         resolve_installed_package_runtime_info_cached, InstalledPackageTrackingState,
     };
     use crate::app::models::{AppToRun, RunningApps};
+    use crate::app::shared::ids::{GroupId, RuleId};
     use os_api::{InstalledPackageRuntimeInfo, PriorityClass};
     use std::cell::Cell;
     use std::path::PathBuf;
@@ -202,6 +271,14 @@ mod tests {
 
     fn installed_app(name: &str, aumid: &str, priority: PriorityClass) -> AppToRun {
         AppToRun::new_installed(name.to_string(), aumid.to_string(), priority, false)
+    }
+
+    fn group_id(value: usize) -> GroupId {
+        GroupId(format!("group-{value}"))
+    }
+
+    fn rule_id(value: usize) -> RuleId {
+        RuleId(format!("rule-{value}"))
     }
 
     #[test]
@@ -259,8 +336,8 @@ mod tests {
         let mut running_apps = RunningApps::default();
         let first = installed_app("Spotify", "Pkg!AppA", PriorityClass::Normal).get_key();
         let second = installed_app("Spotify Launcher", "Pkg!AppB", PriorityClass::Normal).get_key();
-        running_apps.add_app(&first, 10, 0, 0);
-        running_apps.add_app(&second, 20, 0, 1);
+        running_apps.add_app(&first, 10, group_id(0), rule_id(0));
+        running_apps.add_app(&second, 20, group_id(0), rule_id(1));
 
         assert!(ensure_package_owner_claim(
             &mut tracking,
@@ -283,7 +360,7 @@ mod tests {
         let first = installed_app("Spotify", "Pkg!AppA", PriorityClass::Normal).get_key();
         let second = installed_app("Spotify Launcher", "Pkg!AppB", PriorityClass::Normal).get_key();
 
-        running_apps.add_app(&first, 10, 0, 0);
+        running_apps.add_app(&first, 10, group_id(0), rule_id(0));
         assert!(ensure_package_owner_claim(
             &mut tracking,
             &running_apps,
@@ -294,7 +371,7 @@ mod tests {
         running_apps.remove_app(&first);
         cleanup_orphaned_package_owners(&mut tracking, &running_apps);
 
-        running_apps.add_app(&second, 20, 0, 1);
+        running_apps.add_app(&second, 20, group_id(0), rule_id(1));
         assert!(ensure_package_owner_claim(
             &mut tracking,
             &running_apps,

@@ -1,4 +1,4 @@
-use super::{schema_refresh, storage_io, AppStateStorage, CURRENT_APP_STATE_VERSION};
+use super::{schema_refresh, AppStateStorage};
 use crate::app::models::core_group::CoreGroup;
 use crate::app::models::cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 use serde::Deserialize;
@@ -29,6 +29,7 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     let version_check: VersionCheck = serde_json::from_str(data).ok()?;
 
     match version_check.version {
+        Some(6) => load_v6(data, path),
         Some(5) => load_v5(data, path),
         Some(4) => load_v4(data, path),
         Some(3) => load_v3(data, path),
@@ -37,38 +38,38 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     }
 }
 
-fn load_v5(data: &str, path: &Path) -> Option<AppStateStorage> {
+fn load_v6(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
-
-    if schema_refresh::refresh_loaded_schema(&mut state) {
-        let _ = state.save_to_path(path);
-    }
-
-    Some(state)
-}
-
-fn load_v4(data: &str, path: &Path) -> Option<AppStateStorage> {
-    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
-    state.version = CURRENT_APP_STATE_VERSION;
-
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
-    let _ = state.save_to_path(path);
-
-    Some(state)
+    Some(state.finalize_load(6, false))
 }
 
-fn load_v3(data: &str, path: &Path) -> Option<AppStateStorage> {
+fn load_v5(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
-    state.version = CURRENT_APP_STATE_VERSION;
-    let _ = state.save_to_path(path);
-    Some(state)
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    Some(state.finalize_load(5, true))
 }
 
-fn load_v2(data: &str, path: &Path) -> Option<AppStateStorage> {
+fn load_v4(data: &str, _path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    state.version = 5;
+    state.rule_identities = None;
+    Some(state.finalize_load(4, true))
+}
+
+fn load_v3(data: &str, _path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.version = 5;
+    state.rule_identities = None;
+    Some(state.finalize_load(3, true))
+}
+
+fn load_v2(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let v2: V2AppStateStorage = serde_json::from_str(data).ok()?;
 
     let mut migrated = AppStateStorage {
-        version: CURRENT_APP_STATE_VERSION,
+        version: 5,
         groups: v2.groups,
         cpu_schema: CpuSchema {
             model: "Generic CPU".to_string(),
@@ -76,20 +77,20 @@ fn load_v2(data: &str, path: &Path) -> Option<AppStateStorage> {
         },
         theme_index: v2.theme_index,
         process_monitoring_enabled: v2.process_monitoring_enabled,
+        rule_identities: None,
+        loaded_version: 0,
+        pending_pre_v6_backup: false,
     };
 
     schema_refresh::refresh_migrated_schema(&mut migrated);
-    storage_io::backup_state_file(path);
-    let _ = migrated.save_to_path(path);
-
-    Some(migrated)
+    Some(migrated.finalize_load(2, true))
 }
 
-fn load_legacy(data: &str, path: &Path) -> Option<AppStateStorage> {
+fn load_legacy(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let legacy: LegacyAppStateStorage = serde_json::from_str(data).ok()?;
 
     let mut migrated = AppStateStorage {
-        version: CURRENT_APP_STATE_VERSION,
+        version: 5,
         groups: legacy.groups,
         cpu_schema: CpuSchema {
             model: "Generic CPU".to_string(),
@@ -97,13 +98,13 @@ fn load_legacy(data: &str, path: &Path) -> Option<AppStateStorage> {
         },
         theme_index: legacy.theme_index,
         process_monitoring_enabled: false,
+        rule_identities: None,
+        loaded_version: 0,
+        pending_pre_v6_backup: false,
     };
 
     schema_refresh::refresh_migrated_schema(&mut migrated);
-    storage_io::backup_state_file(path);
-    let _ = migrated.save_to_path(path);
-
-    Some(migrated)
+    Some(migrated.finalize_load(0, true))
 }
 
 pub(super) fn build_generic_clusters(clusters: Vec<Vec<usize>>) -> Vec<CpuCluster> {

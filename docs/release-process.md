@@ -37,7 +37,7 @@ Stable Windows publishing and Linux beta publishing are separate workflows with 
 When a stable tag matching `v*` is pushed:
 
 1. GitHub Actions runs the Windows release job
-2. the workflow runs formatting, clippy, `libs/os_api` tests, root tests, and the Windows release build
+2. the workflow runs formatting, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `libs/os_api` tests, `cargo test --features windows --bin cpu-affinity-tool`, and `cargo build --release --features windows --bin cpu-affinity-tool`
 3. the workflow uploads `cpu-affinity-tool.exe`
 4. GitHub Release is created with the body from `changelogs/vX.Y.Z.txt`
 
@@ -61,6 +61,7 @@ Before pushing a stable Windows tag, align:
 - `Cargo.toml` version
 - `changelogs/vX.Y.Z.txt`
 - release-facing docs if platform or process truth changed
+- if the release includes the first shipped schema `v6` build, call out that the first explicit save upgrades `state.json` to `v6`, writes an additional `state.json.pre-v6*` backup, and makes downgrade to older pre-`v6` binaries unsupported after that save
 
 Before pushing a Linux beta tag, align:
 
@@ -68,6 +69,7 @@ Before pushing a Linux beta tag, align:
 - `Cargo.toml` version: `X.Y.Z`
 - `changelogs/linux-beta-vX.Y.Z-N.txt`
 - Linux beta release-facing docs if platform or process truth changed
+- if the prerelease includes the first shipped schema `v6` build, call out that the first explicit save upgrades `state.json` to `v6`, writes an additional `state.json.pre-v6*` backup, and makes downgrade to older pre-`v6` binaries unsupported after that save
 
 ## Recommended stable release steps
 

@@ -3,7 +3,7 @@
 mod app;
 mod tray;
 
-use app::runtime::App;
+use app::shell::App;
 use eframe::{run_native, NativeOptions};
 use tokio::runtime::Runtime;
 
@@ -32,7 +32,9 @@ fn main() {
 
     // Set self-priority to Below Normal to avoid interfering with high-load apps
     #[warn(unused_variables)]
-    if let Err(_e) = os_api::OS::set_current_process_priority(os_api::PriorityClass::BelowNormal) {
+    if let Err(_e) =
+        app::adapters::os::set_current_process_priority(os_api::PriorityClass::BelowNormal)
+    {
         #[cfg(debug_assertions)]
         eprintln!("DEBUG: Failed to set self priority: {}", _e);
     }

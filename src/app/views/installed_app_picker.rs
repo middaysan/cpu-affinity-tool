@@ -35,7 +35,7 @@ fn installed_app_picker_heading() -> (&'static str, &'static str) {
 }
 
 pub fn draw_installed_app_picker(app: &mut AppState, ctx: &Context) {
-    if app.ui.installed_app_picker.target_group_index.is_none() {
+    if app.ui.installed_app_picker.target_group_id.is_none() {
         app.close_installed_app_picker();
         return;
     }

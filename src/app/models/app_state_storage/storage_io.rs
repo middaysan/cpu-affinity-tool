@@ -41,3 +41,33 @@ pub(super) fn backup_state_file(path: &Path) {
 
     let _ = std::fs::rename(path, backup_path);
 }
+
+pub(super) fn backup_pre_v6_state_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let backup_path = rotated_backup_path(path, "pre-v6", "-");
+    std::fs::copy(path, backup_path)?;
+    Ok(())
+}
+
+fn rotated_backup_path(path: &Path, suffix: &str, counter_separator: &str) -> PathBuf {
+    let mut backup_path = PathBuf::from(path);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(STATE_FILE_NAME);
+
+    let mut backup_name = format!("{file_name}.{suffix}");
+    backup_path.set_file_name(&backup_name);
+
+    let mut counter = 1;
+    while backup_path.exists() {
+        backup_name = format!("{file_name}.{suffix}{counter_separator}{counter}");
+        backup_path.set_file_name(&backup_name);
+        counter += 1;
+    }
+
+    backup_path
+}

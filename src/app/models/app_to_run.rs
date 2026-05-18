@@ -289,11 +289,13 @@ fn path_file_name_lossy(path: &Path) -> Option<String> {
         .map(|segment| segment.to_string())
 }
 
+#[cfg(not(target_os = "windows"))]
 fn looks_like_windows_path(path: &Path) -> bool {
     let raw = path.to_string_lossy();
     raw.contains('\\') || raw.get(1..3) == Some(":\\") || raw.get(1..3) == Some(":/")
 }
 
+#[cfg(not(target_os = "windows"))]
 fn normalize_windows_path_text(path: &Path) -> String {
     let normalized = path.to_string_lossy().replace('/', "\\");
 

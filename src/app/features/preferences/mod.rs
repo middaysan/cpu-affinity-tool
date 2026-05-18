@@ -2,17 +2,13 @@ use crate::app::models::AppStateStorage;
 use std::sync::{Arc, RwLock};
 
 pub fn toggle_theme(persistent_state: &Arc<RwLock<AppStateStorage>>) {
-    {
-        let mut state = persistent_state.write().unwrap();
-        state.theme_index = (state.theme_index + 1) % 3;
-    }
+    let mut state = persistent_state.write().unwrap();
+    state.theme_index = (state.theme_index + 1) % 3;
 }
 
 pub fn toggle_process_monitoring(persistent_state: &Arc<RwLock<AppStateStorage>>) {
-    {
-        let mut state = persistent_state.write().unwrap();
-        state.process_monitoring_enabled = !state.process_monitoring_enabled;
-    }
+    let mut state = persistent_state.write().unwrap();
+    state.process_monitoring_enabled = !state.process_monitoring_enabled;
 }
 
 #[cfg(test)]
@@ -31,6 +27,9 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            rule_identities: None,
+            loaded_version: 5,
+            pending_pre_v6_backup: false,
         }))
     }
 

@@ -69,7 +69,7 @@ mod sys {
                     "1" => {
                         let hwnd =
                             windows::Win32::Foundation::HWND(hwnd_val.0 as *mut core::ffi::c_void);
-                        os_api::OS::restore_and_focus(hwnd);
+                        crate::app::adapters::os::restore_and_focus_window(hwnd);
                         let _ = tx.send(TrayCmd::Show);
                         ctx.request_repaint();
                     }
@@ -92,7 +92,7 @@ mod sys {
                 {
                     let hwnd =
                         windows::Win32::Foundation::HWND(hwnd_val.0 as *mut core::ffi::c_void);
-                    os_api::OS::restore_and_focus(hwnd);
+                    crate::app::adapters::os::restore_and_focus_window(hwnd);
                     let _ = tx.send(TrayCmd::Show);
                     ctx.request_repaint();
                 }

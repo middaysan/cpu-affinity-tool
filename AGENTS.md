@@ -48,9 +48,10 @@ Current platform reality:
 ## Repository map
 Key directories:
 - `src/` - application runtime code and entrypoints
-- `src/app/views/` - egui rendering and screen composition
-- `src/app/navigation/` - route enums for active window and view selection
-- `src/app/runtime/` - `eframe::App` shell, `AppState` facade, `UiState`, `RuntimeRegistry`, startup wiring, monitor loops, commands, tray and window lifecycle, and view dispatch
+- `src/app/shell/` - the top-level `eframe::App` shell, route enums, transient UI sessions, typed shell events, and presenter module ownership
+- `src/app/features/` - bounded feature modules for `rules`, `execution`, `preferences`, `topology`, and `diagnostics`
+- `src/app/adapters/` - seams for persisted state loading, OS helpers, and installed-app discovery
+- `src/app/runtime/` - thin composition-root state facade kept around `AppState`
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
 - `src/app/models/app_state_storage/` - internal persistence modules for state path resolution, storage I/O, migrations, and schema refresh; `app_state_storage.rs` remains the public storage schema and API entrypoint
 - `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, while Linux remains a single-file desktop beta backend
@@ -82,53 +83,61 @@ Important root files:
 
 ## Runtime architecture
 Layers:
-- `views` render UI, keep local UI-shell interactions such as file dialogs and hit-testing, and emit app intents through `AppState`
-- `navigation` holds route enums
-- `runtime` owns orchestration, the top-level `eframe::App` shell, `AppState`, monitor wiring, commands, tray and window lifecycle, and view dispatch
-- `models` hold persisted and domain data plus reusable runtime-adjacent data structures
+- `shell` owns the top-level `eframe::App`, tray/window lifecycle, route enums, UI sessions, presenter dispatch, and repaint policy
+- `features` own product behavior:
+  - `rules` owns group and rule mutations plus logical `GroupId` / `RuleId` identity
+  - `execution` owns launch, runtime tracking, reconcile loops, package-owner claims, and typed monitor notifications
+  - `preferences` owns theme and monitoring toggles
+  - `topology` owns CPU model/thread detection helpers
+  - `diagnostics` owns startup logging and typed diagnostic event shape
+- `adapters` isolate storage loading, OS helper calls, and installed-app discovery
+- `models` hold persisted schema plus domain and runtime-adjacent value types
+- `runtime` is now a thin composition-root facade around `AppState`
 
 Current runtime split:
-- `runtime::App` owns shell-only lifecycle state:
+- `shell::App` owns shell-only lifecycle state:
   - `tray_rx`
   - Windows tray icon guard
   - Windows `HWND`
   - hidden-window flag
-- `runtime::AppState` is a facade with four owned parts:
+- `runtime::AppState` is the composition root over:
   - `persistent_state`
+  - `rules`
   - `ui`
   - `runtime`
   - `log_manager`
-- `runtime::UiState` owns transient UI-only state:
+- `shell::UiSession` owns transient UI-only state:
   - active route
-  - group form state
-  - app edit session state
+  - group form session
+  - rule editor session
   - dropped files
-  - installed app picker state and cached catalog
+  - installed app picker session and cached catalog
   - rotating tip state
-- `runtime::RuntimeRegistry` owns runtime process tracking:
+- `features::rules::RulesContext` owns logical `GroupId` / `RuleId` allocation, index projection, and persisted `rule_identities`
+- `features::execution::RuntimeRegistry` owns runtime process tracking:
   - `running_apps`
   - runtime-only installed-package metadata cache for Windows installed targets
   - package-owner claims for shared package-local helper processes
   - cached app statuses
   - `monitor_rx`
-- runtime process identity is keyed by opaque `AppRuntimeKey`, not ad-hoc raw strings
-- `runtime::commands::*` own use-case logic for groups, apps, launch, and preferences
-- `runtime::monitors::*` own the two background monitor loops
+- runtime process identity stays keyed by opaque `AppRuntimeKey`, but tracked app ownership now also stores logical `GroupId` / `RuleId`
+- shell presenters are owned under `shell::presenters`; their source files still live under `src/app/views/` via path-based module ownership
+- workers emit typed `shell::events::ShellEvent` messages and do not hold `egui::Context`
 
 Windows runtime flow:
 1. Entry point creates GUI and runtime environment.
 2. `tokio` runtime is created.
 3. The process lowers its own priority to `BelowNormal`.
-4. `App::new` creates `AppState`, writes startup diagnostics, starts monitor tasks, captures `HWND`, runs autorun, and initializes tray integration.
+4. `App::new` creates `AppState`, seeds in-memory logical identities, writes startup diagnostics, starts execution monitors, captures `HWND`, runs autorun once, and initializes tray integration.
 5. `App::update` handles tray events, monitor notifications, hidden-window flow, file drops, applies theme, and renders the active view.
 
-Linux entrypoint now reaches the shared `runtime::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
+Linux entrypoint now reaches the shared `shell::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
 
 ## Concurrency model
 - GUI runs on the main thread
 - background tasks use `tokio`
-- tray commands flow through `tray_rx` owned by `runtime::App`
-- monitor notifications flow through `monitor_rx` owned by `RuntimeRegistry`
+- tray commands flow through `tray_rx` owned by `shell::App`
+- monitor notifications flow through typed `ShellEvent` messages in `monitor_rx` owned by `RuntimeRegistry`
 - persisted state uses `Arc<RwLock<AppStateStorage>>`
 - running-process tracking uses `Arc<TokioRwLock<RunningApps>>`
 - installed-package runtime metadata cache and ownership state use in-memory `Arc<RwLock<...>>`
@@ -139,7 +148,7 @@ Background loops:
 - affinity and priority verification and optional correction loop
 
 Hidden-window flow:
-- when the window is hidden, `runtime::App` schedules repaint with `ctx.request_repaint_after(...)` and skips rendering
+- when the window is hidden, `shell::App` schedules repaint with `ctx.request_repaint_after(...)` and skips rendering
 - the hidden-window path no longer sleeps on the UI thread
 
 ## State and data contracts
@@ -153,16 +162,21 @@ Persisted state facts:
   - Windows: `%LOCALAPPDATA%\CpuAffinityTool\state.json`
   - Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/cpu-affinity-tool/state.json`
 - there is no automatic migration or copy between the legacy sidecar path and the platform data path
-- current persisted schema version: `5`
-- older formats are migrated on load
+- current persisted schema version: `6`
+- schema `v5` and older formats are dual-read and normalized in memory without eager rewrite on load
+- the upgrade from pre-`v6` data to `v6` happens only on an explicit save path
+- before the first `v6` save after loading pre-`v6` state, persistence creates an additional `state.json.pre-v6`, `state.json.pre-v6-1`, and so on backup series
+- after the first `v6` save, downgrade to an older binary that only understands pre-`v6` state is unsupported
 - backup rotation uses `state.json.old`, `state.json.old1`, `state.json.old2`, and so on
 - persistence loading is split into `state_path`, `storage_io`, `migrations`, and `schema_refresh`
 
 Key entities:
 - `CoreGroup` - CPU core group plus assigned apps
 - `AppToRun` - application launch configuration with `Path` or `Installed` launch targets
+- `GroupId` / `RuleId` - logical persisted identities for groups and rules
 - `AppRuntimeKey` - opaque runtime-only identity derived from `AppToRun` for tracking and monitor lookups
 - `RunningApp` / `RunningApps` - tracked live processes
+- `RulesContext` - logical identity catalog and index projection over persisted groups and rules
 - `CpuSchema`, `CpuCluster`, `CoreInfo` - logical CPU layout description
 - `LogManager` - in-memory runtime log and history
 
@@ -171,6 +185,8 @@ Important contract facts:
 - `AppToRun` path targets store both source path and resolved executable path
 - `AppToRun` installed targets store Windows `AUMID` and do not expose user-editable args in the current contract
 - runtime tracking identity keeps the existing stable encoded key contract, but it now flows through typed `AppRuntimeKey` instead of raw `String` keys across runtime core
+- logical group and rule ownership persist in `AppStateStorage.rule_identities` starting with schema `v6`
+- when pre-`v6` state is loaded, `AppState` seeds in-memory logical identities immediately and persists them on the next explicit save
 - the Windows `Find Installed` picker is a launch-safe Windows subset backed by `AppsFolder + Start Menu shortcuts + App Paths`, not a full OS inventory
 - tracked Windows installed targets now use a runtime-only package metadata cache plus package-local PID enrichment while the target stays tracked
 - package-local helper PID ownership for multiple installed targets in the same package follows `first active target wins`
@@ -273,10 +289,10 @@ Do not invent dependency purpose just because a crate appears in `Cargo.toml`.
 ## Build, verification, CI, and release
 Local verification commands:
 - `cargo test --manifest-path libs/os_api/Cargo.toml`
-- `cargo test`
+- `cargo test --features windows --bin cpu-affinity-tool`
 - `cargo fmt --all -- --check`
-- `cargo clippy -- -D warnings`
-- `cargo build --release`
+- `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`
+- `cargo build --release --features windows --bin cpu-affinity-tool`
 - `cargo test --features linux --bin cpu-affinity-tool-linux`
 - `cargo build --release --features linux --bin cpu-affinity-tool-linux`
 
@@ -291,10 +307,11 @@ Current CI facts:
   - `ubuntu-latest` for the Linux desktop beta job
 - `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, and verifies the Linux beta binary on `ubuntu-latest`
 - tests are part of the committed CI contract for `ci.yml`
+- the Windows CI job validates the feature-gated Windows binary path explicitly with `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --features windows --bin cpu-affinity-tool`, and `cargo build --release --features windows --bin cpu-affinity-tool`
 
 Current release facts:
 - stable GitHub Release workflow reacts to pushed tags matching `v*`
-- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test`, and then builds `cpu-affinity-tool.exe` in the same runner before upload
+- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, and then builds `cpu-affinity-tool.exe` with `cargo build --release --features windows --bin cpu-affinity-tool` in the same runner before upload
 - the stable release workflow publishes `cpu-affinity-tool.exe`
 - stable release target: `x86_64-pc-windows-msvc`
 - Linux beta prerelease workflow reacts to pushed tags matching `linux-beta-v*`

@@ -1,5 +1,5 @@
-use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::runtime::AppState;
+use crate::app::shell::{GroupRoute, WindowRoute};
 use eframe::egui::{self, Layout, Margin, RichText, TopBottomPanel};
 
 pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {

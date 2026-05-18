@@ -1,9 +1,11 @@
-use crate::app::models::{AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, RunningApps};
-use crate::app::runtime::runtime_registry::{
+use crate::app::features::execution::{
     cleanup_orphaned_package_owners, ensure_package_owner_claim,
     resolve_installed_package_runtime_info_cached, InstalledPackageTrackingState,
 };
-use eframe::egui;
+use crate::app::features::rules::RulesContext;
+use crate::app::models::{AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, RunningApps};
+use crate::app::shared::ids::{GroupId, RuleId};
+use crate::app::shell::events::ShellEvent;
 use os_api::{InstalledPackageRuntimeInfo, OS};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -39,8 +41,8 @@ struct ConfiguredProgramSnapshot {
     display_name: String,
     additional_processes_normalized: Vec<String>,
     matcher: ConfiguredProgramMatcher,
-    group_index: usize,
-    prog_index: usize,
+    group_id: GroupId,
+    rule_id: RuleId,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -94,8 +96,7 @@ pub async fn run_running_app_monitor(
     running_apps: Arc<TokioRwLock<RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     app_state: Arc<RwLock<AppStateStorage>>,
-    ctx: egui::Context,
-    monitor_tx: std::sync::mpsc::Sender<String>,
+    monitor_tx: std::sync::mpsc::Sender<ShellEvent>,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
     let os = RealRunningAppsOs;
@@ -107,10 +108,10 @@ pub async fn run_running_app_monitor(
             let state = match app_state.read() {
                 Ok(guard) => guard,
                 Err(_) => {
-                    let _ = monitor_tx.send(
+                    let _ = monitor_tx.send(ShellEvent::Warning(
                         "WARNING: persistent_state lock poisoned, skipping monitor iteration"
                             .to_string(),
-                    );
+                    ));
                     continue;
                 }
             };
@@ -146,11 +147,11 @@ pub async fn run_running_app_monitor(
             );
 
             for message in outcome.notifications {
-                let _ = monitor_tx.send(message);
+                let _ = monitor_tx.send(ShellEvent::Monitor(message));
             }
 
             if outcome.changed {
-                ctx.request_repaint();
+                let _ = monitor_tx.send(ShellEvent::RuntimeStateChanged);
             }
         }
     }
@@ -158,12 +159,14 @@ pub async fn run_running_app_monitor(
 
 fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgramSnapshot> {
     let mut programs = Vec::new();
+    let rules = RulesContext::from_storage(state);
+    let snapshot = rules.snapshot(state);
 
-    for (group_index, group) in state.groups.iter().enumerate() {
-        for (prog_index, program) in group.programs.iter().enumerate() {
-            let matcher = match &program.launch_target {
+    for group in snapshot.groups {
+        for program in group.rules {
+            let matcher = match &program.app.launch_target {
                 LaunchTarget::Path { bin_path, .. } => {
-                    let names = collect_path_candidate_names(program);
+                    let names = collect_path_candidate_names(&program.app);
                     if names.is_empty() {
                         continue;
                     }
@@ -179,12 +182,12 @@ fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgram
             };
 
             programs.push(ConfiguredProgramSnapshot {
-                key: program.get_key(),
-                display_name: program.name.clone(),
-                additional_processes_normalized: collect_additional_process_names(program),
+                key: program.app.get_key(),
+                display_name: program.app.name.clone(),
+                additional_processes_normalized: collect_additional_process_names(&program.app),
                 matcher,
-                group_index,
-                prog_index,
+                group_id: group.id.clone(),
+                rule_id: program.id,
             });
         }
     }
@@ -488,6 +491,8 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
             .unwrap_or(false);
 
         if let Some(app) = apps.apps.get_mut(&key) {
+            app.group_id = configured.group_id.clone();
+            app.rule_id = configured.rule_id.clone();
             let old_pid_count = app.pids.len();
 
             extend_with_descendants(snapshot, &mut app.pids);
@@ -605,8 +610,8 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
         apps.add_app(
             &key,
             detected_pids[0],
-            configured.group_index,
-            configured.prog_index,
+            configured.group_id,
+            configured.rule_id,
         );
         outcome.changed = true;
 
@@ -650,8 +655,9 @@ mod tests {
         extend_with_descendants, process_running_apps_iteration_with_os, ConfiguredProgramMatcher,
         ProcessSnapshot, RunningAppsOs,
     };
+    use crate::app::features::execution::InstalledPackageTrackingState;
     use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, RunningApps};
-    use crate::app::runtime::runtime_registry::InstalledPackageTrackingState;
+    use crate::app::shared::ids::{GroupId, RuleId};
     use os_api::{InstalledPackageRuntimeInfo, PriorityClass};
     use std::cell::Cell;
     use std::collections::{HashMap, HashSet};
@@ -742,6 +748,9 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            rule_identities: None,
+            loaded_version: 5,
+            pending_pre_v6_backup: false,
         }
     }
 
@@ -769,6 +778,9 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            rule_identities: None,
+            loaded_version: 5,
+            pending_pre_v6_backup: false,
         }
     }
 
@@ -801,6 +813,9 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            rule_identities: None,
+            loaded_version: 5,
+            pending_pre_v6_backup: false,
         }
     }
 
@@ -832,14 +847,22 @@ mod tests {
         )
     }
 
+    fn group_id(value: usize) -> GroupId {
+        GroupId(format!("group-{value}"))
+    }
+
+    fn rule_id(value: usize) -> RuleId {
+        RuleId(format!("rule-{value}"))
+    }
+
     #[test]
-    fn test_collect_configured_programs_preserves_indices_and_names() {
+    fn test_collect_configured_programs_preserves_ids_and_names() {
         let state = sample_path_program_state();
         let configured = collect_configured_programs(&state);
 
         assert_eq!(configured.len(), 1);
-        assert_eq!(configured[0].group_index, 0);
-        assert_eq!(configured[0].prog_index, 0);
+        assert_eq!(configured[0].group_id, group_id(0));
+        assert_eq!(configured[0].rule_id, rule_id(0));
         assert_eq!(configured[0].display_name, "game");
         assert_eq!(
             configured[0].additional_processes_normalized,
@@ -1032,7 +1055,7 @@ mod tests {
         let configured = collect_configured_programs(&state);
         let mut apps = RunningApps::default();
         let key = state.groups[0].programs[0].get_key();
-        apps.add_app(&key, 20, 0, 0);
+        apps.add_app(&key, 20, group_id(0), rule_id(0));
         let os = FakeRunningAppsOs {
             snapshot: Ok(ProcessSnapshot {
                 children_of: HashMap::new(),
@@ -1142,7 +1165,7 @@ mod tests {
         let mut apps = RunningApps::default();
         let first_key = state.groups[0].programs[0].get_key();
         let second_key = state.groups[0].programs[1].get_key();
-        apps.add_app(&first_key, 20, 0, 0);
+        apps.add_app(&first_key, 20, group_id(0), rule_id(0));
         let os = FakeRunningAppsOs {
             snapshot: Ok(ProcessSnapshot {
                 children_of: HashMap::new(),
@@ -1217,7 +1240,7 @@ mod tests {
         let configured = collect_configured_programs(&state);
         let mut apps = RunningApps::default();
         let key = state.groups[0].programs[0].get_key();
-        apps.add_app(&key, 10, 0, 0);
+        apps.add_app(&key, 10, group_id(0), rule_id(0));
         let os = FakeRunningAppsOs {
             snapshot: Ok(ProcessSnapshot {
                 children_of: HashMap::new(),
@@ -1240,7 +1263,7 @@ mod tests {
         let state = sample_path_program_state();
         let mut apps = RunningApps::default();
         let key = state.groups[0].programs[0].get_key();
-        apps.add_app(&key, 10, 0, 0);
+        apps.add_app(&key, 10, group_id(0), rule_id(0));
         let os = FakeRunningAppsOs {
             snapshot: Ok(ProcessSnapshot {
                 children_of: HashMap::new(),

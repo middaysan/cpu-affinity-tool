@@ -2,6 +2,7 @@
 use std::collections::HashMap;
 
 use crate::app::models::AppRuntimeKey;
+use crate::app::shared::ids::{GroupId, RuleId};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppStatus {
@@ -12,14 +13,14 @@ pub enum AppStatus {
 
 /// Represents a single running application instance.
 /// This structure tracks information about a running application,
-/// including its process IDs, group and program indices, and creation time.
+/// including its process IDs, logical group/rule identities, and creation time.
 pub struct RunningApp {
     /// List of process IDs associated with this application
     pub pids: Vec<u32>,
-    /// Index of the group this application belongs to
-    pub group_index: usize,
-    /// Index of the program within the group
-    pub prog_index: usize,
+    /// Logical group identity for the tracked rule.
+    pub group_id: GroupId,
+    /// Logical rule identity for the tracked rule.
+    pub rule_id: RuleId,
     /// Time when the application was started
     pub created_at: std::time::SystemTime,
     /// Whether the CPU affinity and priority settings match the desired values
@@ -45,21 +46,21 @@ impl RunningApps {
     ///
     /// * `app_key` - A unique key to identify the application
     /// * `pid` - The process ID of the application
-    /// * `group_index` - The index of the group the application belongs to
-    /// * `prog_index` - The index of the program within the group
+    /// * `group_id` - The logical group identity
+    /// * `rule_id` - The logical rule identity
     pub fn add_app(
         &mut self,
         app_key: &AppRuntimeKey,
         pid: u32,
-        group_index: usize,
-        prog_index: usize,
+        group_id: GroupId,
+        rule_id: RuleId,
     ) {
         self.apps.insert(
             app_key.clone(),
             RunningApp {
                 pids: vec![pid],
-                group_index,
-                prog_index,
+                group_id,
+                rule_id,
                 created_at: std::time::SystemTime::now(),
                 settings_matched: true, // Default to true until checked by monitor
             },

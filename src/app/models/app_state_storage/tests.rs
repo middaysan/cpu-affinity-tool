@@ -1,4 +1,5 @@
 use super::{state_path, storage_io, AppStateStorage, CURRENT_APP_STATE_VERSION};
+use crate::app::features::rules::RulesContext;
 use crate::app::models::app_to_run::{AppToRun, LaunchTarget};
 use crate::app::models::core_group::CoreGroup;
 use crate::app::models::cpu_presets::get_preset_for_model;
@@ -55,7 +56,17 @@ fn sample_state() -> AppStateStorage {
         },
         theme_index: 2,
         process_monitoring_enabled: true,
+        rule_identities: None,
+        loaded_version: CURRENT_APP_STATE_VERSION,
+        pending_pre_v6_backup: false,
     }
+}
+
+fn sample_state_with_version(version: u32) -> AppStateStorage {
+    let mut state = sample_state();
+    state.version = version;
+    state.loaded_version = version;
+    state
 }
 
 fn current_schema_state() -> AppStateStorage {
@@ -75,7 +86,17 @@ fn current_schema_state() -> AppStateStorage {
         },
         theme_index: 1,
         process_monitoring_enabled: false,
+        rule_identities: None,
+        loaded_version: CURRENT_APP_STATE_VERSION,
+        pending_pre_v6_backup: false,
     }
+}
+
+fn current_schema_state_with_version(version: u32) -> AppStateStorage {
+    let mut state = current_schema_state();
+    state.version = version;
+    state.loaded_version = version;
+    state
 }
 
 fn expected_migrated_cpu_schema(clusters: Vec<Vec<usize>>) -> CpuSchema {
@@ -90,6 +111,12 @@ fn expected_migrated_cpu_schema(clusters: Vec<Vec<usize>>) -> CpuSchema {
             clusters: super::migrations::build_generic_clusters(clusters),
         }
     }
+}
+
+fn persist_explicit_v6_upgrade(state: &mut AppStateStorage, state_path: &Path) {
+    let rules = RulesContext::from_storage(state);
+    state.mark_ready_for_v6_save(rules.to_persisted_identities());
+    state.try_save_to_path(state_path).unwrap();
 }
 
 #[test]
@@ -128,8 +155,8 @@ fn test_backup_rotation() {
 }
 
 #[test]
-fn test_load_v5_state_keeps_current_schema_without_rewrite() {
-    with_temp_state_path("v4_current", |state_path| {
+fn test_load_v6_state_keeps_current_schema_without_rewrite() {
+    with_temp_state_path("v6_current", |state_path| {
         let serialized = serde_json::to_string_pretty(&current_schema_state()).unwrap();
         fs::write(state_path, &serialized).unwrap();
 
@@ -142,10 +169,10 @@ fn test_load_v5_state_keeps_current_schema_without_rewrite() {
 }
 
 #[test]
-fn test_load_v5_generic_state_refreshes_when_cpu_model_is_known() {
-    with_temp_state_path("v4_generic", |state_path| {
+fn test_load_v5_generic_state_refreshes_when_cpu_model_is_known_without_rewrite() {
+    with_temp_state_path("v5_generic", |state_path| {
         let generic = AppStateStorage {
-            version: CURRENT_APP_STATE_VERSION,
+            version: 5,
             groups: Vec::new(),
             cpu_schema: CpuSchema {
                 model: "Generic CPU".to_string(),
@@ -153,6 +180,9 @@ fn test_load_v5_generic_state_refreshes_when_cpu_model_is_known() {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            rule_identities: None,
+            loaded_version: 5,
+            pending_pre_v6_backup: false,
         };
 
         let before = serde_json::to_string_pretty(&generic).unwrap();
@@ -165,18 +195,21 @@ fn test_load_v5_generic_state_refreshes_when_cpu_model_is_known() {
             assert_eq!(after, before);
             assert_eq!(loaded.cpu_schema.model, "Generic CPU");
         } else {
-            assert_ne!(after, before);
+            assert_eq!(after, before);
             assert_ne!(loaded.cpu_schema.model, "Generic CPU");
         }
 
         assert!(!state_path.with_file_name("state.json.old").exists());
+        assert_eq!(loaded.version, 5);
+        assert_eq!(loaded.loaded_version, 5);
+        assert!(loaded.pending_pre_v6_backup);
     });
 }
 
 #[test]
-fn test_load_v3_state_migrates_and_persists_v5() {
+fn test_load_v3_state_migrates_in_memory_until_explicit_v6_save() {
     with_temp_state_path("v3_migration", |state_path| {
-        let mut value = serde_json::to_value(sample_state()).unwrap();
+        let mut value = serde_json::to_value(sample_state_with_version(3)).unwrap();
         value["version"] = json!(3);
 
         value
@@ -190,13 +223,18 @@ fn test_load_v3_state_migrates_and_persists_v5() {
             .unwrap()
             .remove("additional_processes");
 
-        fs::write(state_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        let original = serde_json::to_string_pretty(&value).unwrap();
+        fs::write(state_path, &original).unwrap();
 
-        let loaded = AppStateStorage::load_from_path(state_path);
-        assert_eq!(loaded.version, CURRENT_APP_STATE_VERSION);
+        let mut loaded = AppStateStorage::load_from_path(state_path);
+        assert_eq!(loaded.version, 5);
+        assert_eq!(loaded.loaded_version, 3);
+        assert!(loaded.pending_pre_v6_backup);
         assert!(loaded.groups[0].programs[0].additional_processes.is_empty());
         assert!(!state_path.with_file_name("state.json.old").exists());
+        assert_eq!(fs::read_to_string(state_path).unwrap(), original);
 
+        persist_explicit_v6_upgrade(&mut loaded, state_path);
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
         assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
@@ -204,12 +242,17 @@ fn test_load_v3_state_migrates_and_persists_v5() {
             persisted["groups"][0]["programs"][0]["additional_processes"],
             json!([])
         );
+        assert!(persisted["rule_identities"].is_object());
+        assert_eq!(
+            fs::read_to_string(state_path.with_file_name("state.json.pre-v6")).unwrap(),
+            original
+        );
     });
 }
 
 #[test]
-fn test_load_v4_state_migrates_path_targets_losslessly() {
-    with_temp_state_path("v4_to_v5_path_targets", |state_path| {
+fn test_load_v4_state_migrates_path_targets_losslessly_until_explicit_v6_save() {
+    with_temp_state_path("v4_to_v6_path_targets", |state_path| {
         let legacy_v4 = json!({
             "version": 4,
             "groups": [{
@@ -241,8 +284,12 @@ fn test_load_v4_state_migrates_path_targets_losslessly() {
         )
         .unwrap();
 
-        let loaded = AppStateStorage::load_from_path(state_path);
-        assert_eq!(loaded.version, CURRENT_APP_STATE_VERSION);
+        let original = fs::read_to_string(state_path).unwrap();
+
+        let mut loaded = AppStateStorage::load_from_path(state_path);
+        assert_eq!(loaded.version, 5);
+        assert_eq!(loaded.loaded_version, 4);
+        assert!(loaded.pending_pre_v6_backup);
         assert!(matches!(
             loaded.groups[0].programs[0].launch_target,
             LaunchTarget::Path { .. }
@@ -259,11 +306,17 @@ fn test_load_v4_state_migrates_path_targets_losslessly() {
             loaded.groups[0].programs[0].additional_processes,
             vec!["sample_helper.exe".to_string()]
         );
+        assert_eq!(fs::read_to_string(state_path).unwrap(), original);
 
+        persist_explicit_v6_upgrade(&mut loaded, state_path);
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
         assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
         assert!(persisted["groups"][0]["programs"][0]["launch_target"].is_object());
+        assert_eq!(
+            fs::read_to_string(state_path.with_file_name("state.json.pre-v6")).unwrap(),
+            original
+        );
     });
 }
 
@@ -284,7 +337,7 @@ fn test_build_generic_clusters_preserves_order_and_labels() {
 }
 
 #[test]
-fn test_load_v2_state_migrates_and_keeps_backup() {
+fn test_load_v2_state_migrates_in_memory_until_explicit_v6_save() {
     with_temp_state_path("v2_migration", |state_path| {
         let legacy_v2 = json!({
             "version": 2,
@@ -304,21 +357,21 @@ fn test_load_v2_state_migrates_and_keeps_backup() {
         let original = serde_json::to_string_pretty(&legacy_v2).unwrap();
         fs::write(state_path, &original).unwrap();
 
-        let loaded = AppStateStorage::load_from_path(state_path);
+        let mut loaded = AppStateStorage::load_from_path(state_path);
         let expected_cpu_schema = expected_migrated_cpu_schema(vec![vec![0, 1], vec![2, 3]]);
-        assert_eq!(loaded.version, CURRENT_APP_STATE_VERSION);
+        assert_eq!(loaded.version, 5);
+        assert_eq!(loaded.loaded_version, 2);
+        assert!(loaded.pending_pre_v6_backup);
         assert_eq!(loaded.theme_index, 1);
         assert!(loaded.process_monitoring_enabled);
         assert_eq!(
             serde_json::to_value(&loaded.cpu_schema).unwrap(),
             serde_json::to_value(&expected_cpu_schema).unwrap()
         );
-        assert!(state_path.with_file_name("state.json.old").exists());
-        assert_eq!(
-            fs::read_to_string(state_path.with_file_name("state.json.old")).unwrap(),
-            original
-        );
+        assert!(!state_path.with_file_name("state.json.old").exists());
+        assert_eq!(fs::read_to_string(state_path).unwrap(), original);
 
+        persist_explicit_v6_upgrade(&mut loaded, state_path);
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
         assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
@@ -328,11 +381,15 @@ fn test_load_v2_state_migrates_and_keeps_backup() {
             persisted["cpu_schema"],
             serde_json::to_value(expected_cpu_schema).unwrap()
         );
+        assert_eq!(
+            fs::read_to_string(state_path.with_file_name("state.json.pre-v6")).unwrap(),
+            original
+        );
     });
 }
 
 #[test]
-fn test_load_legacy_state_defaults_monitor_flag_and_keeps_backup() {
+fn test_load_legacy_state_defaults_monitor_flag_until_explicit_v6_save() {
     with_temp_state_path("legacy_migration", |state_path| {
         let legacy = json!({
             "groups": [{
@@ -349,21 +406,21 @@ fn test_load_legacy_state_defaults_monitor_flag_and_keeps_backup() {
         let original = serde_json::to_string_pretty(&legacy).unwrap();
         fs::write(state_path, &original).unwrap();
 
-        let loaded = AppStateStorage::load_from_path(state_path);
+        let mut loaded = AppStateStorage::load_from_path(state_path);
         let expected_cpu_schema = expected_migrated_cpu_schema(vec![vec![0, 1], vec![2, 3]]);
-        assert_eq!(loaded.version, CURRENT_APP_STATE_VERSION);
+        assert_eq!(loaded.version, 5);
+        assert_eq!(loaded.loaded_version, 0);
+        assert!(loaded.pending_pre_v6_backup);
         assert_eq!(loaded.theme_index, 2);
         assert!(!loaded.process_monitoring_enabled);
         assert_eq!(
             serde_json::to_value(&loaded.cpu_schema).unwrap(),
             serde_json::to_value(&expected_cpu_schema).unwrap()
         );
-        assert!(state_path.with_file_name("state.json.old").exists());
-        assert_eq!(
-            fs::read_to_string(state_path.with_file_name("state.json.old")).unwrap(),
-            original
-        );
+        assert!(!state_path.with_file_name("state.json.old").exists());
+        assert_eq!(fs::read_to_string(state_path).unwrap(), original);
 
+        persist_explicit_v6_upgrade(&mut loaded, state_path);
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
         assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
@@ -372,6 +429,36 @@ fn test_load_legacy_state_defaults_monitor_flag_and_keeps_backup() {
         assert_eq!(
             persisted["cpu_schema"],
             serde_json::to_value(expected_cpu_schema).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(state_path.with_file_name("state.json.pre-v6")).unwrap(),
+            original
+        );
+    });
+}
+
+#[test]
+fn test_explicit_v5_save_upgrades_to_v6_and_persists_rule_identities() {
+    with_temp_state_path("v5_explicit_upgrade", |state_path| {
+        let v5_state = current_schema_state_with_version(5);
+        let original = serde_json::to_string_pretty(&v5_state).unwrap();
+        fs::write(state_path, &original).unwrap();
+
+        let mut loaded = AppStateStorage::load_from_path(state_path);
+        assert_eq!(loaded.version, 5);
+        assert_eq!(loaded.loaded_version, 5);
+        assert!(loaded.pending_pre_v6_backup);
+        assert!(loaded.rule_identities.is_none());
+
+        persist_explicit_v6_upgrade(&mut loaded, state_path);
+
+        let persisted: Value =
+            serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
+        assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
+        assert!(persisted["rule_identities"].is_object());
+        assert_eq!(
+            fs::read_to_string(state_path.with_file_name("state.json.pre-v6")).unwrap(),
+            original
         );
     });
 }

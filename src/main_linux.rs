@@ -1,7 +1,7 @@
 mod app;
 mod tray;
 
-use app::runtime::App;
+use app::shell::App;
 use eframe::{run_native, NativeOptions};
 use tokio::runtime::Runtime;
 
@@ -12,7 +12,7 @@ fn main() {
     let rt = Runtime::new().expect("failed to create tokio runtime");
     let _guard = rt.enter();
 
-    let _ = os_api::OS::set_current_process_priority(os_api::PriorityClass::BelowNormal);
+    let _ = app::adapters::os::set_current_process_priority(os_api::PriorityClass::BelowNormal);
 
     let res = run_native(
         "CPU Affinity Tool",

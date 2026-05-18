@@ -1,6 +1,6 @@
-use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::runtime::AppState;
-use crate::app::views::shared_elements::glass_frame;
+use crate::app::shell::presenters::shared_elements::glass_frame;
+use crate::app::shell::{GroupRoute, WindowRoute};
 use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
 
 pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {

@@ -1,4 +1,6 @@
+pub mod adapters;
+pub mod features;
 pub mod models;
-pub mod navigation;
 pub mod runtime;
-pub mod views;
+pub mod shared;
+pub mod shell;

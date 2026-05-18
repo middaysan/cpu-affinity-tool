@@ -1,6 +1,6 @@
-use crate::app::navigation::{GroupRoute, WindowRoute};
 use crate::app::runtime::AppState;
-use crate::app::views::shared_elements::glass_frame;
+use crate::app::shell::presenters::shared_elements::glass_frame;
+use crate::app::shell::{GroupRoute, WindowRoute};
 use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Layout, RichText, Vec2};
 use os_api::PriorityClass;
 use std::path::PathBuf;
@@ -28,15 +28,12 @@ fn browse_binary_hover_text() -> &'static str {
 }
 
 pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
-    let (group_idx, prog_idx) = match app.ui.app_edit_state.run_settings {
-        Some((g, p)) => (g, p),
-        None => {
-            app.set_current_window(WindowRoute::Groups(GroupRoute::List));
-            return;
-        }
-    };
+    if app.ui.app_edit_state.target.is_none() {
+        app.set_current_window(WindowRoute::Groups(GroupRoute::List));
+        return;
+    }
 
-    if !app.ensure_current_edit_loaded(group_idx, prog_idx) {
+    if !app.ensure_current_edit_loaded() {
         return;
     }
 
