@@ -35,7 +35,7 @@ Use this checklist with `docs/release-process.md`.
 - Confirm the window opens and the detected CPU core count looks correct.
 - Add an app target by path or `.desktop` entry and confirm it appears once.
 - Launch the target and confirm affinity and priority are applied as expected.
-- If Auto Re-apply is expected for the beta, confirm correction behavior and logs still work.
+- If Auto Re-apply App Process Affinity is expected for the beta, confirm correction behavior and logs still work.
 - Treat startup failures, incorrect CPU topology, launch failures, missing logs, or broken affinity application as beta-blocking until resolved or explicitly downgraded.
 
 ## Release Notes And Distribution

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub use service::{
     add_apps_to_group, add_installed_app_to_group, create_group, load_group_for_edit, load_rule,
-    move_rule_between_groups, remove_group, remove_rule_from_group, set_group_is_hidden,
+    move_rule_between_groups_at, remove_group, remove_rule_from_group, set_group_is_hidden,
     swap_groups, update_group_properties, update_rule,
 };
 
@@ -233,37 +233,49 @@ impl RulesContext {
         }
     }
 
-    pub fn can_move_rule_between_groups(
+    pub fn can_move_rule_between_groups_at(
         &self,
         source_group_index: usize,
         source_rule_index: usize,
         target_group_index: usize,
+        target_rule_index: usize,
     ) -> bool {
-        source_group_index != target_group_index
-            && source_group_index < self.rule_ids.len()
+        source_group_index < self.rule_ids.len()
             && target_group_index < self.rule_ids.len()
             && self
                 .rule_ids
                 .get(source_group_index)
                 .is_some_and(|rules| source_rule_index < rules.len())
+            && self
+                .rule_ids
+                .get(target_group_index)
+                .is_some_and(|rules| target_rule_index <= rules.len())
     }
 
-    pub fn move_rule_between_groups(
+    pub fn move_rule_between_groups_at(
         &mut self,
         source_group_index: usize,
         source_rule_index: usize,
         target_group_index: usize,
+        target_rule_index: usize,
     ) -> Option<RuleId> {
-        if !self.can_move_rule_between_groups(
+        if !self.can_move_rule_between_groups_at(
             source_group_index,
             source_rule_index,
             target_group_index,
+            target_rule_index,
         ) {
             return None;
         }
 
         let rule_id = self.rule_ids[source_group_index].remove(source_rule_index);
-        self.rule_ids[target_group_index].push(rule_id.clone());
+        let insert_index =
+            if source_group_index == target_group_index && target_rule_index > source_rule_index {
+                target_rule_index - 1
+            } else {
+                target_rule_index
+            };
+        self.rule_ids[target_group_index].insert(insert_index, rule_id.clone());
         Some(rule_id)
     }
 
@@ -385,10 +397,33 @@ mod tests {
         let rule_id = context.rule_id_for_index(0, 0).unwrap();
 
         assert_eq!(
-            context.move_rule_between_groups(0, 0, 1),
+            context.move_rule_between_groups_at(0, 0, 1, 0),
             Some(rule_id.clone())
         );
         assert_eq!(context.rule_id_for_index(1, 0), Some(rule_id));
         assert!(context.rule_id_for_index(0, 0).is_none());
+    }
+
+    #[test]
+    fn test_move_rule_within_group_preserves_rule_id_order() {
+        let mut storage = sample_storage();
+        storage.groups[0].programs.push(AppToRun::new_path(
+            PathBuf::from(r"C:\helper.lnk"),
+            vec![],
+            PathBuf::from(r"C:\helper.exe"),
+            PriorityClass::Normal,
+            false,
+        ));
+
+        let mut context = RulesContext::from_storage(&storage);
+        let first = context.rule_id_for_index(0, 0).unwrap();
+        let second = context.rule_id_for_index(0, 1).unwrap();
+
+        assert_eq!(
+            context.move_rule_between_groups_at(0, 0, 0, 2),
+            Some(first.clone())
+        );
+        assert_eq!(context.rule_id_for_index(0, 0), Some(second));
+        assert_eq!(context.rule_id_for_index(0, 1), Some(first));
     }
 }

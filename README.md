@@ -38,10 +38,10 @@ This is a control tool, not a promise of better FPS.
 - Launch apps with saved affinity and priority rules
 - Add apps from direct paths and launcher files with **Open App**
 - Add supported installed apps with **Find Installed** (`Start`-backed entries on Windows, desktop entries plus matching `PATH` executables during search on Linux beta)
-- Re-apply affinity and priority while Auto Re-apply is enabled
+- Re-apply affinity and priority while Auto Re-apply App Process Affinity is enabled
 - Autorun selected apps with the tool
 - Add targets by drag and drop
-- Inspect launch and Auto Re-apply activity in the built-in log view
+- Inspect launch and automatic CPU affinity re-apply activity in the built-in log view
 - Open the active data folder directly from the log screen
 - Switch between light, dark, and system theme modes
 
@@ -68,11 +68,11 @@ For a longer explanation, see [docs/why.md](docs/why.md).
 3. Create a CPU core group for the workload you want to isolate.
 4. Add an app with **Open App**, **Find Installed**, or drag and drop.
 5. Set the desired affinity and priority, then save the rule.
-6. Launch the app from the tool and keep Auto Re-apply enabled if you want settings re-applied automatically.
+6. Launch the app from the tool and keep Auto Re-apply App Process Affinity enabled if you want settings re-applied automatically.
 
 ## Comparison
 
-| Tool | Saved launch rules | Auto Re-apply | Complexity | Best fit |
+| Tool | Saved launch rules | Auto Re-apply App Process Affinity | Complexity | Best fit |
 | --- | --- | --- | --- | --- |
 | CPU Affinity Tool | Yes | Yes | Low | Focused Windows affinity workflows with saved rules |
 | Task Manager | No | No | Low | One-off manual changes |
@@ -97,7 +97,7 @@ Yes. The current Windows release is built with `requireAdministrator`, so you sh
 
 ### Can Windows or the application override affinity settings?
 
-Yes. Some applications or helper processes may change affinity or priority after launch. That is why the tool includes Auto Re-apply behavior.
+Yes. Some applications or helper processes may change affinity or priority after launch. That is why the tool includes automatic CPU affinity re-apply behavior for app processes.
 
 ### Is this an alternative to Process Lasso?
 
@@ -120,12 +120,12 @@ Use **Open App** instead. On Windows, **Find Installed** is a launch-safe subset
 ### Affinity or priority is not applied
 
 - Make sure you launched the target from CPU Affinity Tool
-- Keep Auto Re-apply enabled if the app changes settings after launch
+- Keep Auto Re-apply App Process Affinity enabled if the app changes settings after launch
 - Verify that you accepted the UAC prompt and the tool is running elevated
 
 ### The application overrides the configured settings
 
-Some applications spawn helper processes or reset their own settings. Auto Re-apply is designed to correct that, but it may not cover every application behavior.
+Some applications spawn helper processes or reset their own settings. Auto Re-apply App Process Affinity is designed to correct that, but it may not cover every application behavior.
 
 ### Windows security software or antivirus prompts appear
 

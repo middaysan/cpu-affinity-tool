@@ -211,18 +211,31 @@ pub fn remove_rule_from_group(
     None
 }
 
-pub fn move_rule_between_groups(
+pub fn move_rule_between_groups_at(
     state: &mut AppStateStorage,
     source_group_index: usize,
     source_rule_index: usize,
     target_group_index: usize,
+    target_rule_index: usize,
 ) -> Option<AppToRun> {
-    if source_group_index == target_group_index
-        || source_group_index >= state.groups.len()
+    if source_group_index >= state.groups.len()
         || target_group_index >= state.groups.len()
         || source_rule_index >= state.groups[source_group_index].programs.len()
+        || target_rule_index > state.groups[target_group_index].programs.len()
     {
         return None;
+    }
+
+    if source_group_index == target_group_index {
+        let programs = &mut state.groups[source_group_index].programs;
+        let moved = programs.remove(source_rule_index);
+        let insert_index = if target_rule_index > source_rule_index {
+            target_rule_index - 1
+        } else {
+            target_rule_index
+        };
+        programs.insert(insert_index, moved.clone());
+        return Some(moved);
     }
 
     let moved = state.groups[source_group_index]
@@ -230,7 +243,7 @@ pub fn move_rule_between_groups(
         .remove(source_rule_index);
     state.groups[target_group_index]
         .programs
-        .push(moved.clone());
+        .insert(target_rule_index, moved.clone());
     Some(moved)
 }
 

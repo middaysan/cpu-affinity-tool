@@ -41,7 +41,7 @@ pub(crate) struct CentralPanelSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MoveRuleToGroupOutcome {
     Moved,
-    SameGroup,
+    SamePosition,
     MissingSourceGroup,
     MissingTargetGroup,
     MissingRule,
@@ -299,11 +299,12 @@ impl AppState {
         self.swap_groups(group_index + 1, group_index)
     }
 
-    pub fn move_rule_to_group(
+    pub fn move_rule_to_group_at(
         &mut self,
         source_group_id: GroupId,
         rule_id: RuleId,
         target_group_id: GroupId,
+        target_rule_index: usize,
     ) -> MoveRuleToGroupOutcome {
         self.reconcile_rules();
 
@@ -313,19 +314,23 @@ impl AppState {
         let Some(target_group_index) = self.rules.group_index_for_id(&target_group_id) else {
             return MoveRuleToGroupOutcome::MissingTargetGroup;
         };
-        if source_group_index == target_group_index {
-            return MoveRuleToGroupOutcome::SameGroup;
-        }
         let Some(source_rule_index) = self.rules.rule_index_for_id(source_group_index, &rule_id)
         else {
             return MoveRuleToGroupOutcome::MissingRule;
         };
-        if !self.rules.can_move_rule_between_groups(
+        if !self.rules.can_move_rule_between_groups_at(
             source_group_index,
             source_rule_index,
             target_group_index,
+            target_rule_index,
         ) {
             return MoveRuleToGroupOutcome::MissingRule;
+        }
+        if source_group_index == target_group_index
+            && (target_rule_index == source_rule_index
+                || target_rule_index == source_rule_index + 1)
+        {
+            return MoveRuleToGroupOutcome::SamePosition;
         }
 
         let read_result = {
@@ -342,11 +347,15 @@ impl AppState {
             let Some(moving_app) = source_group.programs.get(source_rule_index) else {
                 return MoveRuleToGroupOutcome::MissingRule;
             };
+            if target_rule_index > target_group.programs.len() {
+                return MoveRuleToGroupOutcome::MissingRule;
+            }
             let moving_key = moving_app.get_key();
-            if target_group
-                .programs
-                .iter()
-                .any(|program| program.get_key() == moving_key)
+            if source_group_index != target_group_index
+                && target_group
+                    .programs
+                    .iter()
+                    .any(|program| program.get_key() == moving_key)
             {
                 Err(format!(
                     "Cannot move app '{}': target group '{}' already contains the same launch rule",
@@ -371,25 +380,27 @@ impl AppState {
 
         let moved = match self.persistent_state.write() {
             Ok(mut state) => {
-                let duplicate_exists = state
-                    .groups
-                    .get(target_group_index)
-                    .map(|group| {
-                        group
-                            .programs
-                            .iter()
-                            .any(|program| program.get_key() == moving_key)
-                    })
-                    .unwrap_or(false);
+                let duplicate_exists = source_group_index != target_group_index
+                    && state
+                        .groups
+                        .get(target_group_index)
+                        .map(|group| {
+                            group
+                                .programs
+                                .iter()
+                                .any(|program| program.get_key() == moving_key)
+                        })
+                        .unwrap_or(false);
                 if duplicate_exists {
                     return MoveRuleToGroupOutcome::DuplicateInTarget;
                 }
 
-                rules::move_rule_between_groups(
+                rules::move_rule_between_groups_at(
                     &mut state,
                     source_group_index,
                     source_rule_index,
                     target_group_index,
+                    target_rule_index,
                 )
             }
             Err(_) => return MoveRuleToGroupOutcome::LockFailed,
@@ -400,7 +411,12 @@ impl AppState {
         }
         if self
             .rules
-            .move_rule_between_groups(source_group_index, source_rule_index, target_group_index)
+            .move_rule_between_groups_at(
+                source_group_index,
+                source_rule_index,
+                target_group_index,
+                target_rule_index,
+            )
             .is_none()
         {
             self.reconcile_rules();
@@ -411,10 +427,12 @@ impl AppState {
         }
 
         let _ = self.persist_state();
-        self.log_manager.add_entry(format!(
-            "Moved app '{}' to group '{}'",
-            moving_name, target_group_name
-        ));
+        let message = if source_group_index == target_group_index {
+            format!("Reordered app '{moving_name}' in group '{target_group_name}'")
+        } else {
+            format!("Moved app '{moving_name}' to group '{target_group_name}'")
+        };
+        self.log_manager.add_entry(message);
         MoveRuleToGroupOutcome::Moved
     }
 
@@ -1172,6 +1190,18 @@ mod tests {
         app.reconcile_rules();
     }
 
+    fn sample_app(name: &str) -> AppToRun {
+        let mut app = AppToRun::new_path(
+            PathBuf::from(format!(r"C:\{name}.lnk")),
+            vec![],
+            PathBuf::from(format!(r"C:\{name}.exe")),
+            PriorityClass::Normal,
+            false,
+        );
+        app.name = name.to_string();
+        app
+    }
+
     #[test]
     fn test_commit_group_form_session_preserves_invalid_create_closeout() {
         let mut app = sample_state();
@@ -1248,7 +1278,7 @@ mod tests {
         let original_app = app.persistent_state.read().unwrap().groups[0].programs[0].clone();
 
         let outcome =
-            app.move_rule_to_group(source_group_id, moved_rule_id.clone(), target_group_id);
+            app.move_rule_to_group_at(source_group_id, moved_rule_id.clone(), target_group_id, 0);
 
         assert_eq!(outcome, MoveRuleToGroupOutcome::Moved);
         let state = app.persistent_state.read().unwrap();
@@ -1261,6 +1291,63 @@ mod tests {
     }
 
     #[test]
+    fn test_move_rule_to_group_at_inserts_at_target_position() {
+        let mut app = sample_state();
+        add_empty_group(&mut app, "Background");
+        app.persistent_state.write().unwrap().groups[1].programs =
+            vec![sample_app("TargetFirst"), sample_app("TargetSecond")];
+        app.reconcile_rules();
+
+        let source_group_id = group_id(&app, 0);
+        let target_group_id = group_id(&app, 1);
+        let moved_rule_id = rule_id(&app, 0, 0);
+        let original_app = app.persistent_state.read().unwrap().groups[0].programs[0].clone();
+
+        let outcome =
+            app.move_rule_to_group_at(source_group_id, moved_rule_id.clone(), target_group_id, 1);
+
+        assert_eq!(outcome, MoveRuleToGroupOutcome::Moved);
+        let state = app.persistent_state.read().unwrap();
+        assert!(state.groups[0].programs.is_empty());
+        assert_eq!(state.groups[1].programs[0].name, "TargetFirst");
+        assert_eq!(state.groups[1].programs[1], original_app);
+        assert_eq!(state.groups[1].programs[2].name, "TargetSecond");
+        drop(state);
+        assert_eq!(app.rules.rule_id_for_index(1, 1), Some(moved_rule_id));
+        assert_eq!(app.save_count(), 1);
+    }
+
+    #[test]
+    fn test_reorder_rule_within_group_preserves_app_and_rule_id() {
+        let mut app = sample_state();
+        app.persistent_state.write().unwrap().groups[0]
+            .programs
+            .extend([sample_app("Second"), sample_app("Third")]);
+        app.reconcile_rules();
+        let group_id = group_id(&app, 0);
+        let first_rule_id = rule_id(&app, 0, 0);
+        let second_rule_id = rule_id(&app, 0, 1);
+        let third_rule_id = rule_id(&app, 0, 2);
+
+        let outcome =
+            app.move_rule_to_group_at(group_id.clone(), first_rule_id.clone(), group_id, 3);
+
+        assert_eq!(outcome, MoveRuleToGroupOutcome::Moved);
+        let state = app.persistent_state.read().unwrap();
+        let names = state.groups[0]
+            .programs
+            .iter()
+            .map(|program| program.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Second", "Third", "Sample"]);
+        drop(state);
+        assert_eq!(app.rules.rule_id_for_index(0, 0), Some(second_rule_id));
+        assert_eq!(app.rules.rule_id_for_index(0, 1), Some(third_rule_id));
+        assert_eq!(app.rules.rule_id_for_index(0, 2), Some(first_rule_id));
+        assert_eq!(app.save_count(), 1);
+    }
+
+    #[test]
     fn test_move_rule_to_same_group_and_duplicate_target_do_not_save() {
         let mut app = sample_state();
         add_empty_group(&mut app, "Background");
@@ -1269,12 +1356,13 @@ mod tests {
         let moved_rule_id = rule_id(&app, 0, 0);
 
         assert_eq!(
-            app.move_rule_to_group(
+            app.move_rule_to_group_at(
                 source_group_id.clone(),
                 moved_rule_id.clone(),
                 source_group_id.clone(),
+                0,
             ),
-            MoveRuleToGroupOutcome::SameGroup
+            MoveRuleToGroupOutcome::SamePosition
         );
         assert_eq!(app.save_count(), 0);
 
@@ -1285,7 +1373,7 @@ mod tests {
         app.reconcile_rules();
 
         assert_eq!(
-            app.move_rule_to_group(source_group_id, moved_rule_id, target_group_id),
+            app.move_rule_to_group_at(source_group_id, moved_rule_id, target_group_id, 0),
             MoveRuleToGroupOutcome::DuplicateInTarget
         );
         let state = app.persistent_state.read().unwrap();

@@ -36,6 +36,7 @@ enum CentralAction {
         source_group_id: GroupId,
         rule_id: RuleId,
         target_group_id: GroupId,
+        target_rule_index: usize,
     },
     ConsumeDroppedFiles(GroupId),
 }
@@ -100,11 +101,25 @@ fn installed_app_hover_text() -> &'static str {
 fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> Vec<CentralAction> {
     let mut actions = Vec::new();
     let mut drop_target = None;
+    let active_rule_payload = egui::DragAndDrop::payload::<RuleDragPayload>(ctx);
+    let rule_drag_pos = if active_rule_payload.is_some() {
+        ctx.pointer_interact_pos()
+    } else {
+        None
+    };
+    let rule_drop_pos = if ctx.input(|i| i.pointer.any_released()) {
+        ctx.pointer_interact_pos()
+    } else {
+        None
+    };
+    let rule_pointer_pos = rule_drop_pos.or(rule_drag_pos);
     let snapshot = app.build_central_panel_snapshot();
     let groups_len = snapshot.groups.len();
 
     for (group_index, group) in snapshot.groups.iter().enumerate() {
         let group_id = group.group_id.clone();
+        let mut target_rule_index = None;
+        let mut drop_indicator = None;
 
         let group_response = glass_frame(ui).outer_margin(5.0).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -224,10 +239,10 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         );
                     });
                 } else {
-                    for program in &group.programs {
+                    for (program_index, program) in group.programs.iter().enumerate() {
                         let app_status = app.get_app_status_sync(&program.app_key);
 
-                        ui.horizontal(|ui| {
+                        let row_response = ui.horizontal(|ui| {
                             let (rect, response) =
                                 ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
                             let color = match app_status {
@@ -302,6 +317,39 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                             }
                         });
 
+                        if target_rule_index.is_none() {
+                            if let Some(pos) = rule_pointer_pos {
+                                if row_response.response.rect.contains(pos) {
+                                    let insert_index =
+                                        if pos.y < row_response.response.rect.center().y {
+                                            program_index
+                                        } else {
+                                            program_index + 1
+                                        };
+                                    target_rule_index = Some(insert_index);
+                                    if active_rule_payload.as_deref().is_some_and(|payload| {
+                                        let source_index = group
+                                            .programs
+                                            .iter()
+                                            .position(|program| program.rule_id == payload.rule_id);
+                                        !is_same_position_rule_drop(
+                                            payload,
+                                            &group.group_id,
+                                            source_index,
+                                            insert_index,
+                                        )
+                                    }) {
+                                        let y = if insert_index == program_index {
+                                            row_response.response.rect.top()
+                                        } else {
+                                            row_response.response.rect.bottom()
+                                        };
+                                        drop_indicator = Some((row_response.response.rect, y));
+                                    }
+                                }
+                            }
+                        }
+
                         if group
                             .programs
                             .last()
@@ -328,10 +376,34 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
             }
         });
 
-        let dropped_rule_here = ctx.input(|i| i.pointer.any_released())
-            && ctx
-                .pointer_interact_pos()
-                .is_some_and(|pos| group_response.response.rect.contains(pos));
+        if drop_indicator.is_none() {
+            if let Some(pos) = rule_drag_pos {
+                let append_index = group.programs.len();
+                if group_response.response.rect.contains(pos)
+                    && active_rule_payload.as_deref().is_some_and(|payload| {
+                        let source_index = group
+                            .programs
+                            .iter()
+                            .position(|program| program.rule_id == payload.rule_id);
+                        !is_same_position_rule_drop(
+                            payload,
+                            &group.group_id,
+                            source_index,
+                            append_index,
+                        )
+                    })
+                {
+                    let rect = group_response.response.rect.shrink2(Vec2::new(14.0, 8.0));
+                    drop_indicator = Some((rect, rect.bottom()));
+                }
+            }
+        }
+        if let Some((rect, y)) = drop_indicator {
+            paint_rule_drop_indicator(ui, rect, y);
+        }
+
+        let dropped_rule_here =
+            rule_drop_pos.is_some_and(|pos| group_response.response.rect.contains(pos));
         let dropped_rule = if dropped_rule_here {
             egui::DragAndDrop::take_payload::<RuleDragPayload>(ctx)
         } else {
@@ -342,6 +414,7 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                 source_group_id: payload.source_group_id.clone(),
                 rule_id: payload.rule_id.clone(),
                 target_group_id: group_id,
+                target_rule_index: target_rule_index.unwrap_or(group.programs.len()),
             });
         }
     }
@@ -351,6 +424,39 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
     }
 
     actions
+}
+
+fn is_same_position_rule_drop(
+    payload: &RuleDragPayload,
+    group_id: &GroupId,
+    source_rule_index: Option<usize>,
+    target_rule_index: usize,
+) -> bool {
+    if &payload.source_group_id != group_id {
+        return false;
+    }
+
+    source_rule_index.is_some_and(|source_index| {
+        target_rule_index == source_index || target_rule_index == source_index + 1
+    })
+}
+
+fn paint_rule_drop_indicator(ui: &egui::Ui, rect: egui::Rect, y: f32) {
+    let color = ui.visuals().selection.stroke.color;
+    let glow = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 70);
+    let left = rect.left() + 4.0;
+    let right = rect.right() - 4.0;
+
+    ui.painter().line_segment(
+        [egui::pos2(left, y), egui::pos2(right, y)],
+        egui::Stroke::new(6.0, glow),
+    );
+    ui.painter().line_segment(
+        [egui::pos2(left, y), egui::pos2(right, y)],
+        egui::Stroke::new(2.0, color),
+    );
+    ui.painter().circle_filled(egui::pos2(left, y), 3.0, color);
+    ui.painter().circle_filled(egui::pos2(right, y), 3.0, color);
 }
 
 fn render_rule_drag_preview(ctx: &egui::Context) {
@@ -414,8 +520,14 @@ fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
                 source_group_id,
                 rule_id,
                 target_group_id,
+                target_rule_index,
             } => {
-                let _ = app.move_rule_to_group(source_group_id, rule_id, target_group_id);
+                let _ = app.move_rule_to_group_at(
+                    source_group_id,
+                    rule_id,
+                    target_group_id,
+                    target_rule_index,
+                );
             }
             CentralAction::ConsumeDroppedFiles(group_id) => {
                 let _ = app.consume_dropped_files_into_group(group_id);
