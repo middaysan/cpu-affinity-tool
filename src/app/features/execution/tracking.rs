@@ -1,6 +1,7 @@
 use crate::app::features::execution::{
     cleanup_orphaned_package_owners, ensure_package_owner_claim,
-    resolve_installed_package_runtime_info_cached, InstalledPackageTrackingState,
+    is_excluded_installed_auto_process, resolve_installed_package_runtime_info_cached,
+    InstalledPackageTrackingState,
 };
 use crate::app::features::rules::RulesContext;
 use crate::app::models::{
@@ -372,15 +373,56 @@ fn extend_with_named_processes(
     additional_processes: &[String],
     name_to_pids: &HashMap<String, Vec<u32>>,
 ) {
+    for pid in collect_named_process_pids(additional_processes, name_to_pids) {
+        push_unique_pid(tracked_pids, pid);
+    }
+}
+
+fn collect_named_process_pids(
+    additional_processes: &[String],
+    name_to_pids: &HashMap<String, Vec<u32>>,
+) -> Vec<u32> {
+    let mut tracked_pids = Vec::new();
+
     for process_name in additional_processes {
         if let Some(pids) = name_to_pids.get(process_name) {
             for &pid in pids {
-                if !tracked_pids.contains(&pid) {
-                    tracked_pids.push(pid);
-                }
+                push_unique_pid(&mut tracked_pids, pid);
             }
         }
     }
+
+    tracked_pids
+}
+
+fn push_unique_pid(tracked_pids: &mut Vec<u32>, pid: u32) {
+    if !tracked_pids.contains(&pid) {
+        tracked_pids.push(pid);
+    }
+}
+
+fn is_auto_managed_installed_pid(snapshot: &ProcessSnapshot, pid: u32) -> bool {
+    match snapshot.names.get(&pid) {
+        Some(name) => !is_excluded_installed_auto_process(name),
+        None => true,
+    }
+}
+
+fn is_known_auto_managed_installed_pid(snapshot: &ProcessSnapshot, pid: u32) -> bool {
+    snapshot
+        .names
+        .get(&pid)
+        .is_some_and(|name| !is_excluded_installed_auto_process(name))
+}
+
+fn retain_auto_managed_installed_pids(
+    snapshot: &ProcessSnapshot,
+    tracked_pids: &mut Vec<u32>,
+    explicit_pids: &HashSet<u32>,
+) {
+    tracked_pids.retain(|&pid| {
+        explicit_pids.contains(&pid) || is_auto_managed_installed_pid(snapshot, pid)
+    });
 }
 
 fn extend_with_descendants(snapshot: &ProcessSnapshot, tracked_pids: &mut Vec<u32>) {
@@ -444,8 +486,22 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
             }
             _ => None,
         };
+        let has_auto_managed_installed_evidence = match &configured.matcher {
+            ConfiguredProgramMatcher::Installed { .. } => {
+                detected_pids
+                    .iter()
+                    .any(|&pid| is_known_auto_managed_installed_pid(snapshot, pid))
+                    || apps.apps.get(&key).is_some_and(|app| {
+                        app.pids
+                            .iter()
+                            .any(|&pid| is_known_auto_managed_installed_pid(snapshot, pid))
+                    })
+            }
+            ConfiguredProgramMatcher::Path { .. } => false,
+        };
         let owns_package = installed_package_info
             .as_ref()
+            .filter(|_| has_auto_managed_installed_evidence)
             .map(|info| {
                 let mut tracking = installed_package_tracking.write().unwrap();
                 ensure_package_owner_claim(&mut tracking, apps, &info.package_family_name, &key)
@@ -455,57 +511,70 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
         if let Some(app) = apps.apps.get_mut(&key) {
             app.group_id = configured.group_id.clone();
             app.rule_id = configured.rule_id.clone();
-            let old_pid_count = app.pids.len();
-
-            extend_with_descendants(snapshot, &mut app.pids);
-            for pid in detected_pids.drain(..) {
-                if !app.pids.contains(&pid) {
-                    app.pids.push(pid);
-                }
-            }
-
-            if let (ConfiguredProgramMatcher::Installed { aumid }, Some(package_info)) =
-                (&configured.matcher, installed_package_info.as_ref())
-            {
-                if let Ok(package_candidates) = collect_package_local_pid_candidates(
-                    &app.pids,
-                    snapshot,
-                    &package_info.install_root,
-                    aumid,
-                    os,
-                ) {
-                    for pid in package_candidates.same_aumid_pids {
-                        if !app.pids.contains(&pid) {
-                            app.pids.push(pid);
-                        }
-                    }
-                    if owns_package {
-                        for pid in package_candidates.no_identity_pids {
-                            if !app.pids.contains(&pid) {
-                                app.pids.push(pid);
-                            }
-                        }
-                    }
-                }
-            }
+            let old_pids = app.pids.clone();
 
             match &configured.matcher {
                 ConfiguredProgramMatcher::Path { fallback_names, .. } => {
+                    extend_with_descendants(snapshot, &mut app.pids);
+                    for pid in detected_pids.drain(..) {
+                        push_unique_pid(&mut app.pids, pid);
+                    }
                     extend_with_named_processes(&mut app.pids, fallback_names, name_to_pids);
+                    extend_with_descendants(snapshot, &mut app.pids);
                 }
-                ConfiguredProgramMatcher::Installed { .. } => {
-                    extend_with_named_processes(
-                        &mut app.pids,
+                ConfiguredProgramMatcher::Installed { aumid } => {
+                    let explicit_pids = collect_named_process_pids(
                         &configured.additional_processes_normalized,
                         name_to_pids,
                     );
+                    let explicit_pid_set: HashSet<u32> = explicit_pids.iter().copied().collect();
+                    let mut managed_pids = app.pids.clone();
+
+                    extend_with_descendants(snapshot, &mut managed_pids);
+                    for pid in detected_pids.drain(..) {
+                        push_unique_pid(&mut managed_pids, pid);
+                    }
+
+                    if let Some(package_info) = installed_package_info.as_ref() {
+                        if let Ok(package_candidates) = collect_package_local_pid_candidates(
+                            &managed_pids,
+                            snapshot,
+                            &package_info.install_root,
+                            aumid,
+                            os,
+                        ) {
+                            for pid in package_candidates.same_aumid_pids {
+                                push_unique_pid(&mut managed_pids, pid);
+                            }
+                            if owns_package {
+                                for pid in package_candidates.no_identity_pids {
+                                    push_unique_pid(&mut managed_pids, pid);
+                                }
+                            }
+                        }
+                    }
+
+                    retain_auto_managed_installed_pids(
+                        snapshot,
+                        &mut managed_pids,
+                        &explicit_pid_set,
+                    );
+                    for pid in explicit_pids {
+                        push_unique_pid(&mut managed_pids, pid);
+                    }
+                    extend_with_descendants(snapshot, &mut managed_pids);
+                    retain_auto_managed_installed_pids(
+                        snapshot,
+                        &mut managed_pids,
+                        &explicit_pid_set,
+                    );
+                    app.pids = managed_pids;
                 }
             }
 
-            extend_with_descendants(snapshot, &mut app.pids);
             retain_live_pids(&mut app.pids, os);
 
-            if app.pids.len() != old_pid_count {
+            if app.pids != old_pids {
                 outcome.changed = true;
             }
 
@@ -529,42 +598,45 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
             continue;
         }
 
-        extend_with_descendants(snapshot, &mut detected_pids);
-        if let (ConfiguredProgramMatcher::Installed { aumid }, Some(package_info)) =
-            (&configured.matcher, installed_package_info.as_ref())
-        {
-            if let Ok(package_candidates) = collect_package_local_pid_candidates(
-                &detected_pids,
-                snapshot,
-                &package_info.install_root,
-                aumid,
-                os,
-            ) {
-                for pid in package_candidates.same_aumid_pids {
-                    if !detected_pids.contains(&pid) {
-                        detected_pids.push(pid);
-                    }
-                }
-                if owns_package {
-                    for pid in package_candidates.no_identity_pids {
-                        if !detected_pids.contains(&pid) {
-                            detected_pids.push(pid);
+        match &configured.matcher {
+            ConfiguredProgramMatcher::Path { .. } => {
+                extend_with_descendants(snapshot, &mut detected_pids);
+            }
+            ConfiguredProgramMatcher::Installed { aumid } => {
+                let explicit_pids = collect_named_process_pids(
+                    &configured.additional_processes_normalized,
+                    name_to_pids,
+                );
+                let explicit_pid_set: HashSet<u32> = explicit_pids.iter().copied().collect();
+
+                extend_with_descendants(snapshot, &mut detected_pids);
+                if let Some(package_info) = installed_package_info.as_ref() {
+                    if let Ok(package_candidates) = collect_package_local_pid_candidates(
+                        &detected_pids,
+                        snapshot,
+                        &package_info.install_root,
+                        aumid,
+                        os,
+                    ) {
+                        for pid in package_candidates.same_aumid_pids {
+                            push_unique_pid(&mut detected_pids, pid);
+                        }
+                        if owns_package {
+                            for pid in package_candidates.no_identity_pids {
+                                push_unique_pid(&mut detected_pids, pid);
+                            }
                         }
                     }
                 }
+
+                retain_auto_managed_installed_pids(snapshot, &mut detected_pids, &explicit_pid_set);
+                for pid in explicit_pids {
+                    push_unique_pid(&mut detected_pids, pid);
+                }
+                extend_with_descendants(snapshot, &mut detected_pids);
+                retain_auto_managed_installed_pids(snapshot, &mut detected_pids, &explicit_pid_set);
             }
         }
-        if matches!(
-            &configured.matcher,
-            ConfiguredProgramMatcher::Installed { .. }
-        ) {
-            extend_with_named_processes(
-                &mut detected_pids,
-                &configured.additional_processes_normalized,
-                name_to_pids,
-            );
-        }
-        extend_with_descendants(snapshot, &mut detected_pids);
         retain_live_pids(&mut detected_pids, os);
 
         if detected_pids.is_empty() {
@@ -1074,6 +1146,31 @@ mod tests {
     }
 
     #[test]
+    fn test_installed_background_host_seed_does_not_create_tracking_entry() {
+        let state = sample_installed_program_state();
+        let configured = collect_configured_programs(&state);
+        let mut apps = RunningApps::default();
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::new(),
+                names: HashMap::from([(99, "backgroundTaskHost.exe".to_string())]),
+            }),
+            live_pids: HashSet::from([99]),
+            aumids: HashMap::from([(
+                99,
+                "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+            )]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        assert!(!outcome.changed);
+        assert!(outcome.notifications.is_empty());
+        assert!(apps.apps.is_empty());
+    }
+
+    #[test]
     fn test_installed_target_attaches_additional_processes_after_seed() {
         let state = sample_installed_program_state();
         let configured = collect_configured_programs(&state);
@@ -1103,6 +1200,72 @@ mod tests {
             apps.apps.get(&key).map(|app| app.pids.clone()),
             Some(vec![20, 21])
         );
+    }
+
+    #[test]
+    fn test_installed_background_host_does_not_keep_app_running_after_main_exit() {
+        let mut state = sample_installed_program_state();
+        state.groups[0].programs[0].additional_processes.clear();
+        let configured = collect_configured_programs(&state);
+        let mut apps = RunningApps::default();
+        let key = state.groups[0].programs[0].get_key();
+        apps.add_app(&key, 20, group_id(0), rule_id(0));
+        apps.apps.get_mut(&key).unwrap().pids.push(99);
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::new(),
+                names: HashMap::from([(99, "backgroundTaskHost.exe".to_string())]),
+            }),
+            live_pids: HashSet::from([99]),
+            aumids: HashMap::from([(
+                99,
+                "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+            )]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        assert!(outcome.changed);
+        assert_eq!(outcome.notifications, vec!["App stopped: Spotify"]);
+        assert!(!apps.apps.contains_key(&key));
+    }
+
+    #[test]
+    fn test_installed_explicit_background_host_name_overrides_auto_filter() {
+        let mut state = sample_installed_program_state();
+        state.groups[0].programs[0].additional_processes =
+            vec!["backgroundTaskHost.exe".to_string()];
+        let configured = collect_configured_programs(&state);
+        let mut apps = RunningApps::default();
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::new(),
+                names: HashMap::from([
+                    (20, "spotify.exe".to_string()),
+                    (99, "backgroundTaskHost.exe".to_string()),
+                ]),
+            }),
+            live_pids: HashSet::from([20, 99]),
+            aumids: HashMap::from([
+                (
+                    20,
+                    "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+                ),
+                (
+                    99,
+                    "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        let key = state.groups[0].programs[0].get_key();
+        let tracked: HashSet<u32> = apps.apps[&key].pids.iter().copied().collect();
+        assert!(outcome.changed);
+        assert_eq!(tracked, HashSet::from([20, 99]));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use crate::app::features::execution::{
-    ensure_package_owner_claim, InstalledPackageTrackingState, RuntimeRegistry,
+    ensure_package_owner_claim, is_excluded_installed_auto_process, InstalledPackageTrackingState,
+    RuntimeRegistry,
 };
 use crate::app::features::rules::RulesContext;
 use crate::app::models::{AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, LogManager};
@@ -19,9 +20,10 @@ struct LaunchProcessSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PostLaunchCorrectionOutcome {
-    tracked_pids: Vec<u32>,
+    seed_pids: Vec<u32>,
+    managed_pids: Vec<u32>,
     no_identity_package_pids: Vec<u32>,
-    new_pids_added: usize,
+    new_managed_pids_added: usize,
     saw_identity_seed: bool,
 }
 
@@ -304,19 +306,29 @@ fn run_launch_decision<O: LaunchOs>(
 
     match launch_result {
         Ok(pid) => {
-            if matches!(app_to_run.launch_target, LaunchTarget::Installed { .. }) {
+            let is_installed = matches!(app_to_run.launch_target, LaunchTarget::Installed { .. });
+            let launch_pid_auto_managed =
+                !is_installed || installed_launch_pid_auto_managed(os, pid);
+
+            if is_installed && launch_pid_auto_managed {
                 let _ = os.set_process_affinity_by_pid(pid, mask);
                 let _ = os.set_process_priority_by_pid(pid, priority);
             }
 
-            record_started_pid(
-                runtime,
-                log_manager,
-                &app_key,
-                pid,
-                group_id.clone(),
-                rule_id.clone(),
-            );
+            if launch_pid_auto_managed {
+                record_started_pid(
+                    runtime,
+                    log_manager,
+                    &app_key,
+                    pid,
+                    group_id.clone(),
+                    rule_id.clone(),
+                );
+            } else {
+                log_manager.add_entry(format!(
+                    "Installed app activation PID {pid} is a Windows background host; waiting for app processes"
+                ));
+            }
 
             if let LaunchTarget::Installed { aumid } = &app_to_run.launch_target {
                 spawn_post_launch_correction(PostLaunchCorrectionRequest {
@@ -372,7 +384,7 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
 
     handle.spawn(async move {
         let os = RealLaunchOs;
-        let mut tracked_pids = vec![request.initial_pid];
+        let mut seed_pids = vec![request.initial_pid];
         let mut stable_polls = 0usize;
         let mut saw_identity_seed = false;
 
@@ -384,7 +396,7 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
             let outcome = post_launch_correction_poll_with_os(
                 &os,
                 &request.expected_aumid,
-                &mut tracked_pids,
+                &mut seed_pids,
                 &request.group_cores,
                 request.priority,
                 request.installed_package_info.as_ref(),
@@ -399,16 +411,22 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                 let mut attached_no_identity_pids = Vec::new();
                 let mut newly_attached_package_pids = 0usize;
                 if let Ok(mut apps) = request.running_apps.try_write() {
-                    if !apps.apps.contains_key(&request.app_key) {
+                    if !outcome.managed_pids.is_empty() && !apps.apps.contains_key(&request.app_key)
+                    {
                         apps.add_app(
                             &request.app_key,
-                            request.initial_pid,
+                            outcome.managed_pids[0],
                             request.group_id.clone(),
                             request.rule_id.clone(),
                         );
                     }
 
-                    for &pid in &outcome.tracked_pids {
+                    if let Some(app) = apps.apps.get_mut(&request.app_key) {
+                        app.group_id = request.group_id.clone();
+                        app.rule_id = request.rule_id.clone();
+                    }
+
+                    for &pid in &outcome.managed_pids {
                         if let Some(app) = apps.apps.get_mut(&request.app_key) {
                             if !app.pids.contains(&pid) {
                                 app.pids.push(pid);
@@ -416,30 +434,32 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                         }
                     }
 
-                    if let Some(package_info) = &request.installed_package_info {
-                        let mut package_tracking =
-                            request.installed_package_tracking.write().unwrap();
-                        let owns_package = ensure_package_owner_claim(
-                            &mut package_tracking,
-                            &apps,
-                            &package_info.package_family_name,
-                            &request.app_key,
-                        );
+                    if apps.apps.contains_key(&request.app_key) {
+                        if let Some(package_info) = &request.installed_package_info {
+                            let mut package_tracking =
+                                request.installed_package_tracking.write().unwrap();
+                            let owns_package = ensure_package_owner_claim(
+                                &mut package_tracking,
+                                &apps,
+                                &package_info.package_family_name,
+                                &request.app_key,
+                            );
 
-                        if owns_package {
-                            for &pid in &outcome.no_identity_package_pids {
-                                if let Some(app) = apps.apps.get_mut(&request.app_key) {
-                                    if !app.pids.contains(&pid) {
-                                        app.pids.push(pid);
-                                        attached_no_identity_pids.push(pid);
-                                        let mask = request
-                                            .group_cores
-                                            .iter()
-                                            .fold(0usize, |acc, &i| acc | (1 << i));
-                                        let _ = os.set_process_affinity_by_pid(pid, mask);
-                                        let _ =
-                                            os.set_process_priority_by_pid(pid, request.priority);
-                                        newly_attached_package_pids += 1;
+                            if owns_package {
+                                for &pid in &outcome.no_identity_package_pids {
+                                    if let Some(app) = apps.apps.get_mut(&request.app_key) {
+                                        if !app.pids.contains(&pid) {
+                                            app.pids.push(pid);
+                                            attached_no_identity_pids.push(pid);
+                                            let mask = request
+                                                .group_cores
+                                                .iter()
+                                                .fold(0usize, |acc, &i| acc | (1 << i));
+                                            let _ = os.set_process_affinity_by_pid(pid, mask);
+                                            let _ = os
+                                                .set_process_priority_by_pid(pid, request.priority);
+                                            newly_attached_package_pids += 1;
+                                        }
                                     }
                                 }
                             }
@@ -447,16 +467,16 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                     }
                 }
 
-                tracked_pids = outcome.tracked_pids;
-                tracked_pids.extend(attached_no_identity_pids);
+                seed_pids = outcome.seed_pids;
+                seed_pids.extend(attached_no_identity_pids);
 
-                if outcome.new_pids_added + newly_attached_package_pids == 0 {
+                if outcome.new_managed_pids_added + newly_attached_package_pids == 0 {
                     stable_polls += 1;
                 } else {
                     stable_polls = 0;
                 }
 
-                if saw_identity_seed && stable_polls >= 2 {
+                if saw_identity_seed && !outcome.managed_pids.is_empty() && stable_polls >= 2 {
                     break;
                 }
             }
@@ -467,16 +487,16 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
 fn post_launch_correction_poll_with_os<O: LaunchOs>(
     os: &O,
     expected_aumid: &str,
-    tracked_pids: &mut Vec<u32>,
+    seed_pids: &mut Vec<u32>,
     group_cores: &[usize],
     priority: PriorityClass,
     installed_package_info: Option<&InstalledPackageRuntimeInfo>,
     prelaunch_package_pids: &HashSet<u32>,
 ) -> Result<PostLaunchCorrectionOutcome, String> {
     let snapshot = os.snapshot_process_tree()?;
-    let before: HashSet<u32> = tracked_pids.iter().copied().collect();
+    let before: HashSet<u32> = seed_pids.iter().copied().collect();
 
-    extend_with_descendants(&snapshot, tracked_pids);
+    extend_with_descendants(&snapshot, seed_pids);
     let mut no_identity_package_pids = Vec::new();
 
     if let Some(package_info) = installed_package_info {
@@ -490,20 +510,25 @@ fn post_launch_correction_poll_with_os<O: LaunchOs>(
         )?;
 
         for pid in package_candidates.same_aumid_pids {
-            if !tracked_pids.contains(&pid) {
-                tracked_pids.push(pid);
+            if !seed_pids.contains(&pid) {
+                seed_pids.push(pid);
             }
         }
         no_identity_package_pids = package_candidates.no_identity_pids;
+        retain_auto_managed_installed_pids(&snapshot, &mut no_identity_package_pids);
     }
 
     let mask = group_cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
     let mut saw_identity_seed = false;
+    let mut managed_pids = seed_pids.clone();
+    retain_auto_managed_installed_pids(&snapshot, &mut managed_pids);
 
-    for &pid in tracked_pids.iter() {
+    for &pid in managed_pids.iter() {
         let _ = os.set_process_affinity_by_pid(pid, mask);
         let _ = os.set_process_priority_by_pid(pid, priority);
+    }
 
+    for &pid in seed_pids.iter() {
         if !saw_identity_seed
             && os
                 .get_process_app_user_model_id(pid)?
@@ -513,15 +538,16 @@ fn post_launch_correction_poll_with_os<O: LaunchOs>(
         }
     }
 
-    let new_pids_added = tracked_pids
+    let new_managed_pids_added = managed_pids
         .iter()
         .filter(|pid| !before.contains(pid))
         .count();
 
     Ok(PostLaunchCorrectionOutcome {
-        tracked_pids: tracked_pids.clone(),
+        seed_pids: seed_pids.clone(),
+        managed_pids,
         no_identity_package_pids,
-        new_pids_added,
+        new_managed_pids_added,
         saw_identity_seed,
     })
 }
@@ -540,6 +566,26 @@ fn extend_with_descendants(snapshot: &LaunchProcessSnapshot, tracked_pids: &mut 
             }
         }
     }
+}
+
+fn installed_launch_pid_auto_managed<O: LaunchOs>(os: &O, pid: u32) -> bool {
+    os.snapshot_process_tree()
+        .map(|snapshot| is_auto_managed_installed_pid(&snapshot, pid))
+        .unwrap_or(true)
+}
+
+fn is_auto_managed_installed_pid(snapshot: &LaunchProcessSnapshot, pid: u32) -> bool {
+    match snapshot.names.get(&pid) {
+        Some(name) => !is_excluded_installed_auto_process(name),
+        None => true,
+    }
+}
+
+fn retain_auto_managed_installed_pids(
+    snapshot: &LaunchProcessSnapshot,
+    tracked_pids: &mut Vec<u32>,
+) {
+    tracked_pids.retain(|&pid| is_auto_managed_installed_pid(snapshot, pid));
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1006,6 +1052,46 @@ mod tests {
     }
 
     #[test]
+    fn test_installed_launch_skips_background_host_activation_pid() {
+        let runtime = RuntimeRegistry::new();
+        let mut log_manager = LogManager::default();
+        let app = AppToRun::new_installed(
+            "Spotify".into(),
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into(),
+            PriorityClass::High,
+            false,
+        );
+        let app_key = app.get_key();
+        let os = FakeLaunchOs {
+            activate_result: RefCell::new(Ok(4321)),
+            snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                children_of: HashMap::new(),
+                names: HashMap::from([(4321, "backgroundTaskHost.exe".to_string())]),
+            })),
+            ..Default::default()
+        };
+
+        run_launch_decision(
+            &runtime,
+            &mut log_manager,
+            group_id(0),
+            rule_id(0),
+            app,
+            vec![0, 2],
+            &os,
+        );
+
+        assert!(os.run_calls.borrow().is_empty());
+        assert_eq!(
+            os.activate_calls.borrow().as_slice(),
+            &["SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string()]
+        );
+        assert!(os.affinity_calls.borrow().is_empty());
+        assert!(os.priority_calls.borrow().is_empty());
+        assert_eq!(runtime.get_running_app_pids(&app_key), None);
+    }
+
+    #[test]
     fn test_post_launch_correction_poll_attaches_descendants_and_reapplies_settings() {
         let os = FakeLaunchOs {
             snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
@@ -1035,9 +1121,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(outcome.tracked_pids, vec![50, 51, 52]);
+        assert_eq!(outcome.seed_pids, vec![50, 51, 52]);
+        assert_eq!(outcome.managed_pids, vec![50, 51, 52]);
         assert!(outcome.no_identity_package_pids.is_empty());
-        assert_eq!(outcome.new_pids_added, 2);
+        assert_eq!(outcome.new_managed_pids_added, 2);
         assert!(outcome.saw_identity_seed);
         assert_eq!(
             os.affinity_calls.borrow().as_slice(),
@@ -1050,6 +1137,53 @@ mod tests {
                 (51, PriorityClass::AboveNormal),
                 (52, PriorityClass::AboveNormal),
             ]
+        );
+    }
+
+    #[test]
+    fn test_post_launch_correction_uses_background_host_as_seed_only() {
+        let os = FakeLaunchOs {
+            snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                children_of: HashMap::from([(60, vec![61])]),
+                names: HashMap::from([
+                    (60, "backgroundTaskHost.exe".to_string()),
+                    (61, "Spotify.exe".to_string()),
+                ]),
+            })),
+            process_aumids: HashMap::from([
+                (
+                    60,
+                    "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+                ),
+                (
+                    61,
+                    "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let mut seed_pids = vec![60];
+
+        let outcome = post_launch_correction_poll_with_os(
+            &os,
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
+            &mut seed_pids,
+            &[1, 3],
+            PriorityClass::AboveNormal,
+            None,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.seed_pids, vec![60, 61]);
+        assert_eq!(outcome.managed_pids, vec![61]);
+        assert!(outcome.no_identity_package_pids.is_empty());
+        assert_eq!(outcome.new_managed_pids_added, 1);
+        assert!(outcome.saw_identity_seed);
+        assert_eq!(os.affinity_calls.borrow().as_slice(), &[(61, 10)]);
+        assert_eq!(
+            os.priority_calls.borrow().as_slice(),
+            &[(61, PriorityClass::AboveNormal)]
         );
     }
 
@@ -1120,9 +1254,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(outcome.tracked_pids, vec![40, 42]);
+        assert_eq!(outcome.seed_pids, vec![40, 42]);
+        assert_eq!(outcome.managed_pids, vec![40, 42]);
         assert_eq!(outcome.no_identity_package_pids, Vec::<u32>::new());
-        assert_eq!(outcome.new_pids_added, 1);
+        assert_eq!(outcome.new_managed_pids_added, 1);
         assert!(outcome.saw_identity_seed);
         assert_eq!(os.affinity_calls.borrow().as_slice(), &[(40, 3), (42, 3)]);
         assert_eq!(

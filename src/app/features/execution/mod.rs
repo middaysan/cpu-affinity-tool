@@ -4,7 +4,7 @@ mod store;
 mod tracking;
 
 use crate::app::features::diagnostics::DiagnosticEvent;
-use crate::app::models::{AppStateStorage, RunningApps};
+use crate::app::models::{normalize_process_name, AppStateStorage, RunningApps};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
@@ -17,6 +17,13 @@ pub(crate) use store::{
     resolve_installed_package_runtime_info_cached, InstalledPackageTrackingState,
 };
 pub use tracking::run_running_app_monitor;
+
+pub(crate) fn is_excluded_installed_auto_process(process_name: &str) -> bool {
+    matches!(
+        normalize_process_name(process_name).as_str(),
+        "backgroundtaskhost"
+    )
+}
 
 pub fn spawn_monitors(
     running_apps: Arc<TokioRwLock<RunningApps>>,
