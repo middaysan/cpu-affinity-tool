@@ -1,0 +1,20 @@
+## [1.3.1] - 2026-05-19
+
+### Fixed
+- **External file drop regression**:
+  - Fixed a regression introduced in `v1.3.0` that accidentally broke dropping external `.exe`, `.lnk`, and `.url` files onto CPU groups.
+  - The UI now remembers the group hovered during an OS file drag and uses that cached target if the pointer position is unavailable on the drop frame.
+  - App-rule drag and drop remains separate from OS file drops, so moving/reordering existing app rules still works while external file drops are restored.
+
+### Testing
+- Verified local gates:
+  - `cargo fmt --all -- --check`
+  - `cargo test --features windows --bin cpu-affinity-tool`
+  - `cargo test --features linux --bin cpu-affinity-tool-linux`
+  - `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`
+  - `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`
+  - `cargo build --release --features windows --bin cpu-affinity-tool`
+
+### Notes
+- This is a narrow patch release for the accidental `v1.3.0` external file drop regression.
+- Persisted state schema remains `v7`.

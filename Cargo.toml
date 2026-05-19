@@ -1,6 +1,6 @@
 [package]
 name = "cpu-affinity-tool" 
-version = "1.3.0"
+version = "1.3.1"
 edition = "2021"
 default-run = "cpu-affinity-tool"
 description = "Windows utility for managing CPU affinity of games and background applications."

@@ -484,6 +484,7 @@ impl AppState {
     }
 
     pub fn consume_dropped_files_into_group(&mut self, group_id: GroupId) -> bool {
+        self.ui.file_drop_hover_target = None;
         let Some(files) = self.ui.dropped_files.take() else {
             return false;
         };

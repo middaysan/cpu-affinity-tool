@@ -1,3 +1,4 @@
+use crate::app::shared::ids::GroupId;
 use crate::app::shell::sessions::{GroupFormSession, InstalledAppPickerSession, RuleEditorSession};
 use crate::app::shell::{GroupRoute, WindowRoute};
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ pub struct UiSession {
     pub group_form: GroupFormSession,
     pub app_edit_state: RuleEditorSession,
     pub dropped_files: Option<Vec<PathBuf>>,
+    pub file_drop_hover_target: Option<GroupId>,
     pub current_tip_index: usize,
     pub tip_change_interval: f64,
     pub last_tip_change_time: f64,
@@ -49,6 +51,7 @@ impl UiSession {
                 target: None,
             },
             dropped_files: None,
+            file_drop_hover_target: None,
             current_tip_index: 0,
             tip_change_interval: 120.0,
             last_tip_change_time: 0.0,
@@ -90,6 +93,7 @@ mod tests {
         assert_eq!(state.group_form.core_selection.len(), 6);
         assert!(state.app_edit_state.current_edit.is_none());
         assert!(state.dropped_files.is_none());
+        assert!(state.file_drop_hover_target.is_none());
     }
 
     #[test]

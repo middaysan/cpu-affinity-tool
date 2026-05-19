@@ -4,6 +4,13 @@ This file is the consolidated high-level project history.
 
 Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
+## [1.3.1] - 2026-05-19
+
+### Fixed
+
+- Fixed a regression introduced in `v1.3.0` that accidentally broke dropping external `.exe`, `.lnk`, and `.url` files onto groups
+- File drops now remember the hovered group during the OS drag operation, so the target group is still resolved even when the pointer position is missing on the release frame
+
 ## [1.3.0] - 2026-05-19
 
 ### Added

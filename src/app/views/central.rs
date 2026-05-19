@@ -110,7 +110,7 @@ fn installed_app_hover_text() -> &'static str {
 
 fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> Vec<CentralAction> {
     let mut actions = Vec::new();
-    let mut drop_target = None;
+    let mut hovered_file_drop_group = None;
     let active_rule_payload = egui::DragAndDrop::payload::<RuleDragPayload>(ctx);
     let rule_drag_pos = if active_rule_payload.is_some() {
         ctx.pointer_interact_pos()
@@ -123,6 +123,13 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
         None
     };
     let rule_pointer_pos = rule_drop_pos.or(rule_drag_pos);
+    let has_hovered_files = ctx.input(|i| !i.raw.hovered_files.is_empty());
+    let has_dropped_files = app
+        .ui
+        .dropped_files
+        .as_ref()
+        .is_some_and(|files| !files.is_empty());
+    let file_drop_pos = ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()));
     let snapshot = app.build_central_panel_snapshot();
     let groups_len = snapshot.groups.len();
 
@@ -377,20 +384,15 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                 }
             }
 
-            let has_dropped_files = app
-                .ui
-                .dropped_files
-                .as_ref()
-                .is_some_and(|files| !files.is_empty());
+        });
 
-            if drop_target.is_none() && has_dropped_files {
-                let rect = ui.min_rect();
-                let hover_pos = ctx.input(|i| i.pointer.hover_pos().unwrap_or_default());
-                if rect.contains(hover_pos) {
-                    drop_target = Some(group_id.clone());
+        if (has_hovered_files || has_dropped_files) && hovered_file_drop_group.is_none() {
+            if let Some(pos) = file_drop_pos {
+                if group_response.response.rect.contains(pos) {
+                    hovered_file_drop_group = Some(group_id.clone());
                 }
             }
-        });
+        }
 
         if drop_indicator.is_none() && target_rule_index.is_none() {
             if let Some(pos) = rule_drag_pos {
@@ -451,11 +453,41 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
         }
     }
 
-    if let Some(group_id) = drop_target {
+    if let Some(group_id) = resolve_file_drop_target(
+        &mut app.ui.file_drop_hover_target,
+        has_hovered_files,
+        has_dropped_files,
+        file_drop_pos.is_some(),
+        hovered_file_drop_group,
+    ) {
         actions.push(CentralAction::ConsumeDroppedFiles(group_id));
     }
 
     actions
+}
+
+fn resolve_file_drop_target(
+    cached_target: &mut Option<GroupId>,
+    has_hovered_files: bool,
+    has_dropped_files: bool,
+    pointer_pos_known: bool,
+    hovered_group: Option<GroupId>,
+) -> Option<GroupId> {
+    if has_dropped_files {
+        let target = hovered_group.or_else(|| cached_target.clone());
+        *cached_target = target.clone();
+        return target;
+    }
+
+    if has_hovered_files {
+        if pointer_pos_known {
+            *cached_target = hovered_group;
+        }
+        return None;
+    }
+
+    *cached_target = None;
+    None
 }
 
 fn classify_rule_drop(
@@ -677,6 +709,59 @@ mod tests {
             preview_label: "Sample".to_string(),
             preview_width: 240.0,
         }
+    }
+
+    #[test]
+    fn test_file_drop_target_uses_current_hovered_group() {
+        let mut cached = Some(GroupId("old-group".to_string()));
+        let target = resolve_file_drop_target(
+            &mut cached,
+            false,
+            true,
+            true,
+            Some(GroupId("new-group".to_string())),
+        );
+
+        assert_eq!(target, Some(GroupId("new-group".to_string())));
+        assert_eq!(cached, Some(GroupId("new-group".to_string())));
+    }
+
+    #[test]
+    fn test_file_drop_target_falls_back_to_cached_hover_when_pointer_missing() {
+        let mut cached = Some(GroupId("cached-group".to_string()));
+        let target = resolve_file_drop_target(&mut cached, false, true, false, None);
+
+        assert_eq!(target, Some(GroupId("cached-group".to_string())));
+        assert_eq!(cached, Some(GroupId("cached-group".to_string())));
+    }
+
+    #[test]
+    fn test_file_drop_hover_updates_and_clears_cached_target() {
+        let mut cached = None;
+        let target = resolve_file_drop_target(
+            &mut cached,
+            true,
+            false,
+            true,
+            Some(GroupId("hovered-group".to_string())),
+        );
+
+        assert_eq!(target, None);
+        assert_eq!(cached, Some(GroupId("hovered-group".to_string())));
+
+        let target = resolve_file_drop_target(&mut cached, true, false, true, None);
+
+        assert_eq!(target, None);
+        assert_eq!(cached, None);
+    }
+
+    #[test]
+    fn test_file_drop_target_clears_when_no_external_file_drag_is_active() {
+        let mut cached = Some(GroupId("cached-group".to_string()));
+        let target = resolve_file_drop_target(&mut cached, false, false, false, None);
+
+        assert_eq!(target, None);
+        assert_eq!(cached, None);
     }
 
     #[test]
