@@ -32,6 +32,13 @@ Freshness rules:
 - if assistant detects drift between this file and repo reality, it must flag the conflicting section and carry the tracked update in the next relevant repo change
 - `.codex/ROADMAP.md` owns only stages, statuses, deferred items, residual risks, freshness metadata, and append-only roadmap-change history
 
+Test-first development rules:
+- Behavior changes must follow TDD: write or update the failing or characterization test for the desired behavior before implementing the production change whenever technically possible
+- Regression fixes must include a regression test that would have failed on the broken behavior before the fix
+- UI and runtime changes should push decision logic into pure helpers or state-level methods so behavior can be tested without relying only on manual GUI interaction
+- If an OS or GUI interaction cannot be reproduced deterministically in automated tests, add the closest reliable unit or state-level coverage and document the required manual smoke validation in the change plan or release notes
+- Behavior changes must not rely on manual testing alone unless automated coverage is impractical and that limitation is explicitly called out
+
 ## Project and platform status
 `cpu-affinity-tool` is a desktop utility for managing CPU affinity and process priority.
 
@@ -400,5 +407,6 @@ A new engineer should be able to learn from this file alone:
 - which local verification commands matter
 - what the current release contract is
 - what the canonical repo workflow artifacts are
+- what the repo test-first development contract is
 - when `AGENTS.md` must be updated
 - where the shared staged-workflow protocol is sourced from for this repo

@@ -1466,6 +1466,61 @@ mod tests {
     }
 
     #[test]
+    fn test_set_group_hidden_saves_only_on_real_change() {
+        let mut app = sample_state();
+        let group_id = group_id(&app, 0);
+
+        app.set_group_is_hidden(group_id.clone(), true);
+        assert!(app.persistent_state.read().unwrap().groups[0].is_hidden);
+        assert_eq!(app.save_count(), 1);
+
+        app.set_group_is_hidden(group_id, true);
+        assert_eq!(app.save_count(), 1);
+
+        app.set_group_is_hidden(GroupId("missing-group".to_string()), false);
+        assert_eq!(app.save_count(), 1);
+    }
+
+    #[test]
+    fn test_move_group_by_id_preserves_group_ids_and_saves_once_per_move() {
+        let mut app = sample_state();
+        add_empty_group(&mut app, "Work");
+        let games_id = group_id(&app, 0);
+        let work_id = group_id(&app, 1);
+
+        assert!(app.move_group_down(games_id.clone()));
+        assert_eq!(app.persistent_state.read().unwrap().groups[0].name, "Work");
+        assert_eq!(app.rules.group_id_for_index(0), Some(work_id.clone()));
+        assert_eq!(app.rules.group_id_for_index(1), Some(games_id.clone()));
+        assert_eq!(app.save_count(), 1);
+
+        assert!(app.move_group_up(games_id.clone()));
+        assert_eq!(app.persistent_state.read().unwrap().groups[0].name, "Games");
+        assert_eq!(app.rules.group_id_for_index(0), Some(games_id));
+        assert_eq!(app.rules.group_id_for_index(1), Some(work_id));
+        assert_eq!(app.save_count(), 2);
+    }
+
+    #[test]
+    fn test_move_group_edges_and_missing_group_do_not_save() {
+        let mut app = sample_state();
+        add_empty_group(&mut app, "Work");
+        let first_group_id = group_id(&app, 0);
+        let last_group_id = group_id(&app, 1);
+
+        assert!(!app.move_group_up(first_group_id));
+        assert!(!app.move_group_down(last_group_id));
+        assert!(!app.move_group_up(GroupId("missing-group".to_string())));
+        assert!(!app.move_group_down(GroupId("missing-group".to_string())));
+
+        let state = app.persistent_state.read().unwrap();
+        assert_eq!(state.groups[0].name, "Games");
+        assert_eq!(state.groups[1].name, "Work");
+        drop(state);
+        assert_eq!(app.save_count(), 0);
+    }
+
+    #[test]
     fn test_successful_group_create_and_delete_save_once_each() {
         let mut app = sample_state();
         app.ui.group_form.group_name = "Work".to_string();
@@ -1504,6 +1559,63 @@ mod tests {
         app.delete_current_app_edit_target();
 
         assert_eq!(app.save_count(), 0);
+    }
+
+    #[test]
+    fn test_consume_dropped_files_without_pending_files_clears_cached_target() {
+        let mut app = sample_state();
+        let target_group_id = group_id(&app, 0);
+        app.ui.file_drop_hover_target = Some(target_group_id.clone());
+
+        assert!(!app.consume_dropped_files_into_group(target_group_id));
+
+        assert!(app.ui.file_drop_hover_target.is_none());
+        assert!(app.ui.dropped_files.is_none());
+        assert_eq!(app.save_count(), 0);
+    }
+
+    #[test]
+    fn test_consume_dropped_files_with_stale_group_clears_pending_files_without_save() {
+        let mut app = sample_state();
+        app.ui.dropped_files = Some(vec![PathBuf::from(r"C:\Dropped.exe")]);
+        app.ui.file_drop_hover_target = Some(GroupId("stale-group".to_string()));
+
+        assert!(!app.consume_dropped_files_into_group(GroupId("stale-group".to_string())));
+
+        assert!(app.ui.file_drop_hover_target.is_none());
+        assert!(app.ui.dropped_files.is_none());
+        assert_eq!(
+            app.persistent_state.read().unwrap().groups[0]
+                .programs
+                .len(),
+            1
+        );
+        assert_eq!(app.save_count(), 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_consume_dropped_files_adds_windows_exe_to_target_and_clears_transient_state() {
+        let mut app = sample_state();
+        add_empty_group(&mut app, "Dropped");
+        let target_group_id = group_id(&app, 1);
+        app.ui.dropped_files = Some(vec![PathBuf::from(r"C:\Dropped.exe")]);
+        app.ui.file_drop_hover_target = Some(target_group_id.clone());
+
+        assert!(app.consume_dropped_files_into_group(target_group_id));
+
+        let state = app.persistent_state.read().unwrap();
+        assert_eq!(state.groups[0].programs.len(), 1);
+        assert_eq!(state.groups[1].programs.len(), 1);
+        assert_eq!(
+            state.groups[1].programs[0].bin_path(),
+            Some(PathBuf::from(r"C:\Dropped.exe").as_path())
+        );
+        drop(state);
+        assert!(app.ui.file_drop_hover_target.is_none());
+        assert!(app.ui.dropped_files.is_none());
+        assert!(app.rules.rule_id_for_index(1, 0).is_some());
+        assert_eq!(app.save_count(), 1);
     }
 
     #[cfg(target_os = "windows")]

@@ -474,7 +474,13 @@ fn resolve_file_drop_target(
     hovered_group: Option<GroupId>,
 ) -> Option<GroupId> {
     if has_dropped_files {
-        let target = hovered_group.or_else(|| cached_target.clone());
+        let target = hovered_group.or_else(|| {
+            if pointer_pos_known {
+                None
+            } else {
+                cached_target.clone()
+            }
+        });
         *cached_target = target.clone();
         return target;
     }
@@ -750,6 +756,24 @@ mod tests {
         assert_eq!(cached, Some(GroupId("hovered-group".to_string())));
 
         let target = resolve_file_drop_target(&mut cached, true, false, true, None);
+
+        assert_eq!(target, None);
+        assert_eq!(cached, None);
+    }
+
+    #[test]
+    fn test_file_drop_hover_without_pointer_preserves_cached_target() {
+        let mut cached = Some(GroupId("cached-group".to_string()));
+        let target = resolve_file_drop_target(&mut cached, true, false, false, None);
+
+        assert_eq!(target, None);
+        assert_eq!(cached, Some(GroupId("cached-group".to_string())));
+    }
+
+    #[test]
+    fn test_file_drop_release_with_known_pointer_outside_group_clears_cached_target() {
+        let mut cached = Some(GroupId("cached-group".to_string()));
+        let target = resolve_file_drop_target(&mut cached, false, true, true, None);
 
         assert_eq!(target, None);
         assert_eq!(cached, None);

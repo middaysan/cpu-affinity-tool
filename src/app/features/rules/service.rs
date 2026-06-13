@@ -317,6 +317,106 @@ mod tests {
     }
 
     #[test]
+    fn test_create_group_validation_does_not_mutate_state() {
+        let persistent_state = sample_persistent_state();
+
+        assert_eq!(
+            create_group(&persistent_state, "   ", &[true, false], true),
+            Err("Group name cannot be empty".to_string())
+        );
+        assert_eq!(
+            create_group(&persistent_state, "No Cores", &[false, false], true),
+            Err("At least one core must be selected".to_string())
+        );
+
+        let state = persistent_state.read().unwrap();
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(state.groups[0].name, "Games");
+    }
+
+    #[test]
+    fn test_update_group_validation_and_missing_index_do_not_mutate_state() {
+        let persistent_state = sample_persistent_state();
+
+        assert_eq!(
+            update_group_properties(&persistent_state, 0, " ".to_string(), &[true], false),
+            Err("Group name cannot be empty".to_string())
+        );
+        assert_eq!(
+            update_group_properties(&persistent_state, 0, "Edited".to_string(), &[false], false),
+            Err("At least one core must be selected".to_string())
+        );
+        assert_eq!(
+            update_group_properties(&persistent_state, 99, "Missing".to_string(), &[true], false),
+            Ok(false)
+        );
+
+        let state = persistent_state.read().unwrap();
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(state.groups[0].name, "Games");
+        assert_eq!(state.groups[0].cores, vec![1, 3]);
+        assert!(state.groups[0].run_all_button);
+    }
+
+    #[test]
+    fn test_group_visibility_and_swap_report_only_real_changes() {
+        let persistent_state = sample_persistent_state();
+        create_group(&persistent_state, "Work", &[true, false], false).unwrap();
+
+        assert!(set_group_is_hidden(&persistent_state, 0, true));
+        assert!(!set_group_is_hidden(&persistent_state, 0, true));
+        assert!(!set_group_is_hidden(&persistent_state, 99, true));
+
+        assert!(swap_groups(&persistent_state, 0, 1));
+        assert!(!swap_groups(&persistent_state, 0, 99));
+
+        let state = persistent_state.read().unwrap();
+        assert_eq!(state.groups[0].name, "Work");
+        assert_eq!(state.groups[1].name, "Games");
+        assert!(state.groups[1].is_hidden);
+    }
+
+    #[test]
+    fn test_move_rule_between_groups_rejects_invalid_indices_without_mutation() {
+        let persistent_state = sample_persistent_state();
+        create_group(&persistent_state, "Work", &[true, false], false).unwrap();
+        let mut state = persistent_state.write().unwrap();
+        let before = state
+            .groups
+            .iter()
+            .map(|group| {
+                (
+                    group.name.clone(),
+                    group.cores.clone(),
+                    group.programs.len(),
+                    group.is_hidden,
+                    group.run_all_button,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(move_rule_between_groups_at(&mut state, 9, 0, 1, 0).is_none());
+        assert!(move_rule_between_groups_at(&mut state, 0, 9, 1, 0).is_none());
+        assert!(move_rule_between_groups_at(&mut state, 0, 0, 9, 0).is_none());
+        assert!(move_rule_between_groups_at(&mut state, 0, 0, 1, 9).is_none());
+
+        let after = state
+            .groups
+            .iter()
+            .map(|group| {
+                (
+                    group.name.clone(),
+                    group.cores.clone(),
+                    group.programs.len(),
+                    group.is_hidden,
+                    group.run_all_button,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+    }
+
+    #[test]
     fn test_update_and_remove_rule() {
         let persistent_state = sample_persistent_state();
         let updated = AppToRun {

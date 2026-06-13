@@ -61,4 +61,7 @@ Do not open large implementation pull requests for new features without discussi
 - Keep comments in English
 - Keep user-facing repository text in English
 - Prefer targeted changes over broad rewrites
+- Follow TDD for behavior changes: add or update the failing or characterization test before changing production code whenever technically possible
+- Include a regression test for every bug fix, especially for UI state transitions, drag and drop, storage migrations, process tracking, and launch behavior
+- If an OS or GUI interaction cannot be tested deterministically, add the closest reliable unit or state-level test and document the manual smoke validation that remains
 - Run the relevant checks before asking for review
