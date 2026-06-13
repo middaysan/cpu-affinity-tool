@@ -20,7 +20,7 @@ use nix::unistd::Pid;
 use crate::PriorityClass;
 use crate::{
     InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
-    InstalledPackageRuntimeInfo,
+    InstalledPackageRuntimeInfo, ShortcutSpec,
 };
 
 pub struct OS;
@@ -55,6 +55,10 @@ impl OS {
 
     pub const fn supports_installed_app_picker() -> bool {
         true
+    }
+
+    pub fn create_shortcut(_spec: ShortcutSpec) -> Result<(), String> {
+        Err("shortcut creation is only supported on Windows".to_string())
     }
 
     fn compose_mask_from_cores(cores: &[usize]) -> Result<usize, String> {

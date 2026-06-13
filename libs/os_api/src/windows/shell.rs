@@ -24,11 +24,12 @@ use winreg::enums::{HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
 use crate::{
     InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
-    InstalledPackageRuntimeInfo,
+    InstalledPackageRuntimeInfo, ShortcutSpec,
 };
 
 use super::OS;
 use super::common::{ComGuard, OsError, decode_ansi, expand_env, to_wide_z};
+use super::launch::quote_arg_windows;
 
 #[derive(Deserialize)]
 struct AppsFolderRecord {
@@ -647,6 +648,52 @@ fn resolve_installed_package_runtime_info_powershell(
     parse_appx_package_runtime_info_json(&stdout, aumid)
 }
 
+fn create_shortcut_file(spec: &ShortcutSpec) -> Result<(), String> {
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|e| e.to_string())?;
+        let _com = ComGuard;
+
+        let link: IShellLinkW =
+            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?;
+        let persist: IPersistFile = link.cast().map_err(|e| e.to_string())?;
+
+        let target_w = to_wide_z(spec.target_path.as_os_str());
+        link.SetPath(PCWSTR(target_w.as_ptr()))
+            .map_err(|e| e.to_string())?;
+
+        let arguments = spec
+            .arguments
+            .iter()
+            .map(|arg| quote_arg_windows(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let args_w = to_wide_z(OsStr::new(&arguments));
+        link.SetArguments(PCWSTR(args_w.as_ptr()))
+            .map_err(|e| e.to_string())?;
+
+        if let Some(working_dir) = &spec.working_dir {
+            let working_dir_w = to_wide_z(working_dir.as_os_str());
+            link.SetWorkingDirectory(PCWSTR(working_dir_w.as_ptr()))
+                .map_err(|e| e.to_string())?;
+        }
+
+        if let Some(icon_path) = &spec.icon_path {
+            let icon_path_w = to_wide_z(icon_path.as_os_str());
+            link.SetIconLocation(PCWSTR(icon_path_w.as_ptr()), spec.icon_index)
+                .map_err(|e| e.to_string())?;
+        }
+
+        let shortcut_path_w = to_wide_z(spec.shortcut_path.as_os_str());
+        persist
+            .Save(PCWSTR(shortcut_path_w.as_ptr()), true)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 impl OS {
     pub fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, Vec<String>), String> {
         let file_ext = file_path
@@ -690,6 +737,10 @@ impl OS {
     ) -> Result<InstalledPackageRuntimeInfo, String> {
         resolve_installed_package_runtime_info_powershell(aumid)
     }
+
+    pub fn create_shortcut(spec: ShortcutSpec) -> Result<(), String> {
+        create_shortcut_file(&spec)
+    }
 }
 
 #[cfg(test)]
@@ -721,7 +772,7 @@ mod tests {
     use crate::windows::common::{ComGuard, to_wide_z};
     use crate::{
         InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
-        InstalledPackageRuntimeInfo,
+        InstalledPackageRuntimeInfo, ShortcutSpec,
     };
 
     fn unique_suffix() -> String {
@@ -847,6 +898,72 @@ mod tests {
             resolved_args,
             vec!["--mode".to_string(), "quoted arg".to_string()]
         );
+
+        drop(shortcut_guard);
+        drop(target_guard);
+    }
+
+    #[test]
+    fn test_create_shortcut_writes_lnk_target_and_args() {
+        let unique = unique_suffix();
+        let target = env::temp_dir().join(format!("codex shortcut target {}.exe", unique));
+        let target_guard = TempFileGuard::new(target.clone());
+        fs::write(&target, b"stub").unwrap();
+
+        let shortcut = env::temp_dir().join(format!("codex created shortcut {}.lnk", unique));
+        let shortcut_guard = TempFileGuard::new(shortcut.clone());
+        let args = vec![
+            "--run-rule".to_string(),
+            "group-1".to_string(),
+            "rule-2".to_string(),
+        ];
+
+        OS::create_shortcut(ShortcutSpec {
+            shortcut_path: shortcut.clone(),
+            target_path: target.clone(),
+            arguments: args.clone(),
+            working_dir: target.parent().map(PathBuf::from),
+            icon_path: Some(target.clone()),
+            icon_index: 0,
+        })
+        .unwrap();
+
+        let (resolved_target, resolved_args) = OS::parse_dropped_file(shortcut.clone()).unwrap();
+        assert_eq!(resolved_target, normalize_existing_windows_path(&target));
+        assert_eq!(resolved_args, args);
+
+        drop(shortcut_guard);
+        drop(target_guard);
+    }
+
+    #[test]
+    fn test_create_shortcut_roundtrips_arguments_that_need_quoting() {
+        let unique = unique_suffix();
+        let target = env::temp_dir().join(format!("codex shortcut quoted target {}.exe", unique));
+        let target_guard = TempFileGuard::new(target.clone());
+        fs::write(&target, b"stub").unwrap();
+
+        let shortcut = env::temp_dir().join(format!("codex quoted shortcut {}.lnk", unique));
+        let shortcut_guard = TempFileGuard::new(shortcut.clone());
+        let args = vec![
+            "--literal".to_string(),
+            "two words".to_string(),
+            r#"say "hello""#.to_string(),
+            r#"C:\Path With Space\folder\"#.to_string(),
+        ];
+
+        OS::create_shortcut(ShortcutSpec {
+            shortcut_path: shortcut.clone(),
+            target_path: target.clone(),
+            arguments: args.clone(),
+            working_dir: None,
+            icon_path: None,
+            icon_index: 0,
+        })
+        .unwrap();
+
+        let (_resolved_target, resolved_args) = OS::parse_dropped_file(shortcut).unwrap();
+        assert_eq!(resolved_args, args);
 
         drop(shortcut_guard);
         drop(target_guard);

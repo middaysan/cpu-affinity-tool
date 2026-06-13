@@ -2,12 +2,13 @@ use crate::app::features::diagnostics;
 use crate::app::features::execution;
 use crate::app::features::execution::InstalledPackageTrackingState;
 use crate::app::models::RunningApps;
-use crate::app::runtime::AppState;
+use crate::app::runtime::{AppState, RunRuleOutcome};
 use crate::app::shell::events::ShellEvent;
 use crate::app::shell::presenters::{
     central, footer, group_editor, header, installed_app_picker, logs, run_settings,
 };
 use crate::app::shell::{GroupRoute, WindowRoute};
+use crate::app::startup::StartupIntent;
 use crate::tray::{init_tray, TrayCmd};
 use eframe::egui;
 use std::path::PathBuf;
@@ -27,7 +28,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new_with_startup_intent(
+        cc: &eframe::CreationContext<'_>,
+        startup_intent: StartupIntent,
+    ) -> Self {
         #[cfg(debug_assertions)]
         {
             println!("========================================================");
@@ -50,7 +54,12 @@ impl App {
         }
 
         let mut state = AppState::new();
-        Self::bootstrap_runtime(&mut state, &cc.egui_ctx, execution::spawn_monitors);
+        Self::bootstrap_runtime(
+            &mut state,
+            &cc.egui_ctx,
+            startup_intent,
+            execution::spawn_monitors,
+        );
 
         #[cfg(target_os = "windows")]
         let mut hwnd = None;
@@ -118,8 +127,12 @@ impl App {
         }
     }
 
-    fn bootstrap_runtime<F>(state: &mut AppState, _egui_ctx: &egui::Context, spawn_monitors: F)
-    where
+    fn bootstrap_runtime<F>(
+        state: &mut AppState,
+        _egui_ctx: &egui::Context,
+        startup_intent: StartupIntent,
+        spawn_monitors: F,
+    ) where
         F: FnOnce(
             Arc<TokioRwLock<RunningApps>>,
             Arc<RwLock<InstalledPackageTrackingState>>,
@@ -132,7 +145,24 @@ impl App {
             state.runtime.installed_package_tracking_handle(),
             state.persistent_state.clone(),
         ));
-        state.start_app_with_autorun();
+        Self::handle_startup_intent(state, startup_intent);
+    }
+
+    fn handle_startup_intent(state: &mut AppState, startup_intent: StartupIntent) {
+        match startup_intent {
+            StartupIntent::NormalGui => state.start_app_with_autorun(),
+            StartupIntent::RunRule { group_id, rule_id } => {
+                match state.run_group_program(group_id, rule_id) {
+                    RunRuleOutcome::Accepted | RunRuleOutcome::LaunchRejected(_) => {}
+                    RunRuleOutcome::MissingGroup => state.log_manager.add_important_sticky_once(
+                        "ERROR: Shortcut launch group was not found".to_string(),
+                    ),
+                    RunRuleOutcome::MissingRule => state.log_manager.add_important_sticky_once(
+                        "ERROR: Shortcut launch rule was not found".to_string(),
+                    ),
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -168,10 +198,13 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::App;
-    use crate::app::models::{AppStateStorage, CpuSchema};
+    use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema};
     use crate::app::runtime::AppState;
     use crate::app::shell::events::ShellEvent;
+    use crate::app::startup::StartupIntent;
     use eframe::egui;
+    use os_api::PriorityClass;
+    use std::path::PathBuf;
     use std::sync::mpsc;
     use std::sync::{Arc, RwLock};
 
@@ -194,13 +227,55 @@ mod tests {
         )
     }
 
+    fn app_to_run(name: &str, autorun: bool) -> AppToRun {
+        let mut app = AppToRun::new_path(
+            PathBuf::from(format!(r"C:\{name}.lnk")),
+            Vec::new(),
+            PathBuf::from(format!(r"C:\{name}.exe")),
+            PriorityClass::Normal,
+            autorun,
+        );
+        app.name = name.to_string();
+        app
+    }
+
+    fn sample_state_with_programs(programs: Vec<AppToRun>) -> AppState {
+        AppState::new_for_test(
+            Arc::new(RwLock::new(AppStateStorage {
+                version: 5,
+                groups: vec![CoreGroup {
+                    name: "Games".to_string(),
+                    cores: vec![0, 1],
+                    programs,
+                    is_hidden: false,
+                    run_all_button: true,
+                }],
+                cpu_schema: CpuSchema {
+                    model: "Test CPU".to_string(),
+                    clusters: Vec::new(),
+                },
+                theme_index: 0,
+                process_monitoring_enabled: false,
+                rule_identities: None,
+                loaded_version: 5,
+                pending_pre_v6_backup: false,
+            })),
+            4,
+        )
+    }
+
     #[test]
     fn test_bootstrap_runtime_logs_startup_and_drains_monitor_notifications() {
         let ctx = egui::Context::default();
         let (tx, rx) = mpsc::channel();
         let mut state = sample_state();
 
-        App::bootstrap_runtime(&mut state, &ctx, move |_, _, _| rx);
+        App::bootstrap_runtime(
+            &mut state,
+            &ctx,
+            StartupIntent::NormalGui,
+            move |_, _, _| rx,
+        );
 
         assert!(state.runtime.monitor_rx.is_some());
         assert!(state
@@ -240,6 +315,84 @@ mod tests {
             .monitor_rx
             .as_ref()
             .is_some_and(|rx| rx.try_recv().is_err()));
+    }
+
+    #[test]
+    fn test_bootstrap_runtime_normal_gui_runs_autorun() {
+        let ctx = egui::Context::default();
+        let (_tx, rx) = mpsc::channel();
+        let mut state = sample_state_with_programs(vec![
+            app_to_run("AutorunApp", true),
+            app_to_run("ManualApp", false),
+        ]);
+        let group_id = state.rules.group_id_for_index(0).unwrap();
+        let autorun_rule_id = state.rules.rule_id_for_index(0, 0).unwrap();
+        let autorun_key = state.persistent_state.read().unwrap().groups[0].programs[0].get_key();
+        assert!(state
+            .runtime
+            .add_running_app(&autorun_key, 12345, group_id, autorun_rule_id));
+
+        App::bootstrap_runtime(
+            &mut state,
+            &ctx,
+            StartupIntent::NormalGui,
+            move |_, _, _| rx,
+        );
+
+        let messages = state
+            .log_manager
+            .entries
+            .iter()
+            .map(|entry| entry.message.as_str())
+            .collect::<Vec<_>>();
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("AutorunApp") && message.contains("already running")));
+        assert!(!messages
+            .iter()
+            .any(|message| message.contains("ManualApp") || message.contains("ManualApp.exe")));
+    }
+
+    #[test]
+    fn test_bootstrap_runtime_run_rule_skips_autorun_and_runs_requested_rule() {
+        let ctx = egui::Context::default();
+        let (_tx, rx) = mpsc::channel();
+        let mut state = sample_state_with_programs(vec![
+            app_to_run("AutorunApp", true),
+            app_to_run("ShortcutApp", false),
+        ]);
+        let group_id = state.rules.group_id_for_index(0).unwrap();
+        let requested_rule_id = state.rules.rule_id_for_index(0, 1).unwrap();
+        let requested_key = state.persistent_state.read().unwrap().groups[0].programs[1].get_key();
+        assert!(state.runtime.add_running_app(
+            &requested_key,
+            12345,
+            group_id.clone(),
+            requested_rule_id.clone()
+        ));
+
+        App::bootstrap_runtime(
+            &mut state,
+            &ctx,
+            StartupIntent::RunRule {
+                group_id,
+                rule_id: requested_rule_id,
+            },
+            move |_, _, _| rx,
+        );
+
+        let messages = state
+            .log_manager
+            .entries
+            .iter()
+            .map(|entry| entry.message.as_str())
+            .collect::<Vec<_>>();
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("ShortcutApp") && message.contains("already running")));
+        assert!(!messages
+            .iter()
+            .any(|message| message.contains("AutorunApp") || message.contains("AutorunApp.exe")));
     }
 }
 

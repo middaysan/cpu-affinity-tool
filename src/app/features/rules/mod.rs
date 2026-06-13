@@ -13,6 +13,10 @@ pub use service::{
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedRuleIdentities {
     pub groups: Vec<PersistedGroupIdentity>,
+    #[serde(default)]
+    pub next_group_id: usize,
+    #[serde(default)]
+    pub next_rule_id: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +96,8 @@ impl RulesContext {
             .map(|group| group.rule_ids.clone())
             .collect();
         self.seed_next_ids();
+        self.next_group_id = self.next_group_id.max(identities.next_group_id);
+        self.next_rule_id = self.next_rule_id.max(identities.next_rule_id);
         self.reconcile_with_storage(storage);
     }
 
@@ -290,6 +296,8 @@ impl RulesContext {
                     rule_ids: self.rule_ids.get(group_index).cloned().unwrap_or_default(),
                 })
                 .collect(),
+            next_group_id: self.next_group_id,
+            next_rule_id: self.next_rule_id,
         }
     }
 
@@ -328,6 +336,7 @@ impl RulesContext {
 mod tests {
     use super::RulesContext;
     use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema};
+    use crate::app::shared::ids::{GroupId, RuleId};
     use os_api::PriorityClass;
     use std::path::PathBuf;
 
@@ -359,16 +368,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_swap_and_append_preserve_existing_ids() {
-        let mut storage = sample_storage();
-        storage.groups.push(CoreGroup {
-            name: "Work".into(),
+    fn empty_group(name: &str) -> CoreGroup {
+        CoreGroup {
+            name: name.into(),
             cores: vec![2, 3],
             programs: vec![],
             is_hidden: false,
             run_all_button: false,
-        });
+        }
+    }
+
+    fn sample_app(name: &str) -> AppToRun {
+        AppToRun::new_path(
+            PathBuf::from(format!(r"C:\{name}.lnk")),
+            vec![],
+            PathBuf::from(format!(r"C:\{name}.exe")),
+            PriorityClass::Normal,
+            false,
+        )
+    }
+
+    #[test]
+    fn test_swap_and_append_preserve_existing_ids() {
+        let mut storage = sample_storage();
+        storage.groups.push(empty_group("Work"));
 
         let mut context = RulesContext::from_storage(&storage);
         let first = context.group_id_for_index(0).unwrap();
@@ -385,13 +408,7 @@ mod tests {
     #[test]
     fn test_move_rule_between_groups_preserves_rule_id() {
         let mut storage = sample_storage();
-        storage.groups.push(CoreGroup {
-            name: "Work".into(),
-            cores: vec![2, 3],
-            programs: vec![],
-            is_hidden: false,
-            run_all_button: false,
-        });
+        storage.groups.push(empty_group("Work"));
 
         let mut context = RulesContext::from_storage(&storage);
         let rule_id = context.rule_id_for_index(0, 0).unwrap();
@@ -407,13 +424,7 @@ mod tests {
     #[test]
     fn test_move_rule_within_group_preserves_rule_id_order() {
         let mut storage = sample_storage();
-        storage.groups[0].programs.push(AppToRun::new_path(
-            PathBuf::from(r"C:\helper.lnk"),
-            vec![],
-            PathBuf::from(r"C:\helper.exe"),
-            PriorityClass::Normal,
-            false,
-        ));
+        storage.groups[0].programs.push(sample_app("helper"));
 
         let mut context = RulesContext::from_storage(&storage);
         let first = context.rule_id_for_index(0, 0).unwrap();
@@ -425,5 +436,80 @@ mod tests {
         );
         assert_eq!(context.rule_id_for_index(0, 0), Some(second));
         assert_eq!(context.rule_id_for_index(0, 1), Some(first));
+    }
+
+    #[test]
+    fn test_group_ids_are_not_reused_after_delete_save_reload() {
+        let mut storage = sample_storage();
+        let mut context = RulesContext::from_storage(&storage);
+
+        storage.groups.push(empty_group("Temporary"));
+        let deleted_group_id = context.append_group();
+        assert_eq!(deleted_group_id, GroupId("group-1".to_string()));
+
+        storage.rule_identities = Some(context.to_persisted_identities());
+        storage.groups.pop();
+        context.remove_group(1);
+        storage.rule_identities = Some(context.to_persisted_identities());
+
+        let mut reloaded = RulesContext::from_storage(&storage);
+        storage.groups.push(empty_group("Replacement"));
+        let replacement_group_id = reloaded.append_group();
+
+        assert_eq!(replacement_group_id, GroupId("group-2".to_string()));
+        assert_ne!(replacement_group_id, deleted_group_id);
+    }
+
+    #[test]
+    fn test_legacy_persisted_identities_without_counters_reconstruct_next_ids() {
+        let identities = serde_json::from_str(
+            r#"{
+                "groups": [
+                    {
+                        "id": "group-4",
+                        "rule_ids": ["rule-7"]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut storage = sample_storage();
+        storage.rule_identities = Some(identities);
+
+        let mut context = RulesContext::from_storage(&storage);
+        storage.groups.push(empty_group("Replacement"));
+        let replacement_group_id = context.append_group();
+        storage.groups[0].programs.push(sample_app("replacement"));
+        context.append_rules_to_group(0, 1);
+
+        assert_eq!(replacement_group_id, GroupId("group-5".to_string()));
+        assert_eq!(
+            context.rule_id_for_index(0, 1),
+            Some(RuleId("rule-8".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_rule_ids_are_not_reused_after_delete_save_reload() {
+        let mut storage = sample_storage();
+        let mut context = RulesContext::from_storage(&storage);
+
+        storage.groups[0].programs.push(sample_app("temporary"));
+        context.append_rules_to_group(0, 1);
+        let deleted_rule_id = context.rule_id_for_index(0, 1).unwrap();
+        assert_eq!(deleted_rule_id, RuleId("rule-1".to_string()));
+
+        storage.rule_identities = Some(context.to_persisted_identities());
+        storage.groups[0].programs.pop();
+        context.remove_rule(0, 1);
+        storage.rule_identities = Some(context.to_persisted_identities());
+
+        let mut reloaded = RulesContext::from_storage(&storage);
+        storage.groups[0].programs.push(sample_app("replacement"));
+        reloaded.append_rules_to_group(0, 1);
+        let replacement_rule_id = reloaded.rule_id_for_index(0, 1).unwrap();
+
+        assert_eq!(replacement_rule_id, RuleId("rule-2".to_string()));
+        assert_ne!(replacement_rule_id, deleted_rule_id);
     }
 }

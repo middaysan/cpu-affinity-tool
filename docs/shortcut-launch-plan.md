@@ -1,6 +1,23 @@
 # Shortcut Launch Plan
 
-Status: design plan, not implemented.
+Status: staged implementation in progress.
+
+Implemented so far:
+
+- CLI startup parsing for `--run-rule <group-id> <rule-id>`
+- non-reusable group/rule allocation counters in `rule_identities`
+- saved-rule dispatch outcome for accepted, missing group, missing rule, and immediate launch rejection
+- cold-start `RunRule` handling that skips normal autorun
+- shortcut command builder for target path, arguments, working directory, and sanitized display name
+- Windows `os_api::ShortcutSpec` and `.lnk` creation
+
+Not implemented yet:
+
+- user-facing rule settings button
+- app-level OS adapter wrapper for shortcut creation
+- second-instance forwarding
+- elevated named-pipe security
+- manual release smoke updates
 
 Origin: GitHub Discussion #12, "Suggestion: shortcut and Run command line support".
 
@@ -21,10 +38,10 @@ Important blocker: saved rule IDs must be non-reusable before this feature is ex
 ## Confirmed Facts
 
 - Windows is the primary released platform.
-- The Windows binary currently starts the GUI directly; there is no committed user-facing CLI command contract.
+- The Windows binary now accepts the narrow `--run-rule <group-id> <rule-id>` startup intent, but there is still no broad user-facing CLI command contract.
 - Saved rules already have logical `GroupId` and `RuleId` identity through `rule_identities`.
 - `AppState::run_group_program(group_id, rule_id)` already resolves logical IDs and dispatches the existing launch path.
-- `AppState::run_group_program(group_id, rule_id)` currently returns `()` and silently ignores stale IDs, so it is not yet enough for an IPC acknowledgement contract.
+- `AppState::run_group_program(group_id, rule_id)` now returns `RunRuleOutcome` for accepted, missing group, missing rule, and immediate launch rejection; second-instance IPC still needs to translate that outcome into process exit behavior.
 - Path-target rules already store launch args and tracked process names.
 - Installed-app rules use AUMID targets and should remain supported by the saved-rule shortcut model.
 - The Windows binary embeds a `requireAdministrator` manifest, so shortcut launches are expected to go through UAC when required by Windows.
@@ -111,7 +128,7 @@ Those flags should not be added until their exact lifecycle behavior is defined 
 The generated Windows shortcut should contain:
 
 - target path: the current executable path
-- arguments: `--run-rule <group-id> <rule-id>`
+- arguments: argv tokens equivalent to `--run-rule <group-id> <rule-id>`; the Windows OS boundary is responsible for command-line quoting when writing `.lnk`
 - working directory: the executable directory
 - icon: the current executable icon where possible
 - display name: a sanitized name derived from the app and group names
@@ -126,7 +143,7 @@ Preferred API shape:
 OS::create_shortcut(ShortcutSpec)
 ```
 
-Expose it to the app through `src/app/adapters/os`, keeping COM and Windows shell details out of `run_settings`.
+`ShortcutSpec` should carry typed argument tokens rather than a pre-quoted raw command line. Expose shortcut creation to the app through `src/app/adapters/os`, keeping COM and Windows shell details out of `run_settings`.
 
 ## Architecture Plan
 
@@ -145,17 +162,20 @@ Add small, bounded pieces rather than a broad refactor.
 
    Before shortcuts can ship, persisted rule identity allocation must stop reusing IDs after delete/save/restart.
 
-   Acceptable approaches:
+   Selected implementation approach:
 
    - persist next group/rule counters
+
+   Alternatives considered but not chosen for the first implementation:
+
    - persist tombstones for exported shortcut IDs
    - switch to random UUID-like IDs that stay within the CLI-safe grammar
 
-   This may require a state schema change and an `AGENTS.md` update in the same implementation change.
+   This changes the persisted `rule_identities` shape and requires an `AGENTS.md` update in the same implementation change.
 
 3. Saved-rule command dispatch
 
-   Reuse the current launch path, but add an explicit outcome before IPC is implemented. A suggested shape:
+   Reuse the current launch path with an explicit outcome before IPC is implemented:
 
    ```text
    RunRuleOutcome::Accepted
@@ -176,6 +196,8 @@ Add small, bounded pieces rather than a broad refactor.
 4. Shortcut generation
 
    Add a UI command in the rule launch settings. The UI should request shortcut creation through an adapter/service, not construct Windows shell objects directly.
+
+   The non-UI builder and Windows OS shortcut writer are implemented. The app adapter and user-facing button remain gated on second-instance forwarding.
 
    Do not expose this UI until the full MVP path works:
 
@@ -367,7 +389,6 @@ cargo build --release --features linux --bin cpu-affinity-tool-linux
 ## Open Decisions
 
 - Exact Windows IPC implementation details after checking the required Win32 APIs and crate feature flags.
-- Exact non-reusable ID strategy: persisted counters, tombstones, or UUID-like IDs.
 - Whether the current `uiAccess="true"` manifest setting is still justified before adding elevated IPC.
 - Whether the first version should support shortcuts for whole groups or only individual rules. Current recommendation: individual rules only.
 - Whether minimized startup belongs in the first shortcut UX or a later iteration.

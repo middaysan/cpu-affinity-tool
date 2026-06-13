@@ -4,6 +4,7 @@ mod app;
 mod tray;
 
 use app::shell::App;
+use app::startup::parse_startup_args;
 use eframe::{run_native, NativeOptions};
 use tokio::runtime::Runtime;
 
@@ -11,6 +12,15 @@ use tokio::runtime::Runtime;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
+    let startup_args = std::env::args().skip(1).collect::<Vec<_>>();
+    let startup_intent = match parse_startup_args(&startup_args) {
+        Ok(intent) => intent,
+        Err(err) => {
+            eprintln!("Invalid startup arguments: {err:?}");
+            std::process::exit(2);
+        }
+    };
+
     #[cfg(debug_assertions)]
     {
         println!("========================================================");
@@ -61,7 +71,7 @@ fn main() {
     let res = run_native(
         "CPU Affinity Tool",
         options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(App::new_with_startup_intent(cc, startup_intent)))),
     );
 
     if let Err(e) = res {

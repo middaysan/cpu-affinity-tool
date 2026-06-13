@@ -41,6 +41,12 @@ struct PostLaunchCorrectionRequest {
     prelaunch_package_pids: HashSet<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchDispatchOutcome {
+    Accepted,
+    Rejected(String),
+}
+
 trait LaunchOs {
     fn set_process_affinity_by_pid(&self, pid: u32, mask: usize) -> Result<(), String>;
     fn set_process_priority_by_pid(&self, pid: u32, priority: PriorityClass) -> Result<(), String>;
@@ -165,7 +171,7 @@ pub fn run_app_with_affinity_sync(
     group_index: usize,
     prog_index: usize,
     app_to_run: AppToRun,
-) {
+) -> LaunchDispatchOutcome {
     let os = RealLaunchOs;
 
     run_app_with_affinity_sync_with_os(
@@ -176,7 +182,7 @@ pub fn run_app_with_affinity_sync(
         prog_index,
         app_to_run,
         &os,
-    );
+    )
 }
 
 fn run_app_with_affinity_sync_with_os<O: LaunchOs>(
@@ -187,16 +193,15 @@ fn run_app_with_affinity_sync_with_os<O: LaunchOs>(
     prog_index: usize,
     app_to_run: AppToRun,
     os: &O,
-) {
+) -> LaunchDispatchOutcome {
     let group_cores = {
         let state = persistent_state.read().unwrap();
         match state.groups.get(group_index) {
             Some(group) => group.cores.clone(),
             None => {
-                log_manager.add_important_sticky_once(format!(
-                    "Error: Group index {group_index} not found"
-                ));
-                return;
+                let message = format!("Error: Group index {group_index} not found");
+                log_manager.add_important_sticky_once(message.clone());
+                return LaunchDispatchOutcome::Rejected(message);
             }
         }
     };
@@ -205,16 +210,16 @@ fn run_app_with_affinity_sync_with_os<O: LaunchOs>(
         let state = persistent_state.read().unwrap();
         let rules = RulesContext::from_storage(&state);
         let Some(group_id) = rules.group_id_for_index(group_index) else {
-            log_manager.add_important_sticky_once(format!(
-                "Error: Missing group id for group index {group_index}"
-            ));
-            return;
+            let message = format!("Error: Missing group id for group index {group_index}");
+            log_manager.add_important_sticky_once(message.clone());
+            return LaunchDispatchOutcome::Rejected(message);
         };
         let Some(rule_id) = rules.rule_id_for_index(group_index, prog_index) else {
-            log_manager.add_important_sticky_once(format!(
+            let message = format!(
                 "Error: Missing rule id for rule index {prog_index} in group {group_index}"
-            ));
-            return;
+            );
+            log_manager.add_important_sticky_once(message.clone());
+            return LaunchDispatchOutcome::Rejected(message);
         };
         (group_id, rule_id)
     };
@@ -227,7 +232,7 @@ fn run_app_with_affinity_sync_with_os<O: LaunchOs>(
         app_to_run,
         group_cores,
         os,
-    );
+    )
 }
 
 fn run_launch_decision<O: LaunchOs>(
@@ -238,7 +243,7 @@ fn run_launch_decision<O: LaunchOs>(
     app_to_run: AppToRun,
     group_cores: Vec<usize>,
     os: &O,
-) {
+) -> LaunchDispatchOutcome {
     let app_key = app_to_run.get_key();
     let mask = group_cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
 
@@ -254,14 +259,14 @@ fn run_launch_decision<O: LaunchOs>(
                 "App already running: {}, settings reapplied and window focused",
                 app_to_run.display()
             ));
-            return;
+            return LaunchDispatchOutcome::Accepted;
         }
 
         log_manager.add_entry(format!(
             "App already running: {}, settings reapplied but no window found to focus",
             app_to_run.display()
         ));
-        return;
+        return LaunchDispatchOutcome::Accepted;
     }
 
     let label = match &app_to_run.launch_target {
@@ -345,8 +350,12 @@ fn run_launch_decision<O: LaunchOs>(
                     prelaunch_package_pids,
                 });
             }
+            LaunchDispatchOutcome::Accepted
         }
-        Err(e) => log_manager.add_important_sticky_once(format!("ERROR: {e}")),
+        Err(e) => {
+            log_manager.add_important_sticky_once(format!("ERROR: {e}"));
+            LaunchDispatchOutcome::Rejected(e)
+        }
     }
 }
 

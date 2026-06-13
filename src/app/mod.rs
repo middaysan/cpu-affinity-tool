@@ -4,3 +4,5 @@ pub mod models;
 pub mod runtime;
 pub mod shared;
 pub mod shell;
+pub mod shortcut_launch;
+pub mod startup;

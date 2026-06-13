@@ -50,6 +50,14 @@ pub(crate) enum MoveRuleToGroupOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunRuleOutcome {
+    Accepted,
+    MissingGroup,
+    MissingRule,
+    LaunchRejected(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InstalledAppPickerRowSnapshot {
     pub entry_index: usize,
     pub name: String,
@@ -677,7 +685,7 @@ impl AppState {
         group_index: usize,
         prog_index: usize,
         app_to_run: AppToRun,
-    ) {
+    ) -> execution::LaunchDispatchOutcome {
         execution::run_app_with_affinity_sync(
             &self.persistent_state,
             &self.runtime,
@@ -685,17 +693,27 @@ impl AppState {
             group_index,
             prog_index,
             app_to_run,
-        );
+        )
     }
 
-    pub fn run_group_program(&mut self, group_id: GroupId, rule_id: RuleId) {
-        let Some((group_index, program_index)) = self.rule_indices_for_ids(&group_id, &rule_id)
-        else {
-            return;
+    pub fn run_group_program(&mut self, group_id: GroupId, rule_id: RuleId) -> RunRuleOutcome {
+        self.reconcile_rules();
+        let Some(group_index) = self.rules.group_index_for_id(&group_id) else {
+            return RunRuleOutcome::MissingGroup;
+        };
+        let Some(program_index) = self.rules.rule_index_for_id(group_index, &rule_id) else {
+            return RunRuleOutcome::MissingRule;
         };
 
         if let Some(app_to_run) = self.get_group_program(group_index, program_index) {
-            self.run_app_with_affinity_sync(group_index, program_index, app_to_run);
+            match self.run_app_with_affinity_sync(group_index, program_index, app_to_run) {
+                execution::LaunchDispatchOutcome::Accepted => RunRuleOutcome::Accepted,
+                execution::LaunchDispatchOutcome::Rejected(message) => {
+                    RunRuleOutcome::LaunchRejected(message)
+                }
+            }
+        } else {
+            RunRuleOutcome::MissingRule
         }
     }
 
@@ -1109,7 +1127,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, MoveRuleToGroupOutcome};
+    use super::{AppState, MoveRuleToGroupOutcome, RunRuleOutcome};
     use crate::app::features::execution::RuntimeRegistry;
     use crate::app::features::rules::RulesContext;
     use crate::app::models::{
@@ -1210,6 +1228,89 @@ mod tests {
             rule_id: rule_id(app, 0, 0),
         });
         app.ui.app_edit_state.current_edit = Some(updated);
+    }
+
+    #[test]
+    fn test_run_group_program_reports_missing_group() {
+        let mut app = sample_state();
+        let existing_rule_id = rule_id(&app, 0, 0);
+
+        assert_eq!(
+            app.run_group_program(GroupId("missing-group".to_string()), existing_rule_id),
+            RunRuleOutcome::MissingGroup
+        );
+    }
+
+    #[test]
+    fn test_run_group_program_reports_missing_rule() {
+        let mut app = sample_state();
+        let existing_group_id = group_id(&app, 0);
+
+        assert_eq!(
+            app.run_group_program(existing_group_id, RuleId("missing-rule".to_string())),
+            RunRuleOutcome::MissingRule
+        );
+    }
+
+    #[test]
+    fn test_run_group_program_rejects_rule_moved_to_another_group() {
+        let mut app = sample_state();
+        add_empty_group(&mut app, "Background");
+        let source_group_id = group_id(&app, 0);
+        let target_group_id = group_id(&app, 1);
+        let moved_rule_id = rule_id(&app, 0, 0);
+
+        assert_eq!(
+            app.move_rule_to_group_at(
+                source_group_id.clone(),
+                moved_rule_id.clone(),
+                target_group_id,
+                0
+            ),
+            MoveRuleToGroupOutcome::Moved
+        );
+
+        assert_eq!(
+            app.run_group_program(source_group_id, moved_rule_id),
+            RunRuleOutcome::MissingRule
+        );
+    }
+
+    #[test]
+    fn test_run_group_program_reports_accepted_for_existing_rule() {
+        let mut app = sample_state();
+        let existing_group_id = group_id(&app, 0);
+        let existing_rule_id = rule_id(&app, 0, 0);
+        let app_key = app.get_group_program(0, 0).unwrap().get_key();
+
+        assert!(app.runtime.add_running_app(
+            &app_key,
+            12345,
+            existing_group_id.clone(),
+            existing_rule_id.clone()
+        ));
+
+        assert_eq!(
+            app.run_group_program(existing_group_id, existing_rule_id),
+            RunRuleOutcome::Accepted
+        );
+    }
+
+    #[test]
+    fn test_run_group_program_reports_launch_rejection() {
+        let mut app = sample_state();
+        let existing_group_id = group_id(&app, 0);
+        let existing_rule_id = rule_id(&app, 0, 0);
+
+        let outcome = app.run_group_program(existing_group_id, existing_rule_id);
+
+        assert!(matches!(
+            outcome,
+            RunRuleOutcome::LaunchRejected(message)
+                if message.contains("Failed to start process")
+                    || message.contains("No such file")
+                    || message.contains("The system cannot find")
+        ));
     }
 
     #[test]

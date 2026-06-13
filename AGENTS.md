@@ -132,11 +132,14 @@ Current runtime split:
 - workers emit typed `shell::events::ShellEvent` messages and do not hold `egui::Context`
 
 Windows runtime flow:
-1. Entry point creates GUI and runtime environment.
-2. `tokio` runtime is created.
-3. The process lowers its own priority to `BelowNormal`.
-4. `App::new` creates `AppState`, seeds in-memory logical identities, writes startup diagnostics, starts execution monitors, captures `HWND`, runs autorun once, and initializes tray integration.
-5. `App::update` handles tray events, monitor notifications, hidden-window flow, file drops, applies theme, and renders the active view.
+1. Entry point parses startup arguments into a narrow startup intent; normal GUI startup remains the default, while `--run-rule <group-id> <rule-id>` is accepted as a saved-rule startup intent.
+2. Entry point creates GUI and runtime environment.
+3. `tokio` runtime is created.
+4. The process lowers its own priority to `BelowNormal`.
+5. `App::new_with_startup_intent` creates `AppState`, seeds in-memory logical identities, writes startup diagnostics, starts execution monitors, handles startup intent, captures `HWND`, and initializes tray integration.
+   - normal GUI startup runs autorun once
+   - `RunRule` startup skips normal autorun and dispatches only the requested saved rule
+6. `App::update` handles tray events, monitor notifications, hidden-window flow, file drops, applies theme, and renders the active view.
 
 Linux entrypoint now reaches the shared `shell::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
 
@@ -197,6 +200,8 @@ Important contract facts:
 - `AppToRun` installed targets store Windows `AUMID` and do not expose user-editable args in the current contract
 - runtime tracking identity keeps the existing stable encoded key contract, but it now flows through typed `AppRuntimeKey` instead of raw `String` keys across runtime core
 - logical group and rule ownership persist in `AppStateStorage.rule_identities` starting with schema `v6`
+- `rule_identities` also persists next group/rule allocation counters so deleted logical IDs are not reused after save and reload
+- older `rule_identities` data without allocation counters remains readable; missing counters are reconstructed from the highest existing logical IDs and persisted on the next explicit save
 - when pre-`v6` state is loaded, `AppState` seeds in-memory logical identities immediately and persists them on the next explicit save
 - the Windows `Find Installed` picker is a launch-safe Windows subset backed by `AppsFolder + Start Menu shortcuts + App Paths`, not a full OS inventory
 - tracked Windows installed targets now use a runtime-only package metadata cache plus package-local PID enrichment while the target stays tracked
@@ -224,6 +229,7 @@ Data source separation:
 - installed-app discovery and activation on Windows
 - installed package metadata lookup on Windows
 - opening the active data directory in the platform file manager
+- Windows shortcut creation for saved-rule launch shortcuts
 - affinity read and set
 - priority read and set
 - process inspection and process-tree logic
@@ -241,13 +247,14 @@ Internal backend structure:
   - `launch`
   - `window`
   - `cpu`
-- crate-root public shape remains intentionally narrow: external callers still interact through `OS` plus `PriorityClass`
+- crate-root public shape remains intentionally narrow: external callers still interact through `OS` plus small boundary value types such as `PriorityClass` and `ShortcutSpec`
 - Linux backend remains a single-file minimal backend and is not forced into parity with the Windows internal layout
 
 Windows release-path surface:
 - tray integration
 - taskbar and focus behavior
 - `.lnk` and `.url` parsing
+- `.lnk` creation through `os_api::ShortcutSpec`
 - registry-based URI resolution
 - `AppsFolder + Start Menu shortcuts + App Paths` installed app discovery and AUMID activation
 - runtime-only package metadata lookup and package-local helper tracking for installed targets
