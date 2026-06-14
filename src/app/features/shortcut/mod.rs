@@ -236,8 +236,8 @@ mod tests {
         fn supported() -> Self {
             Self {
                 supported: true,
-                current_exe: Ok(PathBuf::from(r"C:\Tools\cpu-affinity-tool.exe")),
-                desktop_dir: Ok(PathBuf::from(r"C:\Users\Ada\Desktop")),
+                current_exe: Ok(fake_current_exe()),
+                desktop_dir: Ok(fake_desktop_dir()),
                 create_result: Ok(()),
                 ..Self::default()
             }
@@ -251,6 +251,22 @@ mod tests {
         fn path_key(path: &Path) -> String {
             path.to_string_lossy().to_ascii_lowercase()
         }
+    }
+
+    fn fake_tool_dir() -> PathBuf {
+        PathBuf::from(r"C:\Tools")
+    }
+
+    fn fake_current_exe() -> PathBuf {
+        fake_tool_dir().join("cpu-affinity-tool.exe")
+    }
+
+    fn fake_desktop_dir() -> PathBuf {
+        PathBuf::from(r"C:\Users\Ada\Desktop")
+    }
+
+    fn fake_desktop_shortcut(file_name: &str) -> PathBuf {
+        fake_desktop_dir().join(file_name)
     }
 
     impl RuleShortcutPlatform for FakePlatform {
@@ -334,23 +350,14 @@ mod tests {
         let created =
             create_saved_rule_shortcut(&storage, &rules, group_id, rule_id, &mut platform).unwrap();
 
-        assert_eq!(
-            created,
-            PathBuf::from(r"C:\Users\Ada\Desktop\Game - Performance.lnk")
-        );
+        assert_eq!(created, fake_desktop_shortcut("Game - Performance.lnk"));
         assert_eq!(platform.create_calls.len(), 1);
         let spec = &platform.create_calls[0];
         assert_eq!(spec.shortcut_path, created);
-        assert_eq!(
-            spec.target_path,
-            PathBuf::from(r"C:\Tools\cpu-affinity-tool.exe")
-        );
+        assert_eq!(spec.target_path, fake_current_exe());
         assert_eq!(spec.arguments, vec!["--run-rule", "group-0", "rule-0"]);
-        assert_eq!(spec.working_dir, Some(PathBuf::from(r"C:\Tools")));
-        assert_eq!(
-            spec.icon_path,
-            Some(PathBuf::from(r"C:\Tools\cpu-affinity-tool.exe"))
-        );
+        assert_eq!(spec.working_dir, Some(fake_tool_dir()));
+        assert_eq!(spec.icon_path, Some(fake_current_exe()));
         assert_eq!(spec.icon_index, 0);
     }
 
@@ -464,15 +471,12 @@ mod tests {
         let group_id = rules.group_id_for_index(0).unwrap();
         let rule_id = rules.rule_id_for_index(0, 0).unwrap();
         let mut platform = FakePlatform::supported();
-        platform.add_existing(r"C:\Users\Ada\Desktop\GAME - PERFORMANCE.LNK");
+        platform.add_existing(fake_desktop_shortcut("GAME - PERFORMANCE.LNK"));
 
         let created =
             create_saved_rule_shortcut(&storage, &rules, group_id, rule_id, &mut platform).unwrap();
 
-        assert_eq!(
-            created,
-            PathBuf::from(r"C:\Users\Ada\Desktop\Game - Performance (1).lnk")
-        );
+        assert_eq!(created, fake_desktop_shortcut("Game - Performance (1).lnk"));
     }
 
     #[test]
@@ -481,11 +485,11 @@ mod tests {
         let group_id = rules.group_id_for_index(0).unwrap();
         let rule_id = rules.rule_id_for_index(0, 0).unwrap();
         let mut exhausted = FakePlatform::supported();
-        exhausted.add_existing(r"C:\Users\Ada\Desktop\Game - Performance.lnk");
+        exhausted.add_existing(fake_desktop_shortcut("Game - Performance.lnk"));
         for index in 1..100 {
-            exhausted.add_existing(format!(
-                r"C:\Users\Ada\Desktop\Game - Performance ({index}).lnk"
-            ));
+            exhausted.add_existing(fake_desktop_shortcut(&format!(
+                "Game - Performance ({index}).lnk"
+            )));
         }
 
         assert_eq!(
@@ -517,10 +521,7 @@ mod tests {
         let created =
             create_saved_rule_shortcut(&storage, &rules, group_id, rule_id, &mut platform).unwrap();
 
-        assert_eq!(
-            created,
-            PathBuf::from(r"C:\Users\Ada\Desktop\Spotify - Performance.lnk")
-        );
+        assert_eq!(created, fake_desktop_shortcut("Spotify - Performance.lnk"));
         assert!(!created.to_string_lossy().contains("Vendor.Package_abc!App"));
     }
 }

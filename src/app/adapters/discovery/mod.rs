@@ -108,15 +108,24 @@ mod tests {
             PathBuf::from(r"C:\Tools\NeverParsed.exe"),
         ]);
 
-        assert_eq!(discovered.apps.len(), 1);
-        assert_eq!(
-            discovered.apps[0].bin_path(),
-            Some(PathBuf::from(r"C:\Tools\Sample.exe").as_path())
-        );
-        assert!(discovered
-            .first_error
-            .as_deref()
-            .is_some_and(|error| error.contains("Failed to get file extension")));
+        #[cfg(windows)]
+        {
+            assert_eq!(discovered.apps.len(), 1);
+            assert_eq!(
+                discovered.apps[0].bin_path(),
+                Some(PathBuf::from(r"C:\Tools\Sample.exe").as_path())
+            );
+            assert!(discovered
+                .first_error
+                .as_deref()
+                .is_some_and(|error| error.contains("Failed to get file extension")));
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert_eq!(discovered.apps.len(), 3);
+            assert!(discovered.first_error.is_none());
+        }
     }
 
     #[test]
