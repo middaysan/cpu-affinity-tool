@@ -1,6 +1,6 @@
 # Shortcut Launch Plan
 
-Status: staged implementation in progress.
+Status: MVP implementation is complete in code and docs; release readiness still requires the manual smoke matrix before publishing.
 
 Implemented so far:
 
@@ -10,14 +10,14 @@ Implemented so far:
 - cold-start `RunRule` handling that skips normal autorun
 - shortcut command builder for target path, arguments, working directory, and sanitized display name
 - Windows `os_api::ShortcutSpec` and `.lnk` creation
+- Windows second-instance `RunRule` forwarding through a local named pipe and primary mutex
+- explicit named-pipe/mutex security descriptor, remote-client rejection, same-session and same-user client checks, SQOS-protected client open, first-pipe-instance creation, strict versioned JSON protocol, bounded frames, and typed forwarding exit codes
+- app-level saved-rule shortcut service with no-overwrite filename allocation and current elevated token Desktop resolution
+- rule settings `Create desktop shortcut` button for saved clean rules on Windows
 
-Not implemented yet:
+Release gate still required:
 
-- user-facing rule settings button
-- app-level OS adapter wrapper for shortcut creation
-- second-instance forwarding
-- elevated named-pipe security
-- manual release smoke updates
+- run the release-blocking shortcut smoke matrix in `docs/release-smoke-matrix.md`
 
 Origin: GitHub Discussion #12, "Suggestion: shortcut and Run command line support".
 
@@ -41,11 +41,12 @@ Important blocker: saved rule IDs must be non-reusable before this feature is ex
 - The Windows binary now accepts the narrow `--run-rule <group-id> <rule-id>` startup intent, but there is still no broad user-facing CLI command contract.
 - Saved rules already have logical `GroupId` and `RuleId` identity through `rule_identities`.
 - `AppState::run_group_program(group_id, rule_id)` already resolves logical IDs and dispatches the existing launch path.
-- `AppState::run_group_program(group_id, rule_id)` now returns `RunRuleOutcome` for accepted, missing group, missing rule, and immediate launch rejection; second-instance IPC still needs to translate that outcome into process exit behavior.
+- `AppState::run_group_program(group_id, rule_id)` now returns `RunRuleOutcome` for accepted, missing group, missing rule, and immediate launch rejection; second-instance IPC translates that outcome into typed responses and forwarding exit codes.
 - Path-target rules already store launch args and tracked process names.
 - Installed-app rules use AUMID targets and should remain supported by the saved-rule shortcut model.
-- The Windows binary embeds a `requireAdministrator` manifest, so shortcut launches are expected to go through UAC when required by Windows.
-- The Windows manifest currently also sets `uiAccess="true"`, which must be included in the security model before adding elevated IPC.
+- The Windows release binary embeds a `requireAdministrator` manifest, so shortcut launches are expected to go through UAC when required by Windows.
+- The Windows manifest uses `uiAccess="false"`; the app is not an assistive-technology tool and shortcut IPC must not rely on UIAccess privileges.
+- Shortcut creation resolves the Desktop for the current elevated token. If the app is elevated through credential-over-the-shoulder UAC with another administrator account, the shortcut can be created on that elevated account's Desktop instead of the unelevated shell user's Desktop.
 
 ## Goals
 
@@ -54,7 +55,7 @@ Important blocker: saved rule IDs must be non-reusable before this feature is ex
 - Let shortcut launches work whether the app is already running or not.
 - Avoid a broad command-line surface that duplicates the whole rule editor.
 - Keep the first implementation small enough to test with unit/state-level coverage plus a focused Windows smoke pass.
-- Do not expose the user-facing shortcut button until CLI parsing, saved-rule dispatch, shortcut writing, and second-instance forwarding all work together.
+- Keep the user-facing shortcut button limited to the completed saved-rule shortcut path: CLI parsing, saved-rule dispatch, shortcut writing, and second-instance forwarding.
 
 ## Non-Goals For The First Version
 
@@ -70,7 +71,7 @@ Important blocker: saved rule IDs must be non-reusable before this feature is ex
 
 1. The user configures an app rule in the normal UI.
 2. In that rule's launch settings, the user clicks "Create desktop shortcut" for the saved rule.
-3. The app creates a `.lnk` on the user's desktop.
+3. The app creates a `.lnk` on the Desktop for the current elevated Windows token.
 4. The shortcut target is the current `cpu-affinity-tool.exe`.
 5. The shortcut args include the saved `GroupId` and `RuleId`.
 6. When the shortcut is opened, the tool runs that saved rule.
@@ -114,14 +115,7 @@ Rules:
 - IDs accepted from CLI or IPC should use a constrained no-whitespace grammar such as `[A-Za-z0-9._:-]{1,128}`. If rule identity generation changes later, it must keep shortcut IDs within that grammar.
 - A shortcut binds to the `(group-id, rule-id)` pair. Renaming or reordering a group or app should not break the shortcut, but moving a rule to a different group should invalidate the old shortcut and require creating a new one.
 
-Deferred behaviors, not reserved CLI contract:
-
-```text
---start-minimized
---exit-after-target-exits
-```
-
-Those flags should not be added until their exact lifecycle behavior is defined and tested.
+Deferred behaviors are not reserved CLI contract. Exact names and encoding for minimized/background startup or auto-close after target exit are intentionally undecided and should be chosen only after lifecycle behavior is defined and tested.
 
 ## Shortcut Contract
 
@@ -197,7 +191,7 @@ Add small, bounded pieces rather than a broad refactor.
 
    Add a UI command in the rule launch settings. The UI should request shortcut creation through an adapter/service, not construct Windows shell objects directly.
 
-   The non-UI builder and Windows OS shortcut writer are implemented. The app adapter and user-facing button remain gated on second-instance forwarding.
+   The non-UI builder, Windows OS shortcut writer, app service, and user-facing Windows button are implemented.
 
    Do not expose this UI until the full MVP path works:
 
@@ -224,36 +218,48 @@ Add small, bounded pieces rather than a broad refactor.
 
    Required IPC security properties:
 
-   - explicit security descriptor, not default security
-   - scoped to the current logon SID/session where practical
-   - no remote clients
-   - client identity verification before dispatch
+   - explicit security descriptor, not default security: implemented in `libs/os_api/src/windows/ipc.rs`
+   - scoped to current user/session and app executable identity: implemented through endpoint names plus pipe/mutex ACLs
+   - no remote clients: implemented with `PIPE_REJECT_REMOTE_CLIENTS`
+   - client identity verification before dispatch: implemented with same-session checks plus named-pipe impersonation and thread-token user SID verification
+   - client-side impersonation protection: implemented with `SECURITY_SQOS_PRESENT`, `SECURITY_IDENTIFICATION`, and `SECURITY_EFFECTIVE_ONLY`
+   - first-instance anti-squatting: implemented with a primary mutex plus `FILE_FLAG_FIRST_PIPE_INSTANCE`
    - fail closed on authentication or version errors
-   - strict maximum IPC message size
-   - strict `version == 1`
-   - no unknown commands or unknown fields
-   - no control characters in logged error text
+   - strict maximum IPC message size: implemented at 4096 bytes
+   - strict `version == 1`: implemented
+   - no unknown commands or unknown fields: implemented with deny-unknown-field serde frames
+   - no control characters in logged error text: implemented by sanitizing optional response detail
 
-   The command envelope can be versioned JSON using existing `serde_json`:
+   The command envelope is versioned JSON using existing `serde_json`:
 
    ```json
    {
      "version": 1,
-     "command": "run_rule",
-     "group_id": "group-1",
-     "rule_id": "rule-3"
+     "command": {
+       "type": "run_rule",
+       "group_id": "group-1",
+       "rule_id": "rule-3"
+     }
    }
    ```
 
    The response should also be typed:
 
    ```json
-   { "ok": true }
+   {
+     "version": 1,
+     "code": "accepted"
+   }
    ```
 
    ```json
-   { "ok": false, "error": "Rule not found" }
+   {
+     "version": 1,
+     "code": "missing_rule"
+   }
    ```
+
+   Response codes are protocol values, not user-facing text. Optional display/log text is sanitized and is not required for control flow. The protocol rejects unknown fields, unsupported versions, oversized frames, unknown commands, and unknown response codes.
 
 6. Shell integration
 
@@ -273,9 +279,10 @@ Add small, bounded pieces rather than a broad refactor.
 
 ## Security And Runtime Risks
 
-- Because the executable requires administrator privileges, the shortcut may trigger UAC even when it only forwards a command.
+- Because the release executable requires administrator privileges, the shortcut may trigger UAC even when it only forwards a command.
+- Because shortcut creation uses the current elevated token, credential-over-the-shoulder UAC can put the generated shortcut on the elevated administrator account's Desktop.
 - Because the active app is elevated, IPC can become an elevation bridge if a lower-integrity or different-session process can connect and trigger saved launches.
-- The current manifest includes `uiAccess="true"`. Microsoft documents `uiAccess=true` as intended for assistive technology scenarios and says it should not be used by applications that are not assistive technologies:
+- The manifest uses `uiAccess="false"`. Microsoft documents `uiAccess=true` as intended for assistive technology scenarios and says it should not be used by applications that are not assistive technologies:
   - https://learn.microsoft.com/en-us/cpp/build/reference/manifestuac-embeds-uac-information-in-manifest
   - https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-securityoverview
 - IPC must not accept arbitrary executable paths or shell commands.
@@ -285,7 +292,7 @@ Add small, bounded pieces rather than a broad refactor.
 - Log the resolved saved rule target before launching from a shortcut.
 - Verify state-file ownership and ACL expectations before treating saved rules as privileged launch intent.
 - Race handling matters when two shortcuts are launched at the same time.
-- If the active app is starting but the IPC endpoint is not ready yet, the forwarding process should retry briefly before deciding to become the primary instance or report failure.
+- If the active app is starting but the IPC endpoint is not ready yet, the forwarding process retries briefly and then reports failure; it must not become a second primary instance while another process owns the primary guard.
 - If a shortcut points to an old moved executable path, Windows will fail before the app can recover; this is normal shortcut behavior. If possible, user-facing docs should tell users to recreate shortcuts after moving the portable app folder.
 
 ## Alternatives Considered
@@ -374,6 +381,37 @@ Manual smoke:
 - verify normal no-intent launches keep the existing behavior
 - verify shortcut-triggered cold start does not run unrelated autorun rules
 
+## Forwarding Exit Codes
+
+| Result | Exit code |
+| --- | ---: |
+| Forwarded accepted | 0 |
+| Missing group | 20 |
+| Missing rule | 21 |
+| Launch rejected | 22 |
+| Server not ready | 23 |
+| Timeout | 24 |
+| Protocol error | 25 |
+| Auth/security failure | 26 |
+| CLI parse error | 2 |
+| GUI startup error | 1 |
+
+## IPC Security Closure
+
+| Gate | Evidence | Status |
+| --- | --- | --- |
+| Explicit pipe/mutex security descriptor | Source audit: `libs/os_api/src/windows/ipc.rs` builds explicit SDDL instead of default descriptors | Closed |
+| Scoped endpoint identity | Source audit: endpoint includes user SID, session id, and executable path hash | Closed |
+| Remote clients rejected | Source audit: pipe mode uses `PIPE_REJECT_REMOTE_CLIENTS` | Closed |
+| Client session validation | Source audit: server and client verify named-pipe session ids | Closed |
+| Client user validation | Source audit: server uses named-pipe impersonation and thread-token user SID comparison | Closed |
+| Client-side impersonation protection | Source audit: client open uses SQOS flags with identification/effective-only behavior | Closed |
+| First-instance anti-squatting | Source audit: primary mutex plus `FILE_FLAG_FIRST_PIPE_INSTANCE` | Closed |
+| Strict protocol and frame size | Automated tests: `app::instance_forwarding` protocol tests | Closed |
+| Hidden-window drain | Automated tests: shell forwarded-command drain while hidden | Closed |
+| Lower-integrity/elevation behavior | Manual release smoke: verify shortcut/UAC behavior and auth failure probes where practical | Release smoke |
+| Built manifest `uiAccess` | Artifact probe: `scripts/assert-windows-release-manifest.ps1` reads `RT_MANIFEST` from the built Windows exe and asserts `requireAdministrator` plus `uiAccess="false"` in CI and the stable release workflow | Closed |
+
 Relevant existing verification commands:
 
 ```text
@@ -383,13 +421,14 @@ cargo fmt --all -- --check
 cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings
 cargo build --release --features windows --bin cpu-affinity-tool
 cargo test --features linux --bin cpu-affinity-tool-linux
+cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings
 cargo build --release --features linux --bin cpu-affinity-tool-linux
 ```
 
 ## Open Decisions
 
-- Exact Windows IPC implementation details after checking the required Win32 APIs and crate feature flags.
-- Whether the current `uiAccess="true"` manifest setting is still justified before adding elevated IPC.
+- Manual smoke details for Windows IPC security probes and exit-code capture.
+- Whether future focus/window behavior ever needs a manifest privilege change; current shortcut IPC must keep `uiAccess="false"`.
 - Whether the first version should support shortcuts for whole groups or only individual rules. Current recommendation: individual rules only.
 - Whether minimized startup belongs in the first shortcut UX or a later iteration.
 - Whether auto-close should mean "close after the primary launched process exits" or "close after all tracked PIDs for the rule exit".
@@ -402,5 +441,5 @@ Thanks for the suggestion. I do not want to duplicate the whole rule editor as c
 
 The safer direction is a shortcut for an already saved rule: configure the app once in the UI, then use a desktop shortcut that calls the tool with that saved rule ID. If the tool is already running, the new process can forward the command to the active instance and exit. If it is not running, the tool can start normally, load the saved state, and run that rule.
 
-That keeps the GUI as the source of truth while still giving the one-click launch flow you described. I will track this as a staged feature: saved-rule CLI command first, desktop shortcut generation second, and start-minimized / close-after-exit behavior only after the lifecycle details are clear.
+That keeps the GUI as the source of truth while still giving the quick desktop shortcut launch flow you described. I will track this as a staged feature: saved-rule CLI command first, desktop shortcut generation second, and minimized/background or auto-close behavior only after the lifecycle details are clear.
 ```

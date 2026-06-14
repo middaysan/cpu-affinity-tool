@@ -56,7 +56,7 @@ Current platform reality:
 Key directories:
 - `src/` - application runtime code and entrypoints
 - `src/app/shell/` - the top-level `eframe::App` shell, route enums, transient UI sessions, typed shell events, and presenter module ownership
-- `src/app/features/` - bounded feature modules for `rules`, `execution`, `preferences`, `topology`, and `diagnostics`
+- `src/app/features/` - bounded feature modules for `rules`, `execution`, `preferences`, `shortcut`, `topology`, and `diagnostics`
 - `src/app/adapters/` - seams for persisted state loading, OS helpers, and installed-app discovery
 - `src/app/runtime/` - thin composition-root state facade kept around `AppState`
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
@@ -64,6 +64,7 @@ Key directories:
 - `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, while Linux remains a single-file desktop beta backend
 - `assets/` - icon, screenshot, `cpu_presets.json`, and social-preview guidance
 - `docs/` - release/process documentation and user-facing comparison/rationale references
+- `scripts/` - committed release/build verification helper scripts
 - `.github/workflows/` - CI and GitHub Release automation
 - `changelogs/` - manual release notes
 
@@ -71,7 +72,7 @@ Important root files:
 - `Cargo.toml` - package metadata, binaries, features, dependencies
 - `LICENSE` - MIT license
 - `build.rs` - Windows resource embedding and rebuild hooks
-- `app.manifest` - embedded Windows manifest with elevated privilege model
+- `app.manifest` - embedded Windows release manifest with elevated privilege model
 - `Makefile.toml` - local developer automation wrapper
 - `README.md` - user-facing project description
 - `CHANGELOG.md` - consolidated human-facing release history
@@ -94,6 +95,7 @@ Layers:
 - `features` own product behavior:
   - `rules` owns group and rule mutations plus logical `GroupId` / `RuleId` identity
   - `execution` owns launch, runtime tracking, reconcile loops, package-owner claims, and typed monitor notifications
+  - `shortcut` owns saved-rule desktop shortcut service, shortcut filename allocation, OS adapter seam, and user-safe shortcut creation errors
   - `preferences` owns theme and monitoring toggles
   - `topology` owns CPU model/thread detection helpers
   - `diagnostics` owns startup logging and typed diagnostic event shape
@@ -104,6 +106,7 @@ Layers:
 Current runtime split:
 - `shell::App` owns shell-only lifecycle state:
   - `tray_rx`
+  - Windows local shortcut-forwarding server and primary guard
   - Windows tray icon guard
   - Windows `HWND`
   - hidden-window flag
@@ -117,6 +120,7 @@ Current runtime split:
   - active route
   - group form session
   - rule editor session
+  - rule editor shortcut creation result/status
   - dropped files
   - installed app picker session and cached catalog
   - rotating tip state
@@ -133,13 +137,20 @@ Current runtime split:
 
 Windows runtime flow:
 1. Entry point parses startup arguments into a narrow startup intent; normal GUI startup remains the default, while `--run-rule <group-id> <rule-id>` is accepted as a saved-rule startup intent.
-2. Entry point creates GUI and runtime environment.
-3. `tokio` runtime is created.
-4. The process lowers its own priority to `BelowNormal`.
-5. `App::new_with_startup_intent` creates `AppState`, seeds in-memory logical identities, writes startup diagnostics, starts execution monitors, handles startup intent, captures `HWND`, and initializes tray integration.
-   - normal GUI startup runs autorun once
-   - `RunRule` startup skips normal autorun and dispatches only the requested saved rule
-6. `App::update` handles tray events, monitor notifications, hidden-window flow, file drops, applies theme, and renders the active view.
+2. Windows entry point prepares the local shortcut-forwarding endpoint before creating `tokio` or `eframe`:
+   - normal GUI startup may claim the primary guard before GUI startup, but it never forwards, exits, blocks on an IPC lock, or becomes a global single-instance launch
+   - `RunRule` startup first tries to claim the primary guard; if another primary owns it, the process forwards a typed `RunRule` command over the local IPC pipe and exits with the typed forwarding result code
+   - if `RunRule` claims the primary guard, it cold-starts the GUI, starts the forwarding server after the shell owns the command receiver and GUI wake path, then skips normal autorun and dispatches only the requested saved rule
+   - if the primary guard exists but the pipe is not ready, forwarding retries briefly and then exits non-zero instead of becoming a second primary
+3. Entry point creates GUI and runtime environment.
+4. `tokio` runtime is created.
+5. The process lowers its own priority to `BelowNormal`.
+6. The Windows entrypoint creates `App` without dispatching startup intent, which creates `AppState`, seeds in-memory logical identities, writes startup diagnostics, starts execution monitors, captures `HWND`, and initializes tray integration.
+7. The Windows entrypoint installs the prepared shortcut-forwarding runtime with the GUI wake callback before dispatching startup intent.
+   - normal GUI startup then runs autorun once
+   - `RunRule` startup then skips normal autorun and dispatches only the requested saved rule
+   - if a `RunRule` cold start claimed the primary guard but cannot start the forwarding server, the requested saved rule is blocked and logged instead of launching without an owned forwarding endpoint
+8. `App::update` handles tray events, monitor notifications, local forwarded shortcut commands, hidden-window flow, file drops, applies theme, and renders the active view.
 
 Linux entrypoint now reaches the shared `shell::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
 
@@ -147,6 +158,7 @@ Linux entrypoint now reaches the shared `shell::App` shell, startup logging, aut
 - GUI runs on the main thread
 - background tasks use `tokio`
 - tray commands flow through `tray_rx` owned by `shell::App`
+- Windows local shortcut-forwarding requests flow through a shell-owned named-pipe server thread into `shell::App`, with per-request reply channels; request enqueue wakes the `egui` context for prompt draining
 - monitor notifications flow through typed `ShellEvent` messages in `monitor_rx` owned by `RuntimeRegistry`
 - persisted state uses `Arc<RwLock<AppStateStorage>>`
 - running-process tracking uses `Arc<TokioRwLock<RunningApps>>`
@@ -158,6 +170,7 @@ Background loops:
 - affinity and priority verification and optional correction loop
 
 Hidden-window flow:
+- forwarded shortcut commands are drained before the hidden-window render skip
 - when the window is hidden, `shell::App` schedules repaint with `ctx.request_repaint_after(...)` and skips rendering
 - the hidden-window path no longer sleeps on the UI thread
 
@@ -225,10 +238,12 @@ Data source separation:
 
 ## Platform boundary
 `libs/os_api` is the main boundary between the app and the OS. It covers:
+- Windows local named-pipe and mutex transport for saved-rule shortcut forwarding
 - process launch
 - installed-app discovery and activation on Windows
 - installed package metadata lookup on Windows
 - opening the active data directory in the platform file manager
+- resolving the current elevated token's per-user Desktop directory for Windows shortcut creation
 - Windows shortcut creation for saved-rule launch shortcuts
 - affinity read and set
 - priority read and set
@@ -241,6 +256,7 @@ Data source separation:
 Internal backend structure:
 - Windows backend is split internally into focused modules under `libs/os_api/src/windows/`:
   - `common`
+  - `ipc`
   - `scheduling`
   - `processes`
   - `shell`
@@ -255,11 +271,13 @@ Windows release-path surface:
 - taskbar and focus behavior
 - `.lnk` and `.url` parsing
 - `.lnk` creation through `os_api::ShortcutSpec`
+- current-token per-user Desktop resolution through the Windows known-folder API for saved-rule shortcut creation; credential-over-the-shoulder UAC can place shortcuts on the elevated account's Desktop instead of the unelevated shell user's Desktop
+- local named-pipe and primary-guard forwarding for saved-rule shortcut launches
 - registry-based URI resolution
 - `AppsFolder + Start Menu shortcuts + App Paths` installed app discovery and AUMID activation
 - runtime-only package metadata lookup and package-local helper tracking for installed targets
 - richer process inspection
-- embedded manifest and resources
+- embedded release manifest and resources
 - Windows release-path CI validation
 - current published release artifact
 
@@ -285,7 +303,7 @@ Primary runtime and build dependencies:
 - `eframe` / `egui` - desktop GUI
 - `tokio` - background runtime
 - `mimalloc` - global allocator
-- `windows` - Win32 bindings
+- `windows` - Win32 bindings for shell integration, process/runtime operations, local IPC, security descriptors, and manifest/resource-adjacent Windows APIs
 - `tray-icon` - Windows tray integration
 - `rfd` - file dialogs
 - `serde` / `serde_json` - persisted JSON schema
@@ -311,7 +329,9 @@ Local verification commands:
 - `cargo fmt --all -- --check`
 - `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`
 - `cargo build --release --features windows --bin cpu-affinity-tool`
+- `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe`
 - `cargo test --features linux --bin cpu-affinity-tool-linux`
+- `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`
 - `cargo build --release --features linux --bin cpu-affinity-tool-linux`
 
 `cargo make`:
@@ -323,14 +343,14 @@ Current CI facts:
 - runners:
   - `windows-latest` for the Windows release-path job
   - `ubuntu-24.04` for the Linux desktop beta job
-- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, and verifies the Linux beta binary on `ubuntu-24.04`
+- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, verifies the built Windows artifact manifest resource, and verifies the Linux beta binary on `ubuntu-24.04`
 - tests are part of the committed CI contract for `ci.yml`
-- the Windows CI job validates the feature-gated Windows binary path explicitly with `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --features windows --bin cpu-affinity-tool`, and `cargo build --release --features windows --bin cpu-affinity-tool`
+- the Windows CI job validates the feature-gated Windows binary path explicitly with `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --features windows --bin cpu-affinity-tool`, `cargo build --release --features windows --bin cpu-affinity-tool`, and `scripts/assert-windows-release-manifest.ps1` against the built release exe
 
 Current release facts:
 - stable GitHub Release workflow reacts to pushed tags matching `v*`
 - the stable release workflow validates that the tag matches `vX.Y.Z`, that `Cargo.toml` version matches `X.Y.Z`, and that `changelogs/vX.Y.Z.txt` exists before building
-- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, and then builds `cpu-affinity-tool.exe` with `cargo build --release --features windows --bin cpu-affinity-tool` in the same runner before upload
+- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, builds `cpu-affinity-tool.exe` with `cargo build --release --features windows --bin cpu-affinity-tool`, and then verifies the built exe manifest resource with `scripts/assert-windows-release-manifest.ps1` in the same runner before upload
 - the stable release publish job runs on `ubuntu-24.04` and publishes `cpu-affinity-tool.exe`
 - stable release target: `x86_64-pc-windows-msvc`
 - Linux beta prerelease workflow reacts to pushed tags matching `linux-beta-v*`
@@ -344,6 +364,7 @@ Additional release facts:
 - the stable GitHub Release workflow uses `changelogs/vX.Y.Z.txt` as the release body for the matching tag
 - the Linux beta prerelease workflow uses `changelogs/linux-beta-vX.Y.Z-N.txt` as the prerelease body for the matching tag
 - release notes no longer rely on `generate_release_notes: true`
+- `scripts/assert-windows-release-manifest.ps1` reads the built Windows exe `RT_MANIFEST` resource and asserts `requireAdministrator` plus `uiAccess=false`; UAC prompt behavior remains manual smoke validation
 - manual pre-release validation lives in `docs/release-checklist.md` and its subordinate `docs/release-smoke-matrix.md`
 - manual Linux beta pre-release validation lives in `docs/linux-beta-release-checklist.md`
 - `docs/release-process.md` documents the current automated stable tag-release flow, Linux beta prerelease flow, and their current artifact limits
@@ -354,11 +375,14 @@ Release-impacting artifacts:
 - `build.rs`
 - `app.manifest`
 - `assets/icon.ico`
+- `scripts/assert-windows-release-manifest.ps1`
 - embedded resources
 - release workflow definitions
 
 Privilege model:
-- Windows binary embeds `app.manifest` with `requestedExecutionLevel=requireAdministrator`
+- Windows release binary embeds `app.manifest` with `requestedExecutionLevel=requireAdministrator` and `uiAccess="false"`
+- Windows CI and the stable release workflow verify the built release exe's embedded manifest resource after `cargo build --release --features windows --bin cpu-affinity-tool`
+- local test/debug binaries do not embed the administrator manifest so CI and local `cargo test` can run without elevation
 
 ## AGENTS.md maintenance rules
 Update `AGENTS.md` in the same change when you alter:

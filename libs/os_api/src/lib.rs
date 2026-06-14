@@ -17,4 +17,7 @@ mod windows;
 #[cfg(target_os = "linux")]
 pub use linux::OS;
 #[cfg(target_os = "windows")]
-pub use windows::OS;
+pub use windows::{
+    LocalIpcClientError, LocalIpcEndpoint, LocalIpcGuard, LocalIpcRequest, LocalIpcServer,
+    LocalIpcWake, OS,
+};

@@ -49,6 +49,7 @@ impl UiSession {
             app_edit_state: RuleEditorSession {
                 current_edit: None,
                 target: None,
+                shortcut_result: None,
             },
             dropped_files: None,
             file_drop_hover_target: None,

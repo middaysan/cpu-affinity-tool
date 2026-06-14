@@ -1,5 +1,6 @@
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::glass_frame;
+use crate::app::shell::sessions::RuleShortcutResult;
 use crate::app::shell::{GroupRoute, WindowRoute};
 use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Layout, RichText, Vec2};
 use os_api::PriorityClass;
@@ -27,6 +28,22 @@ fn browse_binary_hover_text() -> &'static str {
     "Select binary path..."
 }
 
+fn shortcut_button_enabled_for_current_frame(status_enabled: bool, draft_changed: bool) -> bool {
+    status_enabled && !draft_changed
+}
+
+fn shortcut_message_for_current_frame(
+    status_message: Option<&str>,
+    status_enabled: bool,
+    draft_changed: bool,
+) -> Option<&str> {
+    if status_enabled && draft_changed {
+        Some("Save changes first.")
+    } else {
+        status_message
+    }
+}
+
 pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
     if app.ui.app_edit_state.target.is_none() {
         app.set_current_window(WindowRoute::Groups(GroupRoute::List));
@@ -40,6 +57,10 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
     let mut is_close = false;
     let mut save_clicked = false;
     let mut delete_clicked = false;
+    let mut create_shortcut_clicked = false;
+    let mut draft_changed = false;
+    let shortcut_status = app.current_app_edit_shortcut_status();
+    let shortcut_result = app.ui.app_edit_state.shortcut_result.clone();
 
     CentralPanel::default().show(ctx, |ui| {
         ui.add_space(5.0);
@@ -66,7 +87,9 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                     .spacing(Vec2::new(10.0, 10.0))
                     .show(ui, |ui| {
                         ui.label(RichText::new("App Name:").strong());
-                        ui.text_edit_singleline(&mut selected_app.name);
+                        if ui.text_edit_singleline(&mut selected_app.name).changed() {
+                            draft_changed = true;
+                        }
                         ui.end_row();
 
                         if selected_app.is_path_target() {
@@ -79,6 +102,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                                 if ui.text_edit_singleline(&mut bin_path_str).changed() {
                                     if let Some(bin_path) = selected_app.bin_path_mut() {
                                         *bin_path = PathBuf::from(bin_path_str);
+                                        draft_changed = true;
                                     }
                                 }
 
@@ -90,6 +114,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                                     if let Some(path) = pick_binary_path() {
                                         if let Some(bin_path) = selected_app.bin_path_mut() {
                                             *bin_path = path;
+                                            draft_changed = true;
                                         }
                                     }
                                 }
@@ -117,45 +142,62 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                         ComboBox::from_id_salt("priority_combo")
                             .selected_text(format!("{:?}", selected_app.priority))
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut selected_app.priority,
-                                    PriorityClass::Realtime,
-                                    "RealTime",
-                                );
-                                ui.selectable_value(
-                                    &mut selected_app.priority,
-                                    PriorityClass::High,
-                                    "High",
-                                );
-                                ui.selectable_value(
-                                    &mut selected_app.priority,
-                                    PriorityClass::AboveNormal,
-                                    "Above Normal",
-                                );
-                                ui.selectable_value(
-                                    &mut selected_app.priority,
-                                    PriorityClass::Normal,
-                                    "Normal",
-                                );
-                                ui.selectable_value(
-                                    &mut selected_app.priority,
-                                    PriorityClass::BelowNormal,
-                                    "Below Normal",
-                                );
-                                ui.selectable_value(
-                                    &mut selected_app.priority,
-                                    PriorityClass::Idle,
-                                    "Low",
-                                );
+                                draft_changed |= ui
+                                    .selectable_value(
+                                        &mut selected_app.priority,
+                                        PriorityClass::Realtime,
+                                        "RealTime",
+                                    )
+                                    .changed();
+                                draft_changed |= ui
+                                    .selectable_value(
+                                        &mut selected_app.priority,
+                                        PriorityClass::High,
+                                        "High",
+                                    )
+                                    .changed();
+                                draft_changed |= ui
+                                    .selectable_value(
+                                        &mut selected_app.priority,
+                                        PriorityClass::AboveNormal,
+                                        "Above Normal",
+                                    )
+                                    .changed();
+                                draft_changed |= ui
+                                    .selectable_value(
+                                        &mut selected_app.priority,
+                                        PriorityClass::Normal,
+                                        "Normal",
+                                    )
+                                    .changed();
+                                draft_changed |= ui
+                                    .selectable_value(
+                                        &mut selected_app.priority,
+                                        PriorityClass::BelowNormal,
+                                        "Below Normal",
+                                    )
+                                    .changed();
+                                draft_changed |= ui
+                                    .selectable_value(
+                                        &mut selected_app.priority,
+                                        PriorityClass::Idle,
+                                        "Low",
+                                    )
+                                    .changed();
                             });
                         ui.end_row();
                     });
 
                 ui.add_space(10.0);
-                ui.checkbox(
-                    &mut selected_app.autorun,
-                    RichText::new("Start this app on startup").strong(),
-                );
+                if ui
+                    .checkbox(
+                        &mut selected_app.autorun,
+                        RichText::new("Start this app on startup").strong(),
+                    )
+                    .changed()
+                {
+                    draft_changed = true;
+                }
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(10.0);
@@ -171,7 +213,9 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                         for (i, arg) in selected_app.args.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
                                 ui.label(format!("{}:", i + 1));
-                                ui.text_edit_singleline(arg);
+                                if ui.text_edit_singleline(arg).changed() {
+                                    draft_changed = true;
+                                }
                                 if ui.button("Remove").clicked() {
                                     arg_to_remove = Some(i);
                                 }
@@ -181,11 +225,13 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
 
                     if let Some(idx) = arg_to_remove {
                         selected_app.args.remove(idx);
+                        draft_changed = true;
                     }
 
                     ui.add_space(5.0);
                     if ui.button("Add Argument").clicked() {
                         selected_app.args.push(String::new());
+                        draft_changed = true;
                     }
 
                     ui.add_space(15.0);
@@ -208,7 +254,9 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
                     for (i, proc_name) in selected_app.additional_processes.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(format!("{}:", i + 1));
-                            ui.text_edit_singleline(proc_name);
+                            if ui.text_edit_singleline(proc_name).changed() {
+                                draft_changed = true;
+                            }
                             if ui.button("Remove").clicked() {
                                 proc_to_remove = Some(i);
                             }
@@ -218,16 +266,61 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
 
                 if let Some(idx) = proc_to_remove {
                     selected_app.additional_processes.remove(idx);
+                    draft_changed = true;
                 }
 
                 ui.add_space(5.0);
                 if ui.button("Add Process Name").clicked() {
                     selected_app.additional_processes.push(String::new());
+                    draft_changed = true;
                 }
 
                 ui.add_space(15.0);
                 ui.separator();
                 ui.add_space(10.0);
+
+                if shortcut_status.visible {
+                    let shortcut_enabled = shortcut_button_enabled_for_current_frame(
+                        shortcut_status.enabled,
+                        draft_changed,
+                    );
+                    let shortcut_message = shortcut_message_for_current_frame(
+                        shortcut_status.message.as_deref(),
+                        shortcut_status.enabled,
+                        draft_changed,
+                    );
+
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                shortcut_enabled,
+                                egui::Button::new("Create desktop shortcut")
+                                    .min_size(egui::vec2(170.0, 32.0)),
+                            )
+                            .clicked()
+                        {
+                            create_shortcut_clicked = true;
+                        }
+                        if let Some(message) = shortcut_message {
+                            ui.label(RichText::new(message).weak());
+                        }
+                    });
+                    if !draft_changed {
+                        if let Some(result) = &shortcut_result {
+                            match result {
+                                RuleShortcutResult::Created { filename } => {
+                                    ui.label(RichText::new(filename).color(egui::Color32::GREEN));
+                                }
+                                RuleShortcutResult::Failed { message } => {
+                                    ui.label(RichText::new(message).color(egui::Color32::RED));
+                                }
+                            }
+                        }
+                    }
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(10.0);
+                }
 
                 ui.horizontal(|ui| {
                     if ui
@@ -267,11 +360,38 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
         });
     });
 
+    if draft_changed {
+        app.clear_current_app_shortcut_result();
+    }
+    if create_shortcut_clicked && !draft_changed {
+        let _ = app.create_shortcut_for_current_rule();
+    }
+
     if save_clicked {
         app.commit_current_app_edit_session();
     } else if delete_clicked {
         app.delete_current_app_edit_target();
     } else if is_close {
         app.close_app_run_settings();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shortcut_button_enabled_for_current_frame, shortcut_message_for_current_frame};
+
+    #[test]
+    fn test_shortcut_status_for_current_frame_disables_same_frame_dirty_edit() {
+        assert!(!shortcut_button_enabled_for_current_frame(true, true));
+        assert_eq!(
+            shortcut_message_for_current_frame(None, true, true),
+            Some("Save changes first.")
+        );
+    }
+
+    #[test]
+    fn test_shortcut_status_for_current_frame_keeps_hidden_status_hidden() {
+        assert!(!shortcut_button_enabled_for_current_frame(false, true));
+        assert_eq!(shortcut_message_for_current_frame(None, false, true), None);
     }
 }

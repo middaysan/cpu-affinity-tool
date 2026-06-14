@@ -61,6 +61,10 @@ impl OS {
         Err("shortcut creation is only supported on Windows".to_string())
     }
 
+    pub fn current_user_desktop_dir() -> Result<PathBuf, String> {
+        Err("desktop shortcut creation is only supported on Windows".to_string())
+    }
+
     fn compose_mask_from_cores(cores: &[usize]) -> Result<usize, String> {
         let mut mask = 0usize;
 

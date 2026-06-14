@@ -1,0 +1,75 @@
+## [1.4.0] - 2026-06-15
+
+### Summary
+- Adds Windows saved-rule desktop shortcuts: configure a rule in the GUI once, then launch that saved rule from a generated desktop shortcut.
+- Keeps the GUI as the source of truth instead of adding a broad command-line rule editor.
+- Hardens the Windows shortcut path with local IPC forwarding, typed exit codes, explicit manifest verification, and release smoke coverage.
+
+### Added
+- **Saved-rule desktop shortcuts on Windows**:
+  - Saved clean rules can now create a desktop `.lnk` from the rule launch settings.
+  - Generated shortcuts target the current `cpu-affinity-tool.exe` and pass `--run-rule <group-id> <rule-id>`.
+  - Shortcuts bind to stable saved IDs, so group/app display renames and reordering do not break existing shortcuts.
+  - Path-target and installed/AUMID saved rules are covered by the saved-rule shortcut contract.
+- **Shortcut startup intent**:
+  - The Windows binary now accepts the narrow `--run-rule <group-id> <rule-id>` startup intent.
+  - Cold-start shortcut launches skip normal autorun and dispatch only the requested saved rule.
+  - Deleted or moved rules fail closed with explicit missing-group or missing-rule behavior.
+- **Active-instance forwarding**:
+  - If the app is already running, a shortcut-launched process forwards the saved-rule command to the active GUI instance and exits with a typed result code.
+  - The forwarding path uses a local named pipe plus a primary guard, bounded frames, strict versioned JSON, same-user/session checks, remote-client rejection, and SQOS-protected client open.
+  - Forwarded requests wake the GUI loop before waiting for the reply, including hidden-window cases.
+- **Shortcut creation service**:
+  - Shortcut creation now has an app-level service that resolves saved rules, allocates no-overwrite filenames, and translates OS failures into user-safe status messages.
+  - Shortcut filenames use numbered suffixes instead of overwriting existing files.
+
+### Changed
+- **Windows release manifest and verification**:
+  - The Windows release build uses `requireAdministrator` with `uiAccess=false`.
+  - CI and stable release workflows now verify the embedded Windows manifest resource after the release build.
+- **Release documentation**:
+  - The release checklist and smoke matrix now cover shortcut/UAC behavior, Desktop placement, forwarding exit codes, installed/AUMID shortcut coverage, and IPC security probes.
+  - The shortcut launch plan now reflects the implemented IPC protocol and forwarding behavior.
+- **User documentation**:
+  - README now documents saved-rule desktop shortcuts, UAC expectations, and the current elevated-token Desktop placement behavior.
+  - Linux beta docs remain scoped to the existing beta path; Linux desktop launcher parity is not part of this release.
+
+### Fixed
+- **Shortcut startup ordering**:
+  - Cold-start `RunRule` now starts the forwarding server only after the GUI shell owns the command receiver and wake callback.
+  - If a `RunRule` cold start claims the primary guard but cannot start the forwarding server, the requested rule is blocked and logged instead of launching without an owned forwarding endpoint.
+- **Startup race handling**:
+  - A process that sees another primary guard but no ready pipe retries briefly, then exits with a server-not-ready result instead of becoming another primary.
+  - The IPC server holds a single reusable first-instance pipe to keep pipe ownership continuous between requests.
+- **UI safety**:
+  - The shortcut button is hidden or disabled when the current rule cannot safely export a saved shortcut, including dirty unsaved edits and secondary GUI instances.
+  - Stale shortcut status is cleared when editing makes the rule dirty.
+
+### State and Compatibility
+- Persisted state schema remains `v7`.
+- Existing `v7` state remains compatible with this release.
+- As in earlier `v7` builds, downgrade to older binaries that only understand earlier state is unsupported after the first current-schema save.
+
+### Testing
+- Verified local automated gates:
+  - `cargo fmt --all -- --check`
+  - `cargo test --manifest-path libs/os_api/Cargo.toml`
+  - `cargo test --features windows --bin cpu-affinity-tool`
+  - `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`
+  - `cargo build --release --features windows --bin cpu-affinity-tool`
+  - `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe`
+  - `cargo test --features linux --bin cpu-affinity-tool-linux`
+  - `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`
+  - `cargo build --release --features linux --bin cpu-affinity-tool-linux`
+- The stable GitHub Release workflow repeats the Windows release-path checks before publishing `cpu-affinity-tool.exe`.
+
+### Known issues
+- Stable release artifacts remain Windows-only.
+- Linux remains a separate beta path; Linux builds do not expose saved-rule desktop shortcut UI or generate `.desktop` launchers.
+- Generated shortcuts target the executable path used at creation time. Recreate shortcuts after moving a portable app folder.
+- Shortcut launches run the same elevated executable, so Windows may show a UAC prompt before the saved rule runs or forwards to an active instance.
+- Shortcut creation resolves the Desktop for the current elevated Windows token. Credential-over-the-shoulder UAC with another administrator account can place the shortcut on that administrator account's Desktop.
+- The release is not code signed and does not include an installer, winget, Chocolatey, AppImage, or Flatpak package.
+
+### Download
+- Download `cpu-affinity-tool.exe` from the GitHub Release assets for `v1.4.0`.

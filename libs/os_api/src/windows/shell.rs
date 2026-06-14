@@ -11,14 +11,15 @@ use serde::Deserialize;
 use windows::Win32::Foundation::{HLOCAL, HWND, LocalFree};
 use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IPersistFile,
-    STGM_READ,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoTaskMemFree, IPersistFile, STGM_READ,
 };
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows::Win32::UI::Shell::{
-    CommandLineToArgvW, IShellLinkW, SLGP_UNCPRIORITY, SLR_NO_UI, ShellLink,
+    CommandLineToArgvW, FOLDERID_Desktop, IShellLinkW, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+    SLGP_UNCPRIORITY, SLR_NO_UI, ShellLink,
 };
-use windows::core::{Interface, PCWSTR};
+use windows::core::{Interface, PCWSTR, PWSTR};
 use winreg::RegKey;
 use winreg::enums::{HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
@@ -694,6 +695,33 @@ fn create_shortcut_file(spec: &ShortcutSpec) -> Result<(), String> {
     Ok(())
 }
 
+fn current_user_desktop_dir_shell() -> Result<PathBuf, String> {
+    let desktop = unsafe { SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, None) }
+        .map_err(|e| e.to_string())?;
+    let result = pwstr_to_path_buf(desktop)
+        .ok_or_else(|| "failed to decode Desktop known-folder path".to_string());
+    unsafe {
+        CoTaskMemFree(Some(desktop.0 as *const core::ffi::c_void));
+    }
+    result
+}
+
+fn pwstr_to_path_buf(value: PWSTR) -> Option<PathBuf> {
+    if value.is_null() {
+        return None;
+    }
+
+    let mut len = 0usize;
+    unsafe {
+        while *value.0.add(len) != 0 {
+            len += 1;
+        }
+        Some(PathBuf::from(String::from_utf16_lossy(
+            std::slice::from_raw_parts(value.0, len),
+        )))
+    }
+}
+
 impl OS {
     pub fn parse_dropped_file(file_path: PathBuf) -> Result<(PathBuf, Vec<String>), String> {
         let file_ext = file_path
@@ -740,6 +768,10 @@ impl OS {
 
     pub fn create_shortcut(spec: ShortcutSpec) -> Result<(), String> {
         create_shortcut_file(&spec)
+    }
+
+    pub fn current_user_desktop_dir() -> Result<PathBuf, String> {
+        current_user_desktop_dir_shell()
     }
 }
 

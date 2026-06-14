@@ -4,6 +4,26 @@ This file is the consolidated high-level project history.
 
 Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
+## [1.4.0] - 2026-06-15
+
+### Added
+
+- Added Windows desktop shortcuts for saved rules from rule launch settings
+- Added `--run-rule <group-id> <rule-id>` startup handling for saved-rule shortcut launches
+- Added Windows local IPC forwarding so shortcut launches can hand off to the active GUI instance
+
+### Changed
+
+- Windows release builds now explicitly use `uiAccess=false` and verify the embedded release manifest in CI and release workflows
+- Release docs now include shortcut/UAC/Desktop-placement smoke coverage and forwarding exit-code expectations
+- README now documents saved-rule shortcut behavior, UAC expectations, and Linux beta shortcut limitations
+
+### Fixed
+
+- Shortcut cold starts now skip unrelated autorun rules and run only the requested saved rule
+- Forwarded shortcut launches now wake the GUI loop and avoid becoming a second primary when another instance owns startup
+- Shortcut creation avoids overwriting existing desktop files by allocating numbered filenames
+
 ## [1.3.1] - 2026-05-19
 
 ### Fixed

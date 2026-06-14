@@ -2,12 +2,17 @@ use crate::app::adapters::storage::StorageAdapter;
 use crate::app::features::execution::{self, RuntimeRegistry};
 use crate::app::features::preferences;
 use crate::app::features::rules::{self, RulesContext};
+use crate::app::features::shortcut::{
+    create_saved_rule_shortcut, CreateRuleShortcutError, RuleShortcutPlatform,
+    SystemRuleShortcutPlatform,
+};
 use crate::app::models::cpu_schema::CpuSchema;
 use crate::app::models::{
     effective_total_threads, AddAppsOutcome, AppRuntimeKey, AppStateStorage, AppStatus, AppToRun,
     LogManager, StateStorageMode,
 };
 use crate::app::shared::ids::{GroupId, RuleId};
+use crate::app::shell::sessions::{RuleShortcutResult, ShortcutCreationRole};
 use crate::app::shell::UiSession;
 use crate::app::shell::{GroupRoute, WindowRoute};
 use os_api::InstalledAppCatalogEntry;
@@ -36,6 +41,44 @@ pub(crate) struct CentralGroupSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CentralPanelSnapshot {
     pub groups: Vec<CentralGroupSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuleShortcutDisabledReason {
+    NoTarget,
+    DraftNotLoaded,
+    SaveChangesFirst,
+    NonPrimary,
+    MissingGroup,
+    MissingRule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunSettingsShortcutButtonState {
+    pub visible: bool,
+    pub enabled: bool,
+    pub disabled_reason: Option<RuleShortcutDisabledReason>,
+    pub message: Option<String>,
+}
+
+fn shortcut_disabled(
+    reason: RuleShortcutDisabledReason,
+    message: impl Into<String>,
+) -> RunSettingsShortcutButtonState {
+    RunSettingsShortcutButtonState {
+        visible: true,
+        enabled: false,
+        disabled_reason: Some(reason),
+        message: Some(message.into()),
+    }
+}
+
+fn default_shortcut_creation_role() -> ShortcutCreationRole {
+    if cfg!(all(target_os = "windows", feature = "windows")) {
+        ShortcutCreationRole::Primary
+    } else {
+        ShortcutCreationRole::Unsupported
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +123,7 @@ pub struct AppState {
     pub(crate) ui: UiSession,
     pub(crate) runtime: RuntimeRegistry,
     pub(crate) log_manager: LogManager,
+    shortcut_creation_role: ShortcutCreationRole,
     #[cfg(test)]
     save_count: usize,
 }
@@ -103,6 +147,7 @@ impl AppState {
             ui: UiSession::new(effective_total_threads()),
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
+            shortcut_creation_role: default_shortcut_creation_role(),
             #[cfg(test)]
             save_count: 0,
         }
@@ -128,8 +173,20 @@ impl AppState {
             ui: UiSession::new(total_threads),
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
+            shortcut_creation_role: default_shortcut_creation_role(),
             save_count: 0,
         }
+    }
+
+    #[cfg_attr(not(feature = "windows"), allow(dead_code))]
+    pub(crate) fn set_shortcut_creation_role(&mut self, role: ShortcutCreationRole) {
+        self.shortcut_creation_role = role;
+    }
+
+    #[cfg(test)]
+    #[cfg_attr(not(feature = "windows"), allow(dead_code))]
+    pub(crate) fn shortcut_creation_role(&self) -> ShortcutCreationRole {
+        self.shortcut_creation_role
     }
 
     #[cfg(test)]
@@ -646,9 +703,15 @@ impl AppState {
         let leaving_installed_app_picker =
             matches!(self.ui.current_window, WindowRoute::InstalledAppPicker)
                 && !matches!(window, WindowRoute::InstalledAppPicker);
+        let leaving_app_run_settings =
+            matches!(self.ui.current_window, WindowRoute::AppRunSettings)
+                && !matches!(window, WindowRoute::AppRunSettings);
 
         if leaving_installed_app_picker {
             self.reset_installed_app_picker_session();
+        }
+        if leaving_app_run_settings {
+            self.reset_app_run_settings_session();
         }
 
         self.ui.set_current_window(window);
@@ -715,6 +778,203 @@ impl AppState {
         } else {
             RunRuleOutcome::MissingRule
         }
+    }
+
+    pub fn create_shortcut_for_rule_with_platform(
+        &mut self,
+        group_id: GroupId,
+        rule_id: RuleId,
+        platform: &mut impl RuleShortcutPlatform,
+    ) -> Result<PathBuf, CreateRuleShortcutError> {
+        self.reconcile_rules();
+        let result = match self.persistent_state.read() {
+            Ok(storage) => {
+                create_saved_rule_shortcut(&storage, &self.rules, group_id, rule_id, platform)
+            }
+            Err(_) => Err(CreateRuleShortcutError::StorageUnavailable),
+        };
+
+        match &result {
+            Ok(path) => self
+                .log_manager
+                .add_entry(format!("Shortcut created: {}", path.display())),
+            Err(err) => self.log_manager.add_important_entry(format!(
+                "Shortcut creation failed: {}",
+                err.to_user_message()
+            )),
+        }
+
+        result
+    }
+
+    pub(crate) fn clear_current_app_shortcut_result(&mut self) {
+        self.ui.app_edit_state.shortcut_result = None;
+    }
+
+    pub(crate) fn is_current_app_edit_dirty(&mut self) -> bool {
+        let (Some(target), Some(current_edit)) = (
+            self.ui.app_edit_state.target.clone(),
+            self.ui.app_edit_state.current_edit.clone(),
+        ) else {
+            return false;
+        };
+
+        let Some((group_idx, prog_idx)) =
+            self.rule_indices_for_ids(&target.group_id, &target.rule_id)
+        else {
+            return false;
+        };
+
+        rules::load_rule(&self.persistent_state, group_idx, prog_idx)
+            .is_none_or(|saved| saved != current_edit)
+    }
+
+    pub(crate) fn current_app_edit_shortcut_status(&mut self) -> RunSettingsShortcutButtonState {
+        if !cfg!(all(target_os = "windows", feature = "windows")) {
+            return RunSettingsShortcutButtonState {
+                visible: false,
+                enabled: false,
+                disabled_reason: None,
+                message: None,
+            };
+        }
+
+        let Some(target) = self.ui.app_edit_state.target.clone() else {
+            return shortcut_disabled(
+                RuleShortcutDisabledReason::NoTarget,
+                "Shortcut target is unavailable.",
+            );
+        };
+        if self.ui.app_edit_state.current_edit.is_none() {
+            return shortcut_disabled(
+                RuleShortcutDisabledReason::DraftNotLoaded,
+                "Shortcut target is not loaded.",
+            );
+        }
+
+        match self.shortcut_creation_role {
+            ShortcutCreationRole::Primary => {}
+            ShortcutCreationRole::NonPrimary => {
+                return shortcut_disabled(
+                    RuleShortcutDisabledReason::NonPrimary,
+                    "Close the other running instance first.",
+                );
+            }
+            ShortcutCreationRole::Unsupported => {
+                return RunSettingsShortcutButtonState {
+                    visible: false,
+                    enabled: false,
+                    disabled_reason: None,
+                    message: None,
+                };
+            }
+        }
+
+        self.reconcile_rules();
+        let Some(group_idx) = self.rules.group_index_for_id(&target.group_id) else {
+            return shortcut_disabled(
+                RuleShortcutDisabledReason::MissingGroup,
+                "Shortcut target group was not found.",
+            );
+        };
+        if self
+            .rules
+            .rule_index_for_id(group_idx, &target.rule_id)
+            .is_none()
+        {
+            return shortcut_disabled(
+                RuleShortcutDisabledReason::MissingRule,
+                "Shortcut target rule was not found.",
+            );
+        }
+
+        if self.is_current_app_edit_dirty() {
+            return shortcut_disabled(
+                RuleShortcutDisabledReason::SaveChangesFirst,
+                "Save changes first.",
+            );
+        }
+
+        RunSettingsShortcutButtonState {
+            visible: true,
+            enabled: true,
+            disabled_reason: None,
+            message: None,
+        }
+    }
+
+    pub(crate) fn create_shortcut_for_current_rule(
+        &mut self,
+    ) -> Result<PathBuf, CreateRuleShortcutError> {
+        let mut platform = SystemRuleShortcutPlatform;
+        self.create_shortcut_for_current_rule_with_platform(&mut platform)
+    }
+
+    pub(crate) fn create_shortcut_for_current_rule_with_platform(
+        &mut self,
+        platform: &mut impl RuleShortcutPlatform,
+    ) -> Result<PathBuf, CreateRuleShortcutError> {
+        let status = self.current_app_edit_shortcut_status();
+        if !status.visible {
+            let err = CreateRuleShortcutError::UnsupportedPlatform;
+            self.ui.app_edit_state.shortcut_result = Some(RuleShortcutResult::Failed {
+                message: err.to_user_message().to_string(),
+            });
+            return Err(err);
+        }
+        if !status.enabled {
+            let err = match status.disabled_reason {
+                Some(RuleShortcutDisabledReason::NoTarget) => CreateRuleShortcutError::NoTarget,
+                Some(RuleShortcutDisabledReason::DraftNotLoaded) => {
+                    CreateRuleShortcutError::DraftNotLoaded
+                }
+                Some(RuleShortcutDisabledReason::SaveChangesFirst) => {
+                    CreateRuleShortcutError::SaveChangesFirst
+                }
+                Some(RuleShortcutDisabledReason::NonPrimary) => {
+                    CreateRuleShortcutError::UnsupportedPlatform
+                }
+                Some(RuleShortcutDisabledReason::MissingGroup) => {
+                    CreateRuleShortcutError::MissingGroup
+                }
+                Some(RuleShortcutDisabledReason::MissingRule) => {
+                    CreateRuleShortcutError::MissingRule
+                }
+                None => CreateRuleShortcutError::NoTarget,
+            };
+            self.ui.app_edit_state.shortcut_result = Some(RuleShortcutResult::Failed {
+                message: if matches!(
+                    status.disabled_reason,
+                    Some(RuleShortcutDisabledReason::NonPrimary)
+                ) {
+                    status
+                        .message
+                        .unwrap_or_else(|| err.to_user_message().to_string())
+                } else {
+                    err.to_user_message().to_string()
+                },
+            });
+            return Err(err);
+        }
+
+        let Some(target) = self.ui.app_edit_state.target.clone() else {
+            return Err(CreateRuleShortcutError::NoTarget);
+        };
+        let result =
+            self.create_shortcut_for_rule_with_platform(target.group_id, target.rule_id, platform);
+        self.ui.app_edit_state.shortcut_result = Some(match &result {
+            Ok(path) => RuleShortcutResult::Created {
+                filename: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string()),
+            },
+            Err(err) => RuleShortcutResult::Failed {
+                message: err.to_user_message().to_string(),
+            },
+        });
+
+        result
     }
 
     pub fn run_group(&mut self, group_id: GroupId) {
@@ -946,12 +1206,12 @@ impl AppState {
         self.ui.app_edit_state.current_edit = None;
         self.ui.app_edit_state.target =
             Some(crate::app::shell::sessions::RuleEditorTarget { group_id, rule_id });
+        self.ui.app_edit_state.shortcut_result = None;
         self.ui.current_window = WindowRoute::AppRunSettings;
     }
 
     pub fn close_app_run_settings(&mut self) {
-        self.ui.app_edit_state.current_edit = None;
-        self.ui.app_edit_state.target = None;
+        self.reset_app_run_settings_session();
         self.ui.current_window = WindowRoute::Groups(GroupRoute::List);
     }
 
@@ -1123,24 +1383,92 @@ impl AppState {
         picker.needs_focus = false;
         picker.refresh_rx = None;
     }
+
+    fn reset_app_run_settings_session(&mut self) {
+        self.ui.app_edit_state.current_edit = None;
+        self.ui.app_edit_state.target = None;
+        self.ui.app_edit_state.shortcut_result = None;
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    use super::RuleShortcutDisabledReason;
     use super::{AppState, MoveRuleToGroupOutcome, RunRuleOutcome};
     use crate::app::features::execution::RuntimeRegistry;
     use crate::app::features::rules::RulesContext;
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    use crate::app::features::shortcut::{
+        CreateRuleShortcutError, RuleShortcutPlatform, ShortcutWriteError,
+    };
     use crate::app::models::{
         AppStateStorage, AppToRun, CoreGroup, CpuSchema, LaunchTarget, LogManager,
     };
     use crate::app::shared::ids::{GroupId, RuleId};
-    use crate::app::shell::sessions::RuleEditorTarget;
+    use crate::app::shell::sessions::{RuleEditorTarget, RuleShortcutResult, ShortcutCreationRole};
     use crate::app::shell::UiSession;
     use crate::app::shell::{GroupRoute, WindowRoute};
     use os_api::PriorityClass;
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    use os_api::ShortcutSpec;
     use os_api::{InstalledAppCatalogEntry, InstalledAppCatalogSource};
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    use std::collections::HashSet;
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    use std::path::Path;
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    struct FakeShortcutPlatform {
+        supported: bool,
+        current_exe: Result<PathBuf, String>,
+        desktop_dir: Result<PathBuf, String>,
+        existing_paths: HashSet<String>,
+        create_calls: Vec<ShortcutSpec>,
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    impl FakeShortcutPlatform {
+        fn supported() -> Self {
+            Self {
+                supported: true,
+                current_exe: Ok(PathBuf::from(r"C:\Tools\cpu-affinity-tool.exe")),
+                desktop_dir: Ok(PathBuf::from(r"C:\Users\Ada\Desktop")),
+                existing_paths: HashSet::new(),
+                create_calls: Vec::new(),
+            }
+        }
+
+        fn path_key(path: &Path) -> String {
+            path.to_string_lossy().to_ascii_lowercase()
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    impl RuleShortcutPlatform for FakeShortcutPlatform {
+        fn is_supported(&self) -> bool {
+            self.supported
+        }
+
+        fn current_exe_path(&mut self) -> Result<PathBuf, String> {
+            self.current_exe.clone()
+        }
+
+        fn current_user_desktop_dir(&mut self) -> Result<PathBuf, String> {
+            self.desktop_dir.clone()
+        }
+
+        fn shortcut_path_exists(&mut self, path: &Path) -> Result<bool, String> {
+            Ok(self.existing_paths.contains(&Self::path_key(path)))
+        }
+
+        fn create_shortcut_new(&mut self, spec: ShortcutSpec) -> Result<(), ShortcutWriteError> {
+            self.create_calls.push(spec);
+            Ok(())
+        }
+    }
 
     fn sample_state() -> AppState {
         let persistent_state = Arc::new(RwLock::new(AppStateStorage {
@@ -1180,6 +1508,7 @@ mod tests {
             ui: UiSession::new(4),
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
+            shortcut_creation_role: ShortcutCreationRole::Primary,
             save_count: 0,
         }
     }
@@ -1228,6 +1557,180 @@ mod tests {
             rule_id: rule_id(app, 0, 0),
         });
         app.ui.app_edit_state.current_edit = Some(updated);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn test_current_app_edit_shortcut_status_enabled_for_clean_saved_rule() {
+        let mut app = sample_state();
+        let group_id = group_id(&app, 0);
+        let rule_id = rule_id(&app, 0, 0);
+        app.set_shortcut_creation_role(ShortcutCreationRole::Primary);
+
+        app.open_app_run_settings(group_id, rule_id);
+        assert!(app.ensure_current_edit_loaded());
+
+        let status = app.current_app_edit_shortcut_status();
+        assert!(status.visible);
+        assert!(status.enabled);
+        assert_eq!(status.disabled_reason, None);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn test_current_app_edit_shortcut_status_disabled_for_non_primary_instance() {
+        let mut app = sample_state();
+        let group_id = group_id(&app, 0);
+        let rule_id = rule_id(&app, 0, 0);
+        app.set_shortcut_creation_role(ShortcutCreationRole::NonPrimary);
+        app.open_app_run_settings(group_id, rule_id);
+        assert!(app.ensure_current_edit_loaded());
+
+        let status = app.current_app_edit_shortcut_status();
+
+        assert!(status.visible);
+        assert!(!status.enabled);
+        assert_eq!(
+            status.disabled_reason,
+            Some(RuleShortcutDisabledReason::NonPrimary)
+        );
+        assert_eq!(
+            status.message.as_deref(),
+            Some("Close the other running instance first.")
+        );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn test_current_app_edit_shortcut_status_requires_saved_changes_first() {
+        let mut app = sample_state();
+        let group_id = group_id(&app, 0);
+        let rule_id = rule_id(&app, 0, 0);
+        app.open_app_run_settings(group_id, rule_id);
+        assert!(app.ensure_current_edit_loaded());
+        app.ui.app_edit_state.current_edit.as_mut().unwrap().name = "Unsaved".to_string();
+
+        let status = app.current_app_edit_shortcut_status();
+
+        assert!(status.visible);
+        assert!(!status.enabled);
+        assert_eq!(
+            status.disabled_reason,
+            Some(RuleShortcutDisabledReason::SaveChangesFirst)
+        );
+    }
+
+    #[cfg(feature = "linux")]
+    #[test]
+    fn test_current_app_edit_shortcut_status_hidden_for_linux_feature() {
+        let mut app = sample_state();
+        let group_id = group_id(&app, 0);
+        let rule_id = rule_id(&app, 0, 0);
+        app.open_app_run_settings(group_id, rule_id);
+        assert!(app.ensure_current_edit_loaded());
+
+        let status = app.current_app_edit_shortcut_status();
+
+        assert!(!status.visible);
+        assert!(!status.enabled);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn test_create_shortcut_for_current_rule_uses_saved_rule_and_stores_success() {
+        let mut app = sample_state();
+        let group_id = group_id(&app, 0);
+        let rule_id = rule_id(&app, 0, 0);
+        app.open_app_run_settings(group_id, rule_id);
+        assert!(app.ensure_current_edit_loaded());
+        let mut platform = FakeShortcutPlatform::supported();
+
+        let created = app
+            .create_shortcut_for_current_rule_with_platform(&mut platform)
+            .unwrap();
+
+        assert_eq!(
+            created,
+            PathBuf::from(r"C:\Users\Ada\Desktop\Sample - Games.lnk")
+        );
+        assert_eq!(platform.create_calls.len(), 1);
+        assert_eq!(
+            app.ui.app_edit_state.shortcut_result,
+            Some(RuleShortcutResult::Created {
+                filename: "Sample - Games.lnk".to_string()
+            })
+        );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn test_create_shortcut_for_current_rule_dirty_draft_does_not_call_platform() {
+        let mut app = sample_state();
+        let group_id = group_id(&app, 0);
+        let rule_id = rule_id(&app, 0, 0);
+        app.open_app_run_settings(group_id, rule_id);
+        assert!(app.ensure_current_edit_loaded());
+        app.ui.app_edit_state.current_edit.as_mut().unwrap().name = "Unsaved".to_string();
+        let mut platform = FakeShortcutPlatform::supported();
+
+        assert_eq!(
+            app.create_shortcut_for_current_rule_with_platform(&mut platform),
+            Err(CreateRuleShortcutError::SaveChangesFirst)
+        );
+
+        assert!(platform.create_calls.is_empty());
+        assert_eq!(
+            app.ui.app_edit_state.shortcut_result,
+            Some(RuleShortcutResult::Failed {
+                message: "Save changes before creating a shortcut.".to_string()
+            })
+        );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn test_create_shortcut_for_current_rule_non_primary_does_not_call_platform() {
+        let mut app = sample_state();
+        let group_id = group_id(&app, 0);
+        let rule_id = rule_id(&app, 0, 0);
+        app.set_shortcut_creation_role(ShortcutCreationRole::NonPrimary);
+        app.open_app_run_settings(group_id, rule_id);
+        assert!(app.ensure_current_edit_loaded());
+        let mut platform = FakeShortcutPlatform::supported();
+
+        assert_eq!(
+            app.create_shortcut_for_current_rule_with_platform(&mut platform),
+            Err(CreateRuleShortcutError::UnsupportedPlatform)
+        );
+
+        assert!(platform.create_calls.is_empty());
+        assert_eq!(
+            app.ui.app_edit_state.shortcut_result,
+            Some(RuleShortcutResult::Failed {
+                message: "Close the other running instance first.".to_string()
+            })
+        );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn test_create_shortcut_for_current_rule_rechecks_after_same_frame_dirty_change() {
+        let mut app = sample_state();
+        let group_id = group_id(&app, 0);
+        let rule_id = rule_id(&app, 0, 0);
+        app.open_app_run_settings(group_id, rule_id);
+        assert!(app.ensure_current_edit_loaded());
+        let initial_status = app.current_app_edit_shortcut_status();
+        assert!(initial_status.enabled);
+        app.ui.app_edit_state.current_edit.as_mut().unwrap().name = "Unsaved".to_string();
+        let mut platform = FakeShortcutPlatform::supported();
+
+        assert_eq!(
+            app.create_shortcut_for_current_rule_with_platform(&mut platform),
+            Err(CreateRuleShortcutError::SaveChangesFirst)
+        );
+
+        assert!(platform.create_calls.is_empty());
     }
 
     #[test]
@@ -1883,6 +2386,28 @@ mod tests {
         assert!(!app.ui.installed_app_picker.is_refreshing);
         assert!(app.ui.installed_app_picker.refresh_rx.is_none());
         assert_eq!(app.ui.installed_app_picker.entries.len(), 1);
+    }
+
+    #[test]
+    fn test_leaving_app_run_settings_route_clears_edit_session() {
+        let mut app = sample_state();
+        let target = RuleEditorTarget {
+            group_id: group_id(&app, 0),
+            rule_id: rule_id(&app, 0, 0),
+        };
+        app.ui.current_window = WindowRoute::AppRunSettings;
+        app.ui.app_edit_state.target = Some(target);
+        app.ui.app_edit_state.current_edit = Some(sample_app("Draft"));
+        app.ui.app_edit_state.shortcut_result = Some(RuleShortcutResult::Failed {
+            message: "old status".to_string(),
+        });
+
+        app.set_current_window(WindowRoute::Logs);
+
+        assert!(matches!(app.ui.current_window, WindowRoute::Logs));
+        assert!(app.ui.app_edit_state.target.is_none());
+        assert!(app.ui.app_edit_state.current_edit.is_none());
+        assert!(app.ui.app_edit_state.shortcut_result.is_none());
     }
 
     #[test]

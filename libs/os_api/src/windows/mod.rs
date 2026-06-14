@@ -1,10 +1,16 @@
 mod common;
 mod cpu;
+mod ipc;
 mod launch;
 mod processes;
 mod scheduling;
 mod shell;
 mod window;
+
+pub use ipc::{
+    LocalIpcClientError, LocalIpcEndpoint, LocalIpcGuard, LocalIpcRequest, LocalIpcServer,
+    LocalIpcWake,
+};
 
 pub struct OS;
 

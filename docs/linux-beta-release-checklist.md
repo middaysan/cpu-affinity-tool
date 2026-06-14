@@ -10,6 +10,7 @@ Use this checklist with `docs/release-process.md`.
 - Confirm the stable Windows release path remains separate: `.github/workflows/release.yml` should still react only to stable tags matching `v*`.
 - Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs separate Windows and Linux beta jobs, and the Linux beta job still verifies formatting, Linux clippy, `libs/os_api` tests, Linux binary tests, and the Linux release build on `ubuntu-24.04`.
 - Confirm no project docs claim full cross-platform support, Linux stable parity, AppImage support, or Flatpak support.
+- Confirm no docs or release notes claim saved-rule desktop shortcut, quick shortcut launch, or `.desktop` launcher parity for Linux beta; the Windows shortcut button remains hidden on non-Windows.
 - Confirm `README.md` and `AGENTS.md` describe Linux as a desktop beta path with prerelease artifacts under `linux-beta-v*` tags.
 - Confirm the base version in `Cargo.toml` matches the `X.Y.Z` segment of the Linux beta tag you plan to push.
 - Confirm the beta changelog exists at `changelogs/linux-beta-vX.Y.Z-N.txt`.
@@ -36,6 +37,7 @@ Use this checklist with `docs/release-process.md`.
 - Add an app target by path or `.desktop` entry and confirm it appears once.
 - Launch the target and confirm affinity and priority are applied as expected.
 - If Auto Re-apply Affinity and Priority is expected for the beta, confirm correction behavior and logs still work.
+- Open a saved rule settings view and confirm no saved-rule desktop shortcut control is exposed on Linux beta.
 - Treat startup failures, incorrect CPU topology, launch failures, missing logs, or broken affinity application as beta-blocking until resolved or explicitly downgraded.
 
 ## Release Notes And Distribution
@@ -47,3 +49,4 @@ Use this checklist with `docs/release-process.md`.
   - `cpu-affinity-tool-linux-x86_64.tar.gz`
   - `SHA256SUMS.txt`
 - Confirm AppImage, Flatpak, `.deb`, `.rpm`, installer packaging, code signing, and Linux stable release artifacts are still absent, or update docs/workflows in the same change if that contract changed.
+- Confirm Linux beta notes do not imply Windows saved-rule shortcut behavior, `.lnk` creation, quick shortcut launch support, or `.desktop` shortcut generation.

@@ -76,6 +76,10 @@ jobs:
       - name: Build Windows binary
         run: cargo build --release --features windows --bin cpu-affinity-tool
 
+      - name: Verify Windows release manifest
+        shell: pwsh
+        run: ./scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe
+
       - name: Upload Windows binary
         uses: actions/upload-artifact@v7
         with:

@@ -20,6 +20,7 @@ Use these files together:
 - `.github/workflows/ci.yml`
 - `.github/workflows/release.yml`
 - `.github/workflows/release-linux-beta.yml`
+- `scripts/assert-windows-release-manifest.ps1`
 - `changelogs/vX.Y.Z.txt`
 - `changelogs/linux-beta-vX.Y.Z-N.txt`
 
@@ -41,8 +42,9 @@ When a stable tag matching `v*` is pushed:
 3. the workflow confirms `Cargo.toml` version matches `X.Y.Z`
 4. the workflow requires `changelogs/vX.Y.Z.txt`
 5. the workflow runs formatting, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `libs/os_api` tests, `cargo test --features windows --bin cpu-affinity-tool`, and `cargo build --release --features windows --bin cpu-affinity-tool`
-6. the workflow uploads `cpu-affinity-tool.exe`
-7. a publish job on `ubuntu-24.04` creates the GitHub Release with the body from `changelogs/vX.Y.Z.txt`
+6. the workflow runs `scripts/assert-windows-release-manifest.ps1` against the built exe and requires `requestedExecutionLevel=requireAdministrator` plus `uiAccess=false`
+7. the workflow uploads `cpu-affinity-tool.exe`
+8. a publish job on `ubuntu-24.04` creates the GitHub Release with the body from `changelogs/vX.Y.Z.txt`
 
 When a Linux beta tag matching `linux-beta-v*` is pushed:
 
@@ -98,6 +100,8 @@ Before pushing a Linux beta tag, align:
 Stable published artifact:
 
 - `cpu-affinity-tool.exe`
+
+The Windows CI and stable release workflows verify the built exe's embedded `RT_MANIFEST` resource with `scripts/assert-windows-release-manifest.ps1`. The script confirms `requireAdministrator` and `uiAccess=false`; actual UAC prompt behavior still belongs to manual Windows smoke.
 
 Linux beta prerelease artifacts:
 
