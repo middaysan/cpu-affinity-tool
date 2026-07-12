@@ -311,7 +311,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_tray_events(ctx);
         self.handle_monitor_events(ctx);
         #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -326,7 +326,14 @@ impl eframe::App for App {
 
         self.apply_theme(ctx);
         self.handle_file_drops(ctx);
-        self.render_main_ui(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.is_hidden {
+            return;
+        }
+
+        self.render_main_ui(ui);
     }
 }
 
@@ -937,23 +944,23 @@ impl App {
         }
     }
 
-    fn render_main_ui(&mut self, ctx: &egui::Context) {
-        header::draw_top_panel(&mut self.state, ctx);
-        Self::draw_active_view(&mut self.state, ctx);
-        footer::draw_bottom_panel(&mut self.state, ctx);
+    fn render_main_ui(&mut self, ui: &mut egui::Ui) {
+        header::draw_top_panel(&mut self.state, ui);
+        footer::draw_bottom_panel(&mut self.state, ui);
+        Self::draw_active_view(&mut self.state, ui);
     }
 
-    fn draw_active_view(app_state: &mut AppState, ctx: &egui::Context) {
+    fn draw_active_view(app_state: &mut AppState, ui: &mut egui::Ui) {
         match app_state.ui.current_window.clone() {
             WindowRoute::Groups(group_route) => match group_route {
-                GroupRoute::List => central::draw_central_panel(app_state, ctx),
-                GroupRoute::Create => group_editor::create_group_window(app_state, ctx),
-                GroupRoute::Edit => group_editor::edit_group_window(app_state, ctx),
+                GroupRoute::List => central::draw_central_panel(app_state, ui),
+                GroupRoute::Create => group_editor::create_group_window(app_state, ui),
+                GroupRoute::Edit => group_editor::edit_group_window(app_state, ui),
             },
-            WindowRoute::Logs => logs::draw_logs_window(app_state, ctx),
-            WindowRoute::AppRunSettings => run_settings::draw_app_run_settings(app_state, ctx),
+            WindowRoute::Logs => logs::draw_logs_window(app_state, ui),
+            WindowRoute::AppRunSettings => run_settings::draw_app_run_settings(app_state, ui),
             WindowRoute::InstalledAppPicker => {
-                installed_app_picker::draw_installed_app_picker(app_state, ctx)
+                installed_app_picker::draw_installed_app_picker(app_state, ui)
             }
         }
     }

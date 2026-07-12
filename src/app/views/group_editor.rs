@@ -245,11 +245,11 @@ fn draw_core_buttons(ui: &mut egui::Ui, groups: &mut GroupFormSession, cores: &m
 }
 
 /// Group creation window.
-pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
+pub fn create_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     let mut create_clicked = false;
     let mut cancel_clicked = false;
 
-    CentralPanel::default().show(ctx, |ui| {
+    CentralPanel::default().show(root_ui, |ui| {
         ui.add_space(5.0);
         ui.horizontal(|ui| {
             ui.heading(RichText::new("➕ Create New Group").strong());
@@ -287,8 +287,8 @@ pub fn create_group_window(app: &mut AppState, ctx: &egui::Context) {
 }
 
 /// Group editing window.
-pub fn edit_group_window(app: &mut AppState, ctx: &egui::Context) {
-    CentralPanel::default().show(ctx, |ui| {
+pub fn edit_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
+    CentralPanel::default().show(root_ui, |ui| {
         let mut save_clicked = false;
         let mut delete_clicked = false;
         let mut cancel_clicked = false;

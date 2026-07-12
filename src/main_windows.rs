@@ -79,7 +79,7 @@ fn main() {
     {
         println!("DEBUG: NativeOptions initialized:");
         println!("  - Renderer: {:?}", options.renderer);
-        println!("  - V-Sync: {}", options.vsync);
+        println!("  - V-Sync: {}", options.glow_options.vsync);
         println!("  - Run and return: {}", options.run_and_return);
         println!("========================================================");
     }

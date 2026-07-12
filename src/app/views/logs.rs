@@ -3,7 +3,7 @@ use crate::app::shell::presenters::shared_elements::glass_frame;
 use crate::app::shell::{GroupRoute, WindowRoute};
 use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
 
-pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {
+pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     let mut clear_logs = false;
     let mut open_data_folder = false;
     let data_dir = app.active_data_dir();
@@ -13,7 +13,7 @@ pub fn draw_logs_window(app: &mut AppState, ctx: &egui::Context) {
         data_dir.display()
     );
 
-    CentralPanel::default().show(ctx, |ui| {
+    CentralPanel::default().show(root_ui, |ui| {
         ui.horizontal(|ui| {
             ui.heading("Logs");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

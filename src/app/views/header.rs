@@ -1,9 +1,10 @@
 use crate::app::runtime::AppState;
 use crate::app::shell::{GroupRoute, WindowRoute};
-use eframe::egui::{self, Layout, Margin, RichText, TopBottomPanel};
+use eframe::egui::{self, Layout, Margin, Panel, RichText};
 
-pub fn draw_top_panel(app: &mut AppState, ctx: &egui::Context) {
-    TopBottomPanel::top("top_panel").show(ctx, |ui| {
+pub fn draw_top_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
+    let ctx = root_ui.ctx().clone();
+    Panel::top("top_panel").show(root_ui, |ui| {
         egui::Frame::NONE
             .inner_margin(Margin::same(4))
             .show(ui, |ui| {

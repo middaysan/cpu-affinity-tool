@@ -150,7 +150,7 @@ Windows runtime flow:
    - normal GUI startup then runs autorun once
    - `RunRule` startup then skips normal autorun and dispatches only the requested saved rule
    - if a `RunRule` cold start claimed the primary guard but cannot start the forwarding server, the requested saved rule is blocked and logged instead of launching without an owned forwarding endpoint
-8. `App::update` handles tray events, monitor notifications, local forwarded shortcut commands, hidden-window flow, file drops, applies theme, and renders the active view.
+8. `App::logic` handles tray events, monitor notifications, local forwarded shortcut commands, hidden-window flow, file drops, and theme application; `App::ui` renders the active view from the root `egui::Ui`.
 
 Linux entrypoint now reaches the shared `shell::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
 
@@ -170,8 +170,8 @@ Background loops:
 - affinity and priority verification and optional correction loop
 
 Hidden-window flow:
-- forwarded shortcut commands are drained before the hidden-window render skip
-- when the window is hidden, `shell::App` schedules repaint with `ctx.request_repaint_after(...)` and skips rendering
+- forwarded shortcut commands are drained in `App::logic` before the hidden-window render skip
+- when the window is hidden, `shell::App::logic` schedules repaint with `ctx.request_repaint_after(...)` and `App::ui` skips rendering
 - the hidden-window path no longer sleeps on the UI thread
 
 ## State and data contracts

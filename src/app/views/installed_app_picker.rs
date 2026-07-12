@@ -34,7 +34,8 @@ fn installed_app_picker_heading() -> (&'static str, &'static str) {
     ("Find Installed App", "Browse supported installed apps.")
 }
 
-pub fn draw_installed_app_picker(app: &mut AppState, ctx: &Context) {
+pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
+    let ctx = root_ui.ctx().clone();
     if app.ui.installed_app_picker.target_group_id.is_none() {
         app.close_installed_app_picker();
         return;
@@ -44,7 +45,7 @@ pub fn draw_installed_app_picker(app: &mut AppState, ctx: &Context) {
     let mut actions = Vec::new();
     let needs_focus = app.take_installed_app_picker_focus_request();
 
-    CentralPanel::default().show(ctx, |ui| {
+    CentralPanel::default().show(root_ui, |ui| {
         let (heading, description) = installed_app_picker_heading();
         ui.add_space(5.0);
         ui.horizontal(|ui| {
@@ -169,7 +170,7 @@ pub fn draw_installed_app_picker(app: &mut AppState, ctx: &Context) {
         );
     });
 
-    actions.extend(collect_keyboard_actions(ctx));
+    actions.extend(collect_keyboard_actions(&ctx));
     execute_actions(app, actions);
 }
 

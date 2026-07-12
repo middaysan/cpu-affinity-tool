@@ -59,16 +59,17 @@ enum RuleDropClassification {
     StalePayload,
 }
 
-pub fn draw_central_panel(app: &mut AppState, ctx: &egui::Context) {
-    CentralPanel::default().show(ctx, |ui| {
+pub fn draw_central_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
+    let ctx = root_ui.ctx().clone();
+    CentralPanel::default().show(root_ui, |ui| {
         ScrollArea::vertical().show(ui, |ui| {
             ui.vertical(|ui| {
-                let actions = render_groups(app, ui, ctx);
+                let actions = render_groups(app, ui, &ctx);
                 execute_actions(app, actions);
             });
         });
     });
-    render_rule_drag_preview(ctx);
+    render_rule_drag_preview(&ctx);
 }
 
 #[cfg(target_os = "windows")]

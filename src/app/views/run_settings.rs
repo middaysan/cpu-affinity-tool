@@ -2,7 +2,7 @@ use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::glass_frame;
 use crate::app::shell::sessions::RuleShortcutResult;
 use crate::app::shell::{GroupRoute, WindowRoute};
-use eframe::egui::{self, Align, CentralPanel, ComboBox, Context, Layout, RichText, Vec2};
+use eframe::egui::{self, Align, CentralPanel, ComboBox, Layout, RichText, Vec2};
 use os_api::PriorityClass;
 use std::path::PathBuf;
 
@@ -44,7 +44,7 @@ fn shortcut_message_for_current_frame(
     }
 }
 
-pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
+pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     if app.ui.app_edit_state.target.is_none() {
         app.set_current_window(WindowRoute::Groups(GroupRoute::List));
         return;
@@ -62,7 +62,7 @@ pub fn draw_app_run_settings(app: &mut AppState, ctx: &Context) {
     let shortcut_status = app.current_app_edit_shortcut_status();
     let shortcut_result = app.ui.app_edit_state.shortcut_result.clone();
 
-    CentralPanel::default().show(ctx, |ui| {
+    CentralPanel::default().show(root_ui, |ui| {
         ui.add_space(5.0);
         ui.horizontal(|ui| {
             ui.heading(RichText::new("Edit App Settings").strong());

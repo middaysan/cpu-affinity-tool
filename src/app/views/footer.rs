@@ -1,6 +1,6 @@
 use crate::app::models::APP_VERSION;
 use crate::app::runtime::AppState;
-use eframe::egui::{self, Color32, Layout, Margin, RichText, TopBottomPanel};
+use eframe::egui::{self, Color32, Layout, Margin, Panel, RichText};
 
 /// Draws the bottom panel (footer) of the application.
 ///
@@ -11,9 +11,9 @@ use eframe::egui::{self, Color32, Layout, Margin, RichText, TopBottomPanel};
 /// # Parameters
 ///
 /// * `app` - The application state
-/// * `ctx` - The egui context
-pub fn draw_bottom_panel(app: &mut AppState, ctx: &egui::Context) {
-    TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
+/// * `root_ui` - The root egui UI
+pub fn draw_bottom_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
+    Panel::bottom("bottom_panel").show(root_ui, |ui| {
         egui::Frame::NONE
             .inner_margin(Margin::same(4))
             .show(ui, |ui| {
