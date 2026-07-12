@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 pub use service::{
     add_apps_to_group, add_installed_app_to_group, create_group, load_group_for_edit, load_rule,
-    move_rule_between_groups_at, remove_group, remove_rule_from_group, set_group_is_hidden,
-    swap_groups, update_group_properties, update_rule,
+    move_group_to_index, move_rule_between_groups_at, remove_group, remove_rule_from_group,
+    set_group_is_hidden, update_group_properties, update_rule,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,13 +195,6 @@ impl RulesContext {
             .and_then(|rules| rules.iter().position(|candidate| candidate == rule_id))
     }
 
-    pub fn swap_groups(&mut self, left: usize, right: usize) {
-        if left < self.group_ids.len() && right < self.group_ids.len() {
-            self.group_ids.swap(left, right);
-            self.rule_ids.swap(left, right);
-        }
-    }
-
     pub fn append_group(&mut self) -> GroupId {
         let id = self.allocate_group_id();
         self.group_ids.push(id.clone());
@@ -301,6 +294,20 @@ impl RulesContext {
         }
     }
 
+    pub fn move_group_to_index(&mut self, source_index: usize, target_index: usize) {
+        if source_index >= self.group_ids.len()
+            || target_index >= self.group_ids.len()
+            || source_index == target_index
+        {
+            return;
+        }
+
+        let group_id = self.group_ids.remove(source_index);
+        let rule_ids = self.rule_ids.remove(source_index);
+        self.group_ids.insert(target_index, group_id);
+        self.rule_ids.insert(target_index, rule_ids);
+    }
+
     fn allocate_group_id(&mut self) -> GroupId {
         let id = GroupId(format!("group-{}", self.next_group_id));
         self.next_group_id += 1;
@@ -389,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_and_append_preserve_existing_ids() {
+    fn test_move_and_append_preserve_existing_ids() {
         let mut storage = sample_storage();
         storage.groups.push(empty_group("Work"));
 
@@ -397,7 +404,7 @@ mod tests {
         let first = context.group_id_for_index(0).unwrap();
         let second = context.group_id_for_index(1).unwrap();
 
-        context.swap_groups(0, 1);
+        context.move_group_to_index(0, 1);
         assert_eq!(context.group_id_for_index(0), Some(second));
         assert_eq!(context.group_id_for_index(1), Some(first));
 

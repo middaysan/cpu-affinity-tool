@@ -1,6 +1,7 @@
 use crate::app::models::APP_VERSION;
 use crate::app::runtime::AppState;
-use eframe::egui::{self, Color32, Layout, Margin, Panel, RichText};
+use crate::app::shell::presenters::shared_elements::{success_color, BUTTON_FONT_SIZE};
+use eframe::egui::{self, Layout, Margin, Panel, RichText, Vec2};
 
 /// Draws the bottom panel (footer) of the application.
 ///
@@ -15,53 +16,50 @@ use eframe::egui::{self, Color32, Layout, Margin, Panel, RichText};
 pub fn draw_bottom_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
     Panel::bottom("bottom_panel").show(root_ui, |ui| {
         egui::Frame::NONE
-            .inner_margin(Margin::same(4))
+            .fill(ui.visuals().panel_fill)
+            .inner_margin(Margin::symmetric(8, 5))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    // Get the current auto re-apply status
                     let monitoring_enabled = app.is_process_monitoring_enabled();
-
-                    // Create the toggle button with appropriate icon and label
-                    let (icon, label, color) = if monitoring_enabled {
-                        ("🔄", "ACTIVE", Color32::from_rgb(0, 200, 0))
+                    let (label, detail, color) = if monitoring_enabled {
+                        (
+                            "Monitoring active",
+                            "Affinity and priority are protected",
+                            success_color(ui),
+                        )
                     } else {
                         (
-                            "⏹",
-                            "DISABLED",
+                            "Monitoring paused",
+                            "Automatic corrections are disabled",
                             ui.visuals().widgets.noninteractive.fg_stroke.color,
                         )
                     };
 
-                    // Add the toggle button with hover text
-                    if ui
-                        .button(icon)
-                        .on_hover_text(
-                            "Keeps tracked app processes on their assigned CPU cores\n\
-                                 and restores priority if they change settings",
-                        )
-                        .clicked()
-                    {
-                        app.toggle_process_monitoring();
-                    }
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot_rect.center(), 4.0, color);
 
-                    ui.add_space(4.0);
-                    // Add a label explaining the feature
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Auto Re-apply Affinity and Priority: ")
-                                .color(ui.visuals().widgets.noninteractive.fg_stroke.color)
-                                .small()
-                                .strong(),
-                        );
-                        ui.label(RichText::new(label).color(color).small().strong());
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(label).color(color).strong());
+                        ui.label(RichText::new(detail).small().weak());
                     });
 
                     ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("v{APP_VERSION}"))
-                                .small()
-                                .weak(),
-                        );
+                        ui.label(RichText::new(format!("v{APP_VERSION}")).small().weak());
+                        let action_label = if monitoring_enabled {
+                            "Pause monitor"
+                        } else {
+                            "Resume monitor"
+                        };
+                        if ui
+                            .button(RichText::new(action_label).size(BUTTON_FONT_SIZE))
+                            .on_hover_text(
+                                "Keeps tracked app processes on their assigned CPU cores and restores priority",
+                            )
+                            .clicked()
+                        {
+                            app.toggle_process_monitoring();
+                        }
                     });
                 });
             });

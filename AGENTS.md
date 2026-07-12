@@ -123,7 +123,6 @@ Current runtime split:
   - rule editor shortcut creation result/status
   - dropped files
   - installed app picker session and cached catalog
-  - rotating tip state
 - `features::rules::RulesContext` owns logical `GroupId` / `RuleId` allocation, index projection, and persisted `rule_identities`
 - `features::execution::RuntimeRegistry` owns runtime process tracking:
   - `running_apps`

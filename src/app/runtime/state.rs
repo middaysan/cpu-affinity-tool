@@ -326,42 +326,17 @@ impl AppState {
         self.persistent_state.read().unwrap().cpu_schema.clone()
     }
 
-    pub fn swap_groups(&mut self, index1: usize, index2: usize) -> bool {
-        let swapped = rules::swap_groups(&self.persistent_state, index1, index2);
-        if swapped {
-            self.rules.swap_groups(index1, index2);
+    pub fn move_group_to_index(&mut self, group_id: GroupId, target_index: usize) -> bool {
+        let Some(source_index) = self.group_index_for_id(&group_id) else {
+            return false;
+        };
+
+        let moved = rules::move_group_to_index(&self.persistent_state, source_index, target_index);
+        if moved {
+            self.rules.move_group_to_index(source_index, target_index);
             let _ = self.persist_state();
         }
-        swapped
-    }
-
-    pub fn move_group_up(&mut self, group_id: GroupId) -> bool {
-        let Some(group_index) = self.group_index_for_id(&group_id) else {
-            return false;
-        };
-
-        if group_index == 0 {
-            return false;
-        }
-
-        self.swap_groups(group_index, group_index - 1)
-    }
-
-    pub fn move_group_down(&mut self, group_id: GroupId) -> bool {
-        let Some(group_index) = self.group_index_for_id(&group_id) else {
-            return false;
-        };
-
-        let groups_len = match self.persistent_state.read() {
-            Ok(state) => state.groups.len(),
-            Err(_) => return false,
-        };
-
-        if group_index + 1 >= groups_len {
-            return false;
-        }
-
-        self.swap_groups(group_index + 1, group_index)
+        moved
     }
 
     pub fn move_rule_to_group_at(
@@ -717,6 +692,11 @@ impl AppState {
         self.ui.set_current_window(window);
     }
 
+    pub fn start_creating_group(&mut self) {
+        self.ui.reset_group_form();
+        self.set_current_window(WindowRoute::Groups(GroupRoute::Create));
+    }
+
     pub fn start_editing_group(&mut self, group_id: GroupId) {
         let Some(group_index) = self.group_index_for_id(&group_id) else {
             return;
@@ -1004,10 +984,6 @@ impl AppState {
 
     pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
         self.runtime.get_running_app_pids(app_key)
-    }
-
-    pub fn get_tip(&mut self, current_time: f64) -> &str {
-        self.ui.current_tip(current_time)
     }
 
     pub fn open_installed_app_picker(&mut self, group_id: GroupId) {
@@ -1844,6 +1820,31 @@ mod tests {
     }
 
     #[test]
+    fn test_start_creating_group_clears_previous_edit_session() {
+        let mut app = sample_state();
+        let existing_group_id = group_id(&app, 0);
+        app.start_editing_group(existing_group_id);
+
+        assert!(app.ui.group_form.editing_group_id.is_some());
+        assert!(!app.ui.group_form.group_name.is_empty());
+
+        app.start_creating_group();
+
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::Groups(GroupRoute::Create)
+        ));
+        assert!(app.ui.group_form.editing_group_id.is_none());
+        assert!(app.ui.group_form.group_name.is_empty());
+        assert!(app
+            .ui
+            .group_form
+            .core_selection
+            .iter()
+            .all(|selected| !selected));
+    }
+
+    #[test]
     fn test_commit_current_app_edit_session_updates_and_closes() {
         let mut app = sample_state();
         let mut updated = AppToRun::new_path(
@@ -2086,42 +2087,73 @@ mod tests {
     }
 
     #[test]
-    fn test_move_group_by_id_preserves_group_ids_and_saves_once_per_move() {
-        let mut app = sample_state();
-        add_empty_group(&mut app, "Work");
-        let games_id = group_id(&app, 0);
-        let work_id = group_id(&app, 1);
-
-        assert!(app.move_group_down(games_id.clone()));
-        assert_eq!(app.persistent_state.read().unwrap().groups[0].name, "Work");
-        assert_eq!(app.rules.group_id_for_index(0), Some(work_id.clone()));
-        assert_eq!(app.rules.group_id_for_index(1), Some(games_id.clone()));
-        assert_eq!(app.save_count(), 1);
-
-        assert!(app.move_group_up(games_id.clone()));
-        assert_eq!(app.persistent_state.read().unwrap().groups[0].name, "Games");
-        assert_eq!(app.rules.group_id_for_index(0), Some(games_id));
-        assert_eq!(app.rules.group_id_for_index(1), Some(work_id));
-        assert_eq!(app.save_count(), 2);
-    }
-
-    #[test]
-    fn test_move_group_edges_and_missing_group_do_not_save() {
+    fn test_move_group_invalid_target_or_missing_group_do_not_save() {
         let mut app = sample_state();
         add_empty_group(&mut app, "Work");
         let first_group_id = group_id(&app, 0);
-        let last_group_id = group_id(&app, 1);
 
-        assert!(!app.move_group_up(first_group_id));
-        assert!(!app.move_group_down(last_group_id));
-        assert!(!app.move_group_up(GroupId("missing-group".to_string())));
-        assert!(!app.move_group_down(GroupId("missing-group".to_string())));
+        assert!(!app.move_group_to_index(first_group_id, 0));
+        assert!(!app.move_group_to_index(GroupId("missing-group".to_string()), 1));
+        assert!(!app.move_group_to_index(group_id(&app, 0), 99));
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(state.groups[0].name, "Games");
         assert_eq!(state.groups[1].name, "Work");
         drop(state);
         assert_eq!(app.save_count(), 0);
+    }
+
+    #[test]
+    fn test_move_group_to_index_preserves_ids_and_saves_once() {
+        let mut app = sample_state();
+        let second = CoreGroup {
+            name: "Second".to_string(),
+            cores: vec![2],
+            programs: Vec::new(),
+            is_hidden: false,
+            run_all_button: false,
+        };
+        let third = CoreGroup {
+            name: "Third".to_string(),
+            cores: vec![3],
+            programs: Vec::new(),
+            is_hidden: false,
+            run_all_button: false,
+        };
+        app.persistent_state
+            .write()
+            .unwrap()
+            .groups
+            .extend([second, third]);
+        app.reconcile_rules();
+        let original_ids = (0..3)
+            .map(|index| app.rules.group_id_for_index(index).unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(app.move_group_to_index(original_ids[0].clone(), 2));
+
+        let names = app
+            .persistent_state
+            .read()
+            .unwrap()
+            .groups
+            .iter()
+            .map(|group| group.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Second", "Third", "Games"]);
+        assert_eq!(
+            app.rules.group_id_for_index(0),
+            Some(original_ids[1].clone())
+        );
+        assert_eq!(
+            app.rules.group_id_for_index(1),
+            Some(original_ids[2].clone())
+        );
+        assert_eq!(
+            app.rules.group_id_for_index(2),
+            Some(original_ids[0].clone())
+        );
+        assert_eq!(app.save_count(), 1);
     }
 
     #[test]

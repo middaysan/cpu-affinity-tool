@@ -25,17 +25,22 @@ pub fn set_group_is_hidden(
     false
 }
 
-pub fn swap_groups(
+pub fn move_group_to_index(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
-    index1: usize,
-    index2: usize,
+    source_index: usize,
+    target_index: usize,
 ) -> bool {
     let mut state = persistent_state.write().unwrap();
-    if index1 < state.groups.len() && index2 < state.groups.len() {
-        state.groups.swap(index1, index2);
-        return true;
+    if source_index >= state.groups.len()
+        || target_index >= state.groups.len()
+        || source_index == target_index
+    {
+        return false;
     }
-    false
+
+    let group = state.groups.remove(source_index);
+    state.groups.insert(target_index, group);
+    true
 }
 
 pub fn create_group(
@@ -359,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn test_group_visibility_and_swap_report_only_real_changes() {
+    fn test_group_visibility_and_move_report_only_real_changes() {
         let persistent_state = sample_persistent_state();
         create_group(&persistent_state, "Work", &[true, false], false).unwrap();
 
@@ -367,8 +372,8 @@ mod tests {
         assert!(!set_group_is_hidden(&persistent_state, 0, true));
         assert!(!set_group_is_hidden(&persistent_state, 99, true));
 
-        assert!(swap_groups(&persistent_state, 0, 1));
-        assert!(!swap_groups(&persistent_state, 0, 99));
+        assert!(move_group_to_index(&persistent_state, 0, 1));
+        assert!(!move_group_to_index(&persistent_state, 0, 99));
 
         let state = persistent_state.read().unwrap();
         assert_eq!(state.groups[0].name, "Work");

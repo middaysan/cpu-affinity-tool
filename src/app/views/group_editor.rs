@@ -1,6 +1,8 @@
 use crate::app::models::{CoreInfo, CoreType, CpuSchema};
 use crate::app::runtime::AppState;
-use crate::app::shell::presenters::shared_elements::glass_frame;
+use crate::app::shell::presenters::shared_elements::{
+    danger_color, glass_frame, inset_frame, neutral_emphasis_fill,
+};
 use crate::app::shell::GroupFormSession;
 use eframe::egui::{self, CentralPanel, RichText};
 
@@ -15,18 +17,21 @@ fn draw_group_form_ui(
     on_delete: Option<&mut dyn FnMut()>,
 ) {
     glass_frame(ui).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Group name:").strong());
-            ui.text_edit_singleline(&mut groups.group_name)
-                .request_focus();
+        ui.vertical(|ui| {
+            ui.label(RichText::new("Group name").strong());
+            ui.add_sized(
+                [ui.available_width().min(520.0), 30.0],
+                egui::TextEdit::singleline(&mut groups.group_name),
+            )
+            .request_focus();
         });
 
-        ui.add_space(8.0);
+        ui.add_space(10.0);
 
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut groups.run_all_enabled, "");
-            ui.label(RichText::new("Enable \"Run All\" button").strong());
-        });
+        ui.checkbox(
+            &mut groups.run_all_enabled,
+            "Show a Run all action for this group",
+        );
 
         ui.add_space(8.0);
         ui.separator();
@@ -39,10 +44,16 @@ fn draw_group_form_ui(
         ui.add_space(10.0);
 
         ui.horizontal(|ui| {
+            let save_label = if is_edit {
+                "Save changes"
+            } else {
+                "Create group"
+            };
             if ui
                 .add(
-                    egui::Button::new(RichText::new("💾 Save Changes").strong())
-                        .min_size(egui::vec2(120.0, 32.0)),
+                    egui::Button::new(RichText::new(save_label).strong())
+                        .fill(neutral_emphasis_fill(ui))
+                        .min_size(egui::vec2(130.0, 34.0)),
                 )
                 .clicked()
                 || ui.input(|i| i.key_pressed(egui::Key::Enter))
@@ -51,7 +62,7 @@ fn draw_group_form_ui(
             }
 
             if ui
-                .add(egui::Button::new("❌ Cancel").min_size(egui::vec2(100.0, 32.0)))
+                .add(egui::Button::new("Cancel").min_size(egui::vec2(100.0, 34.0)))
                 .clicked()
             {
                 on_cancel();
@@ -63,9 +74,9 @@ fn draw_group_form_ui(
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new("🗑 Delete Group").color(egui::Color32::RED),
+                                    RichText::new("Delete group").color(danger_color(ui)),
                                 )
-                                .min_size(egui::vec2(120.0, 32.0)),
+                                .min_size(egui::vec2(120.0, 34.0)),
                             )
                             .clicked()
                         {
@@ -80,17 +91,27 @@ fn draw_group_form_ui(
 
 /// Rendering the CPU cores section: a list of already created clusters and a panel of free cores.
 fn draw_cpu_cores_ui(ui: &mut egui::Ui, groups: &mut GroupFormSession, cpu_schema: &mut CpuSchema) {
-    ui.with_layout(
-        egui::Layout::top_down_justified(egui::Align::Center),
-        |ui| {
-            let model_display = if cpu_schema.clusters.is_empty() {
-                format!("{} (No preset matched)", cpu_schema.model)
-            } else {
-                cpu_schema.model.clone()
-            };
-            ui.heading(format!("Select CPU cores ({})", model_display));
-        },
+    let model_display = if cpu_schema.clusters.is_empty() {
+        format!("{} (No preset matched)", cpu_schema.model)
+    } else {
+        cpu_schema.model.clone()
+    };
+    ui.heading("CPU topology");
+    ui.label(RichText::new(model_display).small().weak());
+    ui.label(
+        RichText::new(format!(
+            "{} of {} threads selected",
+            groups
+                .core_selection
+                .iter()
+                .filter(|selected| **selected)
+                .count(),
+            groups.core_selection.len()
+        ))
+        .small()
+        .strong(),
     );
+    ui.add_space(6.0);
     ui.separator();
 
     let assigned = cpu_schema.get_assigned_cores();
@@ -99,7 +120,7 @@ fn draw_cpu_cores_ui(ui: &mut egui::Ui, groups: &mut GroupFormSession, cpu_schem
         (0..total_cores).filter(|i| !assigned.contains(i)).collect();
 
     for cluster in cpu_schema.clusters.iter_mut() {
-        ui.group(|ui| {
+        inset_frame(ui).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&cluster.name).strong());
             });
@@ -108,7 +129,7 @@ fn draw_cpu_cores_ui(ui: &mut egui::Ui, groups: &mut GroupFormSession, cpu_schem
     }
 
     if !free_core_indexes.is_empty() {
-        ui.group(|ui| {
+        inset_frame(ui).show(ui, |ui| {
             ui.label(RichText::new("Free Cores").strong());
 
             // Temporary CoreInfo for drawing buttons of free cores
@@ -210,7 +231,7 @@ fn draw_core_buttons(ui: &mut egui::Ui, groups: &mut GroupFormSession, cores: &m
                     rect.center_top() + egui::vec2(0.0, 15.0),
                     egui::Align2::CENTER_CENTER,
                     &core.label,
-                    egui::FontId::proportional(14.0),
+                    egui::FontId::proportional(12.9),
                     text_color,
                 );
 
@@ -219,7 +240,7 @@ fn draw_core_buttons(ui: &mut egui::Ui, groups: &mut GroupFormSession, cores: &m
                     rect.center_bottom() - egui::vec2(0.0, 6.0),
                     egui::Align2::CENTER_BOTTOM,
                     format!("thread{}", core.index),
-                    egui::FontId::proportional(8.0),
+                    egui::FontId::proportional(7.4),
                     text_color,
                 );
 
@@ -252,7 +273,14 @@ pub fn create_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     CentralPanel::default().show(root_ui, |ui| {
         ui.add_space(5.0);
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("➕ Create New Group").strong());
+            ui.vertical(|ui| {
+                ui.heading(RichText::new("Create affinity group").strong());
+                ui.label(
+                    RichText::new("Choose a name and the CPU threads this group may use")
+                        .small()
+                        .weak(),
+                );
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                 if ui.button("Close").on_hover_text("Close").clicked() {
                     cancel_clicked = true;
@@ -295,7 +323,14 @@ pub fn edit_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
 
         ui.add_space(5.0);
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("⚙ Edit Group").strong());
+            ui.vertical(|ui| {
+                ui.heading(RichText::new("Edit affinity group").strong());
+                ui.label(
+                    RichText::new("Update group identity, actions, and CPU topology")
+                        .small()
+                        .weak(),
+                );
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                 if ui.button("Close").on_hover_text("Close").clicked() {
                     cancel_clicked = true;

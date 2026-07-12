@@ -1,18 +1,21 @@
 use crate::app::models::{AppRuntimeKey, AppStatus};
 use crate::app::runtime::{AppState, CentralPanelSnapshot};
 use crate::app::shared::ids::{GroupId, RuleId};
-use crate::app::shell::presenters::shared_elements::glass_frame;
+use crate::app::shell::presenters::shared_elements::{
+    danger_color, group_frame, inset_frame, neutral_emphasis_fill, row_fill, row_hover_fill,
+    success_color, warning_color, BUTTON_FONT_SIZE,
+};
 use eframe::egui::{self, Align, CentralPanel, Color32, Layout, RichText, ScrollArea, Vec2};
 use std::path::PathBuf;
 
-const ICON_MOVE_UP: &str = "\u{23F6}";
-const ICON_MOVE_DOWN: &str = "\u{23F7}";
 const ICON_EDIT: &str = "\u{2699}";
 const ICON_SHOW: &str = "\u{1F441}";
 
 enum CentralAction {
-    MoveGroupUp(GroupId),
-    MoveGroupDown(GroupId),
+    MoveGroupToIndex {
+        group_id: GroupId,
+        target_index: usize,
+    },
     StartEditGroup(GroupId),
     ToggleGroupHidden {
         group_id: GroupId,
@@ -51,6 +54,13 @@ struct RuleDragPayload {
     preview_width: f32,
 }
 
+#[derive(Clone)]
+struct GroupDragPayload {
+    group_id: GroupId,
+    preview_label: String,
+    preview_width: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuleDropClassification {
     Valid,
@@ -61,15 +71,30 @@ enum RuleDropClassification {
 
 pub fn draw_central_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
     let ctx = root_ui.ctx().clone();
-    CentralPanel::default().show(root_ui, |ui| {
-        ScrollArea::vertical().show(ui, |ui| {
-            ui.vertical(|ui| {
-                let actions = render_groups(app, ui, &ctx);
-                execute_actions(app, actions);
+    let panel_fill = root_ui.visuals().panel_fill;
+    CentralPanel::default()
+        .frame(
+            egui::Frame::NONE
+                .fill(panel_fill)
+                .inner_margin(egui::Margin::symmetric(6, 4)),
+        )
+        .show(root_ui, |ui| {
+            ui.heading("Affinity groups");
+            ui.label(
+                RichText::new("Each bounded area owns its CPU threads and application rules")
+                    .small()
+                    .weak(),
+            );
+            ui.add_space(4.0);
+            ScrollArea::vertical().show(ui, |ui| {
+                ui.vertical(|ui| {
+                    let actions = render_groups(app, ui, &ctx);
+                    execute_actions(app, actions);
+                });
             });
         });
-    });
     render_rule_drag_preview(&ctx);
+    render_group_drag_preview(&ctx);
 }
 
 #[cfg(target_os = "windows")]
@@ -109,9 +134,63 @@ fn installed_app_hover_text() -> &'static str {
     "Find supported installed apps"
 }
 
+fn format_core_summary(cores: &[usize]) -> String {
+    if cores.is_empty() {
+        return "No CPU threads assigned".to_string();
+    }
+
+    let visible = cores
+        .iter()
+        .take(8)
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suffix = if cores.len() > 8 { ", …" } else { "" };
+    format!("{} threads · {visible}{suffix}", cores.len())
+}
+
+fn app_status_label(status: AppStatus) -> &'static str {
+    match status {
+        AppStatus::Running => "Running · protected",
+        AppStatus::SettingsMismatch => "Running · correction needed",
+        AppStatus::NotRunning => "Stopped",
+    }
+}
+
+fn resolve_group_drop_index(
+    source_index: usize,
+    insertion_slot: usize,
+    groups_len: usize,
+) -> Option<usize> {
+    if source_index >= groups_len || insertion_slot > groups_len {
+        return None;
+    }
+
+    let target_index = if insertion_slot > source_index {
+        insertion_slot - 1
+    } else {
+        insertion_slot
+    };
+    (target_index < groups_len && target_index != source_index).then_some(target_index)
+}
+
 fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> Vec<CentralAction> {
     let mut actions = Vec::new();
     let mut hovered_file_drop_group = None;
+    let active_group_payload = egui::DragAndDrop::payload::<GroupDragPayload>(ctx);
+    let group_drag_pos = if active_group_payload.is_some() {
+        ctx.pointer_interact_pos()
+    } else {
+        None
+    };
+    let group_drop_pos =
+        if active_group_payload.is_some() && ctx.input(|input| input.pointer.any_released()) {
+            ctx.pointer_interact_pos()
+        } else {
+            None
+        };
+    let group_pointer_pos = group_drop_pos.or(group_drag_pos);
+    let mut group_drop_target_claimed = false;
     let active_rule_payload = egui::DragAndDrop::payload::<RuleDragPayload>(ctx);
     let rule_drag_pos = if active_rule_payload.is_some() {
         ctx.pointer_interact_pos()
@@ -140,76 +219,80 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
         let mut drop_indicator = None;
         let mut rejected_rule_drop = None;
 
-        let group_response = glass_frame(ui).outer_margin(5.0).show(ui, |ui| {
+        let group_response = group_frame(ui).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    if group_index > 0 {
-                        if ui
-                            .button(ICON_MOVE_UP)
-                            .on_hover_text("Move group up")
-                            .clicked()
-                        {
-                            actions.push(CentralAction::MoveGroupUp(group_id.clone()));
-                        }
-                    } else {
-                        ui.add_enabled(false, egui::Button::new(ICON_MOVE_UP));
-                    }
+                egui::Frame::NONE
+                    .fill(neutral_emphasis_fill(ui))
+                    .corner_radius(5.0)
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new((group_index + 1).to_string())
+                                .color(ui.visuals().text_color())
+                                .strong(),
+                        );
+                    });
 
-                    if group_index < groups_len - 1 {
-                        if ui
-                            .button(ICON_MOVE_DOWN)
-                            .on_hover_text("Move group down")
-                            .clicked()
-                        {
-                            actions.push(CentralAction::MoveGroupDown(group_id.clone()));
-                        }
-                    } else {
-                        ui.add_enabled(false, egui::Button::new(ICON_MOVE_DOWN));
-                    }
-                });
-
-                ui.add_space(8.0);
-
-                ui.vertical(|ui| {
+                let title = ui.vertical(|ui| {
                     ui.label(RichText::new(&group.name).heading().strong());
-                    ui.add_sized(
-                        [350.0, 0.0],
-                        egui::Label::new(RichText::new(format!("Cores: {:?}", group.cores)).small().weak()),
-                    );
+                    ui.label(RichText::new(format_core_summary(&group.cores)).small().weak());
+                });
+                let title_response = ui
+                    .interact(
+                        title.response.rect,
+                        egui::Id::new(("central-group-drag", group_id.0.as_str())),
+                        egui::Sense::click_and_drag(),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::Grab)
+                    .on_hover_text("Drag group to change its position");
+                title_response.dnd_set_drag_payload(GroupDragPayload {
+                    group_id: group_id.clone(),
+                    preview_label: group.name.clone(),
+                    preview_width: title_response.rect.width().max(180.0),
                 });
 
-                ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
+                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .button(ICON_EDIT)
+                        .button(
+                            RichText::new(format!("{ICON_EDIT} Edit")).size(BUTTON_FONT_SIZE),
+                        )
                         .on_hover_text("Edit group settings")
                         .clicked()
                     {
                         actions.push(CentralAction::StartEditGroup(group_id.clone()));
                     }
+                });
+            });
 
-                    ui.separator();
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(3.0);
 
-                    let hide_text = if group.is_hidden {
-                        RichText::new(ICON_SHOW).strikethrough()
-                    } else {
-                        RichText::new(ICON_SHOW)
-                    };
-                    let hover_text = if group.is_hidden {
-                        "Show apps list"
-                    } else {
-                        "Hide apps list"
-                    };
+                ui.horizontal_wrapped(|ui| {
+                    if group.run_all_button
+                        && ui
+                            .button(
+                                RichText::new("\u{25B6} Run all")
+                                    .size(BUTTON_FONT_SIZE)
+                                    .strong(),
+                            )
+                            .on_hover_text("Run all apps in group")
+                            .clicked()
+                    {
+                        actions.push(CentralAction::RunGroup(group_id.clone()));
+                    }
 
-                    if ui.button(hide_text).on_hover_text(hover_text).clicked() {
-                        actions.push(CentralAction::ToggleGroupHidden {
-                            group_id: group_id.clone(),
-                            is_hidden: !group.is_hidden,
-                        });
+                    if crate::app::adapters::discovery::supports_installed_app_picker()
+                        && ui
+                            .button(RichText::new("Find installed").size(BUTTON_FONT_SIZE))
+                            .on_hover_text(installed_app_hover_text())
+                            .clicked()
+                    {
+                        actions.push(CentralAction::OpenInstalledAppPicker(group_id.clone()));
                     }
 
                     if ui
-                        .button("Open App")
+                        .button(RichText::new("Open app").size(BUTTON_FONT_SIZE))
                         .on_hover_text(open_app_hover_text())
                         .clicked()
                     {
@@ -221,120 +304,179 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                         }
                     }
 
-                    if crate::app::adapters::discovery::supports_installed_app_picker()
-                        && ui
-                            .button("Find Installed")
-                            .on_hover_text(installed_app_hover_text())
-                            .clicked()
+                    let visibility_label = if group.is_hidden {
+                        format!("{ICON_SHOW} Show apps")
+                    } else {
+                        format!("{ICON_SHOW} Hide apps")
+                    };
+                    if ui
+                        .button(RichText::new(visibility_label).size(BUTTON_FONT_SIZE))
+                        .clicked()
                     {
-                        actions.push(CentralAction::OpenInstalledAppPicker(group_id.clone()));
-                    }
-
-                    if group.run_all_button
-                        && ui
-                            .button(
-                                RichText::new("\u{25B6} Run All")
-                                    .color(Color32::from_rgb(0, 200, 0)),
-                            )
-                            .on_hover_text("Run all apps in group")
-                            .clicked()
-                    {
-                        actions.push(CentralAction::RunGroup(group_id.clone()));
+                        actions.push(CentralAction::ToggleGroupHidden {
+                            group_id: group_id.clone(),
+                            is_hidden: !group.is_hidden,
+                        });
                     }
                 });
-            });
 
-            if !group.is_hidden {
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(4.0);
+                ui.add_space(5.0);
 
-                if group.programs.is_empty() {
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            RichText::new("No apps yet. Use Open App, Find Installed, or drag files here.")
-                                .weak()
-                                .italics(),
-                        );
+                if group.is_hidden {
+                    inset_frame(ui).show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new("Apps are hidden for this group").strong());
+                            ui.label(
+                                RichText::new("Use Show apps to restore the list.")
+                                    .small()
+                                    .weak(),
+                            );
+                        });
+                    });
+                } else if group.programs.is_empty() {
+                    inset_frame(ui).show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new("Drop an executable inside this group").strong());
+                            ui.label(
+                                RichText::new("or use Open app / Find installed")
+                                    .small()
+                                    .weak(),
+                            );
+                        });
                     });
                 } else {
                     for (program_index, program) in group.programs.iter().enumerate() {
                         let app_status = app.get_app_status_sync(&program.app_key);
 
-                        let row_response = ui.horizontal(|ui| {
-                            let (rect, response) =
-                                ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
-                            let color = match app_status {
-                                AppStatus::Running => {
-                                    if let Some(pids) = app.get_running_app_pids(&program.app_key) {
-                                        response.on_hover_text(format!(
-                                            "Tracking PIDs: {:?}\nStatus: All settings applied",
-                                            pids
-                                        ));
+                        let row_response = egui::Frame::NONE
+                            .fill(row_fill(ui))
+                            .corner_radius(5.0)
+                            .inner_margin(egui::Margin::symmetric(6, 2))
+                            .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let (rect, response) = ui
+                                    .allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+                                let color = match app_status {
+                                    AppStatus::Running => {
+                                        if let Some(pids) = app.get_running_app_pids(&program.app_key)
+                                        {
+                                            response.on_hover_text(format!(
+                                                "Tracking PIDs: {:?}\nStatus: All settings applied",
+                                                pids
+                                            ));
+                                        }
+                                        success_color(ui)
                                     }
-                                    Color32::from_rgb(0, 255, 0)
-                                }
-                                AppStatus::SettingsMismatch => {
-                                    if let Some(pids) = app.get_running_app_pids(&program.app_key) {
-                                        response.on_hover_text(format!(
-                                            "Tracking PIDs: {:?}\nStatus: Settings mismatch (CPU affinity or priority)",
-                                            pids
-                                        ));
+                                    AppStatus::SettingsMismatch => {
+                                        if let Some(pids) = app.get_running_app_pids(&program.app_key)
+                                        {
+                                            response.on_hover_text(format!(
+                                                "Tracking PIDs: {:?}\nStatus: Settings mismatch (CPU affinity or priority)",
+                                                pids
+                                            ));
+                                        }
+                                        warning_color(ui)
                                     }
-                                    Color32::from_rgb(255, 255, 0)
-                                }
-                                AppStatus::NotRunning => Color32::from_rgb(200, 0, 0),
-                            };
-                            ui.painter().circle_filled(rect.center(), 5.0, color);
+                                    AppStatus::NotRunning => danger_color(ui),
+                                };
+                                ui.painter().circle_filled(rect.center(), 3.5, color);
 
-                            ui.add_space(4.0);
+                                ui.add_space(1.0);
 
-                            let app_button_id = (
-                                "central-rule-drag",
-                                group_id.0.as_str(),
-                                program.rule_id.0.as_str(),
-                            );
-                            let app_response = ui
-                                .push_id(app_button_id, |ui| {
-                                    ui.add_sized(
-                                        [ui.available_width() - 40.0, 20.0],
-                                        egui::Button::new(RichText::new(&program.name).strong())
-                                            .sense(egui::Sense::click_and_drag()),
-                                    )
-                                })
-                                .inner
-                                .on_hover_text(program.launch_target_detail.clone());
-                            let drag_payload = RuleDragPayload {
-                                source_group_id: group_id.clone(),
-                                rule_id: program.rule_id.clone(),
-                                app_key: program.app_key.clone(),
-                                preview_label: program.name.clone(),
-                                preview_width: app_response.rect.width(),
-                            };
-                            app_response.dnd_set_drag_payload(drag_payload);
-                            let app_was_dragged = app_response.drag_started()
-                                || app_response.dragged()
-                                || app_response.drag_stopped();
+                                let app_button_id = (
+                                    "central-rule-drag",
+                                    group_id.0.as_str(),
+                                    program.rule_id.0.as_str(),
+                                );
+                                let app_response = ui
+                                    .push_id(app_button_id, |ui| {
+                                        let width = (ui.available_width() - 44.0).max(120.0);
+                                        let (rect, response) = ui.allocate_exact_size(
+                                            Vec2::new(width, 22.0),
+                                            egui::Sense::click_and_drag(),
+                                        );
+                                        let painter = ui.painter_at(rect);
+                                        if response.hovered() || response.dragged() {
+                                            painter.rect_filled(rect, 6.0, row_hover_fill(ui));
+                                        }
 
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui
-                                    .button(ICON_EDIT)
-                                    .on_hover_text("Edit app settings")
-                                    .clicked()
-                                {
-                                    actions.push(CentralAction::OpenAppRunSettings {
+                                        let action_label = match app_status {
+                                            AppStatus::NotRunning => "Run",
+                                            AppStatus::SettingsMismatch => "Fix",
+                                            AppStatus::Running => "",
+                                        };
+                                        let text_rect = egui::Rect::from_min_max(
+                                            rect.min,
+                                            egui::pos2(rect.right() - 68.0, rect.bottom()),
+                                        );
+                                        let text_painter = painter.with_clip_rect(text_rect);
+                                        text_painter.text(
+                                            egui::pos2(rect.left() + 8.0, rect.center().y),
+                                            egui::Align2::LEFT_CENTER,
+                                            format!(
+                                                "{} · {}",
+                                                program.name,
+                                                app_status_label(app_status)
+                                            ),
+                                            egui::FontId::proportional(11.0),
+                                            ui.visuals().text_color(),
+                                        );
+                                        if !action_label.is_empty() {
+                                            painter.text(
+                                                egui::pos2(rect.right() - 8.0, rect.center().y),
+                                                egui::Align2::RIGHT_CENTER,
+                                                action_label,
+                                                egui::FontId::proportional(10.6),
+                                                ui.visuals().text_color(),
+                                            );
+                                        }
+                                        response.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::WidgetType::Button,
+                                                ui.is_enabled(),
+                                                format!(
+                                                    "{}: {}",
+                                                    program.name,
+                                                    app_status_label(app_status)
+                                                ),
+                                            )
+                                        });
+                                        response
+                                    })
+                                    .inner
+                                    .on_hover_text(program.launch_target_detail.clone());
+                                let drag_payload = RuleDragPayload {
+                                    source_group_id: group_id.clone(),
+                                    rule_id: program.rule_id.clone(),
+                                    app_key: program.app_key.clone(),
+                                    preview_label: program.name.clone(),
+                                    preview_width: app_response.rect.width(),
+                                };
+                                app_response.dnd_set_drag_payload(drag_payload);
+                                let app_was_dragged = app_response.drag_started()
+                                    || app_response.dragged()
+                                    || app_response.drag_stopped();
+
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui
+                                        .button(RichText::new(ICON_EDIT).size(BUTTON_FONT_SIZE))
+                                        .on_hover_text("Edit app settings")
+                                        .clicked()
+                                    {
+                                        actions.push(CentralAction::OpenAppRunSettings {
+                                            group_id: group_id.clone(),
+                                            rule_id: program.rule_id.clone(),
+                                        });
+                                    }
+                                });
+
+                                if app_response.clicked() && !app_was_dragged {
+                                    actions.push(CentralAction::RunGroupProgram {
                                         group_id: group_id.clone(),
                                         rule_id: program.rule_id.clone(),
                                     });
                                 }
                             });
-
-                            if app_response.clicked() && !app_was_dragged {
-                                actions.push(CentralAction::RunGroupProgram {
-                                    group_id: group_id.clone(),
-                                    rule_id: program.rule_id.clone(),
-                                });
-                            }
                         });
 
                         if target_rule_index.is_none() {
@@ -379,13 +521,52 @@ fn render_groups(app: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> 
                             .last()
                             .is_some_and(|last| last.rule_id != program.rule_id)
                         {
-                            ui.add_space(2.0);
+                            ui.add_space(0.0);
+                        }
+                    }
+            }
+        });
+
+        if !group_drop_target_claimed {
+            if let (Some(payload), Some(pos)) = (active_group_payload.as_deref(), group_pointer_pos)
+            {
+                let target_rect = group_response.response.rect.expand2(Vec2::new(0.0, 6.0));
+                if target_rect.contains(pos) {
+                    let insertion_slot = if pos.y < group_response.response.rect.center().y {
+                        group_index
+                    } else {
+                        group_index + 1
+                    };
+                    if let Some(source_index) = snapshot
+                        .groups
+                        .iter()
+                        .position(|group| group.group_id == payload.group_id)
+                    {
+                        if let Some(target_index) =
+                            resolve_group_drop_index(source_index, insertion_slot, groups_len)
+                        {
+                            let y = if insertion_slot <= group_index {
+                                group_response.response.rect.top()
+                            } else {
+                                group_response.response.rect.bottom()
+                            };
+                            paint_rule_drop_indicator(ui, group_response.response.rect, y);
+                            group_drop_target_claimed = true;
+
+                            if group_drop_pos.is_some()
+                                && egui::DragAndDrop::take_payload::<GroupDragPayload>(ctx)
+                                    .is_some()
+                            {
+                                actions.push(CentralAction::MoveGroupToIndex {
+                                    group_id: payload.group_id.clone(),
+                                    target_index,
+                                });
+                            }
                         }
                     }
                 }
             }
-
-        });
+        }
 
         if (has_hovered_files || has_dropped_files) && hovered_file_drop_group.is_none() {
             if let Some(pos) = file_drop_pos {
@@ -610,14 +791,40 @@ fn render_rule_drag_preview(ctx: &egui::Context) {
         });
 }
 
+fn render_group_drag_preview(ctx: &egui::Context) {
+    let Some(payload) = egui::DragAndDrop::payload::<GroupDragPayload>(ctx) else {
+        return;
+    };
+    let Some(pointer_pos) = ctx.pointer_interact_pos() else {
+        return;
+    };
+
+    let width = payload.preview_width.clamp(180.0, 360.0);
+    let size = Vec2::new(width, 38.0);
+
+    egui::Area::new(egui::Id::new("central-group-drag-preview"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pointer_pos - size / 2.0)
+        .constrain(false)
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.add_sized(
+                [size.x, size.y],
+                egui::Button::new(
+                    RichText::new(format!("Move group: {}", payload.preview_label)).strong(),
+                ),
+            );
+        });
+}
+
 fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
     for action in actions {
         match action {
-            CentralAction::MoveGroupUp(group_id) => {
-                let _ = app.move_group_up(group_id);
-            }
-            CentralAction::MoveGroupDown(group_id) => {
-                let _ = app.move_group_down(group_id);
+            CentralAction::MoveGroupToIndex {
+                group_id,
+                target_index,
+            } => {
+                let _ = app.move_group_to_index(group_id, target_index);
             }
             CentralAction::StartEditGroup(group_id) => {
                 app.start_editing_group(group_id);
@@ -926,5 +1133,36 @@ mod tests {
             ),
             RuleDropClassification::StalePayload
         );
+    }
+
+    #[test]
+    fn test_format_core_summary_is_compact_and_handles_empty_groups() {
+        assert_eq!(format_core_summary(&[]), "No CPU threads assigned");
+        assert_eq!(format_core_summary(&[0, 1, 6, 7]), "4 threads · 0, 1, 6, 7");
+        assert_eq!(
+            format_core_summary(&[0, 1, 2, 3, 4, 5, 6, 7, 8]),
+            "9 threads · 0, 1, 2, 3, 4, 5, 6, 7, …"
+        );
+    }
+
+    #[test]
+    fn test_app_status_label_is_explicit() {
+        assert_eq!(app_status_label(AppStatus::Running), "Running · protected");
+        assert_eq!(
+            app_status_label(AppStatus::SettingsMismatch),
+            "Running · correction needed"
+        );
+        assert_eq!(app_status_label(AppStatus::NotRunning), "Stopped");
+    }
+
+    #[test]
+    fn test_resolve_group_drop_index_uses_insertion_slots() {
+        assert_eq!(resolve_group_drop_index(0, 0, 3), None);
+        assert_eq!(resolve_group_drop_index(0, 1, 3), None);
+        assert_eq!(resolve_group_drop_index(0, 2, 3), Some(1));
+        assert_eq!(resolve_group_drop_index(0, 3, 3), Some(2));
+        assert_eq!(resolve_group_drop_index(2, 0, 3), Some(0));
+        assert_eq!(resolve_group_drop_index(1, 3, 3), Some(2));
+        assert_eq!(resolve_group_drop_index(1, 4, 3), None);
     }
 }

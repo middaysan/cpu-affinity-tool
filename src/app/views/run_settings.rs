@@ -1,5 +1,7 @@
 use crate::app::runtime::AppState;
-use crate::app::shell::presenters::shared_elements::glass_frame;
+use crate::app::shell::presenters::shared_elements::{
+    danger_color, glass_frame, neutral_emphasis_fill, success_color,
+};
 use crate::app::shell::sessions::RuleShortcutResult;
 use crate::app::shell::{GroupRoute, WindowRoute};
 use eframe::egui::{self, Align, CentralPanel, ComboBox, Layout, RichText, Vec2};
@@ -65,7 +67,14 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     CentralPanel::default().show(root_ui, |ui| {
         ui.add_space(5.0);
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("Edit App Settings").strong());
+            ui.vertical(|ui| {
+                ui.heading(RichText::new("Application rule").strong());
+                ui.label(
+                    RichText::new("Configure launch, scheduling, and process tracking")
+                        .small()
+                        .weak(),
+                );
+            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Close").on_hover_text("Close").clicked() {
                     is_close = true;
@@ -309,10 +318,10 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                         if let Some(result) = &shortcut_result {
                             match result {
                                 RuleShortcutResult::Created { filename } => {
-                                    ui.label(RichText::new(filename).color(egui::Color32::GREEN));
+                                    ui.label(RichText::new(filename).color(success_color(ui)));
                                 }
                                 RuleShortcutResult::Failed { message } => {
-                                    ui.label(RichText::new(message).color(egui::Color32::RED));
+                                    ui.label(RichText::new(message).color(danger_color(ui)));
                                 }
                             }
                         }
@@ -326,7 +335,8 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                     if ui
                         .add(
                             egui::Button::new(RichText::new("Save Changes").strong())
-                                .min_size(egui::vec2(120.0, 32.0)),
+                                .fill(neutral_emphasis_fill(ui))
+                                .min_size(egui::vec2(120.0, 34.0)),
                         )
                         .clicked()
                     {
@@ -344,7 +354,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new("Remove from group").color(egui::Color32::RED),
+                                    RichText::new("Remove from group").color(danger_color(ui)),
                                 )
                                 .min_size(egui::vec2(150.0, 32.0)),
                             )

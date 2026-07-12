@@ -918,12 +918,17 @@ impl App {
 
     fn apply_theme(&self, ctx: &egui::Context) {
         let theme_index = self.state.get_theme_index();
-        let visuals = match theme_index {
+        let mut visuals = match theme_index {
             0 => egui::Visuals::default(),
             1 => egui::Visuals::light(),
             _ => egui::Visuals::dark(),
         };
+        crate::app::shell::presenters::shared_elements::apply_widget_visuals(&mut visuals);
         ctx.set_visuals(visuals);
+        ctx.style_mut_of(
+            ctx.theme(),
+            crate::app::shell::presenters::shared_elements::apply_widget_style,
+        );
     }
 
     fn handle_file_drops(&mut self, ctx: &egui::Context) {

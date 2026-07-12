@@ -1,4 +1,5 @@
 use crate::app::runtime::AppState;
+use crate::app::shell::presenters::shared_elements::neutral_emphasis_fill;
 use eframe::egui::{
     self, Align, CentralPanel, Context, Key, Layout, RichText, ScrollArea, Stroke, TextEdit,
 };
@@ -114,12 +115,12 @@ pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
                 for row in &snapshot.rows {
                     let visuals = ui.visuals();
                     let fill = if row.selected {
-                        visuals.selection.bg_fill
+                        neutral_emphasis_fill(ui)
                     } else {
                         visuals.widgets.inactive.bg_fill
                     };
                     let stroke = if row.selected {
-                        visuals.selection.stroke
+                        Stroke::new(1.5, visuals.widgets.noninteractive.bg_stroke.color)
                     } else {
                         Stroke::new(1.0, visuals.widgets.inactive.bg_stroke.color)
                     };
