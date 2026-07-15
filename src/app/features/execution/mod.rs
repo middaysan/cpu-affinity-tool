@@ -9,7 +9,10 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 
-pub use launch::{run_app_with_affinity_sync, start_app_with_autorun, LaunchDispatchOutcome};
+pub(crate) use launch::{run_app_row_action, AppRowActionRequest};
+pub use launch::{
+    run_app_with_affinity_sync, start_app_with_autorun, AppRowAction, LaunchDispatchOutcome,
+};
 pub use reconcile::run_process_settings_monitor;
 pub use store::RuntimeRegistry;
 pub(crate) use store::{

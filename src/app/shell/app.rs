@@ -40,6 +40,14 @@ pub struct App {
     is_hidden: bool,
 }
 
+fn theme_preference_for_index(theme_index: usize) -> egui::ThemePreference {
+    match theme_index {
+        0 => egui::ThemePreference::System,
+        1 => egui::ThemePreference::Light,
+        _ => egui::ThemePreference::Dark,
+    }
+}
+
 #[cfg(all(target_os = "windows", feature = "windows"))]
 pub struct AppForwardingRuntime {
     _guard: os_api::LocalIpcGuard,
@@ -109,6 +117,9 @@ impl App {
                 .options(|o| println!("DEBUG: [Egui] Context Options: {:?}", o));
             println!("========================================================");
         }
+
+        cc.egui_ctx
+            .set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
 
         let mut state = AppState::new();
         Self::bootstrap_runtime_without_startup(&mut state, execution::spawn_monitors);
@@ -339,9 +350,9 @@ impl eframe::App for App {
 
 #[cfg(test)]
 mod tests {
-    use super::App;
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use super::AppForwardingRuntime;
+    use super::{theme_preference_for_index, App};
     use crate::app::instance_forwarding::{
         parse_ipc_response_frame, serialize_ipc_command_frame, ForwardedIpcCommand, IpcCommand,
         IpcResponseCode,
@@ -361,6 +372,14 @@ mod tests {
     use std::sync::{Arc, RwLock};
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use std::time::SystemTime;
+
+    #[test]
+    fn test_theme_index_maps_to_native_egui_preference() {
+        assert_eq!(theme_preference_for_index(0), egui::ThemePreference::System);
+        assert_eq!(theme_preference_for_index(1), egui::ThemePreference::Light);
+        assert_eq!(theme_preference_for_index(2), egui::ThemePreference::Dark);
+        assert_eq!(theme_preference_for_index(99), egui::ThemePreference::Dark);
+    }
 
     fn sample_state() -> AppState {
         AppState::new_for_test(
@@ -917,18 +936,17 @@ impl App {
     }
 
     fn apply_theme(&self, ctx: &egui::Context) {
-        let theme_index = self.state.get_theme_index();
-        let mut visuals = match theme_index {
-            0 => egui::Visuals::default(),
-            1 => egui::Visuals::light(),
-            _ => egui::Visuals::dark(),
-        };
-        crate::app::shell::presenters::shared_elements::apply_widget_visuals(&mut visuals);
-        ctx.set_visuals(visuals);
-        ctx.style_mut_of(
-            ctx.theme(),
-            crate::app::shell::presenters::shared_elements::apply_widget_style,
-        );
+        ctx.set_theme(theme_preference_for_index(self.state.get_theme_index()));
+        ctx.all_styles_mut(|style| {
+            crate::app::shell::presenters::shared_elements::apply_widget_style(style);
+            let mut visuals = if style.visuals.dark_mode {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            };
+            crate::app::shell::presenters::shared_elements::apply_widget_visuals(&mut visuals);
+            style.visuals = visuals;
+        });
     }
 
     fn handle_file_drops(&mut self, ctx: &egui::Context) {

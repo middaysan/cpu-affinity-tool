@@ -760,6 +760,42 @@ impl AppState {
         }
     }
 
+    pub fn run_group_program_action(
+        &mut self,
+        group_id: GroupId,
+        rule_id: RuleId,
+        action: execution::AppRowAction,
+    ) -> RunRuleOutcome {
+        self.reconcile_rules();
+        let Some(group_index) = self.rules.group_index_for_id(&group_id) else {
+            return RunRuleOutcome::MissingGroup;
+        };
+        let Some(program_index) = self.rules.rule_index_for_id(group_index, &rule_id) else {
+            return RunRuleOutcome::MissingRule;
+        };
+
+        if let Some(app_to_run) = self.get_group_program(group_index, program_index) {
+            match execution::run_app_row_action(
+                &self.persistent_state,
+                &mut self.runtime,
+                &mut self.log_manager,
+                execution::AppRowActionRequest {
+                    group_index,
+                    program_index,
+                    app: app_to_run,
+                    action,
+                },
+            ) {
+                execution::LaunchDispatchOutcome::Accepted => RunRuleOutcome::Accepted,
+                execution::LaunchDispatchOutcome::Rejected(message) => {
+                    RunRuleOutcome::LaunchRejected(message)
+                }
+            }
+        } else {
+            RunRuleOutcome::MissingRule
+        }
+    }
+
     pub fn create_shortcut_for_rule_with_platform(
         &mut self,
         group_id: GroupId,

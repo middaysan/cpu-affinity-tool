@@ -4,6 +4,32 @@ This file is the consolidated high-level project history.
 
 Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
+## [1.5.0] - 2026-07-16
+
+### Added
+
+- Added the bundled Inter variable font with regular, medium, and semibold UI weights
+- Added drag-and-drop group reordering while preserving saved group and rule identities
+- Added semantic light and dark color palettes for actions, status, selection, and monitoring states
+
+### Changed
+
+- Redesigned the egui interface around a denser layout with clearer group boundaries and more compact application rows
+- Replaced the separate logs entry with centered **Overview** and **Activity** navigation
+- Renamed the main add actions to **Add installed...** and **Add file...**
+- Reworked monitoring controls around **Monitoring active** / **Monitoring paused** status and the **Pause monitor** / **Resume monitor** action
+- Updated the Rust dependency set, including `eframe` / `egui` 0.35, and declared Rust 1.92 as the minimum supported toolchain
+
+### Fixed
+
+- Split application-row actions by intent: **Fix** reapplies affinity and priority without stealing focus, while **Focus** only activates the existing window
+- Replaced font-dependent theme glyphs with egui-painted vector icons so the theme control remains readable with the bundled Inter font
+- Increased selected CPU-thread contrast with the same restrained turquoise primary palette used by the create action in both themes
+- Fixed CPU-thread controls overflowing the fixed-width group editor; all controls now wrap without selected-state shifts and keep their core and thread labels visible
+- Improved keyboard access to group reordering after replacing the old arrow controls with drag-and-drop
+- Improved small-text contrast and made long application status details discoverable without relying on a clipped label
+- Reset stale group form data when starting a new group after editing an existing one
+
 ## [1.4.0] - 2026-06-15
 
 ### Added

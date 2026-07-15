@@ -34,7 +34,7 @@ Please use the bug report issue template and include:
 - actual behavior
 - screenshots or logs when possible
 
-If the problem involves launch, monitoring, or affinity correction, include whether the target was added with **Open App** or **Find Installed**.
+If the problem involves launch, monitoring, or affinity correction, include whether the target was added with **Add file...** or **Add installed...**.
 
 ## Requesting features
 

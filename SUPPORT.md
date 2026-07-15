@@ -25,7 +25,7 @@ For technical problems, include as much of the following as possible:
 - Windows version
 - CPU model
 - CPU Affinity Tool version
-- whether the target was added with **Open App** or **Find Installed**
+- whether the target was added with **Add file...** or **Add installed...**
 - the exact target you launched
 - clear reproduction steps
 - expected behavior

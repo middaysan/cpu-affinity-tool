@@ -62,7 +62,8 @@ Key directories:
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
 - `src/app/models/app_state_storage/` - internal persistence modules for state path resolution, storage I/O, migrations, and schema refresh; `app_state_storage.rs` remains the public storage schema and API entrypoint
 - `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, while Linux remains a single-file desktop beta backend
-- `assets/` - icon, screenshot, `cpu_presets.json`, and social-preview guidance
+- `assets/` - icon, screenshot, bundled Inter UI font and license, `cpu_presets.json`, and social-preview guidance
+- `design/` - standalone HTML design reference for the approved compact Inter-based interface; it loads only repository-local assets and is not runtime input
 - `docs/` - release/process documentation and user-facing comparison/rationale references
 - `scripts/` - committed release/build verification helper scripts
 - `.github/workflows/` - CI and GitHub Release automation
@@ -86,6 +87,7 @@ Important root files:
 - `docs/linux-beta-release-checklist.md` - manual checklist for the Linux beta prerelease contract
 - `docs/release-process.md` - current tag-based stable Windows release flow plus Linux beta prerelease flow and release-notes template
 - `docs/release-smoke-matrix.md` - compact manual smoke reference subordinate to the release checklist
+- `docs/dependency-advisories.md` - reviewed RustSec findings that remain in resolved dependencies, including reachability and re-evaluation conditions
 - `docs/github-metadata.md` - manual GitHub UI metadata plan
 - `CPU_SCHEME_INSTRUCTION` - format contract for `cpu_presets.json`
 
@@ -206,6 +208,7 @@ Key entities:
 - `LogManager` - in-memory runtime log and history
 
 Important contract facts:
+- persisted `theme_index` values map to native egui preferences: `0` follows the system theme, `1` forces light, and `2` forces dark; shared widget styling is applied to both egui theme styles
 - `additional_processes` in `AppToRun` is the persisted backing field for the user-visible Tracked Process Names list and participates in runtime process matching
 - path-target app rules use their visible primary executable process name for exact process-name plus image-path verified tracking; other visible tracked process names are exact user-controlled fallback matches
 - `AppToRun` path targets store both source path and resolved executable path

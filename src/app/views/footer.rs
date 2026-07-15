@@ -1,7 +1,16 @@
 use crate::app::models::APP_VERSION;
 use crate::app::runtime::AppState;
-use crate::app::shell::presenters::shared_elements::{success_color, BUTTON_FONT_SIZE};
-use eframe::egui::{self, Layout, Margin, Panel, RichText, Vec2};
+use crate::app::shell::presenters::shared_elements::{
+    inter_medium_family, palette, success_color, UiPalette, BUTTON_FONT_SIZE,
+};
+use eframe::egui::{self, Layout, Margin, Panel, RichText, Stroke, Vec2};
+
+fn footer_frame(colors: &UiPalette) -> egui::Frame {
+    egui::Frame::NONE
+        .fill(colors.group)
+        .stroke(Stroke::new(1.0, colors.border_subtle))
+        .inner_margin(Margin::symmetric(8, 4))
+}
 
 /// Draws the bottom panel (footer) of the application.
 ///
@@ -14,13 +23,12 @@ use eframe::egui::{self, Layout, Margin, Panel, RichText, Vec2};
 /// * `app` - The application state
 /// * `root_ui` - The root egui UI
 pub fn draw_bottom_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
-    Panel::bottom("bottom_panel").show(root_ui, |ui| {
-        egui::Frame::NONE
-            .fill(ui.visuals().panel_fill)
-            .inner_margin(Margin::symmetric(8, 5))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let monitoring_enabled = app.is_process_monitoring_enabled();
+    let colors = *palette(root_ui);
+    Panel::bottom("bottom_panel")
+        .frame(footer_frame(&colors))
+        .show(root_ui, |ui| {
+        let monitoring_enabled = app.is_process_monitoring_enabled();
+        ui.horizontal(|ui| {
                     let (label, detail, color) = if monitoring_enabled {
                         (
                             "Monitoring active",
@@ -31,21 +39,31 @@ pub fn draw_bottom_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                         (
                             "Monitoring paused",
                             "Automatic corrections are disabled",
-                            ui.visuals().widgets.noninteractive.fg_stroke.color,
+                            colors.neutral_status,
                         )
                     };
 
                     let (dot_rect, _) =
-                        ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
-                    ui.painter().circle_filled(dot_rect.center(), 4.0, color);
+                        ui.allocate_exact_size(Vec2::splat(7.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot_rect.center(), 3.5, color);
 
                     ui.vertical(|ui| {
-                        ui.label(RichText::new(label).color(color).strong());
-                        ui.label(RichText::new(detail).small().weak());
+                        ui.label(
+                            RichText::new(label)
+                                .size(BUTTON_FONT_SIZE)
+                                .family(inter_medium_family())
+                                .color(color)
+                                .strong(),
+                        );
+                        ui.label(RichText::new(detail).size(8.5).color(colors.text_muted));
                     });
 
                     ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(format!("v{APP_VERSION}")).small().weak());
+                        ui.label(
+                            RichText::new(format!("v{APP_VERSION}"))
+                                .size(8.5)
+                                .color(colors.text_muted),
+                        );
                         let action_label = if monitoring_enabled {
                             "Pause monitor"
                         } else {
@@ -62,6 +80,20 @@ pub fn draw_bottom_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                         }
                     });
                 });
-            });
-    });
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::footer_frame;
+    use crate::app::shell::presenters::shared_elements::palette_for_dark_mode;
+
+    #[test]
+    fn test_footer_frame_fills_the_entire_panel_surface() {
+        let colors = palette_for_dark_mode(true);
+        let frame = footer_frame(colors);
+
+        assert_eq!(frame.fill, colors.group);
+        assert_eq!(frame.inner_margin, eframe::egui::Margin::symmetric(8, 4));
+    }
 }

@@ -1,3 +1,4 @@
+use crate::app::features::execution::store::{RunningAppPidsLookup, RunningAppSettingsUpdate};
 use crate::app::features::execution::{
     ensure_package_owner_claim, is_excluded_installed_auto_process, InstalledPackageTrackingState,
     RuntimeRegistry,
@@ -45,6 +46,20 @@ struct PostLaunchCorrectionRequest {
 pub enum LaunchDispatchOutcome {
     Accepted,
     Rejected(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppRowAction {
+    Run,
+    Fix,
+    Focus,
+}
+
+pub(crate) struct AppRowActionRequest {
+    pub group_index: usize,
+    pub program_index: usize,
+    pub app: AppToRun,
+    pub action: AppRowAction,
 }
 
 trait LaunchOs {
@@ -185,6 +200,172 @@ pub fn run_app_with_affinity_sync(
     )
 }
 
+pub fn run_app_row_action(
+    persistent_state: &Arc<RwLock<AppStateStorage>>,
+    runtime: &mut RuntimeRegistry,
+    log_manager: &mut LogManager,
+    request: AppRowActionRequest,
+) -> LaunchDispatchOutcome {
+    let os = RealLaunchOs;
+
+    run_app_row_action_with_os(persistent_state, runtime, log_manager, request, &os)
+}
+
+fn run_app_row_action_with_os<O: LaunchOs>(
+    persistent_state: &Arc<RwLock<AppStateStorage>>,
+    runtime: &mut RuntimeRegistry,
+    log_manager: &mut LogManager,
+    request: AppRowActionRequest,
+    os: &O,
+) -> LaunchDispatchOutcome {
+    let AppRowActionRequest {
+        group_index,
+        program_index,
+        app: app_to_run,
+        action,
+    } = request;
+
+    match action {
+        AppRowAction::Run => run_app_with_affinity_sync_with_os(
+            persistent_state,
+            runtime,
+            log_manager,
+            group_index,
+            program_index,
+            app_to_run,
+            os,
+        ),
+        AppRowAction::Focus => focus_existing_app(runtime, log_manager, app_to_run, os),
+        AppRowAction::Fix => {
+            let group_cores = {
+                let state = persistent_state.read().unwrap();
+                match state.groups.get(group_index) {
+                    Some(group) => group.cores.clone(),
+                    None => {
+                        let message = format!("Error: Group index {group_index} not found");
+                        log_manager.add_important_entry(message.clone());
+                        return LaunchDispatchOutcome::Rejected(message);
+                    }
+                }
+            };
+            reapply_existing_app_settings(runtime, log_manager, app_to_run, &group_cores, os)
+        }
+    }
+}
+
+fn reapply_existing_app_settings<O: LaunchOs>(
+    runtime: &mut RuntimeRegistry,
+    log_manager: &mut LogManager,
+    app_to_run: AppToRun,
+    group_cores: &[usize],
+    os: &O,
+) -> LaunchDispatchOutcome {
+    let app_key = app_to_run.get_key();
+    let pids = match runtime.lookup_running_app_pids(&app_key) {
+        RunningAppPidsLookup::Found(pids) if !pids.is_empty() => pids,
+        RunningAppPidsLookup::Found(_) | RunningAppPidsLookup::NotFound => {
+            let message = format!(
+                "Cannot fix {}: the app is not running",
+                app_to_run.display()
+            );
+            log_manager.add_important_entry(message.clone());
+            return LaunchDispatchOutcome::Rejected(message);
+        }
+        RunningAppPidsLookup::Busy => {
+            let message = format!(
+                "Cannot fix {}: running app state is temporarily busy; try again",
+                app_to_run.display()
+            );
+            log_manager.add_important_entry(message.clone());
+            return LaunchDispatchOutcome::Rejected(message);
+        }
+    };
+    let mask = group_cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
+    let mut failures = Vec::new();
+
+    for &pid in &pids {
+        if let Err(error) = os.set_process_affinity_by_pid(pid, mask) {
+            failures.push(format!("affinity PID {pid}: {error}"));
+        }
+        if let Err(error) = os.set_process_priority_by_pid(pid, app_to_run.priority) {
+            failures.push(format!("priority PID {pid}: {error}"));
+        }
+    }
+
+    if !failures.is_empty() {
+        let _ = runtime.mark_running_app_settings_mismatched(&app_key);
+        let message = format!(
+            "Failed to fix settings for {}: {}",
+            app_to_run.display(),
+            failures.join("; ")
+        );
+        log_manager.add_important_entry(message.clone());
+        return LaunchDispatchOutcome::Rejected(message);
+    }
+
+    match runtime.mark_running_app_settings_matched(&app_key) {
+        RunningAppSettingsUpdate::Updated => {
+            log_manager.add_entry(format!("App settings reapplied: {}", app_to_run.display()));
+            LaunchDispatchOutcome::Accepted
+        }
+        RunningAppSettingsUpdate::NotFound => {
+            let message = format!(
+                "Settings were applied for {}, but the app stopped before confirmation",
+                app_to_run.display()
+            );
+            log_manager.add_important_entry(message.clone());
+            LaunchDispatchOutcome::Rejected(message)
+        }
+        RunningAppSettingsUpdate::Busy => {
+            let message = format!(
+                "Settings were applied for {}, but status confirmation is temporarily busy; try again",
+                app_to_run.display()
+            );
+            log_manager.add_important_entry(message.clone());
+            LaunchDispatchOutcome::Rejected(message)
+        }
+    }
+}
+
+fn focus_existing_app<O: LaunchOs>(
+    runtime: &RuntimeRegistry,
+    log_manager: &mut LogManager,
+    app_to_run: AppToRun,
+    os: &O,
+) -> LaunchDispatchOutcome {
+    let pids = match runtime.lookup_running_app_pids(&app_to_run.get_key()) {
+        RunningAppPidsLookup::Found(pids) if !pids.is_empty() => pids,
+        RunningAppPidsLookup::Found(_) | RunningAppPidsLookup::NotFound => {
+            let message = format!(
+                "Cannot focus {}: the app is not running",
+                app_to_run.display()
+            );
+            log_manager.add_important_entry(message.clone());
+            return LaunchDispatchOutcome::Rejected(message);
+        }
+        RunningAppPidsLookup::Busy => {
+            let message = format!(
+                "Cannot focus {}: running app state is temporarily busy; try again",
+                app_to_run.display()
+            );
+            log_manager.add_important_entry(message.clone());
+            return LaunchDispatchOutcome::Rejected(message);
+        }
+    };
+
+    if pids.iter().any(|&pid| os.focus_window_by_pid(pid)) {
+        log_manager.add_entry(format!("App window focused: {}", app_to_run.display()));
+        LaunchDispatchOutcome::Accepted
+    } else {
+        let message = format!(
+            "Cannot focus {}: no application window was found",
+            app_to_run.display()
+        );
+        log_manager.add_important_entry(message.clone());
+        LaunchDispatchOutcome::Rejected(message)
+    }
+}
+
 fn run_app_with_affinity_sync_with_os<O: LaunchOs>(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     runtime: &RuntimeRegistry,
@@ -247,26 +428,37 @@ fn run_launch_decision<O: LaunchOs>(
     let app_key = app_to_run.get_key();
     let mask = group_cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
 
-    if let Some(pids) = runtime.get_running_app_pids(&app_key) {
-        for &pid in &pids {
-            let _ = os.set_process_affinity_by_pid(pid, mask);
-            let _ = os.set_process_priority_by_pid(pid, app_to_run.priority);
-        }
+    match runtime.lookup_running_app_pids(&app_key) {
+        RunningAppPidsLookup::Found(pids) => {
+            for &pid in &pids {
+                let _ = os.set_process_affinity_by_pid(pid, mask);
+                let _ = os.set_process_priority_by_pid(pid, app_to_run.priority);
+            }
 
-        let was_focused = pids.iter().any(|&pid| os.focus_window_by_pid(pid));
-        if was_focused {
+            let was_focused = pids.iter().any(|&pid| os.focus_window_by_pid(pid));
+            if was_focused {
+                log_manager.add_entry(format!(
+                    "App already running: {}, settings reapplied and window focused",
+                    app_to_run.display()
+                ));
+                return LaunchDispatchOutcome::Accepted;
+            }
+
             log_manager.add_entry(format!(
-                "App already running: {}, settings reapplied and window focused",
+                "App already running: {}, settings reapplied but no window found to focus",
                 app_to_run.display()
             ));
             return LaunchDispatchOutcome::Accepted;
         }
-
-        log_manager.add_entry(format!(
-            "App already running: {}, settings reapplied but no window found to focus",
-            app_to_run.display()
-        ));
-        return LaunchDispatchOutcome::Accepted;
+        RunningAppPidsLookup::NotFound => {}
+        RunningAppPidsLookup::Busy => {
+            let message = format!(
+                "Launch skipped for {}: running app state is temporarily busy; try again",
+                app_to_run.display()
+            );
+            log_manager.add_important_entry(message.clone());
+            return LaunchDispatchOutcome::Rejected(message);
+        }
     }
 
     let label = match &app_to_run.launch_target {
@@ -674,10 +866,13 @@ fn path_is_under_root_case_insensitive(path: &Path, install_root: &Path) -> bool
 mod tests {
     use super::{
         collect_autorun_items, post_launch_correction_poll_with_os, record_started_pid,
-        run_app_with_affinity_sync_with_os, run_launch_decision, LaunchOs, LaunchProcessSnapshot,
+        run_app_row_action_with_os, run_app_with_affinity_sync_with_os, run_launch_decision,
+        AppRowAction, AppRowActionRequest, LaunchOs, LaunchProcessSnapshot,
     };
     use crate::app::features::execution::RuntimeRegistry;
-    use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, LogManager};
+    use crate::app::models::{
+        AppStateStorage, AppStatus, AppToRun, CoreGroup, CpuSchema, LogManager,
+    };
     use crate::app::shared::ids::{GroupId, RuleId};
     use os_api::{InstalledPackageRuntimeInfo, PriorityClass};
     use std::cell::RefCell;
@@ -687,7 +882,10 @@ mod tests {
 
     struct FakeLaunchOs {
         affinity_calls: RefCell<Vec<(u32, usize)>>,
+        affinity_results: HashMap<u32, Result<(), String>>,
         priority_calls: RefCell<Vec<(u32, PriorityClass)>>,
+        priority_results: HashMap<u32, Result<(), String>>,
+        focus_calls: RefCell<Vec<u32>>,
         focus_results: HashMap<u32, bool>,
         run_calls: RefCell<Vec<(PathBuf, Vec<String>, Vec<usize>, PriorityClass)>>,
         run_result: RefCell<Result<u32, String>>,
@@ -703,7 +901,10 @@ mod tests {
         fn default() -> Self {
             Self {
                 affinity_calls: RefCell::new(Vec::new()),
+                affinity_results: HashMap::new(),
                 priority_calls: RefCell::new(Vec::new()),
+                priority_results: HashMap::new(),
+                focus_calls: RefCell::new(Vec::new()),
                 focus_results: HashMap::new(),
                 run_calls: RefCell::new(Vec::new()),
                 run_result: RefCell::new(Ok(0)),
@@ -720,7 +921,7 @@ mod tests {
     impl LaunchOs for FakeLaunchOs {
         fn set_process_affinity_by_pid(&self, pid: u32, mask: usize) -> Result<(), String> {
             self.affinity_calls.borrow_mut().push((pid, mask));
-            Ok(())
+            self.affinity_results.get(&pid).cloned().unwrap_or(Ok(()))
         }
 
         fn set_process_priority_by_pid(
@@ -729,10 +930,11 @@ mod tests {
             priority: PriorityClass,
         ) -> Result<(), String> {
             self.priority_calls.borrow_mut().push((pid, priority));
-            Ok(())
+            self.priority_results.get(&pid).cloned().unwrap_or(Ok(()))
         }
 
         fn focus_window_by_pid(&self, pid: u32) -> bool {
+            self.focus_calls.borrow_mut().push(pid);
             self.focus_results.get(&pid).copied().unwrap_or(false)
         }
 
@@ -832,6 +1034,34 @@ mod tests {
         RuleId(format!("rule-{value}"))
     }
 
+    fn set_settings_matched(runtime: &RuntimeRegistry, app: &AppToRun, matched: bool) {
+        let running_apps = runtime.running_apps_handle();
+        running_apps
+            .try_write()
+            .unwrap()
+            .apps
+            .get_mut(&app.get_key())
+            .unwrap()
+            .settings_matched = matched;
+    }
+
+    fn row_request(app: AppToRun, action: AppRowAction) -> AppRowActionRequest {
+        AppRowActionRequest {
+            group_index: 0,
+            program_index: 0,
+            app,
+            action,
+        }
+    }
+
+    fn assert_no_row_action_os_calls(os: &FakeLaunchOs) {
+        assert!(os.affinity_calls.borrow().is_empty());
+        assert!(os.priority_calls.borrow().is_empty());
+        assert!(os.focus_calls.borrow().is_empty());
+        assert!(os.run_calls.borrow().is_empty());
+        assert!(os.activate_calls.borrow().is_empty());
+    }
+
     #[test]
     fn test_collect_autorun_items_preserves_indices() {
         let items = collect_autorun_items(&sample_state());
@@ -908,6 +1138,314 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.message.contains("no window found to focus")));
+    }
+
+    #[test]
+    fn test_row_fix_reapplies_without_focusing_and_marks_confirmed_match() {
+        let state = sample_state();
+        let mut runtime = RuntimeRegistry::new();
+        let app = sample_app();
+        let app_key = app.get_key();
+        assert!(runtime.add_running_app(&app_key, 41, group_id(0), rule_id(0)));
+        assert!(runtime.add_pid_to_existing_app(&app_key, 42));
+        set_settings_matched(&runtime, &app, false);
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs {
+            focus_results: HashMap::from([(41, true)]),
+            ..Default::default()
+        };
+
+        let outcome = run_app_row_action_with_os(
+            &state,
+            &mut runtime,
+            &mut log_manager,
+            row_request(app, AppRowAction::Fix),
+            &os,
+        );
+
+        assert_eq!(outcome, super::LaunchDispatchOutcome::Accepted);
+        assert_eq!(os.affinity_calls.borrow().as_slice(), &[(41, 3), (42, 3)]);
+        assert_eq!(
+            os.priority_calls.borrow().as_slice(),
+            &[(41, PriorityClass::High), (42, PriorityClass::High)]
+        );
+        assert!(os.focus_calls.borrow().is_empty());
+        assert!(os.run_calls.borrow().is_empty());
+        assert!(os.activate_calls.borrow().is_empty());
+        assert_eq!(runtime.get_app_status_sync(&app_key), AppStatus::Running);
+    }
+
+    #[test]
+    fn test_row_fix_setter_failure_stays_mismatched_and_is_rejected() {
+        let state = sample_state();
+        let mut runtime = RuntimeRegistry::new();
+        let app = sample_app();
+        let app_key = app.get_key();
+        assert!(runtime.add_running_app(&app_key, 77, group_id(0), rule_id(0)));
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs {
+            affinity_results: HashMap::from([(77, Err("access denied".to_string()))]),
+            focus_results: HashMap::from([(77, true)]),
+            ..Default::default()
+        };
+
+        let outcome = run_app_row_action_with_os(
+            &state,
+            &mut runtime,
+            &mut log_manager,
+            row_request(app, AppRowAction::Fix),
+            &os,
+        );
+
+        assert!(matches!(outcome, super::LaunchDispatchOutcome::Rejected(_)));
+        assert!(os.focus_calls.borrow().is_empty());
+        assert!(os.run_calls.borrow().is_empty());
+        assert_eq!(
+            runtime.get_app_status_sync(&app_key),
+            AppStatus::SettingsMismatch
+        );
+        assert!(log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("access denied")));
+    }
+
+    #[test]
+    fn test_row_fix_busy_fails_closed_without_os_calls() {
+        let state = sample_state();
+        let mut runtime = RuntimeRegistry::new();
+        let app = sample_app();
+        assert!(runtime.add_running_app(&app.get_key(), 77, group_id(0), rule_id(0)));
+        let running_apps = runtime.running_apps_handle();
+        let _write_guard = running_apps.try_write().unwrap();
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs::default();
+
+        let outcome = run_app_row_action_with_os(
+            &state,
+            &mut runtime,
+            &mut log_manager,
+            row_request(app, AppRowAction::Fix),
+            &os,
+        );
+
+        assert!(matches!(outcome, super::LaunchDispatchOutcome::Rejected(_)));
+        assert_no_row_action_os_calls(&os);
+        assert!(log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("temporarily busy")));
+    }
+
+    #[test]
+    fn test_row_fix_disappeared_entry_fails_closed_without_os_calls() {
+        let state = sample_state();
+        let mut runtime = RuntimeRegistry::new();
+        let app = sample_app();
+        let app_key = app.get_key();
+        assert!(runtime.add_running_app(&app_key, 77, group_id(0), rule_id(0)));
+        runtime
+            .running_apps_handle()
+            .try_write()
+            .unwrap()
+            .remove_app(&app_key);
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs::default();
+
+        let outcome = run_app_row_action_with_os(
+            &state,
+            &mut runtime,
+            &mut log_manager,
+            row_request(app, AppRowAction::Fix),
+            &os,
+        );
+
+        assert!(matches!(outcome, super::LaunchDispatchOutcome::Rejected(_)));
+        assert_no_row_action_os_calls(&os);
+        assert!(log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("not running")));
+    }
+
+    #[test]
+    fn test_row_focus_only_focuses_and_does_not_reapply_or_launch() {
+        let state = sample_state();
+        let mut runtime = RuntimeRegistry::new();
+        let app = sample_app();
+        let app_key = app.get_key();
+        assert!(runtime.add_running_app(&app_key, 91, group_id(0), rule_id(0)));
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs {
+            focus_results: HashMap::from([(91, true)]),
+            ..Default::default()
+        };
+
+        let outcome = run_app_row_action_with_os(
+            &state,
+            &mut runtime,
+            &mut log_manager,
+            row_request(app, AppRowAction::Focus),
+            &os,
+        );
+
+        assert_eq!(outcome, super::LaunchDispatchOutcome::Accepted);
+        assert_eq!(os.focus_calls.borrow().as_slice(), &[91]);
+        assert!(os.affinity_calls.borrow().is_empty());
+        assert!(os.priority_calls.borrow().is_empty());
+        assert!(os.run_calls.borrow().is_empty());
+        assert!(os.activate_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_row_focus_busy_fails_closed_without_os_calls() {
+        let state = sample_state();
+        let mut runtime = RuntimeRegistry::new();
+        let app = sample_app();
+        assert!(runtime.add_running_app(&app.get_key(), 91, group_id(0), rule_id(0)));
+        let running_apps = runtime.running_apps_handle();
+        let _write_guard = running_apps.try_write().unwrap();
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs::default();
+
+        let outcome = run_app_row_action_with_os(
+            &state,
+            &mut runtime,
+            &mut log_manager,
+            row_request(app, AppRowAction::Focus),
+            &os,
+        );
+
+        assert!(matches!(outcome, super::LaunchDispatchOutcome::Rejected(_)));
+        assert_no_row_action_os_calls(&os);
+        assert!(log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("temporarily busy")));
+    }
+
+    #[test]
+    fn test_row_focus_disappeared_entry_fails_closed_without_os_calls() {
+        let state = sample_state();
+        let mut runtime = RuntimeRegistry::new();
+        let app = sample_app();
+        let app_key = app.get_key();
+        assert!(runtime.add_running_app(&app_key, 91, group_id(0), rule_id(0)));
+        runtime
+            .running_apps_handle()
+            .try_write()
+            .unwrap()
+            .remove_app(&app_key);
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs::default();
+
+        let outcome = run_app_row_action_with_os(
+            &state,
+            &mut runtime,
+            &mut log_manager,
+            row_request(app, AppRowAction::Focus),
+            &os,
+        );
+
+        assert!(matches!(outcome, super::LaunchDispatchOutcome::Rejected(_)));
+        assert_no_row_action_os_calls(&os);
+        assert!(log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("not running")));
+    }
+
+    #[test]
+    fn test_row_run_launches_not_running_app() {
+        let state = sample_state();
+        let mut runtime = RuntimeRegistry::new();
+        let app = sample_app();
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs {
+            run_result: RefCell::new(Ok(5150)),
+            ..Default::default()
+        };
+
+        let outcome = run_app_row_action_with_os(
+            &state,
+            &mut runtime,
+            &mut log_manager,
+            row_request(app, AppRowAction::Run),
+            &os,
+        );
+
+        assert_eq!(outcome, super::LaunchDispatchOutcome::Accepted);
+        assert_eq!(os.run_calls.borrow().len(), 1);
+        assert!(os.focus_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_running_registry_contention_rejects_path_launch_without_duplicate() {
+        let runtime = RuntimeRegistry::new();
+        let app = sample_app();
+        let app_key = app.get_key();
+        assert!(runtime.add_running_app(&app_key, 77, group_id(0), rule_id(0)));
+        let running_apps = runtime.running_apps_handle();
+        let _write_guard = running_apps.try_write().unwrap();
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs {
+            run_result: RefCell::new(Ok(555)),
+            ..Default::default()
+        };
+
+        let outcome = run_launch_decision(
+            &runtime,
+            &mut log_manager,
+            group_id(0),
+            rule_id(0),
+            app,
+            vec![1, 3],
+            &os,
+        );
+
+        assert!(matches!(outcome, super::LaunchDispatchOutcome::Rejected(_)));
+        assert!(os.run_calls.borrow().is_empty());
+        assert!(log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("temporarily busy")));
+    }
+
+    #[test]
+    fn test_running_registry_contention_rejects_installed_activation_without_duplicate() {
+        let runtime = RuntimeRegistry::new();
+        let app = AppToRun::new_installed(
+            "Sample Store App".to_string(),
+            "Sample.Package!App".to_string(),
+            PriorityClass::Normal,
+            false,
+        );
+        let app_key = app.get_key();
+        assert!(runtime.add_running_app(&app_key, 88, group_id(0), rule_id(0)));
+        let running_apps = runtime.running_apps_handle();
+        let _write_guard = running_apps.try_write().unwrap();
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs {
+            activate_result: RefCell::new(Err("activation should not be attempted".to_string())),
+            ..Default::default()
+        };
+
+        let outcome = run_launch_decision(
+            &runtime,
+            &mut log_manager,
+            group_id(0),
+            rule_id(0),
+            app,
+            vec![0],
+            &os,
+        );
+
+        assert!(matches!(outcome, super::LaunchDispatchOutcome::Rejected(_)));
+        assert!(os.activate_calls.borrow().is_empty());
+        assert!(log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("temporarily busy")));
     }
 
     #[test]

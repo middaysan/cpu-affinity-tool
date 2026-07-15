@@ -1,0 +1,68 @@
+## [1.5.0] - 2026-07-16
+
+### Summary
+- Refreshes the egui interface with a compact, structured layout that keeps more groups and application rules visible at once.
+- Bundles Inter as the primary UI font and introduces restrained semantic color palettes for both dark and light themes.
+- Replaces group ordering arrows with direct drag-and-drop reordering while preserving the saved identities used by rules and desktop shortcuts.
+- Updates the supported Rust toolchain and dependency set without changing the persisted state schema.
+
+### Added
+- **Bundled Inter UI font**:
+  - Inter Variable is embedded in the executable and configured as the primary proportional font.
+  - Regular, medium, and semibold weights are used for clearer hierarchy while egui's other fonts remain available as fallbacks.
+  - The bundled font license and provenance are included under `assets/fonts`.
+- **Semantic interface palette**:
+  - Dark and light themes now use shared tokens for primary actions, selection, visibility, success, warning, danger, drag targets, and CPU topology colors.
+  - Keyboard focus rings and restrained status colors make interaction states easier to identify without relying on bright accents.
+- **Direct group reordering**:
+  - Groups can be dragged by their grip or title and dropped into a new position.
+  - A keyboard-accessible reorder path remains available for users who cannot use pointer drag-and-drop.
+  - Reordering moves the persisted group together with its logical group and rule identities, so saved-rule shortcut identity remains stable.
+
+### Changed
+- **Compact Overview layout**:
+  - Group borders, internal spacing, buttons, and application rows use a denser layout so more rules fit in the window.
+  - Group headers, CPU-thread summaries, app controls, running state, and edit actions have clearer visual separation.
+  - Application rows retain drag-and-drop movement between groups in the redesigned layout.
+- **Navigation and terminology**:
+  - The main routes are exposed through centered **Overview** and **Activity** navigation.
+  - The former log screen is presented as **Activity**, with recent launches, corrections, and monitoring events plus clear and data-folder actions.
+  - The main add actions are now **Add installed...** and **Add file...**.
+  - Monitoring is presented as **Monitoring active** or **Monitoring paused**, with **Pause monitor** and **Resume monitor** actions.
+- **Group and rule editors**:
+  - Group creation, group editing, CPU topology selection, installed-app picking, and application rule settings now share the same compact surfaces and button styling.
+- **Dependency baseline**:
+  - The GUI stack is updated to `eframe` / `egui` 0.35.
+  - Runtime, dialog, tray, image, serialization, process, and platform dependencies are updated to their tested versions in the lockfiles.
+  - Rust 1.92 is now the declared minimum supported toolchain for the root package.
+
+### Fixed
+- Application-row actions now have distinct behavior: **Fix** reapplies affinity and priority without launching or focusing, and changes to the protected state only after every setting call succeeds; **Focus** only activates the existing window.
+- The theme selector uses egui-painted vector icons instead of font glyphs, preventing missing-glyph squares with the bundled Inter font.
+- Selected CPU threads use the same restrained turquoise primary palette as **Create group** in both dark and light themes.
+- CPU-thread controls wrap inside the fixed-width group editor, retain identical selected/unselected geometry, and keep separate core and thread labels visible.
+- Group reordering remains available from the keyboard after the old up/down arrow controls were removed.
+- Small secondary text has stronger contrast in dark and light themes.
+- Long application status text exposes its complete meaning instead of relying only on a clipped fixed-width label.
+- Starting a new group clears data left in a previous group edit session.
+- The monitoring footer fills the full bottom panel instead of appearing as a detached partial strip.
+
+### State and Compatibility
+- Persisted state schema remains `v7`.
+- Existing `v7` state remains compatible with this release.
+- Group reordering persists the visual order while retaining logical group and rule identities.
+- As with earlier `v7` releases, downgrade to binaries that only understand older schemas is unsupported after a current-schema save.
+
+### Testing
+- CI and release workflows collectively cover formatting, Windows and Linux clippy, `libs/os_api` tests, Windows and Linux application tests, both release builds, and the embedded Windows manifest assertion; the stable tag workflow publishes only the Windows artifact.
+- UI-focused tests cover font registration, semantic palette contrast, compact sizing, group drop placement, application action/status decisions, footer fill, navigation centering, and logical identity preservation during group moves.
+- Manual Windows release smoke additionally covers Inter rendering, vector theme icons, CPU-thread selection contrast, distinct Run/Fix/Focus behavior, keyboard and pointer reordering, compact-window layout, DPI scaling, Activity navigation, monitoring controls, tray restore, shortcuts, and existing state loading.
+
+### Known issues
+- Stable release artifacts remain Windows-only; Linux continues as a separate desktop beta path.
+- Linux beta does not have Windows tray, focus, installed-app activation, or saved-rule shortcut parity.
+- The release is not code signed and does not include an installer, winget, Chocolatey, AppImage, or Flatpak package.
+- Generated Windows shortcuts target the executable path used at creation time and should be recreated after moving the portable application folder.
+
+### Download
+- Download `cpu-affinity-tool.exe` from the GitHub Release assets for `v1.5.0`.

@@ -1,6 +1,6 @@
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    danger_color, glass_frame, neutral_emphasis_fill, success_color,
+    danger_color, ghost_button, glass_frame, success_color, toned_button, ToneRole,
 };
 use crate::app::shell::sessions::RuleShortcutResult;
 use crate::app::shell::{GroupRoute, WindowRoute};
@@ -65,7 +65,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     let shortcut_result = app.ui.app_edit_state.shortcut_result.clone();
 
     CentralPanel::default().show(root_ui, |ui| {
-        ui.add_space(5.0);
+        ui.add_space(3.0);
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.heading(RichText::new("Application rule").strong());
@@ -76,12 +76,15 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                 );
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Close").on_hover_text("Close").clicked() {
+                if ghost_button(ui, egui::Button::new("Close"))
+                    .on_hover_text("Close")
+                    .clicked()
+                {
                     is_close = true;
                 }
             });
         });
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             glass_frame(ui).show(ui, |ui| {
@@ -93,7 +96,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                     .expect("edit_app_clone must be initialized");
 
                 egui::Grid::new("app_settings_grid")
-                    .spacing(Vec2::new(10.0, 10.0))
+                    .spacing(Vec2::new(8.0, 6.0))
                     .show(ui, |ui| {
                         ui.label(RichText::new("App Name:").strong());
                         if ui.text_edit_singleline(&mut selected_app.name).changed() {
@@ -197,7 +200,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                         ui.end_row();
                     });
 
-                ui.add_space(10.0);
+                ui.add_space(6.0);
                 if ui
                     .checkbox(
                         &mut selected_app.autorun,
@@ -207,13 +210,13 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                 {
                     draft_changed = true;
                 }
-                ui.add_space(10.0);
+                ui.add_space(6.0);
                 ui.separator();
-                ui.add_space(10.0);
+                ui.add_space(6.0);
 
                 if selected_app.is_args_editable() {
                     ui.label(RichText::new("Command Line Arguments:").strong());
-                    ui.add_space(5.0);
+                    ui.add_space(3.0);
 
                     let mut arg_to_remove = None;
                     if selected_app.args.is_empty() {
@@ -237,24 +240,24 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                         draft_changed = true;
                     }
 
-                    ui.add_space(5.0);
+                    ui.add_space(3.0);
                     if ui.button("Add Argument").clicked() {
                         selected_app.args.push(String::new());
                         draft_changed = true;
                     }
 
-                    ui.add_space(15.0);
+                    ui.add_space(9.0);
                     ui.separator();
-                    ui.add_space(10.0);
+                    ui.add_space(6.0);
                 }
 
                 ui.label(RichText::new("Tracked Process Names:").strong());
-                ui.add_space(5.0);
+                ui.add_space(3.0);
 
                 let mut proc_to_remove = None;
                 if selected_app.additional_processes.is_empty() {
                     let empty_text = if selected_app.is_path_target() {
-                        "Process-name rediscovery is off for this path app. Add a name to let Auto Re-apply find it later."
+                        "Process-name rediscovery is off for this path app. Add a name so active monitoring can find it later."
                     } else {
                         "No tracked process names defined."
                     };
@@ -278,15 +281,15 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                     draft_changed = true;
                 }
 
-                ui.add_space(5.0);
+                ui.add_space(3.0);
                 if ui.button("Add Process Name").clicked() {
                     selected_app.additional_processes.push(String::new());
                     draft_changed = true;
                 }
 
-                ui.add_space(15.0);
+                ui.add_space(9.0);
                 ui.separator();
-                ui.add_space(10.0);
+                ui.add_space(6.0);
 
                 if shortcut_status.visible {
                     let shortcut_enabled = shortcut_button_enabled_for_current_frame(
@@ -304,7 +307,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                             .add_enabled(
                                 shortcut_enabled,
                                 egui::Button::new("Create desktop shortcut")
-                                    .min_size(egui::vec2(170.0, 32.0)),
+                                    .min_size(egui::vec2(150.0, 27.0)),
                             )
                             .clicked()
                         {
@@ -326,38 +329,37 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                             }
                         }
                     }
-                    ui.add_space(10.0);
+                    ui.add_space(6.0);
                     ui.separator();
-                    ui.add_space(10.0);
+                    ui.add_space(6.0);
                 }
 
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("Save Changes").strong())
-                                .fill(neutral_emphasis_fill(ui))
-                                .min_size(egui::vec2(120.0, 34.0)),
-                        )
+                    if toned_button(
+                        ui,
+                        egui::Button::new(RichText::new("Save Changes").strong())
+                            .min_size(egui::vec2(105.0, 28.0)),
+                        ToneRole::Primary,
+                    )
                         .clicked()
                     {
                         save_clicked = true;
                         is_close = true;
                     }
                     if ui
-                        .add(egui::Button::new("Cancel").min_size(egui::vec2(100.0, 32.0)))
+                        .add(egui::Button::new("Cancel").min_size(egui::vec2(80.0, 28.0)))
                         .clicked()
                     {
                         is_close = true;
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("Remove from group").color(danger_color(ui)),
-                                )
-                                .min_size(egui::vec2(150.0, 32.0)),
-                            )
+                        if toned_button(
+                            ui,
+                            egui::Button::new("Remove from group")
+                                .min_size(egui::vec2(125.0, 28.0)),
+                            ToneRole::Danger,
+                        )
                             .on_hover_text("Remove this application from the group")
                             .clicked()
                         {

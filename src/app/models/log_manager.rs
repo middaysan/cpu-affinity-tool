@@ -125,10 +125,6 @@ impl LogManager {
         self.entries.clear();
     }
 
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
     /// Returns an iterator that yields formatted log strings.
     pub fn formatted_entries(&self) -> impl DoubleEndedIterator<Item = String> + '_ {
         self.entries.iter().map(|entry| entry.format())

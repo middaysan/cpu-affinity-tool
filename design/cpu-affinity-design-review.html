@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CPU Affinity Tool — Design Review</title>
+  <style>
+    @font-face {
+      font-family: "Inter";
+      src: url("../assets/fonts/InterVariable.ttf") format("truetype");
+      font-style: normal;
+      font-weight: 100 900;
+      font-display: swap;
+    }
+
+    :root {
+      color-scheme: dark;
+      --ui-font: "Inter", "Segoe UI", system-ui, sans-serif;
+      /* Graphite neutral scale */
+      --canvas: #090a0c;
+      --titlebar: #040506;
+      --surface: #0f1113;
+      --surface-raised: #15181b;
+      --surface-inset: #1b1f23;
+      --row: #1e2226;
+      --row-hover: #252a2f;
+      --line: #2b3035;
+      --line-strong: #394148;
+      --text: #edf1f3;
+      --text-soft: #a3abb2;
+      --text-muted: #707981;
+
+      /* Deep Ocean interaction scale */
+      --accent: #8099a4;
+      --accent-surface: #141e23;
+      --accent-selected: #19272e;
+      --accent-hover: #1b2a31;
+      --accent-line: #395866;
+      --primary-fill: #29434f;
+      --primary-hover: #314d59;
+      --primary-active: #223943;
+      --primary-text: #e7eef1;
+      --focus: #607e8b;
+
+      /* Pine, Ochre and Rosewood semantic scales */
+      --success: #83bb9c;
+      --success-surface: #17241d;
+      --success-line: #355b45;
+      --warning: #c6a76c;
+      --warning-surface: #2a2317;
+      --warning-line: #6d592f;
+      --danger: #cf8990;
+      --danger-surface: #291a1d;
+      --danger-line: #704148;
+      --shadow: rgba(0, 0, 0, .3);
+      --radius-card: 8px;
+      --radius-control: 6px;
+    }
+
+    html[data-theme="light"] {
+      color-scheme: light;
+      --canvas: #dfe3e6;
+      --titlebar: #f7f8f9;
+      --surface: #f2f4f5;
+      --surface-raised: #fafbfc;
+      --surface-inset: #e9edef;
+      --row: #eceff1;
+      --row-hover: #e2e7ea;
+      --line: #cbd2d7;
+      --line-strong: #aeb9c0;
+      --text: #1d252b;
+      --text-soft: #56636c;
+      --text-muted: #7b878f;
+      --accent: #496875;
+      --accent-surface: #e0e8eb;
+      --accent-selected: #d6e1e5;
+      --accent-hover: #cbdadd;
+      --accent-line: #8aa0a9;
+      --primary-fill: #446472;
+      --primary-hover: #4e7180;
+      --primary-active: #385663;
+      --primary-text: #f7fbfc;
+      --focus: #587682;
+      --success: #246d49;
+      --success-surface: #e3eee7;
+      --success-line: #91b39f;
+      --warning: #77571d;
+      --warning-surface: #f1eadb;
+      --warning-line: #c4ad78;
+      --danger: #963e48;
+      --danger-surface: #f2e2e4;
+      --danger-line: #c9979c;
+      --shadow: rgba(28, 39, 48, .12);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { min-height: 100%; }
+
+    body {
+      margin: 0;
+      background: var(--canvas);
+      color: var(--text);
+      font-family: var(--ui-font);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    button, input { font: inherit; }
+
+    button {
+      color: inherit;
+      cursor: pointer;
+    }
+
+    button:focus-visible,
+    [tabindex]:focus-visible,
+    input:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    .app-window {
+      width: min(100%, 470px);
+      min-height: 100vh;
+      margin: 0 auto;
+      background: var(--surface);
+      border-inline: 1px solid var(--line);
+      display: grid;
+      grid-template-rows: 24px auto 1fr 42px;
+      box-shadow: 0 16px 48px var(--shadow);
+    }
+
+    .native-titlebar {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding-left: 8px;
+      background: var(--titlebar);
+      color: var(--text);
+      user-select: none;
+    }
+
+    .app-mark {
+      width: 11px;
+      height: 11px;
+      display: grid;
+      place-items: center;
+      color: var(--text);
+      font-size: 10px;
+      transform: rotate(45deg);
+    }
+
+    .native-title { font-size: 10.5px; font-weight: 500; }
+
+    .window-controls {
+      height: 100%;
+      margin-left: auto;
+      display: flex;
+    }
+
+    .window-control {
+      width: 28px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: var(--text-soft);
+      font-size: 12px;
+    }
+
+    .window-control:hover { background: var(--surface-inset); color: var(--text); }
+    .window-control.close:hover { background: #a94747; color: #fff; }
+
+    .app-header {
+      padding: 6px 8px 6px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-raised);
+    }
+
+    .brand-row {
+      min-height: 24px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .cpu-badge,
+    .group-number {
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      border: 1px solid var(--accent-line);
+      background: var(--accent-surface);
+      color: var(--accent);
+      border-radius: 7px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .cpu-badge { min-width: 30px; height: 21px; padding: 0 6px; font-size: 10px; }
+    .group-number { border-color: var(--line-strong); background: var(--surface-inset); color: var(--text-soft); }
+    .product-name { margin: 0; font-size: 16px; line-height: 1; font-weight: 560; letter-spacing: -.2px; }
+
+    .brand-actions {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .control {
+      min-height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 2px 6px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-control);
+      background: var(--surface-inset);
+      color: var(--text-soft);
+      white-space: nowrap;
+    }
+
+    .control:hover { background: var(--row-hover); border-color: var(--text-muted); color: var(--text); }
+    .control:active { background: var(--surface); }
+    .control.primary { background: var(--primary-fill); border-color: var(--accent-line); color: var(--primary-text); font-weight: 550; }
+    .control.primary:hover { background: var(--primary-hover); }
+    .control.primary:active { background: var(--primary-active); }
+    .control.danger { background: var(--danger-surface); border-color: var(--danger-line); color: var(--danger); }
+    .control.danger:hover { background: var(--danger-line); border-color: var(--danger); color: var(--text); }
+    .control.ghost { background: transparent; border-color: transparent; }
+    .control.icon { width: 23px; min-width: 23px; padding-inline: 0; font-size: 12px; }
+    .control.small { min-height: 21px; padding: 2px 6px; font-size: 10.5px; }
+    .control:disabled { opacity: .52; cursor: default; }
+
+    .nav-row {
+      display: flex;
+      justify-content: center;
+      padding-top: 5px;
+      margin-top: 5px;
+      border-top: 1px solid var(--line);
+    }
+
+    .segmented {
+      width: 168px;
+      height: 24px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2px;
+      padding: 2px;
+      border: 1px solid var(--line-strong);
+      border-radius: 9px;
+      background: var(--surface);
+    }
+
+    .segment {
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text-soft);
+    }
+
+    .segment:hover { color: var(--text); background: var(--surface-inset); }
+    .segment.selected { background: var(--accent-selected); color: var(--text); box-shadow: inset 0 0 0 1px var(--accent-line); }
+
+    .main-view {
+      min-height: 0;
+      overflow-y: auto;
+      scrollbar-color: var(--line-strong) transparent;
+    }
+
+    .panel { display: none; padding: 8px 6px 11px; }
+    .panel.active { display: block; }
+
+    .section-heading {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 0 6px;
+    }
+
+    .section-heading h2 { margin: 0; font-size: 16px; line-height: 1.1; font-weight: 560; letter-spacing: -.1px; }
+    .section-heading p { margin: 2px 0 0; color: var(--text-muted); font-size: 9.5px; }
+    .count-label { color: var(--text-muted); font-size: 9px; }
+
+    .group-list { display: grid; gap: 6px; }
+
+    .group-card {
+      padding: 7px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-card);
+      background: var(--surface-raised);
+      box-shadow: 0 2px 6px var(--shadow);
+    }
+
+    .group-card.drag-over { border-color: var(--focus); background: var(--surface-inset); }
+    .group-card.dragging { opacity: .58; }
+
+    .group-header {
+      min-height: 30px;
+      display: grid;
+      grid-template-columns: 13px 23px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .grip {
+      width: 12px;
+      height: 20px;
+      border: 0;
+      padding: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: grab;
+      display: grid;
+      grid-template-columns: repeat(2, 3px);
+      grid-auto-rows: 3px;
+      place-content: center;
+      gap: 3px;
+    }
+
+    .grip:hover { color: var(--accent); background: var(--surface-inset); }
+    .grip:active { cursor: grabbing; }
+    .grip i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; }
+
+    .group-number { width: 23px; height: 23px; font-size: 10px; }
+    .group-copy { min-width: 0; }
+    .group-name { margin: 0; font-size: 14px; line-height: 1.1; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .group-meta { margin-top: 1px; color: var(--text-muted); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .group-toolbar {
+      min-height: 27px;
+      margin-top: 5px;
+      padding-top: 5px;
+      border-top: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .visibility-toggle { margin-left: auto; }
+    .visibility-toggle .chevron { font-size: 11px; }
+    .group-card.apps-hidden .visibility-toggle .chevron { transform: rotate(-90deg); }
+    .group-card.apps-hidden .apps { display: none; }
+
+    .apps {
+      display: grid;
+      gap: 3px;
+      margin-top: 1px;
+      padding-top: 1px;
+    }
+
+    .apps.drop-zone { outline: 1px dashed var(--focus); outline-offset: 3px; border-radius: 7px; }
+
+    .app-row {
+      min-height: 25px;
+      display: grid;
+      grid-template-columns: 12px 7px minmax(82px, 1fr) minmax(80px, .72fr) 38px 23px;
+      align-items: center;
+      gap: 5px;
+      padding: 1px 4px;
+      border-radius: 7px;
+      background: var(--row);
+    }
+
+    .app-row:hover { background: var(--row-hover); }
+    .app-row.dragging { opacity: .45; }
+    .app-row .grip { height: 20px; }
+
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); box-shadow: 0 0 0 2px rgba(112, 120, 128, .14); }
+    .app-row.running .status-dot { background: var(--success); box-shadow: 0 0 0 3px rgba(128, 185, 156, .14); }
+    .app-row.warning .status-dot { background: var(--warning); }
+    .app-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-weight: 500; }
+    .app-state { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 9.5px; }
+    .app-row.running .app-state { color: var(--success); }
+    .app-row.warning .app-state { color: var(--warning); }
+
+    .activity-card {
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-card);
+      background: var(--surface-raised);
+      overflow: hidden;
+    }
+
+    .activity-toolbar { display: flex; justify-content: flex-end; gap: 4px; padding: 5px; border-bottom: 1px solid var(--line); }
+    .log-list { margin: 0; padding: 0; list-style: none; }
+    .log-entry { display: grid; grid-template-columns: 50px 62px 1fr; gap: 6px; padding: 5px 7px; border-bottom: 1px solid var(--line); color: var(--text-soft); font-size: 9.5px; }
+    .log-entry:last-child { border-bottom: 0; }
+    .log-time { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .log-kind { color: var(--accent); font-weight: 600; }
+    .log-kind.success { color: var(--success); }
+    .log-kind.warning { color: var(--warning); }
+
+    .statusbar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px;
+      border-top: 1px solid var(--line);
+      background: var(--surface-raised);
+    }
+
+    .monitor-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--success); box-shadow: 0 0 0 2px rgba(128, 185, 156, .14); }
+    .statusbar.paused .monitor-dot { background: var(--text-muted); box-shadow: none; }
+    .monitor-copy { min-width: 0; }
+    .monitor-title { color: var(--success); font-weight: 600; }
+    .statusbar.paused .monitor-title { color: var(--text-soft); }
+    .monitor-meta { color: var(--text-muted); font-size: 8.5px; margin-top: 1px; }
+    .monitor-actions { margin-left: auto; display: flex; align-items: center; gap: 9px; }
+    .version { color: var(--text-muted); font-size: 8.5px; }
+
+    .editor-card { border: 1px solid var(--line-strong); border-radius: var(--radius-card); background: var(--surface-raised); overflow: hidden; }
+    .editor-body { padding: 10px; }
+    .field { display: grid; gap: 5px; color: var(--text-soft); font-size: 11px; }
+    .field input { width: 100%; height: 25px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface-inset); color: var(--text); }
+    .core-preview { margin-top: 9px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+    .core-preview-title { margin-bottom: 6px; color: var(--text-soft); font-size: 9.5px; }
+    .cores { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+    .core { height: 23px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface-inset); color: var(--text-soft); font-size: 9px; }
+    .core.selected { border-color: var(--accent-line); background: var(--accent-surface); color: var(--accent); }
+    .editor-footer { display: flex; justify-content: flex-end; gap: 5px; padding: 7px 10px; border-top: 1px solid var(--line); }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 50px;
+      z-index: 20;
+      transform: translate(-50%, 12px);
+      padding: 6px 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--surface-inset);
+      color: var(--text);
+      opacity: 0;
+      pointer-events: none;
+      box-shadow: 0 8px 28px var(--shadow);
+    }
+
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    @media (max-width: 420px) {
+      .app-header { padding-inline: 6px; }
+      .product-name { font-size: 15px; }
+      .control .optional-label { display: none; }
+      .panel { padding-inline: 6px; }
+      .group-card { padding-inline: 6px; }
+      .app-row { grid-template-columns: 12px 7px minmax(72px, 1fr) 38px 23px; gap: 4px; }
+      .app-state { display: none; }
+      .log-entry { grid-template-columns: 50px 1fr; }
+      .log-message { grid-column: 1 / -1; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app-window" aria-label="CPU Affinity Tool design prototype">
+    <header class="native-titlebar">
+      <span class="app-mark" aria-hidden="true">◆</span>
+      <span class="native-title">CPU Affinity Tool</span>
+      <div class="window-controls" aria-hidden="true">
+        <button class="window-control" tabindex="-1">−</button>
+        <button class="window-control" tabindex="-1">□</button>
+        <button class="window-control close" tabindex="-1">×</button>
+      </div>
+    </header>
+
+    <section class="app-header">
+      <div class="brand-row">
+        <div class="cpu-badge" title="Intel Core i5-14600KF · 20 threads">CPU</div>
+        <h1 class="product-name">CPU Affinity Tool</h1>
+        <div class="brand-actions">
+          <button class="control primary" id="new-group"><span aria-hidden="true">＋</span><span>New group</span></button>
+          <button class="control icon" id="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle light/dark theme">◐</button>
+        </div>
+      </div>
+      <nav class="nav-row" aria-label="Main views">
+        <div class="segmented">
+          <button class="segment selected" data-tab="overview" aria-selected="true">Overview</button>
+          <button class="segment" data-tab="activity" aria-selected="false">Activity</button>
+        </div>
+      </nav>
+    </section>
+
+    <div class="main-view">
+      <section class="panel active" id="overview-panel">
+        <div class="section-heading">
+          <div>
+            <h2>Affinity groups</h2>
+            <p>CPU placement and application rules</p>
+          </div>
+          <span class="count-label"><span id="group-count">2</span> groups · drag to reorder</span>
+        </div>
+
+        <div class="group-list" id="group-list">
+          <article class="group-card" data-group="321">
+            <header class="group-header">
+              <button class="grip group-grip" draggable="true" aria-label="Drag group 321" title="Drag to reorder">
+                <i></i><i></i><i></i><i></i><i></i><i></i>
+              </button>
+              <span class="group-number">1</span>
+              <div class="group-copy">
+                <h3 class="group-name">321</h3>
+                <div class="group-meta">12 threads · 0, 1, 2, 3, 4, 5, 6, 7, …</div>
+              </div>
+              <button class="control ghost edit-group"><span aria-hidden="true">⚙</span><span>Edit</span></button>
+            </header>
+            <div class="group-toolbar">
+              <button class="control small add-demo" data-kind="installed"><span aria-hidden="true">⊞</span>Add installed…</button>
+              <button class="control small add-demo" data-kind="file"><span aria-hidden="true">＋</span>Add file…</button>
+              <button class="control ghost small visibility-toggle"><span class="chevron" aria-hidden="true">▼</span><span class="visibility-label">Hide list</span></button>
+            </div>
+            <div class="apps" data-app-container>
+              <div class="app-row" data-app="spotify">
+                <button class="grip app-grip" draggable="true" aria-label="Drag Spotify"><i></i><i></i><i></i><i></i><i></i><i></i></button>
+                <span class="status-dot"></span>
+                <span class="app-name">Spotify</span>
+                <span class="app-state">Stopped</span>
+                <button class="control small run-app">Run</button>
+                <button class="control icon small" aria-label="Spotify settings" title="Rule settings">⚙</button>
+              </div>
+              <div class="app-row running" data-app="codex">
+                <button class="grip app-grip" draggable="true" aria-label="Drag Codex"><i></i><i></i><i></i><i></i><i></i><i></i></button>
+                <span class="status-dot"></span>
+                <span class="app-name">Codex</span>
+                <span class="app-state">Running · protected</span>
+                <button class="control small" disabled>Active</button>
+                <button class="control icon small" aria-label="Codex settings" title="Rule settings">⚙</button>
+              </div>
+              <div class="app-row" data-app="discord">
+                <button class="grip app-grip" draggable="true" aria-label="Drag Discord"><i></i><i></i><i></i><i></i><i></i><i></i></button>
+                <span class="status-dot"></span>
+                <span class="app-name">Discord</span>
+                <span class="app-state">Stopped</span>
+                <button class="control small run-app">Run</button>
+                <button class="control icon small" aria-label="Discord settings" title="Rule settings">⚙</button>
+              </div>
+            </div>
+          </article>
+
+          <article class="group-card" data-group="per">
+            <header class="group-header">
+              <button class="grip group-grip" draggable="true" aria-label="Drag group per" title="Drag to reorder">
+                <i></i><i></i><i></i><i></i><i></i><i></i>
+              </button>
+              <span class="group-number">2</span>
+              <div class="group-copy">
+                <h3 class="group-name">per</h3>
+                <div class="group-meta">4 threads · 0, 1, 6, 7</div>
+              </div>
+              <button class="control ghost edit-group"><span aria-hidden="true">⚙</span><span>Edit</span></button>
+            </header>
+            <div class="group-toolbar">
+              <button class="control small add-demo" data-kind="installed"><span aria-hidden="true">⊞</span>Add installed…</button>
+              <button class="control small add-demo" data-kind="file"><span aria-hidden="true">＋</span>Add file…</button>
+              <button class="control ghost small visibility-toggle"><span class="chevron" aria-hidden="true">▼</span><span class="visibility-label">Hide list</span></button>
+            </div>
+            <div class="apps" data-app-container>
+              <div class="app-row" data-app="cpu-z">
+                <button class="grip app-grip" draggable="true" aria-label="Drag CPU-Z"><i></i><i></i><i></i><i></i><i></i><i></i></button>
+                <span class="status-dot"></span>
+                <span class="app-name">CPU-Z</span>
+                <span class="app-state">Stopped</span>
+                <button class="control small run-app">Run</button>
+                <button class="control icon small" aria-label="CPU-Z settings" title="Rule settings">⚙</button>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="activity-panel">
+        <div class="section-heading">
+          <div>
+            <h2>Activity</h2>
+            <p>Recent launches, corrections and monitoring events</p>
+          </div>
+        </div>
+        <div class="activity-card">
+          <div class="activity-toolbar">
+            <button class="control small">Open data folder</button>
+            <button class="control danger small" id="clear-logs">Clear</button>
+          </div>
+          <ul class="log-list" id="log-list">
+            <li class="log-entry"><span class="log-time">20:48:10</span><span class="log-kind success">PROTECTED</span><span class="log-message">Codex affinity confirmed on threads 0–7.</span></li>
+            <li class="log-entry"><span class="log-time">20:48:08</span><span class="log-kind">MOVED</span><span class="log-message">Codex moved to group “321”.</span></li>
+            <li class="log-entry"><span class="log-time">20:47:54</span><span class="log-kind warning">CORRECTED</span><span class="log-message">Spotify priority restored to Normal.</span></li>
+            <li class="log-entry"><span class="log-time">20:47:31</span><span class="log-kind">LAUNCHED</span><span class="log-message">CPU-Z started with group “per”.</span></li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="panel" id="editor-panel">
+        <div class="section-heading">
+          <div>
+            <h2 id="editor-title">Create affinity group</h2>
+            <p>Choose a name and the CPU threads owned by this group</p>
+          </div>
+        </div>
+        <div class="editor-card">
+          <div class="editor-body">
+            <label class="field">Group name<input id="group-name-input" value="Creative work" autocomplete="off"></label>
+            <div class="core-preview">
+              <div class="core-preview-title">Selected CPU threads · Intel Core i5-14600KF</div>
+              <div class="cores">
+                <button class="core selected" type="button">P0</button><button class="core selected" type="button">P1</button>
+                <button class="core selected" type="button">P2</button><button class="core selected" type="button">P3</button>
+                <button class="core selected" type="button">P4</button><button class="core selected" type="button">P5</button>
+                <button class="core selected" type="button">E0</button><button class="core selected" type="button">E1</button>
+                <button class="core" type="button">E2</button><button class="core" type="button">E3</button>
+                <button class="core" type="button">E4</button><button class="core" type="button">E5</button>
+                <button class="core" type="button">E6</button><button class="core" type="button">E7</button>
+                <button class="core" type="button">T0</button><button class="core" type="button">T1</button>
+              </div>
+            </div>
+          </div>
+          <div class="editor-footer">
+            <button class="control ghost" type="button" id="cancel-editor">Cancel</button>
+            <button class="control primary" type="button" id="save-group">Save group</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <footer class="statusbar" id="statusbar">
+      <span class="monitor-dot"></span>
+      <div class="monitor-copy">
+        <div class="monitor-title">Monitoring active</div>
+        <div class="monitor-meta">Affinity and priority are protected</div>
+      </div>
+      <div class="monitor-actions">
+        <button class="control small" id="monitor-toggle">Pause monitor</button>
+        <span class="version">v1.5.0</span>
+      </div>
+    </footer>
+  </main>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    const root = document.documentElement;
+    const toast = document.getElementById('toast');
+    let toastTimer;
+
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove('show'), 1600);
+    }
+
+    function openPanel(name) {
+      document.querySelectorAll('[data-tab]').forEach(tab => {
+        const selected = tab.dataset.tab === name;
+        tab.classList.toggle('selected', selected);
+        tab.setAttribute('aria-selected', selected);
+      });
+      document.querySelectorAll('.panel').forEach(panel => panel.classList.remove('active'));
+      document.getElementById(`${name}-panel`).classList.add('active');
+    }
+
+    document.querySelectorAll('[data-tab]').forEach(button => {
+      button.addEventListener('click', () => {
+        openPanel(button.dataset.tab);
+      });
+    });
+
+    document.getElementById('theme-toggle').addEventListener('click', () => {
+      root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+      showToast(`${root.dataset.theme === 'dark' ? 'Dark' : 'Light'} theme preview`);
+    });
+
+    document.querySelectorAll('.visibility-toggle').forEach(button => {
+      button.addEventListener('click', () => {
+        const card = button.closest('.group-card');
+        const hidden = card.classList.toggle('apps-hidden');
+        button.querySelector('.visibility-label').textContent = hidden ? 'Show list' : 'Hide list';
+      });
+    });
+
+    document.querySelectorAll('.run-app').forEach(button => {
+      button.addEventListener('click', () => {
+        const row = button.closest('.app-row');
+        row.classList.add('running');
+        row.querySelector('.app-state').textContent = 'Running · protected';
+        button.textContent = 'Active';
+        button.disabled = true;
+        showToast(`${row.querySelector('.app-name').textContent} launched`);
+      });
+    });
+
+    const statusbar = document.getElementById('statusbar');
+    document.getElementById('monitor-toggle').addEventListener('click', event => {
+      const paused = statusbar.classList.toggle('paused');
+      statusbar.querySelector('.monitor-title').textContent = paused ? 'Monitoring paused' : 'Monitoring active';
+      statusbar.querySelector('.monitor-meta').textContent = paused ? 'Affinity rules are not being corrected' : 'Affinity and priority are protected';
+      event.currentTarget.textContent = paused ? 'Resume monitor' : 'Pause monitor';
+    });
+
+    const editorTitle = document.getElementById('editor-title');
+    const nameInput = document.getElementById('group-name-input');
+
+    document.getElementById('new-group').addEventListener('click', () => {
+      editorTitle.textContent = 'Create affinity group';
+      nameInput.value = 'Creative work';
+      openPanel('editor');
+    });
+
+    document.querySelectorAll('.edit-group').forEach(button => {
+      button.addEventListener('click', () => {
+        const card = button.closest('.group-card');
+        editorTitle.textContent = 'Edit affinity group';
+        nameInput.value = card.querySelector('.group-name').textContent;
+        openPanel('editor');
+      });
+    });
+
+    document.getElementById('save-group').addEventListener('click', () => {
+      showToast('Prototype only · no data changed');
+      openPanel('overview');
+    });
+
+    document.getElementById('cancel-editor').addEventListener('click', () => openPanel('overview'));
+
+    document.querySelectorAll('.core').forEach(core => {
+      core.addEventListener('click', () => core.classList.toggle('selected'));
+    });
+
+    document.querySelectorAll('.add-demo').forEach(button => {
+      button.addEventListener('click', () => showToast(`${button.dataset.kind === 'file' ? 'File picker' : 'Installed apps'} would open here`));
+    });
+
+    document.getElementById('clear-logs').addEventListener('click', () => {
+      document.getElementById('log-list').innerHTML = '';
+      showToast('Activity cleared in prototype');
+    });
+
+    let draggedGroup = null;
+    document.querySelectorAll('.group-grip').forEach(grip => {
+      grip.addEventListener('dragstart', event => {
+        draggedGroup = grip.closest('.group-card');
+        draggedGroup.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+      });
+      grip.addEventListener('dragend', () => {
+        draggedGroup?.classList.remove('dragging');
+        document.querySelectorAll('.group-card').forEach(card => card.classList.remove('drag-over'));
+        draggedGroup = null;
+        renumberGroups();
+      });
+    });
+
+    document.querySelectorAll('.group-card').forEach(card => {
+      card.addEventListener('dragover', event => {
+        if (!draggedGroup || draggedGroup === card) return;
+        event.preventDefault();
+        card.classList.add('drag-over');
+      });
+      card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+      card.addEventListener('drop', event => {
+        if (!draggedGroup || draggedGroup === card) return;
+        event.preventDefault();
+        card.classList.remove('drag-over');
+        const list = document.getElementById('group-list');
+        const after = event.clientY > card.getBoundingClientRect().top + card.offsetHeight / 2;
+        list.insertBefore(draggedGroup, after ? card.nextSibling : card);
+      });
+    });
+
+    function renumberGroups() {
+      document.querySelectorAll('.group-card').forEach((card, index) => card.querySelector('.group-number').textContent = index + 1);
+    }
+
+    let draggedApp = null;
+    document.querySelectorAll('.app-grip').forEach(grip => {
+      grip.addEventListener('dragstart', event => {
+        event.stopPropagation();
+        draggedApp = grip.closest('.app-row');
+        draggedApp.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+      });
+      grip.addEventListener('dragend', () => {
+        draggedApp?.classList.remove('dragging');
+        document.querySelectorAll('.apps').forEach(list => list.classList.remove('drop-zone'));
+        draggedApp = null;
+      });
+    });
+
+    document.querySelectorAll('[data-app-container]').forEach(container => {
+      container.addEventListener('dragover', event => {
+        if (!draggedApp) return;
+        event.preventDefault();
+        event.stopPropagation();
+        container.classList.add('drop-zone');
+      });
+      container.addEventListener('dragleave', () => container.classList.remove('drop-zone'));
+      container.addEventListener('drop', event => {
+        if (!draggedApp) return;
+        event.preventDefault();
+        event.stopPropagation();
+        container.classList.remove('drop-zone');
+        container.appendChild(draggedApp);
+        showToast('Application moved to another group');
+      });
+    });
+  </script>
+</body>
+</html>

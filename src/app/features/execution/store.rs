@@ -25,6 +25,26 @@ pub struct RuntimeRegistry {
     pub(crate) monitor_rx: Option<Receiver<ShellEvent>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunningAppPidsLookup {
+    Found(Vec<u32>),
+    NotFound,
+    Busy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunningAppSettingsUpdate {
+    Updated,
+    NotFound,
+    Busy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunningAppSettingsState {
+    Matched,
+    Mismatched,
+}
+
 fn normalize_aumid_key(aumid: &str) -> String {
     aumid.to_lowercase()
 }
@@ -127,12 +147,66 @@ impl ExecutionStore {
         }
     }
 
-    pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
-        if let Ok(apps) = self.running_apps.try_read() {
-            apps.apps.get(app_key).map(|app| app.pids.clone())
-        } else {
-            None
+    pub(crate) fn lookup_running_app_pids(&self, app_key: &AppRuntimeKey) -> RunningAppPidsLookup {
+        match self.running_apps.try_read() {
+            Ok(apps) => apps
+                .apps
+                .get(app_key)
+                .map_or(RunningAppPidsLookup::NotFound, |app| {
+                    RunningAppPidsLookup::Found(app.pids.clone())
+                }),
+            Err(_) => RunningAppPidsLookup::Busy,
         }
+    }
+
+    pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
+        match self.lookup_running_app_pids(app_key) {
+            RunningAppPidsLookup::Found(pids) => Some(pids),
+            RunningAppPidsLookup::NotFound | RunningAppPidsLookup::Busy => None,
+        }
+    }
+
+    pub(crate) fn mark_running_app_settings_matched(
+        &mut self,
+        app_key: &AppRuntimeKey,
+    ) -> RunningAppSettingsUpdate {
+        self.set_running_app_settings_state(app_key, RunningAppSettingsState::Matched)
+    }
+
+    pub(crate) fn mark_running_app_settings_mismatched(
+        &mut self,
+        app_key: &AppRuntimeKey,
+    ) -> RunningAppSettingsUpdate {
+        self.set_running_app_settings_state(app_key, RunningAppSettingsState::Mismatched)
+    }
+
+    fn set_running_app_settings_state(
+        &mut self,
+        app_key: &AppRuntimeKey,
+        state: RunningAppSettingsState,
+    ) -> RunningAppSettingsUpdate {
+        let (settings_matched, status) = match state {
+            RunningAppSettingsState::Matched => (true, AppStatus::Running),
+            RunningAppSettingsState::Mismatched => (false, AppStatus::SettingsMismatch),
+        };
+        let outcome = match self.running_apps.try_write() {
+            Ok(mut apps) => match apps.apps.get_mut(app_key) {
+                Some(app) => {
+                    app.settings_matched = settings_matched;
+                    RunningAppSettingsUpdate::Updated
+                }
+                None => RunningAppSettingsUpdate::NotFound,
+            },
+            Err(_) => RunningAppSettingsUpdate::Busy,
+        };
+
+        if outcome == RunningAppSettingsUpdate::Updated
+            || (outcome == RunningAppSettingsUpdate::Busy
+                && state == RunningAppSettingsState::Mismatched)
+        {
+            self.running_apps_statuses.insert(app_key.clone(), status);
+        }
+        outcome
     }
 }
 
@@ -188,6 +262,24 @@ impl RuntimeRegistry {
 
     pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
         self.store.get_running_app_pids(app_key)
+    }
+
+    pub(crate) fn lookup_running_app_pids(&self, app_key: &AppRuntimeKey) -> RunningAppPidsLookup {
+        self.store.lookup_running_app_pids(app_key)
+    }
+
+    pub(crate) fn mark_running_app_settings_matched(
+        &mut self,
+        app_key: &AppRuntimeKey,
+    ) -> RunningAppSettingsUpdate {
+        self.store.mark_running_app_settings_matched(app_key)
+    }
+
+    pub(crate) fn mark_running_app_settings_mismatched(
+        &mut self,
+        app_key: &AppRuntimeKey,
+    ) -> RunningAppSettingsUpdate {
+        self.store.mark_running_app_settings_mismatched(app_key)
     }
 }
 
@@ -260,9 +352,10 @@ pub(crate) fn cleanup_orphaned_package_owners(
 mod tests {
     use super::{
         cleanup_orphaned_package_owners, ensure_package_owner_claim,
-        resolve_installed_package_runtime_info_cached, InstalledPackageTrackingState,
+        resolve_installed_package_runtime_info_cached, ExecutionStore,
+        InstalledPackageTrackingState, RunningAppSettingsUpdate,
     };
-    use crate::app::models::{AppToRun, RunningApps};
+    use crate::app::models::{AppStatus, AppToRun, RunningApps};
     use crate::app::shared::ids::{GroupId, RuleId};
     use os_api::{InstalledPackageRuntimeInfo, PriorityClass};
     use std::cell::Cell;
@@ -378,5 +471,24 @@ mod tests {
             "Pkg",
             &second
         ));
+    }
+
+    #[test]
+    fn test_busy_match_confirmation_preserves_mismatch_status_hint() {
+        let mut store = ExecutionStore::new();
+        let key = installed_app("Sample", "Pkg!App", PriorityClass::Normal).get_key();
+        assert!(store.add_running_app(&key, 42, group_id(0), rule_id(0)));
+        assert_eq!(
+            store.mark_running_app_settings_mismatched(&key),
+            RunningAppSettingsUpdate::Updated
+        );
+
+        let running_apps = store.running_apps_handle();
+        let _write_guard = running_apps.try_write().unwrap();
+        assert_eq!(
+            store.mark_running_app_settings_matched(&key),
+            RunningAppSettingsUpdate::Busy
+        );
+        assert_eq!(store.get_app_status_sync(&key), AppStatus::SettingsMismatch);
     }
 }

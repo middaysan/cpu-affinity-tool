@@ -1,5 +1,7 @@
 use crate::app::runtime::AppState;
-use crate::app::shell::presenters::shared_elements::neutral_emphasis_fill;
+use crate::app::shell::presenters::shared_elements::{
+    danger_color, ghost_button, inter_medium_family, palette,
+};
 use eframe::egui::{
     self, Align, CentralPanel, Context, Key, Layout, RichText, ScrollArea, Stroke, TextEdit,
 };
@@ -17,7 +19,7 @@ enum InstalledAppPickerAction {
 #[cfg(target_os = "windows")]
 fn installed_app_picker_heading() -> (&'static str, &'static str) {
     (
-        "Find Installed App",
+        "Add Installed App",
         "Browse supported Start-backed apps from the current Windows installation.",
     )
 }
@@ -25,14 +27,14 @@ fn installed_app_picker_heading() -> (&'static str, &'static str) {
 #[cfg(target_os = "linux")]
 fn installed_app_picker_heading() -> (&'static str, &'static str) {
     (
-        "Find Installed App",
+        "Add Installed App",
         "Browse apps discovered from desktop entries. Typing a search also surfaces matching executables from PATH.",
     )
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn installed_app_picker_heading() -> (&'static str, &'static str) {
-    ("Find Installed App", "Browse supported installed apps.")
+    ("Add Installed App", "Browse supported installed apps.")
 }
 
 pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
@@ -48,24 +50,27 @@ pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
 
     CentralPanel::default().show(root_ui, |ui| {
         let (heading, description) = installed_app_picker_heading();
-        ui.add_space(5.0);
+        ui.add_space(3.0);
         ui.horizontal(|ui| {
             ui.heading(RichText::new(heading).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Close").on_hover_text("Close").clicked() {
+                if ghost_button(ui, egui::Button::new("Close"))
+                    .on_hover_text("Close")
+                    .clicked()
+                {
                     actions.push(InstalledAppPickerAction::Close);
                 }
             });
         });
         ui.label(RichText::new(description).small().weak());
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
         let search_id = egui::Id::new("installed_app_picker_search");
         let mut query = snapshot.query.clone();
 
         ui.horizontal(|ui| {
             let response = ui.add_sized(
-                [(ui.available_width() - 108.0).max(220.0), 28.0],
+                [(ui.available_width() - 90.0).max(220.0), 25.0],
                 TextEdit::singleline(&mut query)
                     .id(search_id)
                     .hint_text("Search installed apps..."),
@@ -82,7 +87,7 @@ pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
             if ui
                 .add_enabled(
                     !snapshot.is_refreshing,
-                    egui::Button::new("Refresh").min_size(egui::vec2(96.0, 28.0)),
+                    egui::Button::new("Refresh").min_size(egui::vec2(80.0, 25.0)),
                 )
                 .clicked()
             {
@@ -90,19 +95,16 @@ pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
             }
         });
 
-        ui.add_space(8.0);
+        ui.add_space(5.0);
 
         if snapshot.is_refreshing {
             ui.label(RichText::new("Loading installed apps...").weak().italics());
-            ui.add_space(4.0);
+            ui.add_space(3.0);
         }
 
         if let Some(error) = &snapshot.last_error {
-            ui.colored_label(
-                egui::Color32::from_rgb(255, 140, 140),
-                format!("Refresh failed: {error}"),
-            );
-            ui.add_space(6.0);
+            ui.colored_label(danger_color(ui), format!("Refresh failed: {error}"));
+            ui.add_space(4.0);
         }
 
         if snapshot.rows.is_empty() && !snapshot.is_refreshing && snapshot.last_error.is_none() {
@@ -114,13 +116,14 @@ pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
             .show(ui, |ui| {
                 for row in &snapshot.rows {
                     let visuals = ui.visuals();
+                    let colors = palette(ui);
                     let fill = if row.selected {
-                        neutral_emphasis_fill(ui)
+                        colors.selected.fill
                     } else {
                         visuals.widgets.inactive.bg_fill
                     };
                     let stroke = if row.selected {
-                        Stroke::new(1.5, visuals.widgets.noninteractive.bg_stroke.color)
+                        Stroke::new(1.5, colors.selected.border)
                     } else {
                         Stroke::new(1.0, visuals.widgets.inactive.bg_stroke.color)
                     };
@@ -129,13 +132,17 @@ pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
                         .fill(fill)
                         .stroke(stroke)
                         .corner_radius(egui::CornerRadius::same(4))
-                        .inner_margin(egui::Margin::symmetric(8, 3));
+                        .inner_margin(egui::Margin::symmetric(6, 2));
 
                     let inner = frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.vertical_centered(|ui| {
-                            ui.label(RichText::new(&row.name).size(12.0));
-                            ui.add_space(0.3);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(&row.name)
+                                    .size(10.5)
+                                    .family(inter_medium_family())
+                                    .strong(),
+                            );
                             ui.add(
                                 egui::Label::new(RichText::new(&row.detail).small().weak()).wrap(),
                             );
@@ -147,6 +154,14 @@ pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
                         egui::Id::new(("installed_app_picker_row", row.entry_index)),
                         egui::Sense::click(),
                     );
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::SelectableLabel,
+                            true,
+                            row.selected,
+                            format!("{}: {}", row.name, row.detail),
+                        )
+                    });
 
                     if response.clicked() {
                         actions.push(InstalledAppPickerAction::SelectEntry(row.entry_index));
@@ -160,10 +175,10 @@ pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
                 }
             });
 
-        ui.add_space(8.0);
+        ui.add_space(5.0);
         ui.label(
             RichText::new(
-                "If the app is not listed, use Open App with the direct path, launcher file, or portable binary.",
+                "If the app is not listed, use Add file... with the direct path, launcher file, or portable binary.",
             )
             .small()
             .weak()

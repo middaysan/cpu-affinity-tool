@@ -1,10 +1,14 @@
 use crate::app::models::{CoreInfo, CoreType, CpuSchema};
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    danger_color, glass_frame, inset_frame, neutral_emphasis_fill,
+    ghost_button, glass_frame, inset_frame, inter_semibold_family, paint_focus_ring,
+    paint_selected_tone_feedback, palette, toned_button, ToneRole, ToneTokens, UiPalette,
+    BUTTON_FONT_SIZE,
 };
 use crate::app::shell::GroupFormSession;
 use eframe::egui::{self, CentralPanel, RichText};
+
+const CORE_TILE_WIDTH: f32 = 56.0;
 
 /// Form for creating/editing a group: divided into rendering the name and the section with cores and clusters.
 fn draw_group_form_ui(
@@ -20,28 +24,28 @@ fn draw_group_form_ui(
         ui.vertical(|ui| {
             ui.label(RichText::new("Group name").strong());
             ui.add_sized(
-                [ui.available_width().min(520.0), 30.0],
+                [ui.available_width().min(520.0), 25.0],
                 egui::TextEdit::singleline(&mut groups.group_name),
             )
             .request_focus();
         });
 
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
         ui.checkbox(
             &mut groups.run_all_enabled,
             "Show a Run all action for this group",
         );
 
-        ui.add_space(8.0);
+        ui.add_space(5.0);
         ui.separator();
-        ui.add_space(8.0);
+        ui.add_space(5.0);
 
         draw_cpu_cores_ui(ui, groups, cpu_schema);
 
-        ui.add_space(15.0);
+        ui.add_space(9.0);
         ui.separator();
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
         ui.horizontal(|ui| {
             let save_label = if is_edit {
@@ -49,20 +53,20 @@ fn draw_group_form_ui(
             } else {
                 "Create group"
             };
-            if ui
-                .add(
-                    egui::Button::new(RichText::new(save_label).strong())
-                        .fill(neutral_emphasis_fill(ui))
-                        .min_size(egui::vec2(130.0, 34.0)),
-                )
-                .clicked()
+            if toned_button(
+                ui,
+                egui::Button::new(RichText::new(save_label).strong())
+                    .min_size(egui::vec2(110.0, 28.0)),
+                ToneRole::Primary,
+            )
+            .clicked()
                 || ui.input(|i| i.key_pressed(egui::Key::Enter))
             {
                 on_save();
             }
 
             if ui
-                .add(egui::Button::new("Cancel").min_size(egui::vec2(100.0, 34.0)))
+                .add(egui::Button::new("Cancel").min_size(egui::vec2(80.0, 28.0)))
                 .clicked()
             {
                 on_cancel();
@@ -71,14 +75,12 @@ fn draw_group_form_ui(
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if is_edit {
                     if let Some(delete_fn) = on_delete {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("Delete group").color(danger_color(ui)),
-                                )
-                                .min_size(egui::vec2(120.0, 34.0)),
-                            )
-                            .clicked()
+                        if toned_button(
+                            ui,
+                            egui::Button::new("Delete group").min_size(egui::vec2(100.0, 28.0)),
+                            ToneRole::Danger,
+                        )
+                        .clicked()
                         {
                             delete_fn();
                         }
@@ -111,7 +113,7 @@ fn draw_cpu_cores_ui(ui: &mut egui::Ui, groups: &mut GroupFormSession, cpu_schem
         .small()
         .strong(),
     );
-    ui.add_space(6.0);
+    ui.add_space(4.0);
     ui.separator();
 
     let assigned = cpu_schema.get_assigned_cores();
@@ -147,122 +149,218 @@ fn draw_cpu_cores_ui(ui: &mut egui::Ui, groups: &mut GroupFormSession, cpu_schem
     }
 }
 
-fn get_core_color(core_type: CoreType, dark_mode: bool) -> egui::Color32 {
-    match core_type {
-        CoreType::Performance => {
-            if dark_mode {
-                egui::Color32::from_rgb(100, 150, 250)
-            } else {
-                egui::Color32::from_rgb(50, 100, 200)
-            }
-        }
-        CoreType::Efficient => {
-            if dark_mode {
-                egui::Color32::from_rgb(100, 200, 100)
-            } else {
-                egui::Color32::from_rgb(50, 150, 50)
-            }
-        }
-        CoreType::HyperThreading => {
-            if dark_mode {
-                egui::Color32::from_rgb(200, 150, 100)
-            } else {
-                egui::Color32::from_rgb(150, 100, 50)
-            }
-        }
-        CoreType::Other => {
-            if dark_mode {
-                egui::Color32::DARK_GRAY
-            } else {
-                egui::Color32::GRAY
-            }
-        }
+fn core_tile_tokens(
+    _core_type: CoreType,
+    is_selected: bool,
+    colors: &UiPalette,
+) -> Option<ToneTokens> {
+    is_selected.then_some(colors.primary)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CoreTileText {
+    primary: String,
+    secondary: String,
+    accessible: String,
+}
+
+fn core_tile_text(label: &str, thread_index: usize) -> CoreTileText {
+    CoreTileText {
+        primary: label.to_string(),
+        secondary: format!("thread {thread_index}"),
+        accessible: format!("{label}, thread {thread_index}"),
     }
 }
 
-fn draw_core_buttons(ui: &mut egui::Ui, groups: &mut GroupFormSession, cores: &mut [CoreInfo]) {
-    let dark_mode = ui.visuals().dark_mode;
-    let all_selected_color = if dark_mode {
-        egui::Color32::from_rgb(61, 79, 3)
-    } else {
-        egui::Color32::from_rgb(175, 191, 124)
-    };
+fn core_tile_widget_info(
+    enabled: bool,
+    is_selected: bool,
+    text: &CoreTileText,
+) -> egui::WidgetInfo {
+    egui::WidgetInfo::selected(
+        egui::WidgetType::Button,
+        enabled,
+        is_selected,
+        &text.accessible,
+    )
+}
 
-    ui.horizontal(|ui| {
+fn selected_core_tile_fill(tokens: ToneTokens, hovered: bool, pressed: bool) -> egui::Color32 {
+    if pressed {
+        tokens.active_fill
+    } else if hovered {
+        tokens.hover_fill
+    } else {
+        tokens.fill
+    }
+}
+
+fn core_tile_button(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    core: &CoreInfo,
+    is_selected: bool,
+    tokens: Option<ToneTokens>,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let text = core_tile_text(&core.label, core.index);
+    let response = response.on_hover_text(&text.accessible);
+    let (fill, border, foreground) = if let Some(tokens) = tokens {
+        let fill = selected_core_tile_fill(
+            tokens,
+            response.hovered(),
+            response.is_pointer_button_down_on(),
+        );
+        (fill, egui::Stroke::new(1.0, tokens.border), tokens.fg)
+    } else {
+        let visuals = ui.style().interact(&response);
+        (
+            visuals.weak_bg_fill,
+            visuals.bg_stroke,
+            visuals.fg_stroke.color,
+        )
+    };
+    ui.painter()
+        .rect(rect, 5.0, fill, border, egui::StrokeKind::Middle);
+    let painter = ui.painter().with_clip_rect(rect.shrink(2.0));
+    painter.text(
+        egui::pos2(rect.center().x, rect.center().y - 5.0),
+        egui::Align2::CENTER_CENTER,
+        &text.primary,
+        egui::FontId::new(BUTTON_FONT_SIZE, inter_semibold_family()),
+        foreground,
+    );
+    painter.text(
+        egui::pos2(rect.center().x, rect.center().y + 6.0),
+        egui::Align2::CENTER_CENTER,
+        &text.secondary,
+        egui::FontId::proportional(7.5),
+        foreground,
+    );
+    if is_selected {
+        let check = egui::pos2(rect.left() + 4.0, rect.top() + 6.0);
+        let check_stroke = egui::Stroke::new(1.25, foreground);
+        painter.line_segment([check, check + egui::vec2(2.0, 2.0)], check_stroke);
+        painter.line_segment(
+            [check + egui::vec2(2.0, 2.0), check + egui::vec2(5.0, -2.0)],
+            check_stroke,
+        );
+    }
+    response.widget_info(|| core_tile_widget_info(response.enabled(), is_selected, &text));
+    paint_focus_ring(ui, &response);
+    if let Some(tokens) = tokens {
+        paint_selected_tone_feedback(ui, &response, tokens);
+    }
+    response
+}
+
+fn draw_core_buttons(ui: &mut egui::Ui, groups: &mut GroupFormSession, cores: &mut [CoreInfo]) {
+    draw_core_buttons_impl(ui, groups, cores, |_| {});
+}
+
+fn draw_core_buttons_impl(
+    ui: &mut egui::Ui,
+    groups: &mut GroupFormSession,
+    cores: &mut [CoreInfo],
+    mut record_rect: impl FnMut(egui::Rect),
+) {
+    let colors = palette(ui);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
         let all_selected = cores.iter().all(|c| groups.core_selection[c.index]);
-        if ui
-            .add(egui::Button::new("All").fill(if all_selected {
-                all_selected_color
-            } else {
-                get_core_color(CoreType::Other, dark_mode)
-            }))
-            .clicked()
-        {
+        let all_tokens = core_tile_tokens(CoreType::Other, all_selected, colors);
+        let mut all_label =
+            RichText::new(if all_selected { "✓ All" } else { "All" }).size(BUTTON_FONT_SIZE);
+        if let Some(tokens) = all_tokens {
+            all_label = all_label.color(tokens.fg);
+        }
+        let all_button = egui::Button::new(all_label)
+            .selected(all_selected)
+            .truncate();
+        let mut all_response = if let Some(tokens) = all_tokens {
+            let response = ui.add_sized(
+                egui::vec2(46.0, 30.0),
+                all_button
+                    .fill(tokens.fill)
+                    .stroke(egui::Stroke::new(1.0, tokens.border)),
+            );
+            paint_focus_ring(ui, &response);
+            paint_selected_tone_feedback(ui, &response, tokens);
+            response
+        } else {
+            let response = ui.add_sized(egui::vec2(46.0, 30.0), all_button);
+            paint_focus_ring(ui, &response);
+            response
+        };
+        record_rect(all_response.rect);
+        if all_response.clicked() {
+            let mut changed = false;
             for c in cores.iter() {
-                groups.core_selection[c.index] = !all_selected;
+                let target = !all_selected;
+                if groups.core_selection[c.index] != target {
+                    groups.core_selection[c.index] = target;
+                    changed = true;
+                }
+            }
+            if changed {
+                all_response.mark_changed();
             }
             groups.last_clicked_core = None;
         }
 
-        ui.add_space(4.0);
+        for core in cores.iter() {
+            let is_selected = groups.core_selection[core.index];
+            let size = match core.core_type {
+                CoreType::Performance => egui::vec2(CORE_TILE_WIDTH, 36.0),
+                _ => egui::vec2(CORE_TILE_WIDTH, 30.0),
+            };
 
-        ui.horizontal_wrapped(|ui| {
-            for core in cores.iter() {
-                let is_selected = groups.core_selection[core.index];
-                let fill_color = if is_selected {
-                    get_core_color(core.core_type, dark_mode)
-                } else {
-                    get_core_color(CoreType::Other, dark_mode)
-                };
+            let mut response = core_tile_button(
+                ui,
+                size,
+                core,
+                is_selected,
+                core_tile_tokens(core.core_type, is_selected, colors),
+            );
+            record_rect(response.rect);
 
-                let size = match core.core_type {
-                    CoreType::Performance => egui::vec2(55.0, 45.0),
-                    _ => egui::vec2(55.0, 35.0),
-                };
-
-                let response = ui.add_sized(size, egui::Button::new("").fill(fill_color));
-
-                let rect = response.rect;
-                let visuals = ui.style().interact(&response);
-                let text_color = visuals.fg_stroke.color;
-
-                // Draw main label (P0, E1, etc)
-                ui.painter().text(
-                    rect.center_top() + egui::vec2(0.0, 15.0),
-                    egui::Align2::CENTER_CENTER,
-                    &core.label,
-                    egui::FontId::proportional(12.9),
-                    text_color,
-                );
-
-                // Draw thread index (thread 0, etc)
-                ui.painter().text(
-                    rect.center_bottom() - egui::vec2(0.0, 6.0),
-                    egui::Align2::CENTER_BOTTOM,
-                    format!("thread{}", core.index),
-                    egui::FontId::proportional(7.4),
-                    text_color,
-                );
-
-                if response.clicked() {
-                    let shift = ui.input(|i| i.modifiers.shift);
-                    if let (true, Some(last_idx)) = (shift, groups.last_clicked_core) {
-                        let start = last_idx.min(core.index);
-                        let end = last_idx.max(core.index);
-                        let target_state = groups.core_selection[last_idx];
-                        for i in start..=end {
-                            if i < groups.core_selection.len() {
-                                groups.core_selection[i] = target_state;
-                            }
+            if response.clicked() {
+                let shift = ui.input(|i| i.modifiers.shift);
+                if let (true, Some(last_idx)) = (shift, groups.last_clicked_core) {
+                    let start = last_idx.min(core.index);
+                    let end = last_idx.max(core.index);
+                    let target_state = groups.core_selection[last_idx];
+                    let mut changed = false;
+                    for i in start..=end {
+                        if i < groups.core_selection.len()
+                            && groups.core_selection[i] != target_state
+                        {
+                            groups.core_selection[i] = target_state;
+                            changed = true;
                         }
-                    } else {
-                        groups.core_selection[core.index] = !is_selected;
-                        groups.last_clicked_core = Some(core.index);
                     }
+                    if changed {
+                        response.mark_changed();
+                    }
+                } else {
+                    groups.core_selection[core.index] = !is_selected;
+                    groups.last_clicked_core = Some(core.index);
+                    response.mark_changed();
                 }
             }
-        });
+        }
     });
+}
+
+#[cfg(test)]
+fn draw_core_buttons_for_test(
+    ui: &mut egui::Ui,
+    groups: &mut GroupFormSession,
+    cores: &mut [CoreInfo],
+) -> Vec<egui::Rect> {
+    let mut control_rects = Vec::with_capacity(cores.len() + 1);
+    draw_core_buttons_impl(ui, groups, cores, |rect| control_rects.push(rect));
+    control_rects
 }
 
 /// Group creation window.
@@ -271,7 +369,7 @@ pub fn create_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     let mut cancel_clicked = false;
 
     CentralPanel::default().show(root_ui, |ui| {
-        ui.add_space(5.0);
+        ui.add_space(3.0);
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.heading(RichText::new("Create affinity group").strong());
@@ -282,12 +380,15 @@ pub fn create_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                if ui.button("Close").on_hover_text("Close").clicked() {
+                if ghost_button(ui, egui::Button::new("Close"))
+                    .on_hover_text("Close")
+                    .clicked()
+                {
                     cancel_clicked = true;
                 }
             });
         });
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -321,7 +422,7 @@ pub fn edit_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
         let mut delete_clicked = false;
         let mut cancel_clicked = false;
 
-        ui.add_space(5.0);
+        ui.add_space(3.0);
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.heading(RichText::new("Edit affinity group").strong());
@@ -332,12 +433,15 @@ pub fn edit_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                if ui.button("Close").on_hover_text("Close").clicked() {
+                if ghost_button(ui, egui::Button::new("Close"))
+                    .on_hover_text("Close")
+                    .clicked()
+                {
                     cancel_clicked = true;
                 }
             });
         });
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -366,4 +470,181 @@ pub fn edit_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
             app.cancel_group_form_session();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        core_tile_text, core_tile_tokens, core_tile_widget_info, draw_core_buttons_for_test,
+        selected_core_tile_fill, CORE_TILE_WIDTH,
+    };
+    use crate::app::models::{CoreInfo, CoreType};
+    use crate::app::shell::presenters::shared_elements::{
+        inter_semibold_family, palette_for_dark_mode, ui_font_definitions, BUTTON_FONT_SIZE,
+    };
+    use crate::app::shell::GroupFormSession;
+    use eframe::egui::{self, Pos2, RawInput, Rect, WidgetType};
+
+    fn render_narrow_core_tiles(is_selected: bool) -> Vec<Rect> {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(ui_font_definitions());
+        let mut groups = GroupFormSession {
+            editing_group_id: None,
+            editing_selection: None,
+            core_selection: vec![is_selected; 20],
+            group_name: String::new(),
+            run_all_enabled: false,
+            last_clicked_core: None,
+        };
+        let mut cores = (0..20)
+            .map(|index| CoreInfo {
+                index,
+                core_type: match index % 4 {
+                    0 => CoreType::Performance,
+                    1 => CoreType::Efficient,
+                    2 => CoreType::HyperThreading,
+                    _ => CoreType::Other,
+                },
+                label: format!("T{index}"),
+            })
+            .collect::<Vec<_>>();
+        let mut tile_rects = Vec::new();
+
+        let _ = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(190.0, 500.0))),
+                ..Default::default()
+            },
+            |ui| {
+                tile_rects = draw_core_buttons_for_test(ui, &mut groups, &mut cores);
+            },
+        );
+        tile_rects
+    }
+
+    #[test]
+    fn test_core_tile_text_keeps_full_label_and_thread_on_separate_lines() {
+        let text = core_tile_text("P0", 0);
+        assert_eq!(text.primary, "P0");
+        assert_eq!(text.secondary, "thread 0");
+        assert_eq!(text.accessible, "P0, thread 0");
+
+        let text = core_tile_text("E3", 15);
+        assert_eq!(text.primary, "E3");
+        assert_eq!(text.secondary, "thread 15");
+        assert_eq!(text.accessible, "E3, thread 15");
+    }
+
+    #[test]
+    fn test_core_tile_metadata_keeps_button_and_selected_semantics() {
+        let text = core_tile_text("E3", 15);
+        let info = core_tile_widget_info(true, true, &text);
+
+        assert_eq!(info.typ, WidgetType::Button);
+        assert!(info.enabled);
+        assert_eq!(info.selected, Some(true));
+        assert_eq!(info.label.as_deref(), Some("E3, thread 15"));
+    }
+
+    #[test]
+    fn test_selected_core_tile_uses_primary_fill_for_each_interaction_state() {
+        for colors in [palette_for_dark_mode(true), palette_for_dark_mode(false)] {
+            let tokens = colors.primary;
+            assert_eq!(selected_core_tile_fill(tokens, false, false), tokens.fill);
+            assert_eq!(
+                selected_core_tile_fill(tokens, true, false),
+                tokens.hover_fill
+            );
+            assert_eq!(
+                selected_core_tile_fill(tokens, true, true),
+                tokens.active_fill
+            );
+        }
+    }
+
+    #[test]
+    fn test_core_tile_inter_galleys_fit_full_large_thread_labels() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(ui_font_definitions());
+        let mut measured = Vec::new();
+
+        let _ = ctx.run_ui(RawInput::default(), |ui| {
+            for (label, thread_index) in [("P19", 19), ("P127", 127)] {
+                let text = core_tile_text(label, thread_index);
+                let primary = ui.fonts_mut(|fonts| {
+                    fonts.layout_no_wrap(
+                        text.primary,
+                        egui::FontId::new(BUTTON_FONT_SIZE, inter_semibold_family()),
+                        egui::Color32::WHITE,
+                    )
+                });
+                let secondary = ui.fonts_mut(|fonts| {
+                    fonts.layout_no_wrap(
+                        text.secondary,
+                        egui::FontId::proportional(7.5),
+                        egui::Color32::WHITE,
+                    )
+                });
+                measured.push((primary.size(), secondary.size()));
+            }
+        });
+
+        for (primary, secondary) in measured {
+            assert!(primary.x <= CORE_TILE_WIDTH - 4.0);
+            assert!(secondary.x <= CORE_TILE_WIDTH - 4.0);
+            assert!(primary.y + secondary.y <= 26.0);
+        }
+    }
+
+    #[test]
+    fn test_selected_core_tiles_share_the_muted_accent_tone_in_both_themes() {
+        for colors in [palette_for_dark_mode(true), palette_for_dark_mode(false)] {
+            for core_type in [
+                CoreType::Performance,
+                CoreType::Efficient,
+                CoreType::HyperThreading,
+                CoreType::Other,
+            ] {
+                assert_eq!(
+                    core_tile_tokens(core_type, true, colors),
+                    Some(colors.primary)
+                );
+                assert_eq!(core_tile_tokens(core_type, false, colors), None);
+            }
+
+            assert_ne!(colors.primary.fill, colors.core_other);
+        }
+    }
+
+    #[test]
+    fn test_narrow_twenty_thread_layout_wraps_without_selected_width_shift() {
+        let unselected = render_narrow_core_tiles(false);
+        let selected = render_narrow_core_tiles(true);
+
+        assert_eq!(unselected.len(), 21);
+        assert_eq!(selected.len(), unselected.len());
+        for (control_index, (unselected_rect, selected_rect)) in
+            unselected.iter().zip(&selected).enumerate()
+        {
+            for rect in [unselected_rect, selected_rect] {
+                assert!(rect.left() >= 0.0);
+                assert!(rect.right() <= 190.0);
+            }
+            assert_eq!(selected_rect, unselected_rect);
+            let expected_size = if control_index == 0 {
+                egui::vec2(46.0, 30.0)
+            } else if (control_index - 1) % 4 == 0 {
+                egui::vec2(CORE_TILE_WIDTH, 36.0)
+            } else {
+                egui::vec2(CORE_TILE_WIDTH, 30.0)
+            };
+            assert_eq!(unselected_rect.size(), expected_size);
+        }
+        assert!(
+            unselected
+                .windows(2)
+                .any(|pair| pair[1].top() > pair[0].top()),
+            "twenty thread controls must wrap to more than one row"
+        );
+    }
 }

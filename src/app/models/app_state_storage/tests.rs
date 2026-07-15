@@ -9,6 +9,7 @@ use os_api::PriorityClass;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn with_temp_state_path(test_name: &str, test_fn: impl FnOnce(&Path)) {
@@ -590,6 +591,82 @@ fn test_explicit_v5_save_upgrades_to_current_schema_and_persists_rule_identities
         assert_eq!(
             fs::read_to_string(state_path.with_file_name("state.json.pre-v6")).unwrap(),
             original
+        );
+    });
+}
+
+#[test]
+fn test_group_reorder_round_trip_preserves_order_identities_and_allocation_counters() {
+    with_temp_state_path("group_reorder_round_trip", |state_path| {
+        let mut state = sample_state();
+        let mut second = state.groups[0].clone();
+        second.name = "Second".to_string();
+        let mut third = state.groups[0].clone();
+        third.name = "Third".to_string();
+        state.groups.extend([second, third]);
+
+        let mut seeded_identities = RulesContext::from_storage(&state).to_persisted_identities();
+        seeded_identities.next_group_id = 20;
+        seeded_identities.next_rule_id = 40;
+        state.rule_identities = Some(seeded_identities);
+
+        let mut rules = RulesContext::from_storage(&state);
+        let identities_before_move = rules.to_persisted_identities();
+        let persistent_state = Arc::new(RwLock::new(state));
+
+        assert!(crate::app::features::rules::move_group_to_index(
+            &persistent_state,
+            0,
+            2
+        ));
+        rules.move_group_to_index(0, 2);
+
+        let expected_identities = rules.to_persisted_identities();
+        let mut reordered = persistent_state.read().unwrap().clone();
+        reordered.mark_ready_for_current_schema_save(expected_identities.clone());
+        reordered.try_save_to_path(state_path).unwrap();
+
+        let reloaded = AppStateStorage::load_from_path(state_path);
+        assert_eq!(
+            reloaded
+                .groups
+                .iter()
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Second", "Third", "Games"]
+        );
+
+        let reloaded_identities = reloaded.rule_identities.as_ref().unwrap();
+        assert_eq!(reloaded_identities, &expected_identities);
+        assert_eq!(reloaded_identities.next_group_id, 20);
+        assert_eq!(reloaded_identities.next_rule_id, 40);
+        assert_eq!(
+            reloaded_identities
+                .groups
+                .iter()
+                .map(|group| group.id.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                identities_before_move.groups[1].id.clone(),
+                identities_before_move.groups[2].id.clone(),
+                identities_before_move.groups[0].id.clone(),
+            ]
+        );
+        assert_eq!(
+            reloaded_identities
+                .groups
+                .iter()
+                .map(|group| group.rule_ids.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                identities_before_move.groups[1].rule_ids.clone(),
+                identities_before_move.groups[2].rule_ids.clone(),
+                identities_before_move.groups[0].rule_ids.clone(),
+            ]
+        );
+        assert_eq!(
+            RulesContext::from_storage(&reloaded).to_persisted_identities(),
+            expected_identities
         );
     });
 }

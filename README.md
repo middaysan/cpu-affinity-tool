@@ -8,6 +8,7 @@ Windows utility for managing CPU affinity of games and background applications.
 - Linux beta prereleases: [GitHub Releases](https://github.com/middaysan/cpu-affinity-tool/releases)
 - Download: [Latest Release](https://github.com/middaysan/cpu-affinity-tool/releases/latest)
 - License: [MIT](./LICENSE)
+- Bundled UI font: [Inter](assets/fonts/LICENSE.txt), licensed under the SIL Open Font License 1.1
 
 ![CPU Affinity Tool main window](assets/screenshot.png)
 
@@ -36,14 +37,14 @@ This is a control tool, not a promise of better FPS.
 
 - Save CPU core groups for different workloads
 - Launch apps with saved affinity and priority rules
-- Add apps from direct paths and launcher files with **Open App**
-- Add supported installed apps with **Find Installed** (`Start`-backed entries on Windows, desktop entries plus matching `PATH` executables during search on Linux beta)
-- Re-apply affinity and priority while Auto Re-apply Affinity and Priority is enabled
+- Add apps from direct paths and launcher files with **Add file...**
+- Add supported installed apps with **Add installed...** (`Start`-backed entries on Windows, desktop entries plus matching `PATH` executables during search on Linux beta)
+- Re-apply affinity and priority while **Monitoring active** is shown
 - Autorun selected apps with the tool
 - Create Windows desktop shortcuts for saved rules so a configured app can use a quick shortcut launch
 - Add targets by drag and drop
-- Inspect launch and automatic CPU affinity re-apply activity in the built-in log view
-- Open the active data folder directly from the log screen
+- Inspect launches, corrections, and monitoring events in **Activity**
+- Open the active data folder directly from **Activity**
 - Switch between light, dark, and system theme modes
 
 ## When it helps
@@ -67,14 +68,14 @@ For a longer explanation, see [docs/why.md](docs/why.md).
 1. Download the latest Windows release and run `cpu-affinity-tool.exe`.
 2. Accept the UAC prompt. The current Windows build requires administrator rights.
 3. Create a CPU core group for the workload you want to isolate.
-4. Add an app with **Open App**, **Find Installed**, or drag and drop.
+4. Add an app with **Add file...**, **Add installed...**, or drag and drop.
 5. Set the desired affinity and priority, then save the rule.
 6. On Windows, optionally open the saved rule settings and create a desktop shortcut for quick shortcut launch.
-7. Launch the app from the tool or shortcut and keep Auto Re-apply Affinity and Priority enabled if you want settings re-applied automatically.
+7. Launch the app from the tool or shortcut and keep **Monitoring active** if you want settings re-applied automatically. Use **Pause monitor** when you want to suspend corrections.
 
 ## Comparison
 
-| Tool | Saved launch rules | Auto Re-apply Affinity and Priority | Complexity | Best fit |
+| Tool | Saved launch rules | Automatic affinity and priority monitoring | Complexity | Best fit |
 | --- | --- | --- | --- | --- |
 | CPU Affinity Tool | Yes | Yes | Low | Focused Windows affinity workflows with saved rules |
 | Task Manager | No | No | Low | One-off manual changes |
@@ -116,19 +117,19 @@ If `state.json` already exists next to the executable, the app keeps using that 
 
 ## Troubleshooting
 
-### The app I want is not listed in Find Installed
+### The app I want is not listed in Add installed...
 
-Use **Open App** instead. On Windows, **Find Installed** is a launch-safe subset of Start-backed apps. On Linux beta, it primarily uses desktop entries and only surfaces matching `PATH` executables when you search, so it may still miss portable apps or targets outside normal launcher and shell paths.
+Use **Add file...** instead. On Windows, **Add installed...** is a launch-safe subset of Start-backed apps. On Linux beta, it primarily uses desktop entries and only surfaces matching `PATH` executables when you search, so it may still miss portable apps or targets outside normal launcher and shell paths.
 
 ### Affinity or priority is not applied
 
 - Make sure you launched the target from CPU Affinity Tool
-- Keep Auto Re-apply Affinity and Priority enabled if the app changes settings after launch
+- Keep **Monitoring active** if the app changes settings after launch
 - Verify that you accepted the UAC prompt and the tool is running elevated
 
 ### The application overrides the configured settings
 
-Some applications spawn helper processes or reset their own settings. Auto Re-apply Affinity and Priority is designed to correct that, but it may not cover every application behavior.
+Some applications spawn helper processes or reset their own settings. Active monitoring is designed to correct that, but it may not cover every application behavior.
 
 ### Windows security software or antivirus prompts appear
 
@@ -136,7 +137,7 @@ The current release is a Windows executable that requests elevation. Verify that
 
 ### Shortcut or launch path behavior looks wrong
 
-Try **Open App** with the direct executable or launcher path. For installed apps, try **Find Installed** first and fall back to **Open App** if the target is not listed correctly.
+Try **Add file...** with the direct executable or launcher path. For installed apps, try **Add installed...** first and fall back to **Add file...** if the target is not listed correctly.
 
 Saved-rule desktop shortcuts are Windows-only in the current release path. They target the current `cpu-affinity-tool.exe` path, so recreate them after moving a portable app folder. Shortcut creation uses the Desktop folder for the current elevated Windows token; if you start the tool with credential-over-the-shoulder UAC using another administrator account, the shortcut can be created on that account's Desktop instead of the unelevated user's Desktop. Linux beta builds do not expose the shortcut control or generate `.desktop` launchers.
 
@@ -198,3 +199,4 @@ For release-process details, see [docs/release-process.md](docs/release-process.
 - Support and diagnostics: [SUPPORT.md](SUPPORT.md)
 - Security reporting: [SECURITY.md](SECURITY.md)
 - License: [LICENSE](LICENSE)
+- Bundled Inter font license: [assets/fonts/LICENSE.txt](assets/fonts/LICENSE.txt)
