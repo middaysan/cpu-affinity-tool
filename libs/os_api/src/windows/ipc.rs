@@ -1335,7 +1335,7 @@ mod tests {
     #[test]
     fn cancellation_wait_timeout_keeps_operation_pending() {
         assert_eq!(
-            classify_cancel_completion_error(WAIT_TIMEOUT),
+            classify_cancel_completion_error(WIN32_ERROR(WAIT_TIMEOUT.0)),
             CancelCompletionState::Pending,
             "CancelIoEx does not complete cancellation synchronously, so a wait timeout must keep the operation resources alive"
         );
