@@ -28,6 +28,45 @@ fn windows_resource_build_embeds_manifest_as_resource() {
 }
 
 #[test]
+fn binaries_use_the_platform_system_allocator() {
+    let cargo_toml = include_str!("../../Cargo.toml");
+    let windows_entrypoint = include_str!("../main_windows.rs");
+    let linux_entrypoint = include_str!("../main_linux.rs");
+
+    assert!(
+        !cargo_toml.contains("mimalloc"),
+        "the application must not replace the platform allocator with mimalloc"
+    );
+    assert!(
+        !windows_entrypoint.contains("#[global_allocator]"),
+        "the Windows binary must use the platform system allocator"
+    );
+    assert!(
+        !linux_entrypoint.contains("#[global_allocator]"),
+        "the Linux beta binary must use the platform system allocator"
+    );
+}
+
+#[test]
+fn stable_windows_release_publishes_debug_symbols() {
+    let cargo_toml = include_str!("../../Cargo.toml");
+    let release_workflow = include_str!("../../.github/workflows/release.yml");
+
+    assert!(
+        cargo_toml.contains("[profile.release]") && cargo_toml.contains("debug = 1"),
+        "release builds must retain line-table debug information for crash symbolization"
+    );
+    assert!(
+        release_workflow.contains("target/release/cpu-affinity-tool.pdb"),
+        "the stable Windows workflow must package the PDB produced by the release build"
+    );
+    assert!(
+        release_workflow.contains("./artifacts/windows/cpu-affinity-tool.pdb"),
+        "the stable GitHub Release must publish its matching PDB"
+    );
+}
+
+#[test]
 fn winres_metadata_allows_non_manifest_keys() {
     let cargo_toml = r#"
 [package.metadata.winres]

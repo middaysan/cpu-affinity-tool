@@ -80,11 +80,13 @@ jobs:
         shell: pwsh
         run: ./scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe
 
-      - name: Upload Windows binary
+      - name: Upload Windows release artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: windows-binary
-          path: target/release/cpu-affinity-tool.exe
+          name: windows-release-artifacts
+          path: |
+            target/release/cpu-affinity-tool.exe
+            target/release/cpu-affinity-tool.pdb
           if-no-files-found: error
 
   create-release:
@@ -96,10 +98,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Download Windows binary
+      - name: Download Windows release artifacts
         uses: actions/download-artifact@v8
         with:
-          name: windows-binary
+          name: windows-release-artifacts
           path: ./artifacts/windows
 
       - name: Get version from tag
@@ -116,3 +118,4 @@ jobs:
           body_path: changelogs/v${{ steps.get_version.outputs.VERSION }}.txt
           files: |
             ./artifacts/windows/cpu-affinity-tool.exe
+            ./artifacts/windows/cpu-affinity-tool.pdb

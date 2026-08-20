@@ -5,7 +5,7 @@ This document describes the current release contract for CPU Affinity Tool.
 It is intentionally narrow and truthful:
 
 - stable releases are Windows-only
-- Windows stable tags publish `cpu-affinity-tool.exe`
+- Windows stable tags publish `cpu-affinity-tool.exe` and its matching `cpu-affinity-tool.pdb`
 - Linux beta prerelease tags publish a raw Linux binary, a `tar.gz`, and `SHA256SUMS.txt`
 - CI validates the Linux beta build/test/clippy path from source on pinned Ubuntu runners; desktop-session smoke remains manual beta validation
 - there is no installer, AppImage, Flatpak, code signing, or winget package in the current release contract
@@ -43,7 +43,7 @@ When a stable tag matching `v*` is pushed:
 4. the workflow requires `changelogs/vX.Y.Z.txt`
 5. the workflow runs formatting, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `libs/os_api` tests, `cargo test --features windows --bin cpu-affinity-tool`, and `cargo build --release --features windows --bin cpu-affinity-tool`
 6. the workflow runs `scripts/assert-windows-release-manifest.ps1` against the built exe and requires `requestedExecutionLevel=requireAdministrator` plus `uiAccess=false`
-7. the workflow uploads `cpu-affinity-tool.exe`
+7. the workflow uploads `cpu-affinity-tool.exe` and its matching `cpu-affinity-tool.pdb`
 8. a publish job on `ubuntu-24.04` creates the GitHub Release with the body from `changelogs/vX.Y.Z.txt`
 
 When a Linux beta tag matching `linux-beta-v*` is pushed:
@@ -84,7 +84,7 @@ Before pushing a Linux beta tag, align:
 4. Run the manual smoke from `docs/release-smoke-matrix.md`.
 5. Push the release commit.
 6. Push the stable tag `vX.Y.Z`.
-7. Confirm the GitHub Release workflow succeeded and published `cpu-affinity-tool.exe`.
+7. Confirm the GitHub Release workflow succeeded and published `cpu-affinity-tool.exe` plus `cpu-affinity-tool.pdb`.
 
 ## Recommended Linux beta release steps
 
@@ -100,8 +100,9 @@ Before pushing a Linux beta tag, align:
 Stable published artifact:
 
 - `cpu-affinity-tool.exe`
+- `cpu-affinity-tool.pdb`
 
-The Windows CI and stable release workflows verify the built exe's embedded `RT_MANIFEST` resource with `scripts/assert-windows-release-manifest.ps1`. The script confirms `requireAdministrator` and `uiAccess=false`; actual UAC prompt behavior still belongs to manual Windows smoke.
+The release profile retains line-table debug information, and the stable release workflow requires the matching PDB before publishing. The Windows CI and stable release workflows verify the built exe's embedded `RT_MANIFEST` resource with `scripts/assert-windows-release-manifest.ps1`. The script confirms `requireAdministrator` and `uiAccess=false`; actual UAC prompt behavior still belongs to manual Windows smoke.
 
 Linux beta prerelease artifacts:
 

@@ -6,9 +6,6 @@ use app::startup::parse_startup_args;
 use eframe::{run_native, NativeOptions};
 use tokio::runtime::Runtime;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 fn main() {
     let startup_args = std::env::args().skip(1).collect::<Vec<_>>();
     let startup_intent = match parse_startup_args(&startup_args) {

@@ -304,7 +304,6 @@ Only list materially relevant dependencies by actual role.
 Primary runtime and build dependencies:
 - `eframe` / `egui` - desktop GUI
 - `tokio` - background runtime
-- `mimalloc` - global allocator
 - `windows` - Win32 bindings for shell integration, process/runtime operations, local IPC, security descriptors, and manifest/resource-adjacent Windows APIs
 - `tray-icon` - Windows tray integration
 - `rfd` - file dialogs
@@ -315,6 +314,8 @@ Primary runtime and build dependencies:
 - `image` - tray and resource image decoding
 - `winres` - Windows resource embedding at build time
 - `libs/os_api` - local platform abstraction crate
+
+Both application binaries use the platform system allocator; the project does not install a custom global allocator.
 
 Linux-only backend dependencies inside `libs/os_api`:
 - `nix`
@@ -352,8 +353,8 @@ Current CI facts:
 Current release facts:
 - stable GitHub Release workflow reacts to pushed tags matching `v*`
 - the stable release workflow validates that the tag matches `vX.Y.Z`, that `Cargo.toml` version matches `X.Y.Z`, and that `changelogs/vX.Y.Z.txt` exists before building
-- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, builds `cpu-affinity-tool.exe` with `cargo build --release --features windows --bin cpu-affinity-tool`, and then verifies the built exe manifest resource with `scripts/assert-windows-release-manifest.ps1` in the same runner before upload
-- the stable release publish job runs on `ubuntu-24.04` and publishes `cpu-affinity-tool.exe`
+- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, builds `cpu-affinity-tool.exe` plus its matching PDB with `cargo build --release --features windows --bin cpu-affinity-tool`, and then verifies the built exe manifest resource with `scripts/assert-windows-release-manifest.ps1` in the same runner before upload
+- the stable release publish job runs on `ubuntu-24.04` and publishes `cpu-affinity-tool.exe` plus `cpu-affinity-tool.pdb`
 - stable release target: `x86_64-pc-windows-msvc`
 - Linux beta prerelease workflow reacts to pushed tags matching `linux-beta-v*`
 - the Linux beta prerelease workflow runs on `ubuntu-24.04`, installs the Linux GUI build dependencies, runs `cargo fmt --all -- --check`, `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features linux --bin cpu-affinity-tool-linux`, and then builds `cpu-affinity-tool-linux`
@@ -366,6 +367,7 @@ Additional release facts:
 - the stable GitHub Release workflow uses `changelogs/vX.Y.Z.txt` as the release body for the matching tag
 - the Linux beta prerelease workflow uses `changelogs/linux-beta-vX.Y.Z-N.txt` as the prerelease body for the matching tag
 - release notes no longer rely on `generate_release_notes: true`
+- the release profile retains line-table debug information, and the stable Windows workflow requires the matching PDB before publishing
 - `scripts/assert-windows-release-manifest.ps1` reads the built Windows exe `RT_MANIFEST` resource and asserts `requireAdministrator` plus `uiAccess=false`; UAC prompt behavior remains manual smoke validation
 - manual pre-release validation lives in `docs/release-checklist.md` and its subordinate `docs/release-smoke-matrix.md`
 - manual Linux beta pre-release validation lives in `docs/linux-beta-release-checklist.md`
@@ -374,6 +376,7 @@ Additional release facts:
 - that version sync is still manual before tagging, then the stable and Linux beta workflows validate the relevant tag, `Cargo.toml`, and changelog inputs
 
 Release-impacting artifacts:
+- `Cargo.toml` release profile
 - `build.rs`
 - `app.manifest`
 - `assets/icon.ico`

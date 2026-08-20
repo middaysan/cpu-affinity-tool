@@ -16,9 +16,6 @@ use os_api::{LocalIpcClientError, LocalIpcEndpoint, LocalIpcGuard, OS};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 fn main() {
     let startup_args = std::env::args().skip(1).collect::<Vec<_>>();
     let startup_intent = match parse_startup_args(&startup_args) {

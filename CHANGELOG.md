@@ -4,6 +4,17 @@ This file is the consolidated high-level project history.
 
 Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
+## [Unreleased]
+
+### Changed
+
+- Returned both binaries to the platform system allocator instead of installing `mimalloc` globally
+- Stable Windows releases now publish the matching PDB with line-table debug information for crash symbolization
+
+### Fixed
+
+- Kept overlapped named-pipe operation resources alive until cancellation actually completes, preventing a timeout-path use-after-free
+
 ## [1.5.0] - 2026-07-16
 
 ### Added

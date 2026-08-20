@@ -47,7 +47,7 @@ const PIPE_TIMEOUT_MS: u32 = 5000;
 const PIPE_MAX_INSTANCES: u32 = 1;
 const SERVER_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(1);
-const CANCEL_COMPLETION_TIMEOUT_MS: u32 = 1000;
+const CANCEL_COMPLETION_POLL_MS: u32 = 25;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const OPEN_CLIENT_TOKEN_AS_SELF: bool = true;
 
@@ -402,9 +402,16 @@ enum PipeIoError {
     Io(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelCompletionState {
+    Pending,
+    Completed,
+    Failed(WIN32_ERROR),
+}
+
 struct OverlappedOperation {
     overlapped: Box<OVERLAPPED>,
-    event: HandleGuard,
+    _event: HandleGuard,
 }
 
 impl OverlappedOperation {
@@ -414,7 +421,10 @@ impl OverlappedOperation {
         let event = HandleGuard(event);
         let mut overlapped = Box::<OVERLAPPED>::default();
         overlapped.hEvent = event.0;
-        Ok(Self { overlapped, event })
+        Ok(Self {
+            overlapped,
+            _event: event,
+        })
     }
 
     fn as_mut_ptr(&mut self) -> *mut OVERLAPPED {
@@ -472,35 +482,45 @@ impl OverlappedOperation {
     }
 
     fn cancel_and_finish(self, handle: HANDLE, result: PipeIoError) -> Result<u32, PipeIoError> {
-        let this = self;
-        let _ = unsafe { CancelIoEx(handle, Some(&*this.overlapped)) };
-        let mut bytes = 0u32;
-        match unsafe {
-            GetOverlappedResultEx(
-                handle,
-                &*this.overlapped,
-                &mut bytes,
-                CANCEL_COMPLETION_TIMEOUT_MS,
-                false,
-            )
-        } {
-            Ok(()) => Err(result),
-            Err(_) => {
-                let err = unsafe { GetLastError() };
-                if err == ERROR_OPERATION_ABORTED || is_wait_timeout(err) {
-                    if is_wait_timeout(err) {
-                        let _ = Box::leak(this.overlapped);
-                        std::mem::forget(this.event);
+        let operation = self;
+        let _ = unsafe { CancelIoEx(handle, Some(&*operation.overlapped)) };
+
+        // CancelIoEx only requests cancellation. The OVERLAPPED structure and the I/O buffer
+        // must remain valid until GetOverlappedResultEx reports a terminal completion state.
+        loop {
+            let mut bytes = 0u32;
+            match unsafe {
+                GetOverlappedResultEx(
+                    handle,
+                    &*operation.overlapped,
+                    &mut bytes,
+                    CANCEL_COMPLETION_POLL_MS,
+                    false,
+                )
+            } {
+                Ok(()) => return Err(result),
+                Err(_) => match classify_cancel_completion_error(unsafe { GetLastError() }) {
+                    CancelCompletionState::Pending => continue,
+                    CancelCompletionState::Completed => return Err(result),
+                    CancelCompletionState::Failed(err) => {
+                        return Err(pipe_io_error_from_code(
+                            err,
+                            "failed to cancel overlapped IPC operation",
+                        ));
                     }
-                    Err(result)
-                } else {
-                    Err(pipe_io_error_from_code(
-                        err,
-                        "failed to cancel overlapped IPC operation",
-                    ))
-                }
+                },
             }
         }
+    }
+}
+
+fn classify_cancel_completion_error(err: WIN32_ERROR) -> CancelCompletionState {
+    if is_wait_timeout(err) {
+        CancelCompletionState::Pending
+    } else if err == ERROR_OPERATION_ABORTED {
+        CancelCompletionState::Completed
+    } else {
+        CancelCompletionState::Failed(err)
     }
 }
 
@@ -1309,6 +1329,20 @@ mod tests {
         assert!(
             OPEN_CLIENT_TOKEN_AS_SELF,
             "OpenThreadToken must use OpenAsSelf for SecurityIdentification clients"
+        );
+    }
+
+    #[test]
+    fn cancellation_wait_timeout_keeps_operation_pending() {
+        assert_eq!(
+            classify_cancel_completion_error(WAIT_TIMEOUT),
+            CancelCompletionState::Pending,
+            "CancelIoEx does not complete cancellation synchronously, so a wait timeout must keep the operation resources alive"
+        );
+        assert_eq!(
+            classify_cancel_completion_error(ERROR_OPERATION_ABORTED),
+            CancelCompletionState::Completed,
+            "ERROR_OPERATION_ABORTED is the terminal cancellation completion"
         );
     }
 }
