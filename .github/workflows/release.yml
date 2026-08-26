@@ -74,7 +74,20 @@ jobs:
         run: cargo test --features windows --bin cpu-affinity-tool
 
       - name: Build Windows binary
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: cargo build --release --features windows --bin cpu-affinity-tool
+
+      - name: Verify Windows debug symbols
+        shell: pwsh
+        run: |
+          $pdbPath = "target/release/cpu_affinity_tool.pdb"
+          if (-not (Test-Path -LiteralPath $pdbPath -PathType Leaf)) {
+            throw "Missing Windows debug symbols: $pdbPath"
+          }
+          if ((Get-Item -LiteralPath $pdbPath).Length -eq 0) {
+            throw "Windows debug symbols are empty: $pdbPath"
+          }
 
       - name: Verify Windows release manifest
         shell: pwsh
@@ -86,7 +99,7 @@ jobs:
           name: windows-release-artifacts
           path: |
             target/release/cpu-affinity-tool.exe
-            target/release/cpu-affinity-tool.pdb
+            target/release/cpu_affinity_tool.pdb
           if-no-files-found: error
 
   create-release:
@@ -118,4 +131,5 @@ jobs:
           body_path: changelogs/v${{ steps.get_version.outputs.VERSION }}.txt
           files: |
             ./artifacts/windows/cpu-affinity-tool.exe
-            ./artifacts/windows/cpu-affinity-tool.pdb
+            ./artifacts/windows/cpu_affinity_tool.pdb
+          fail_on_unmatched_files: true

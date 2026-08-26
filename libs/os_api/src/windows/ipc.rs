@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BROKEN_PIPE,
-    ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA,
+    ERROR_FILE_NOT_FOUND, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA,
     ERROR_OPERATION_ABORTED, ERROR_PATH_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
     GetLastError, HANDLE, HLOCAL, LocalFree, WAIT_TIMEOUT, WIN32_ERROR,
 };
@@ -431,13 +431,6 @@ impl OverlappedOperation {
         &mut *self.overlapped
     }
 
-    fn finish_now(&mut self, handle: HANDLE) -> Result<u32, PipeIoError> {
-        let mut bytes = 0u32;
-        unsafe { GetOverlappedResultEx(handle, &*self.overlapped, &mut bytes, 0, false) }
-            .map_err(|_| pipe_io_error("overlapped IPC operation failed"))?;
-        Ok(bytes)
-    }
-
     fn wait(
         self,
         handle: HANDLE,
@@ -469,7 +462,7 @@ impl OverlappedOperation {
                 Ok(()) => return Ok(bytes),
                 Err(_) => {
                     let err = unsafe { GetLastError() };
-                    if is_wait_timeout(err) {
+                    if is_overlapped_result_pending(err) {
                         continue;
                     }
                     return Err(pipe_io_error_from_code(
@@ -487,7 +480,7 @@ impl OverlappedOperation {
 
         // CancelIoEx only requests cancellation. The OVERLAPPED structure and the I/O buffer
         // must remain valid until GetOverlappedResultEx reports a terminal completion state.
-        loop {
+        let completion = wait_for_cancel_completion(operation, |operation| {
             let mut bytes = 0u32;
             match unsafe {
                 GetOverlappedResultEx(
@@ -498,24 +491,36 @@ impl OverlappedOperation {
                     false,
                 )
             } {
-                Ok(()) => return Err(result),
-                Err(_) => match classify_cancel_completion_error(unsafe { GetLastError() }) {
-                    CancelCompletionState::Pending => continue,
-                    CancelCompletionState::Completed => return Err(result),
-                    CancelCompletionState::Failed(err) => {
-                        return Err(pipe_io_error_from_code(
-                            err,
-                            "failed to cancel overlapped IPC operation",
-                        ));
-                    }
-                },
+                Ok(()) => CancelCompletionState::Completed,
+                Err(_) => classify_cancel_completion_error(unsafe { GetLastError() }),
             }
+        });
+
+        match completion {
+            Ok(()) => Err(result),
+            Err(err) => Err(pipe_io_error_from_code(
+                err,
+                "failed to cancel overlapped IPC operation",
+            )),
+        }
+    }
+}
+
+fn wait_for_cancel_completion<T>(
+    operation: T,
+    mut poll: impl FnMut(&T) -> CancelCompletionState,
+) -> Result<(), WIN32_ERROR> {
+    loop {
+        match poll(&operation) {
+            CancelCompletionState::Pending => continue,
+            CancelCompletionState::Completed => return Ok(()),
+            CancelCompletionState::Failed(err) => return Err(err),
         }
     }
 }
 
 fn classify_cancel_completion_error(err: WIN32_ERROR) -> CancelCompletionState {
-    if is_wait_timeout(err) {
+    if is_overlapped_result_pending(err) {
         CancelCompletionState::Pending
     } else if err == ERROR_OPERATION_ABORTED {
         CancelCompletionState::Completed
@@ -527,7 +532,9 @@ fn classify_cancel_completion_error(err: WIN32_ERROR) -> CancelCompletionState {
 fn connect_pipe(handle: HANDLE, shutdown: &AtomicBool) -> Result<(), PipeIoError> {
     let mut operation = OverlappedOperation::new()?;
     match unsafe { ConnectNamedPipe(handle, Some(operation.as_mut_ptr())) } {
-        Ok(()) => operation.finish_now(handle).map(|_| ()),
+        Ok(()) => operation
+            .wait(handle, SERVER_CONNECT_TIMEOUT, Some(shutdown))
+            .map(|_| ()),
         Err(_) => match unsafe { GetLastError() } {
             ERROR_PIPE_CONNECTED => Ok(()),
             ERROR_IO_PENDING => operation
@@ -546,7 +553,7 @@ fn read_pipe(
 ) -> Result<u32, PipeIoError> {
     let mut operation = OverlappedOperation::new()?;
     match unsafe { ReadFile(handle, Some(buffer), None, Some(operation.as_mut_ptr())) } {
-        Ok(()) => operation.finish_now(handle),
+        Ok(()) => operation.wait(handle, timeout, shutdown),
         Err(_) => match unsafe { GetLastError() } {
             ERROR_IO_PENDING => operation.wait(handle, timeout, shutdown),
             err => Err(pipe_io_error_from_code(err, "failed to read IPC pipe")),
@@ -564,7 +571,7 @@ fn write_pipe(
     let expected = bytes.len() as u32;
     let written =
         match unsafe { WriteFile(handle, Some(bytes), None, Some(operation.as_mut_ptr())) } {
-            Ok(()) => operation.finish_now(handle)?,
+            Ok(()) => operation.wait(handle, timeout, shutdown)?,
             Err(_) => match unsafe { GetLastError() } {
                 ERROR_IO_PENDING => operation.wait(handle, timeout, shutdown)?,
                 err => return Err(pipe_io_error_from_code(err, "failed to write IPC pipe")),
@@ -580,10 +587,6 @@ fn write_pipe(
     }
 }
 
-fn pipe_io_error(context: &str) -> PipeIoError {
-    pipe_io_error_from_code(unsafe { GetLastError() }, context)
-}
-
 fn pipe_io_error_from_code(err: WIN32_ERROR, context: &str) -> PipeIoError {
     match err {
         ERROR_BROKEN_PIPE | ERROR_NO_DATA | ERROR_OPERATION_ABORTED => PipeIoError::BrokenPipe,
@@ -595,6 +598,10 @@ fn pipe_io_error_from_code(err: WIN32_ERROR, context: &str) -> PipeIoError {
 
 fn is_wait_timeout(err: WIN32_ERROR) -> bool {
     err.0 == WAIT_TIMEOUT.0
+}
+
+fn is_overlapped_result_pending(err: WIN32_ERROR) -> bool {
+    is_wait_timeout(err) || err == ERROR_IO_INCOMPLETE
 }
 
 fn same_session_client(handle: HANDLE) -> bool {
@@ -1193,7 +1200,10 @@ mod tests {
 
         let result = client.join().expect("client thread should not panic");
 
-        assert!(matches!(result, Err(LocalIpcClientError::Timeout)));
+        assert!(
+            matches!(result, Err(LocalIpcClientError::Timeout)),
+            "client should report its response deadline, got {result:?}"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "client timeout should not be stretched by server response wait"
@@ -1340,9 +1350,50 @@ mod tests {
             "CancelIoEx does not complete cancellation synchronously, so a wait timeout must keep the operation resources alive"
         );
         assert_eq!(
+            classify_cancel_completion_error(ERROR_IO_INCOMPLETE),
+            CancelCompletionState::Pending,
+            "an unsignaled overlapped event is still pending and must keep the operation resources alive"
+        );
+        assert_eq!(
             classify_cancel_completion_error(ERROR_OPERATION_ABORTED),
             CancelCompletionState::Completed,
             "ERROR_OPERATION_ABORTED is the terminal cancellation completion"
+        );
+    }
+
+    #[test]
+    fn cancellation_wait_keeps_resources_alive_until_terminal_completion() {
+        use std::cell::Cell;
+
+        struct DropProbe<'a>(&'a Cell<bool>);
+
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let dropped = Cell::new(false);
+        let polls = Cell::new(0usize);
+        let result = wait_for_cancel_completion(DropProbe(&dropped), |operation| {
+            assert!(
+                !operation.0.get(),
+                "operation resources must remain alive while cancellation is pending"
+            );
+            let next_poll = polls.get() + 1;
+            polls.set(next_poll);
+            if next_poll == 1 {
+                CancelCompletionState::Pending
+            } else {
+                CancelCompletionState::Completed
+            }
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(polls.get(), 2, "pending cancellation must be polled again");
+        assert!(
+            dropped.get(),
+            "operation resources should be released after terminal completion"
         );
     }
 }

@@ -13,7 +13,7 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Fixed
 
-- Kept overlapped named-pipe operation resources alive until cancellation actually completes, preventing a timeout-path use-after-free
+- Kept overlapped named-pipe operation resources alive through every pending completion state, including cancellation and `ERROR_IO_INCOMPLETE`, preventing timeout-path use-after-free
 
 ## [1.5.0] - 2026-07-16
 

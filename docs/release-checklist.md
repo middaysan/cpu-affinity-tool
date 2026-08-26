@@ -7,7 +7,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 
 ## Before Tagging
 
-- Confirm the release stays Windows-only: `.github/workflows/release.yml` should publish only `cpu-affinity-tool.exe` and its matching `cpu-affinity-tool.pdb` for `x86_64-pc-windows-msvc`.
+- Confirm the release stays Windows-only: `.github/workflows/release.yml` should publish only `cpu-affinity-tool.exe` and its matching `cpu_affinity_tool.pdb` for `x86_64-pc-windows-msvc`.
 - Confirm Linux beta prereleases stay isolated: `.github/workflows/release-linux-beta.yml` should publish only Linux beta prerelease assets for tags matching `linux-beta-v*`.
 - Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs separate Windows and Linux beta jobs, cancels superseded runs per branch or PR, restores Rust cache, runs shared formatting and `libs/os_api` tests, keeps the Windows release-path checks on `windows-latest`, verifies the built Windows artifact manifest, and verifies the Linux beta binary on `ubuntu-24.04`.
 - Confirm the tag-release gate matches reality: `.github/workflows/release.yml` validates `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`, runs the same formatting, lint, `libs/os_api`, and root test gates, builds the Windows artifact, verifies its embedded manifest resource, and then publishes it.
@@ -36,7 +36,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Run `cargo test --features linux --bin cpu-affinity-tool-linux`.
 - Run `cargo build --release --features linux --bin cpu-affinity-tool-linux`.
 - Confirm the expected Windows artifact exists at `target/release/cpu-affinity-tool.exe`.
-- Confirm the matching Windows debug symbols exist at `target/release/cpu-affinity-tool.pdb`.
+- Confirm the matching Windows debug symbols exist at `target/release/cpu_affinity_tool.pdb`.
 - If `assets/cpu_presets.json` changed, confirm the binary was rebuilt after that change because presets are embedded via `include_str!`.
 - Confirm a clean checkout contains `assets/fonts/InterVariable.ttf` before building because the font is embedded with `include_bytes!`.
 - Run `cargo audit`; reconcile every vulnerability before release. The two current `quick-xml` exceptions and their build-time reachability assessment are documented in `docs/dependency-advisories.md`; do not ignore any additional advisory.
@@ -62,5 +62,5 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 
 - Confirm the tag format is a stable tag: `vX.Y.Z`.
 - Confirm `changelogs/vX.Y.Z.txt` is up to date because `.github/workflows/release.yml` uses it as the published GitHub Release body.
-- Confirm the stable GitHub Release contains both `cpu-affinity-tool.exe` and its matching `cpu-affinity-tool.pdb`.
+- Confirm the stable GitHub Release contains both `cpu-affinity-tool.exe` and its matching `cpu_affinity_tool.pdb`.
 - Confirm installer packaging, code signing, winget, choco, AppImage, Flatpak, and Linux stable release artifacts are still absent from the stable release contract, or update docs/workflows in the same change if that contract changed.

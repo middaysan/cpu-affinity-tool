@@ -51,18 +51,37 @@ fn binaries_use_the_platform_system_allocator() {
 fn stable_windows_release_publishes_debug_symbols() {
     let cargo_toml = include_str!("../../Cargo.toml");
     let release_workflow = include_str!("../../.github/workflows/release.yml");
+    let shared_release_debug_enabled = cargo_toml
+        .split_once("[profile.release]")
+        .map(|(_, remaining)| remaining.split("\n[").next().unwrap_or(remaining))
+        .is_some_and(|profile| {
+            profile
+                .lines()
+                .any(|line| line.trim_start().starts_with("debug"))
+        });
 
     assert!(
-        cargo_toml.contains("[profile.release]") && cargo_toml.contains("debug = 1"),
-        "release builds must retain line-table debug information for crash symbolization"
+        !shared_release_debug_enabled
+            && release_workflow
+                .contains("CARGO_PROFILE_RELEASE_DEBUG: line-tables-only"),
+        "line-table debug information must be enabled by the stable Windows release job without changing Linux beta artifacts"
     );
     assert!(
-        release_workflow.contains("target/release/cpu-affinity-tool.pdb"),
+        release_workflow.contains("target/release/cpu_affinity_tool.pdb"),
         "the stable Windows workflow must package the PDB produced by the release build"
     );
     assert!(
-        release_workflow.contains("./artifacts/windows/cpu-affinity-tool.pdb"),
+        release_workflow.contains("name: Verify Windows debug symbols")
+            && release_workflow.contains("Test-Path -LiteralPath $pdbPath -PathType Leaf"),
+        "the stable Windows workflow must fail before upload when the expected PDB is absent"
+    );
+    assert!(
+        release_workflow.contains("./artifacts/windows/cpu_affinity_tool.pdb"),
         "the stable GitHub Release must publish its matching PDB"
+    );
+    assert!(
+        release_workflow.contains("fail_on_unmatched_files: true"),
+        "the GitHub Release step must reject missing declared artifacts"
     );
 }
 
