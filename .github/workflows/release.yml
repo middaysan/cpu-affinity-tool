@@ -73,21 +73,16 @@ jobs:
       - name: Run tests
         run: cargo test --features windows --bin cpu-affinity-tool
 
-      - name: Build Windows binary
-        env:
-          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
-        run: cargo build --release --features windows --bin cpu-affinity-tool
+      - name: Build Windows release binary
+        shell: pwsh
+        run: ./scripts/build-windows-release.ps1
 
       - name: Verify Windows debug symbols
         shell: pwsh
         run: |
-          $pdbPath = "target/release/cpu_affinity_tool.pdb"
-          if (-not (Test-Path -LiteralPath $pdbPath -PathType Leaf)) {
-            throw "Missing Windows debug symbols: $pdbPath"
-          }
-          if ((Get-Item -LiteralPath $pdbPath).Length -eq 0) {
-            throw "Windows debug symbols are empty: $pdbPath"
-          }
+          ./scripts/assert-windows-pdb-matches.ps1 `
+            -ExePath target/release/cpu-affinity-tool.exe `
+            -PdbPath target/release/cpu_affinity_tool.pdb
 
       - name: Verify Windows release manifest
         shell: pwsh

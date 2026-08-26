@@ -49,24 +49,40 @@ fn theme_preference_for_index(theme_index: usize) -> egui::ThemePreference {
 }
 
 #[cfg(all(target_os = "windows", feature = "windows"))]
+struct ForwardingServerLifetime<Guard, Server> {
+    _guard: Guard,
+    server: Option<Server>,
+}
+
+#[cfg(all(target_os = "windows", feature = "windows"))]
+impl<Guard, Server> Drop for ForwardingServerLifetime<Guard, Server> {
+    fn drop(&mut self) {
+        // LocalIpcServer::drop joins the server thread. Keep the primary guard held until that
+        // shutdown is complete so a replacement process cannot claim a still-owned endpoint.
+        drop(self.server.take());
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "windows"))]
 pub struct AppForwardingRuntime {
-    _guard: os_api::LocalIpcGuard,
     endpoint: os_api::LocalIpcEndpoint,
-    server: Option<os_api::LocalIpcServer>,
+    lifetime: ForwardingServerLifetime<os_api::LocalIpcGuard, os_api::LocalIpcServer>,
 }
 
 #[cfg(all(target_os = "windows", feature = "windows"))]
 impl AppForwardingRuntime {
     pub fn pending(guard: os_api::LocalIpcGuard, endpoint: os_api::LocalIpcEndpoint) -> Self {
         Self {
-            _guard: guard,
             endpoint,
-            server: None,
+            lifetime: ForwardingServerLifetime {
+                _guard: guard,
+                server: None,
+            },
         }
     }
 
     fn start_server(&mut self, ctx: &egui::Context) -> Result<(), String> {
-        if self.server.is_some() {
+        if self.lifetime.server.is_some() {
             return Ok(());
         }
 
@@ -75,13 +91,17 @@ impl AppForwardingRuntime {
             repaint_ctx.request_repaint();
         });
         let server = os_api::OS::start_local_ipc_server_with_wake(&self.endpoint, Some(wake))?;
-        self.server = Some(server);
+        self.lifetime.server = Some(server);
         Ok(())
+    }
+
+    fn server(&self) -> Option<&os_api::LocalIpcServer> {
+        self.lifetime.server.as_ref()
     }
 
     #[cfg(test)]
     fn server_started(&self) -> bool {
-        self.server.is_some()
+        self.server().is_some()
     }
 }
 
@@ -350,9 +370,9 @@ impl eframe::App for App {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(target_os = "windows", feature = "windows"))]
-    use super::AppForwardingRuntime;
     use super::{theme_preference_for_index, App};
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    use super::{AppForwardingRuntime, ForwardingServerLifetime};
     use crate::app::instance_forwarding::{
         parse_ipc_response_frame, serialize_ipc_command_frame, ForwardedIpcCommand, IpcCommand,
         IpcResponseCode,
@@ -372,6 +392,39 @@ mod tests {
     use std::sync::{Arc, RwLock};
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use std::time::SystemTime;
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn test_forwarding_server_lifetime_drops_server_before_guard() {
+        use std::sync::Mutex;
+
+        struct DropProbe {
+            name: &'static str,
+            events: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.events.lock().unwrap().push(self.name);
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let lifetime = ForwardingServerLifetime {
+            _guard: DropProbe {
+                name: "guard",
+                events: events.clone(),
+            },
+            server: Some(DropProbe {
+                name: "server",
+                events: events.clone(),
+            }),
+        };
+
+        drop(lifetime);
+
+        assert_eq!(*events.lock().unwrap(), vec!["server", "guard"]);
+    }
 
     #[test]
     fn test_theme_index_maps_to_native_egui_preference() {
@@ -847,7 +900,7 @@ impl App {
     fn handle_local_ipc_requests(&mut self, ctx: &egui::Context) {
         let mut requests = Vec::new();
         if let Some(runtime) = &self.forwarding_runtime {
-            if let Some(server) = &runtime.server {
+            if let Some(server) = runtime.server() {
                 while let Ok(request) = server.try_recv() {
                     requests.push(request);
                 }

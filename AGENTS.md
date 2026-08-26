@@ -160,6 +160,7 @@ Linux entrypoint now reaches the shared `shell::App` shell, startup logging, aut
 - background tasks use `tokio`
 - tray commands flow through `tray_rx` owned by `shell::App`
 - Windows local shortcut-forwarding requests flow through a shell-owned named-pipe server thread into `shell::App`, with per-request reply channels; request enqueue wakes the `egui` context for prompt draining
+- `AppForwardingRuntime` stops and joins the local shortcut-forwarding server before releasing the primary guard, so a replacement process cannot claim the endpoint while the previous server still owns its named pipe
 - monitor notifications flow through typed `ShellEvent` messages in `monitor_rx` owned by `RuntimeRegistry`
 - persisted state uses `Arc<RwLock<AppStateStorage>>`
 - running-process tracking uses `Arc<TokioRwLock<RunningApps>>`
@@ -331,7 +332,8 @@ Local verification commands:
 - `cargo test --features windows --bin cpu-affinity-tool`
 - `cargo fmt --all -- --check`
 - `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`
-- `cargo build --release --features windows --bin cpu-affinity-tool`
+- `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-release.ps1`
+- `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-pdb-verifier.ps1 -ExePath target/release/cpu-affinity-tool.exe -PdbPath target/release/cpu_affinity_tool.pdb`
 - `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe`
 - `cargo test --features linux --bin cpu-affinity-tool-linux`
 - `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`
@@ -346,14 +348,14 @@ Current CI facts:
 - runners:
   - `windows-latest` for the Windows release-path job
   - `ubuntu-24.04` for the Linux desktop beta job
-- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, verifies the built Windows artifact manifest resource, and verifies the Linux beta binary on `ubuntu-24.04`
+- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, reproduces the stable line-table release build, verifies the built EXE/PDB identity and manifest resource, and verifies the Linux beta binary on `ubuntu-24.04`
 - tests are part of the committed CI contract for `ci.yml`
-- the Windows CI job validates the feature-gated Windows binary path explicitly with `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --features windows --bin cpu-affinity-tool`, `cargo build --release --features windows --bin cpu-affinity-tool`, and `scripts/assert-windows-release-manifest.ps1` against the built release exe
+- the Windows CI job validates the feature-gated Windows binary path explicitly with `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --features windows --bin cpu-affinity-tool`, `scripts/build-windows-release.ps1`, `scripts/test-windows-pdb-verifier.ps1`, and `scripts/assert-windows-release-manifest.ps1` against the built release EXE/PDB pair
 
 Current release facts:
 - stable GitHub Release workflow reacts to pushed tags matching `v*`
 - the stable release workflow validates that the tag matches `vX.Y.Z`, that `Cargo.toml` version matches `X.Y.Z`, and that `changelogs/vX.Y.Z.txt` exists before building
-- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, builds `cpu-affinity-tool.exe` plus its matching `cpu_affinity_tool.pdb` with `cargo build --release --features windows --bin cpu-affinity-tool`, verifies that the PDB exists and is non-empty, and then verifies the built exe manifest resource with `scripts/assert-windows-release-manifest.ps1` in the same runner before upload
+- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, builds `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb` with `scripts/build-windows-release.ps1`, verifies the EXE/PDB basename, GUID, and age with `scripts/assert-windows-pdb-matches.ps1`, and then verifies the built exe manifest resource with `scripts/assert-windows-release-manifest.ps1` in the same runner before upload
 - the stable release publish job runs on `ubuntu-24.04` and publishes `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb`; missing declared release files fail the publish step
 - stable release target: `x86_64-pc-windows-msvc`
 - Linux beta prerelease workflow reacts to pushed tags matching `linux-beta-v*`
@@ -367,7 +369,8 @@ Additional release facts:
 - the stable GitHub Release workflow uses `changelogs/vX.Y.Z.txt` as the release body for the matching tag
 - the Linux beta prerelease workflow uses `changelogs/linux-beta-vX.Y.Z-N.txt` as the prerelease body for the matching tag
 - release notes no longer rely on `generate_release_notes: true`
-- the stable Windows build step sets `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` and requires the matching PDB before publishing; the shared release profile and Linux beta artifacts are unchanged
+- `scripts/build-windows-release.ps1` sets `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` for the Windows production build; the shared release profile plus the Linux beta artifact set and debug-information policy are unchanged
+- `scripts/assert-windows-pdb-matches.ps1` uses the Windows `dbghelp` API to require the expected PDB basename and matching EXE/PDB CodeView GUID and age before publishing
 - `scripts/assert-windows-release-manifest.ps1` reads the built Windows exe `RT_MANIFEST` resource and asserts `requireAdministrator` plus `uiAccess=false`; UAC prompt behavior remains manual smoke validation
 - manual pre-release validation lives in `docs/release-checklist.md` and its subordinate `docs/release-smoke-matrix.md`
 - manual Linux beta pre-release validation lives in `docs/linux-beta-release-checklist.md`
@@ -380,6 +383,9 @@ Release-impacting artifacts:
 - `app.manifest`
 - `assets/icon.ico`
 - `scripts/assert-windows-release-manifest.ps1`
+- `scripts/build-windows-release.ps1`
+- `scripts/assert-windows-pdb-matches.ps1`
+- `scripts/test-windows-pdb-verifier.ps1`
 - embedded resources
 - release workflow definitions
 

@@ -510,6 +510,9 @@ fn wait_for_cancel_completion<T>(
     operation: T,
     mut poll: impl FnMut(&T) -> CancelCompletionState,
 ) -> Result<(), WIN32_ERROR> {
+    // Deliberately no finite bailout: the in-flight operation can still reference its caller's
+    // buffer. A bounded shutdown would require transferring the OVERLAPPED, handle, and buffer to
+    // owned reaper state rather than returning while Windows may still use borrowed memory.
     loop {
         match poll(&operation) {
             CancelCompletionState::Pending => continue,
@@ -1186,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn local_ipc_client_timeout_is_bounded_after_connection() {
+    fn local_ipc_client_reports_timeout_without_waiting_for_server_response() {
         let endpoint = unique_endpoint("client-timeout");
         let server = OS::start_local_ipc_server(&endpoint).expect("server should start");
         let client_endpoint = endpoint.clone();
@@ -1212,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn dropping_server_with_silent_same_user_client_is_bounded() {
+    fn dropping_server_cancels_a_silent_same_user_client() {
         let endpoint = unique_endpoint("silent-client");
         let server = OS::start_local_ipc_server(&endpoint).expect("server should start");
         let silent_client = open_raw_client(&endpoint).expect("silent client should connect");
@@ -1232,7 +1235,7 @@ mod tests {
                 drop(silent_client);
                 let _ = done_rx.recv_timeout(Duration::from_secs(2));
                 let _ = dropper.join();
-                panic!("server drop should not wait indefinitely for silent client: {err}");
+                panic!("server drop should complete after cancelling the silent client: {err}");
             }
         }
     }

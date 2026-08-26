@@ -9,11 +9,12 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 ### Changed
 
 - Returned both binaries to the platform system allocator instead of installing `mimalloc` globally
-- Stable Windows releases now publish the matching PDB with line-table debug information for crash symbolization
+- Stable Windows releases now publish an identity-verified matching PDB with line-table debug information for crash symbolization, and pull-request CI reproduces that symbol build
 
 ### Fixed
 
 - Kept overlapped named-pipe operation resources alive through every pending completion state, including cancellation and `ERROR_IO_INCOMPLETE`, preventing timeout-path use-after-free
+- Kept the saved-rule primary guard held until its forwarding server has stopped, preventing a replacement cold start from racing the previous named-pipe owner during shutdown
 
 ## [1.5.0] - 2026-07-16
 

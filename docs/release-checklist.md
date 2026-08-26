@@ -9,8 +9,8 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 
 - Confirm the release stays Windows-only: `.github/workflows/release.yml` should publish only `cpu-affinity-tool.exe` and its matching `cpu_affinity_tool.pdb` for `x86_64-pc-windows-msvc`.
 - Confirm Linux beta prereleases stay isolated: `.github/workflows/release-linux-beta.yml` should publish only Linux beta prerelease assets for tags matching `linux-beta-v*`.
-- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs separate Windows and Linux beta jobs, cancels superseded runs per branch or PR, restores Rust cache, runs shared formatting and `libs/os_api` tests, keeps the Windows release-path checks on `windows-latest`, verifies the built Windows artifact manifest, and verifies the Linux beta binary on `ubuntu-24.04`.
-- Confirm the tag-release gate matches reality: `.github/workflows/release.yml` validates `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`, runs the same formatting, lint, `libs/os_api`, and root test gates, builds the Windows artifact, verifies its embedded manifest resource, and then publishes it.
+- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs separate Windows and Linux beta jobs, cancels superseded runs per branch or PR, restores Rust cache, runs shared formatting and `libs/os_api` tests, keeps the Windows release-path checks on `windows-latest`, reproduces the stable line-table build, verifies the Windows EXE/PDB identity and embedded manifest, and verifies the Linux beta binary on `ubuntu-24.04`.
+- Confirm the tag-release gate matches reality: `.github/workflows/release.yml` validates `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`, runs the same formatting, lint, `libs/os_api`, and root test gates, builds the Windows artifact with line tables, verifies the EXE/PDB identity and embedded manifest resource, and then publishes it.
 - Confirm no project docs claim full cross-platform support or Linux release parity.
 - Confirm `README.md` and `AGENTS.md` describe Windows as the primary stable released platform and Linux as a separate beta prerelease track without stable parity.
 - Confirm `README.md` documents the administrator/UAC expectation from `app.manifest`, including that saved-rule shortcut launches may show UAC.
@@ -22,7 +22,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
   - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
   - `v6` to `v7` saves do not write `state.json.pre-v6*`
   - downgrade to older binaries is unsupported after that first current-schema save
-- Review release-impacting files if they changed: `build.rs`, `app.manifest`, `assets/icon.ico`, `assets/cpu_presets.json`, `scripts/assert-windows-release-manifest.ps1`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, and `.github/workflows/release-linux-beta.yml`.
+- Review release-impacting files if they changed: `build.rs`, `app.manifest`, `assets/icon.ico`, `assets/cpu_presets.json`, `scripts/build-windows-release.ps1`, `scripts/assert-windows-pdb-matches.ps1`, `scripts/test-windows-pdb-verifier.ps1`, `scripts/assert-windows-release-manifest.ps1`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, and `.github/workflows/release-linux-beta.yml`.
 
 ## Build Verification
 
@@ -30,7 +30,8 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Run `cargo test --manifest-path libs/os_api/Cargo.toml`.
 - Run `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`.
 - Run `cargo test --features windows --bin cpu-affinity-tool`.
-- Run `cargo build --release --features windows --bin cpu-affinity-tool`.
+- Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-release.ps1`.
+- Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-pdb-verifier.ps1 -ExePath target/release/cpu-affinity-tool.exe -PdbPath target/release/cpu_affinity_tool.pdb`.
 - Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe`.
 - Run `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`.
 - Run `cargo test --features linux --bin cpu-affinity-tool-linux`.
