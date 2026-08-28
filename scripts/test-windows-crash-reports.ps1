@@ -43,7 +43,9 @@ function Invoke-CrashProbe {
 
     $reports = @(Get-ChildItem -LiteralPath $reportDirectory -Filter "crash-*.txt" -File)
     if ($reports.Count -ne 1) {
-        throw "Crash probe '$Mode' produced $($reports.Count) complete reports, expected 1."
+        $entries = @(Get-ChildItem -LiteralPath $reportDirectory -Force | ForEach-Object Name)
+        $entrySummary = if ($entries.Count -eq 0) { "<empty>" } else { $entries -join ", " }
+        throw "Crash probe '$Mode' produced $($reports.Count) complete reports, expected 1. Directory entries: $entrySummary"
     }
     $content = [IO.File]::ReadAllText($reports[0].FullName)
     if (-not $content.Contains("event_kind: $ExpectedKind")) {
