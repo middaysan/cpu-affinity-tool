@@ -1863,17 +1863,33 @@ mod tests {
     #[test]
     fn deletion_revalidates_file_identity_and_never_recurses() {
         let temp = TempDir::new("delete");
-        let saved =
-            write_report(&temp.reports(), &sample_input(Some("boom"), None)).expect("write report");
-        let snapshot = scan_reports(&temp.reports()).expect("scan reports");
+        let report_directory = temp.reports();
+        fs::create_dir(&report_directory).expect("create report directory");
+        let saved = report_directory.join("listed-report.txt");
+        fs::write(&saved, b"listed report").expect("write listed report");
+        let listed_file = open_report_file_for_read(&saved).expect("open listed report");
+        let listed_identity = file_identity(&listed_file).expect("read listed report identity");
+        drop(listed_file);
+        let root = TrustedRoot::open_existing(&report_directory)
+            .expect("open report root")
+            .expect("report root exists");
+        let snapshot = ReportSnapshot {
+            report_directory,
+            root_identity: Some(root.identity),
+            reports: vec![CrashReportEntry {
+                file_name: OsString::from("listed-report.txt"),
+                identity: listed_identity,
+                kind: CrashReportKind::MainThreadPanic,
+                timestamp_utc: "20250726T121045.678Z".to_string(),
+                app_version: "1.5.0".to_string(),
+                reason: "listed report".to_string(),
+                size_bytes: 13,
+            }],
+        };
         let report = snapshot.reports[0].clone();
 
         let replacement = temp.reports().join("replacement.txt");
-        fs::write(
-            &replacement,
-            format_report(&sample_input(Some("replacement"), None)),
-        )
-        .expect("write replacement");
+        fs::write(&replacement, b"replacement report").expect("write replacement");
         // Create the replacement before unlinking the listed entry: otherwise a
         // filesystem is allowed to recycle the just-freed file identity and turn
         // this regression test into a false negative.
