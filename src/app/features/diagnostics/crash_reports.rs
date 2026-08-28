@@ -1868,12 +1868,16 @@ mod tests {
         let snapshot = scan_reports(&temp.reports()).expect("scan reports");
         let report = snapshot.reports[0].clone();
 
-        fs::remove_file(&saved).expect("remove original");
+        let replacement = temp.reports().join("replacement.txt");
         fs::write(
-            &saved,
+            &replacement,
             format_report(&sample_input(Some("replacement"), None)),
         )
         .expect("write replacement");
+        // Create the replacement before unlinking the listed entry: otherwise a
+        // filesystem is allowed to recycle the just-freed file identity and turn
+        // this regression test into a false negative.
+        fs::rename(&replacement, &saved).expect("replace original atomically");
 
         assert!(matches!(
             delete_report(&snapshot, &report),
