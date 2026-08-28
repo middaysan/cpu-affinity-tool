@@ -22,6 +22,16 @@ pub fn open_directory(path: &Path) -> Result<(), String> {
     os_api::OS::open_directory(path)
 }
 
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub fn show_file_in_directory(path: &Path) -> Result<(), String> {
+    os_api::OS::show_file_in_directory(path)
+}
+
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub fn open_directory_via_shell_broker(path: &Path) -> Result<(), String> {
+    os_api::OS::open_directory_via_shell_broker(path)
+}
+
 pub fn current_exe_path() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|err| format!("failed to resolve current executable: {err}"))
 }

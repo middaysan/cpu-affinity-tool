@@ -11,6 +11,8 @@ use crate::app::instance_forwarding::{
 use crate::app::models::RunningApps;
 use crate::app::runtime::{AppState, RunRuleOutcome};
 use crate::app::shell::events::ShellEvent;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+use crate::app::shell::presenters::crash_reports;
 use crate::app::shell::presenters::{
     central, footer, group_editor, header, installed_app_picker, logs, run_settings,
 };
@@ -37,7 +39,14 @@ pub struct App {
     _tray_icon_guard: Option<tray_icon::TrayIcon>,
     #[cfg(target_os = "windows")]
     hwnd: Option<windows::Win32::Foundation::HWND>,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    crash_report_viewport_focused: Option<bool>,
     is_hidden: bool,
+}
+
+#[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+fn viewport_gained_focus(previous: Option<bool>, current: Option<bool>) -> bool {
+    matches!((previous, current), (Some(false), Some(true)))
 }
 
 fn theme_preference_for_index(theme_index: usize) -> egui::ThemePreference {
@@ -194,6 +203,8 @@ impl App {
                     _tray_icon_guard: tray_icon_guard,
                     #[cfg(target_os = "windows")]
                     hwnd,
+                    #[cfg(all(target_os = "windows", feature = "windows"))]
+                    crash_report_viewport_focused: None,
                     is_hidden: false,
                 }
             }
@@ -212,6 +223,8 @@ impl App {
                     _tray_icon_guard: None,
                     #[cfg(target_os = "windows")]
                     hwnd,
+                    #[cfg(all(target_os = "windows", feature = "windows"))]
+                    crash_report_viewport_focused: None,
                     is_hidden: false,
                 }
             }
@@ -336,6 +349,8 @@ impl App {
             _tray_icon_guard: None,
             #[cfg(target_os = "windows")]
             hwnd: None,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            crash_report_viewport_focused: None,
             is_hidden: false,
         }
     }
@@ -350,6 +365,22 @@ impl eframe::App for App {
         #[cfg(test)]
         self.handle_forwarded_commands(ctx);
         self.state.poll_installed_app_picker_refresh();
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        {
+            let viewport_focused = ctx.input(|input| input.viewport().focused);
+            if viewport_gained_focus(self.crash_report_viewport_focused, viewport_focused) {
+                self.state.request_crash_report_refresh();
+            }
+            if viewport_focused.is_some() {
+                self.crash_report_viewport_focused = viewport_focused;
+            }
+            if self.state.poll_crash_report_refresh() {
+                ctx.request_repaint();
+            }
+            if let Some(interval) = self.state.crash_report_worker_poll_interval() {
+                ctx.request_repaint_after(interval);
+            }
+        }
 
         if !self.should_render(ctx) {
             return;
@@ -370,13 +401,21 @@ impl eframe::App for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{theme_preference_for_index, App};
+    use super::{theme_preference_for_index, viewport_gained_focus, App};
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use super::{AppForwardingRuntime, ForwardingServerLifetime};
     use crate::app::instance_forwarding::{
         parse_ipc_response_frame, serialize_ipc_command_frame, ForwardedIpcCommand, IpcCommand,
         IpcResponseCode,
     };
+
+    #[test]
+    fn crash_report_refresh_only_triggers_on_a_real_focus_gain() {
+        assert!(viewport_gained_focus(Some(false), Some(true)));
+        assert!(!viewport_gained_focus(None, Some(true)));
+        assert!(!viewport_gained_focus(Some(true), Some(true)));
+        assert!(!viewport_gained_focus(Some(false), None));
+    }
     use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema};
     use crate::app::runtime::AppState;
     use crate::app::shell::events::ShellEvent;
@@ -975,6 +1014,8 @@ impl App {
 
     fn show_from_tray(&mut self, ctx: &egui::Context) {
         self.is_hidden = false;
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        self.state.request_crash_report_refresh();
 
         #[cfg(target_os = "windows")]
         if let Some(hwnd) = self.hwnd {
@@ -1034,6 +1075,8 @@ impl App {
                 GroupRoute::Edit => group_editor::edit_group_window(app_state, ui),
             },
             WindowRoute::Logs => logs::draw_logs_window(app_state, ui),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            WindowRoute::CrashReports => crash_reports::draw_crash_reports_window(app_state, ui),
             WindowRoute::AppRunSettings => run_settings::draw_app_run_settings(app_state, ui),
             WindowRoute::InstalledAppPicker => {
                 installed_app_picker::draw_installed_app_picker(app_state, ui)

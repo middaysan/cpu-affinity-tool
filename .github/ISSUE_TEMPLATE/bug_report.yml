@@ -95,8 +95,20 @@ body:
       placeholder: Include any relevant log lines, screenshots, or short clips.
 
   - type: textarea
+    id: crash_report
+    attributes:
+      label: Reviewed crash report
+      description: If the app saved a matching file under Crash reports, review it for local paths or system details before attaching it. Make and redact a copy if needed; do not edit the app-managed original.
+      placeholder: Drag the reviewed .txt report here, or say that no matching report was created.
+
+  - type: textarea
+    id: unexpected_exit_details
+    attributes:
+      label: Unexpected exit details
+      description: If the app disappeared without a report, say whether it remained in Task Manager or the tray and include the Reliability Monitor/Event Viewer faulting module and exception code when available.
+
+  - type: textarea
     id: additional_context
     attributes:
       label: Additional context
       description: Anything else that may help with diagnosis.
-

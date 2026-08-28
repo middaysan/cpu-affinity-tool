@@ -1,3 +1,5 @@
+#[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+use crate::app::features::diagnostics::crash_reports::{CrashReportEntry, ReportSnapshot};
 use crate::app::shared::ids::GroupId;
 use crate::app::shell::sessions::{GroupFormSession, InstalledAppPickerSession, RuleEditorSession};
 use crate::app::shell::{GroupRoute, WindowRoute};
@@ -11,6 +13,16 @@ pub struct UiSession {
     pub dropped_files: Option<Vec<PathBuf>>,
     pub file_drop_hover_target: Option<GroupId>,
     pub installed_app_picker: InstalledAppPickerSession,
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    pub crash_report_delete_confirmation: Option<CrashReportEntry>,
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    pub crash_report_delete_confirmation_focus_pending: bool,
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    pub crash_report_delete_saved_confirmation: Option<ReportSnapshot>,
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    pub crash_report_delete_saved_confirmation_focus_pending: bool,
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    pub crash_report_action_message: Option<String>,
 }
 
 impl UiSession {
@@ -33,6 +45,16 @@ impl UiSession {
             dropped_files: None,
             file_drop_hover_target: None,
             installed_app_picker: InstalledAppPickerSession::default(),
+            #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+            crash_report_delete_confirmation: None,
+            #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+            crash_report_delete_confirmation_focus_pending: false,
+            #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+            crash_report_delete_saved_confirmation: None,
+            #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+            crash_report_delete_saved_confirmation_focus_pending: false,
+            #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+            crash_report_action_message: None,
         }
     }
 
@@ -61,6 +83,11 @@ mod tests {
         assert!(state.app_edit_state.current_edit.is_none());
         assert!(state.dropped_files.is_none());
         assert!(state.file_drop_hover_target.is_none());
+        assert!(state.crash_report_delete_confirmation.is_none());
+        assert!(!state.crash_report_delete_confirmation_focus_pending);
+        assert!(state.crash_report_delete_saved_confirmation.is_none());
+        assert!(!state.crash_report_delete_saved_confirmation_focus_pending);
+        assert!(state.crash_report_action_message.is_none());
     }
 
     #[test]

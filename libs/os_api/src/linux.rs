@@ -957,6 +957,17 @@ impl OS {
             .map(|_| ())
             .map_err(|e| format!("Failed to open directory '{}': {e}", path.display()))
     }
+
+    pub fn show_file_in_directory(path: &Path) -> Result<(), String> {
+        let directory = path
+            .parent()
+            .ok_or_else(|| format!("Path '{}' has no parent directory", path.display()))?;
+        Self::open_directory(directory)
+    }
+
+    pub fn open_directory_via_shell_broker(_path: &Path) -> Result<(), String> {
+        Err("the Explorer shell broker is available only on Windows".to_string())
+    }
 }
 
 #[cfg(test)]

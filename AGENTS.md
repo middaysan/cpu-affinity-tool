@@ -12,6 +12,7 @@ Workflow facts:
 - canonical repo contract: root `AGENTS.md`
 - optional local overlay: `.codex/AGENTS.md`
 - canonical local stage artifact: `.codex/ROADMAP.md`
+- optional local task handoff workspace: ignored `tasks/`
 - local user-facing roadmap content may be written in Russian
 - repo `workflow_mode`: `staged-default`
 
@@ -20,6 +21,15 @@ Overlay rules:
 - it may not contradict facts or restrictions from this file
 - it may only tighten workflow activation through `workflow_override: inherit | explicit-only`
 - it may not weaken repo-shared policy
+
+Task handoff rules:
+- `tasks/` is a local-only, git-ignored workspace for investigation context, scope, user decisions, implementation plans, and cross-session handoff notes
+- `tasks/` supplements but never replaces or contradicts root `AGENTS.md` or `.codex/ROADMAP.md`
+- `.codex/ROADMAP.md` remains the only canonical owner of stage identity, order, and status
+- at session start, after reading this file and the optional overlay and roadmap, read `tasks/README.md` when it exists and then the relevant task's `HANDOFF.md`
+- task directory names use descriptive lowercase kebab-case; each active task keeps `HANDOFF.md`, `CONTEXT.md`, `SCOPE.md`, `DECISIONS.md`, and `PLAN.md`
+- update the task handoff after material discoveries, user decisions, scope changes, implementation checkpoints, or new blockers
+- do not store secrets, credentials, personal data, or generated build artifacts in `tasks/`
 
 Roadmap identity rules:
 - stages use immutable `stage_id` values such as `S00`, `S01`, `S02`
@@ -31,6 +41,7 @@ Freshness rules:
 - root `AGENTS.md` is always reread at session start and on `Status`
 - if assistant detects drift between this file and repo reality, it must flag the conflicting section and carry the tracked update in the next relevant repo change
 - `.codex/ROADMAP.md` owns only stages, statuses, deferred items, residual risks, freshness metadata, and append-only roadmap-change history
+- `tasks/` may summarize roadmap state for handoff convenience, but any conflict is resolved in favor of `.codex/ROADMAP.md`
 
 Test-first development rules:
 - Behavior changes must follow TDD: write or update the failing or characterization test for the desired behavior before implementing the production change whenever technically possible
@@ -68,6 +79,7 @@ Key directories:
 - `scripts/` - committed release/build verification helper scripts
 - `.github/workflows/` - CI and GitHub Release automation
 - `changelogs/` - manual release notes
+- `tasks/` - optional ignored local workspace for task dossiers and cross-session handoff
 
 Important root files:
 - `Cargo.toml` - package metadata, binaries, features, dependencies
@@ -100,7 +112,7 @@ Layers:
   - `shortcut` owns saved-rule desktop shortcut service, shortcut filename allocation, OS adapter seam, and user-safe shortcut creation errors
   - `preferences` owns theme and monitoring toggles
   - `topology` owns CPU model/thread detection helpers
-  - `diagnostics` owns startup logging and typed diagnostic event shape
+  - `diagnostics` owns startup logging, typed diagnostic event shape, bounded local crash-report formatting/capture, safe report discovery/retention, and report-list state
 - `adapters` isolate storage loading, OS helper calls, and installed-app discovery
 - `models` hold persisted schema plus domain and runtime-adjacent value types
 - `runtime` is now a thin composition-root facade around `AppState`
@@ -118,6 +130,7 @@ Current runtime split:
   - `ui`
   - `runtime`
   - `log_manager`
+  - `crash_reports`
 - `shell::UiSession` owns transient UI-only state:
   - active route
   - group form session
@@ -125,6 +138,7 @@ Current runtime split:
   - rule editor shortcut creation result/status
   - dropped files
   - installed app picker session and cached catalog
+  - crash-report delete confirmations and the last report action message
 - `features::rules::RulesContext` owns logical `GroupId` / `RuleId` allocation, index projection, and persisted `rule_identities`
 - `features::execution::RuntimeRegistry` owns runtime process tracking:
   - `running_apps`
@@ -135,6 +149,7 @@ Current runtime split:
 - runtime process identity stays keyed by opaque `AppRuntimeKey`, but tracked app ownership now also stores logical `GroupId` / `RuleId`
 - shell presenters are owned under `shell::presenters`; their source files still live under `src/app/views/` via path-based module ownership
 - workers emit typed `shell::events::ShellEvent` messages and do not hold `egui::Context`
+- Windows crash-report discovery uses an initial/on-demand single-flight standard thread plus at most one coalesced follow-up refresh; egui rendering reads only the last completed snapshot, synchronizes its newest validated report into the Activity log, and the Linux beta does not start this worker or expose the Crash reports route
 
 Windows runtime flow:
 1. Entry point parses startup arguments into a narrow startup intent; normal GUI startup remains the default, while `--run-rule <group-id> <rule-id>` is accepted as a saved-rule startup intent.
@@ -143,15 +158,17 @@ Windows runtime flow:
    - `RunRule` startup first tries to claim the primary guard; if another primary owns it, the process forwards a typed `RunRule` command over the local IPC pipe and exits with the typed forwarding result code
    - if `RunRule` claims the primary guard, it cold-starts the GUI, starts the forwarding server after the shell owns the command receiver and GUI wake path, then skips normal autorun and dispatches only the requested saved rule
    - if the primary guard exists but the pipe is not ready, forwarding retries briefly and then exits non-zero instead of becoming a second primary
-3. Entry point creates GUI and runtime environment.
-4. `tokio` runtime is created.
+3. After startup forwarding selects `RunGui`, the entrypoint resolves the active crash-report directory, installs the main-thread panic hook, and prepares the startup phase before creating `tokio` or `eframe`; forwarding-only processes do not install the hook, and crash-report discovery or retention never runs synchronously on this startup path.
+4. `tokio` runtime is created. A main-thread panic from this point is written best-effort without changing Rust panic semantics; background-thread/task panics delegate to the previous hook without creating a crash report.
 5. The process lowers its own priority to `BelowNormal`.
-6. The Windows entrypoint creates `App` without dispatching startup intent, which creates `AppState`, seeds in-memory logical identities, writes startup diagnostics, starts execution monitors, captures `HWND`, and initializes tray integration.
-7. The Windows entrypoint installs the prepared shortcut-forwarding runtime with the GUI wake callback before dispatching startup intent.
+6. The Windows entrypoint marks the crash-report phase as UI-running and enters `eframe::run_native`.
+7. The Windows entrypoint creates `App` without dispatching startup intent, which creates `AppState`, seeds in-memory logical identities, writes startup diagnostics, starts execution monitors, captures `HWND`, initializes tray integration, and starts the bounded crash-report index refresh.
+8. The Windows entrypoint installs the prepared shortcut-forwarding runtime with the GUI wake callback before dispatching startup intent.
    - normal GUI startup then runs autorun once
    - `RunRule` startup then skips normal autorun and dispatches only the requested saved rule
    - if a `RunRule` cold start claimed the primary guard but cannot start the forwarding server, the requested saved rule is blocked and logged instead of launching without an owned forwarding endpoint
-8. `App::logic` handles tray events, monitor notifications, local forwarded shortcut commands, hidden-window flow, file drops, and theme application; `App::ui` renders the active view from the root `egui::Ui`.
+9. If `run_native` returns `Err`, the entrypoint synchronously writes a typed native-loop report before preserving exit code `1`, then marks the report phase as closing.
+10. `App::logic` handles tray events, monitor notifications, local forwarded shortcut commands, initial/on-demand crash-report refresh polling, focus-gain refresh, hidden-window flow, file drops, and theme application; `App::ui` renders the active view from the root `egui::Ui`.
 
 Linux entrypoint now reaches the shared `shell::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
 
@@ -166,10 +183,12 @@ Linux entrypoint now reaches the shared `shell::App` shell, startup logging, aut
 - running-process tracking uses `Arc<TokioRwLock<RunningApps>>`
 - installed-package runtime metadata cache and ownership state use in-memory `Arc<RwLock<...>>`
 - Windows tray integration uses tray-icon and muda event handlers instead of a polling loop
+- crash-report capture uses immutable precomputed context, a thread-local recursion guard, and a non-blocking process-wide writer guard; the hook does not take app-state or GUI locks
 
 Background loops:
 - running-process rediscovery and retracking loop
 - affinity and priority verification and optional correction loop
+- bounded Windows crash-report discovery/retention worker with no overlapping replacement worker after timeout; completion is polled briefly after explicit refresh, while a timed-out worker does not force perpetual high-frequency repaint
 
 Hidden-window flow:
 - forwarded shortcut commands are drained in `App::logic` before the hidden-window render skip
@@ -207,6 +226,7 @@ Key entities:
 - `RulesContext` - logical identity catalog and index projection over persisted groups and rules
 - `CpuSchema`, `CpuCluster`, `CoreInfo` - logical CPU layout description
 - `LogManager` - in-memory runtime log and history
+- `CrashReportManager` - runtime-only single-flight report index, last complete snapshot, and retention/action facade
 
 Important contract facts:
 - persisted `theme_index` values map to native egui preferences: `0` follows the system theme, `1` forces light, and `2` forces dark; shared widget styling is applied to both egui theme styles
@@ -223,10 +243,21 @@ Important contract facts:
 - tracked Windows installed targets now use a runtime-only package metadata cache plus package-local PID enrichment while the target stays tracked
 - package-local helper PID ownership for multiple installed targets in the same package follows `first active target wins`
 - `AppStateStorage` may rebuild `cpu_schema` for the current machine through presets when the stored schema is generic or outdated for the detected CPU model
-- `LogManager` keeps a bounded in-memory chronological history with three retention classes:
+- `LogManager` keeps a bounded in-memory chronological history with four retention classes:
   - `Regular` capped at 1000 entries
   - `Important` capped at 200 entries
   - `Sticky` retained outside normal rotation for startup and critical diagnostics
+  - `Crash` holds only the newest validated saved crash-report summary; Activity's **Clear** action preserves it until a completed refresh replaces it or report deletion leaves no saved report
+- local Windows crash reports are separate from `AppStateStorage` and do not change schema `v7`:
+  - directory: `<active-data-dir>/crash-reports/`
+  - event kinds: main-thread panic and native UI-loop error
+  - maximum complete report size: 256 KiB; maximum payload section: 8 KiB
+  - only complete recognized UTF-8 reports with the format-v1 completion marker enter the visible index
+  - newest 20 complete reports are retained; incomplete, corrupt, unrelated, nested, and reparse entries are never removed automatically
+  - each panic-path writer refuses a new report after it observes 64 managed complete or partial entries; this is a non-transactional multi-process safety ceiling rather than a strict quota, so simultaneous GUI writers may exceed it slightly
+  - no crash-report scan or deletion is added to the synchronous startup path; a successful normal background refresh prunes complete reports to 20, while incomplete or invalid entries require user review
+  - after a completed background scan, Activity shows the newest validated report's type, timestamp, reason, and full-report path; the report file remains the complete support artifact
+  - reports are never uploaded automatically and can contain local paths or system details
 
 CPU presets:
 - `assets/cpu_presets.json` is a compile-time source file
@@ -238,6 +269,7 @@ Data source separation:
 - `state.json` - runtime state
 - `assets/cpu_presets.json` - compile-time embedded source
 - `changelogs/*.txt` - manual release notes, not runtime input
+- `crash-reports/*.txt` - local bounded support artifacts, not persisted application state and not automatic telemetry
 
 ## Platform boundary
 `libs/os_api` is the main boundary between the app and the OS. It covers:
@@ -246,6 +278,7 @@ Data source separation:
 - installed-app discovery and activation on Windows
 - installed package metadata lookup on Windows
 - opening the active data directory in the platform file manager
+- opening crash-report directories and selecting report files through an Explorer shell process whose token is verified non-elevated and below high integrity; the pre-existing Activity data-folder action retains its direct Explorer launch contract
 - resolving the current elevated token's per-user Desktop directory for Windows shortcut creation
 - Windows shortcut creation for saved-rule launch shortcuts
 - affinity read and set
@@ -275,6 +308,7 @@ Windows release-path surface:
 - `.lnk` and `.url` parsing
 - `.lnk` creation through `os_api::ShortcutSpec`
 - current-token per-user Desktop resolution through the Windows known-folder API for saved-rule shortcut creation; credential-over-the-shoulder UAC can place shortcuts on the elevated account's Desktop instead of the unelevated shell user's Desktop
+- token-verified Explorer-process shell execution for crash-report folder open and report selection; elevated/high-integrity or unknown brokers fail closed, and the app does not launch a default text editor for managed crash reports
 - local named-pipe and primary-guard forwarding for saved-rule shortcut launches
 - registry-based URI resolution
 - `AppsFolder + Start Menu shortcuts + App Paths` installed app discovery and AUMID activation
@@ -295,6 +329,7 @@ Linux backend surface present in repo:
 Linux gaps:
 - no tray parity
 - no focus parity
+- no crash-report capture, index worker, Crash reports UI, or Explorer-broker parity
 - no Windows-style installed-app activation, AUMID identity, or package metadata parity
 - `os_api` is not symmetric between Windows and Linux
 - no Linux stable release artifacts, installer packaging, AppImage, Flatpak, or parity with the Windows stable release contract
@@ -335,6 +370,7 @@ Local verification commands:
 - `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-release.ps1`
 - `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-pdb-verifier.ps1 -ExePath target/release/cpu-affinity-tool.exe -PdbPath target/release/cpu_affinity_tool.pdb`
 - `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe`
+- `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-crash-reports.ps1`
 - `cargo test --features linux --bin cpu-affinity-tool-linux`
 - `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`
 - `cargo build --release --features linux --bin cpu-affinity-tool-linux`
@@ -348,14 +384,14 @@ Current CI facts:
 - runners:
   - `windows-latest` for the Windows release-path job
   - `ubuntu-24.04` for the Linux desktop beta job
-- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, reproduces the stable line-table release build, verifies the built EXE/PDB identity and manifest resource, and verifies the Linux beta binary on `ubuntu-24.04`
+- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, runs feature-gated real-binary crash probes, reproduces the stable line-table release build, verifies the built EXE/PDB identity and manifest resource, and verifies the Linux beta binary on `ubuntu-24.04`
 - tests are part of the committed CI contract for `ci.yml`
 - the Windows CI job validates the feature-gated Windows binary path explicitly with `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --features windows --bin cpu-affinity-tool`, `scripts/build-windows-release.ps1`, `scripts/test-windows-pdb-verifier.ps1`, and `scripts/assert-windows-release-manifest.ps1` against the built release EXE/PDB pair
 
 Current release facts:
 - stable GitHub Release workflow reacts to pushed tags matching `v*`
 - the stable release workflow validates that the tag matches `vX.Y.Z`, that `Cargo.toml` version matches `X.Y.Z`, and that `changelogs/vX.Y.Z.txt` exists before building
-- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, builds `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb` with `scripts/build-windows-release.ps1`, verifies the EXE/PDB basename, GUID, and age with `scripts/assert-windows-pdb-matches.ps1`, and then verifies the built exe manifest resource with `scripts/assert-windows-release-manifest.ps1` in the same runner before upload
+- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, runs `scripts/test-windows-crash-reports.ps1`, builds `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb` with `scripts/build-windows-release.ps1`, verifies the EXE/PDB basename, GUID, and age with `scripts/assert-windows-pdb-matches.ps1`, and then verifies the built exe manifest resource with `scripts/assert-windows-release-manifest.ps1` in the same runner before upload
 - the stable release publish job runs on `ubuntu-24.04` and publishes `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb`; missing declared release files fail the publish step
 - stable release target: `x86_64-pc-windows-msvc`
 - Linux beta prerelease workflow reacts to pushed tags matching `linux-beta-v*`
@@ -372,6 +408,7 @@ Additional release facts:
 - `scripts/build-windows-release.ps1` sets `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` for the Windows production build; the shared release profile plus the Linux beta artifact set and debug-information policy are unchanged
 - `scripts/assert-windows-pdb-matches.ps1` uses the Windows `dbghelp` API to require the expected PDB basename and matching EXE/PDB CodeView GUID and age before publishing
 - `scripts/assert-windows-release-manifest.ps1` reads the built Windows exe `RT_MANIFEST` resource and asserts `requireAdministrator` plus `uiAccess=false`; UAC prompt behavior remains manual smoke validation
+- `scripts/test-windows-crash-reports.ps1` builds a debug binary with the non-shipping `diagnostics-test-controls` feature and verifies pre-Tokio main-thread panic plus synthetic native-loop-error report ordering, completion markers, event kinds, and exit codes
 - manual pre-release validation lives in `docs/release-checklist.md` and its subordinate `docs/release-smoke-matrix.md`
 - manual Linux beta pre-release validation lives in `docs/linux-beta-release-checklist.md`
 - `docs/release-process.md` documents the current automated stable tag-release flow, Linux beta prerelease flow, and their current artifact limits
@@ -430,7 +467,7 @@ Language rules:
 - internal local-only operational docs may be English or Russian, but must stay truthful and consistent
 
 ## Repo-specific workflow deltas
-This repo follows the shared staged-workflow protocol from `C:\Users\admin\.codex\AGENTS.md`.
+This repository's staged-workflow protocol is self-contained in root `AGENTS.md`. A global `AGENTS.md` may add general collaboration rules, but it is not a task-state source for this repository.
 
 See the `Repo workflow contract` section above for the canonical workflow facts and restrictions for this repository.
 
@@ -450,4 +487,4 @@ A new engineer should be able to learn from this file alone:
 - what the canonical repo workflow artifacts are
 - what the repo test-first development contract is
 - when `AGENTS.md` must be updated
-- where the shared staged-workflow protocol is sourced from for this repo
+- where the staged-workflow protocol and optional local task handoffs are defined

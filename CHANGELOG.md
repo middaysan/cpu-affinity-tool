@@ -6,6 +6,13 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+### Added
+
+- Added local Windows crash reports for main-thread Rust panics and native UI-loop errors
+- Added a bounded **Crash reports** Activity subpage with a header count, retention of the newest 20 complete reports, confirmed deletion, and **Show in Explorer**
+- Added a persistent Activity summary of the newest validated crash report after the next startup, so **Clear** does not hide the last crash context
+- Added a non-shipping Windows crash-capture probe for pre-Tokio panic and native-loop error ordering
+
 ### Changed
 
 - Returned both binaries to the platform system allocator instead of installing `mimalloc` globally
@@ -15,6 +22,11 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 - Kept overlapped named-pipe operation resources alive through every pending completion state, including cancellation and `ERROR_IO_INCOMPLETE`, preventing timeout-path use-after-free
 - Kept the saved-rule primary guard held until its forwarding server has stopped, preventing a replacement cold start from racing the previous named-pipe owner during shutdown
+
+### Security
+
+- Crash-report Explorer actions verify and execute through a non-elevated, below-high-integrity Explorer shell process; the existing Activity **Data folder** action keeps its prior direct-launch behavior
+- Crash report writes use unique partial files, no-replace publication, bounded UTF-8 content, reparse checks, and file-identity validation before managed deletion
 
 ## [1.5.0] - 2026-07-16
 

@@ -1,3 +1,5 @@
+#[cfg(all(target_os = "windows", feature = "windows"))]
+use crate::app::features::diagnostics::crash_reports::CrashReportIndicator;
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
     paint_focus_ring, palette, row_fill, toned_button, toned_sized_button, ToneRole,
@@ -114,6 +116,92 @@ fn theme_button(ui: &mut egui::Ui, theme_index: usize) -> egui::Response {
     response
 }
 
+#[cfg(all(target_os = "windows", feature = "windows"))]
+fn crash_reports_button(
+    ui: &mut egui::Ui,
+    indicator: &CrashReportIndicator,
+    selected: bool,
+) -> egui::Response {
+    let width = if indicator.count.unwrap_or_default() > 0 {
+        38.0
+    } else {
+        22.0
+    };
+    let (_, response) = ui.allocate_exact_size(egui::vec2(width, 20.0), egui::Sense::click());
+    let response = response.on_hover_text(&indicator.label);
+    let colors = palette(ui);
+    let fill = if selected || response.is_pointer_button_down_on() {
+        colors.inset
+    } else if response.hovered() {
+        colors.row
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect(
+        response.rect,
+        5.0,
+        fill,
+        Stroke::NONE,
+        egui::StrokeKind::Middle,
+    );
+
+    let icon_center = egui::pos2(response.rect.left() + 11.0, response.rect.center().y);
+    let icon_rect = egui::Rect::from_center_size(icon_center, egui::vec2(8.0, 10.0))
+        .translate(egui::vec2(0.0, -0.5));
+    let icon_color = if selected {
+        colors.text_primary
+    } else {
+        colors.text_secondary
+    };
+    ui.painter().rect_stroke(
+        icon_rect,
+        1.0,
+        Stroke::new(1.0, icon_color),
+        egui::StrokeKind::Middle,
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(icon_rect.left() + 2.0, icon_rect.center().y - 1.5),
+            egui::pos2(icon_rect.right() - 2.0, icon_rect.center().y - 1.5),
+        ],
+        Stroke::new(1.0, icon_color),
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(icon_rect.left() + 2.0, icon_rect.center().y + 1.5),
+            egui::pos2(icon_rect.right() - 2.0, icon_rect.center().y + 1.5),
+        ],
+        Stroke::new(1.0, icon_color),
+    );
+
+    if let Some(count) = indicator.count.filter(|count| *count > 0) {
+        ui.painter().text(
+            egui::pos2(response.rect.right() - 4.0, response.rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            count.to_string(),
+            egui::FontId::proportional(9.0),
+            icon_color,
+        );
+    }
+    if indicator.stale {
+        ui.painter().circle_filled(
+            egui::pos2(response.rect.right() - 3.0, response.rect.top() + 3.0),
+            1.5,
+            colors.warning.fg,
+        );
+    }
+
+    response
+        .widget_info(|| crash_reports_widget_info(response.enabled(), selected, &indicator.label));
+    paint_focus_ring(ui, &response);
+    response
+}
+
+#[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+fn crash_reports_widget_info(enabled: bool, selected: bool, label: &str) -> egui::WidgetInfo {
+    egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, label)
+}
+
 fn centered_leading_space(available_width: f32, content_width: f32) -> f32 {
     ((available_width - content_width) * 0.5).max(0.0)
 }
@@ -157,6 +245,9 @@ fn navigation_switch(app: &mut AppState, ui: &mut egui::Ui) {
                 }
 
                 let activity_selected = matches!(app.ui.current_window, WindowRoute::Logs);
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                let activity_selected =
+                    activity_selected || matches!(app.ui.current_window, WindowRoute::CrashReports);
                 let activity_label = "Activity";
                 let activity = if activity_selected {
                     RichText::new(activity_label)
@@ -202,6 +293,22 @@ pub fn draw_top_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                             app.toggle_theme();
                             ctx.request_repaint();
                         }
+                        #[cfg(all(target_os = "windows", feature = "windows"))]
+                        {
+                            let crash_report_indicator = app.crash_report_state().indicator();
+                            let crash_reports_selected =
+                                matches!(app.ui.current_window, WindowRoute::CrashReports);
+                            if crash_reports_button(
+                                ui,
+                                &crash_report_indicator,
+                                crash_reports_selected,
+                            )
+                            .clicked()
+                            {
+                                app.set_current_window(WindowRoute::CrashReports);
+                                app.request_crash_report_refresh();
+                            }
+                        }
                         if toned_button(
                             ui,
                             egui::Button::new(
@@ -234,7 +341,10 @@ pub fn draw_top_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
 
 #[cfg(test)]
 mod tests {
-    use super::{centered_leading_space, theme_button_spec, theme_widget_info, ThemeIcon};
+    use super::{
+        centered_leading_space, crash_reports_widget_info, theme_button_spec, theme_widget_info,
+        ThemeIcon,
+    };
     use eframe::egui::WidgetType;
 
     #[test]
@@ -263,5 +373,14 @@ mod tests {
         assert_eq!(disabled.typ, WidgetType::Button);
         assert!(!disabled.enabled);
         assert_eq!(disabled.label.as_deref(), Some("Dark theme"));
+    }
+
+    #[test]
+    fn crash_report_button_exposes_saved_count_to_accessibility() {
+        let info = crash_reports_widget_info(true, true, "Saved crash reports: 2");
+        assert_eq!(info.typ, WidgetType::Button);
+        assert!(info.enabled);
+        assert_eq!(info.selected, Some(true));
+        assert_eq!(info.label.as_deref(), Some("Saved crash reports: 2"));
     }
 }

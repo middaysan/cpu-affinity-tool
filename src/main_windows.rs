@@ -3,6 +3,10 @@
 mod app;
 mod tray;
 
+use app::features::diagnostics::crash_reports::{
+    handle_native_loop_outcome, install_panic_hook, CrashReportContext, StartupPhase,
+    REPORT_DIRECTORY_NAME,
+};
 use app::instance_forwarding::{
     prepare_startup_forwarding_with, EntryAction, ForwardingClientError, ForwardingRetryPolicy,
     PreparedStartupForwarding, StartupForwardingClock, StartupForwardingPlatform,
@@ -13,6 +17,7 @@ use app::startup::parse_startup_args;
 use app::startup::StartupIntent;
 use eframe::{run_native, NativeOptions};
 use os_api::{LocalIpcClientError, LocalIpcEndpoint, LocalIpcGuard, OS};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 
@@ -34,6 +39,19 @@ fn main() {
         EntryAction::RunGui(intent) => intent,
         EntryAction::Exit(code) => std::process::exit(code),
     };
+    let crash_report_context = Arc::new(CrashReportContext::new(crash_report_directory()));
+    if let Err(error) = install_panic_hook(crash_report_context.clone()) {
+        eprintln!("Crash report hook was not installed: {error}");
+    }
+    #[cfg(all(feature = "diagnostics-test-controls", debug_assertions))]
+    let diagnostics_test_fault = requested_diagnostics_test_fault();
+    #[cfg(all(feature = "diagnostics-test-controls", debug_assertions))]
+    if matches!(
+        diagnostics_test_fault,
+        Some(DiagnosticsTestFault::PreRuntimePanic)
+    ) {
+        panic!("synthetic pre-runtime panic");
+    }
 
     #[cfg(debug_assertions)]
     {
@@ -82,30 +100,73 @@ fn main() {
     }
 
     // Running eframe on the main thread
-    let res = run_native(
-        "CPU Affinity Tool",
-        options,
-        Box::new(move |cc| {
-            let startup_requires_forwarding =
-                matches!(&startup_intent, StartupIntent::RunRule { .. })
-                    && forwarding_runtime.is_some();
-            let mut app = App::new_without_startup_intent(cc);
-            let forwarding_ready = app.install_forwarding_runtime(
-                forwarding_runtime.take(),
-                forwarding_warning,
-                &cc.egui_ctx,
-            );
-            app.handle_startup_intent_after_forwarding(
-                startup_intent,
-                startup_requires_forwarding && !forwarding_ready,
-            );
-            Ok(Box::new(app))
-        }),
-    );
+    crash_report_context.set_phase(StartupPhase::RunningUi);
+    let run_application = move || {
+        run_native(
+            "CPU Affinity Tool",
+            options,
+            Box::new(move |cc| {
+                let startup_requires_forwarding =
+                    matches!(&startup_intent, StartupIntent::RunRule { .. })
+                        && forwarding_runtime.is_some();
+                let mut app = App::new_without_startup_intent(cc);
+                let forwarding_ready = app.install_forwarding_runtime(
+                    forwarding_runtime.take(),
+                    forwarding_warning,
+                    &cc.egui_ctx,
+                );
+                app.handle_startup_intent_after_forwarding(
+                    startup_intent,
+                    startup_requires_forwarding && !forwarding_ready,
+                );
+                Ok(Box::new(app))
+            }),
+        )
+    };
+    #[cfg(all(feature = "diagnostics-test-controls", debug_assertions))]
+    let res = if matches!(
+        diagnostics_test_fault,
+        Some(DiagnosticsTestFault::NativeLoopError)
+    ) {
+        Err(eframe::Error::AppCreation(Box::new(std::io::Error::other(
+            "synthetic native loop error",
+        ))))
+    } else {
+        run_application()
+    };
+    #[cfg(not(all(feature = "diagnostics-test-controls", debug_assertions)))]
+    let res = run_application();
+    let res = handle_native_loop_outcome(&crash_report_context, res);
+    crash_report_context.set_phase(StartupPhase::Closing);
 
     if let Err(e) = res {
         eprintln!("Application error: {}", e);
         std::process::exit(EXIT_GUI_STARTUP_ERROR);
+    }
+}
+
+fn crash_report_directory() -> std::path::PathBuf {
+    #[cfg(all(feature = "diagnostics-test-controls", debug_assertions))]
+    if let Some(path) = std::env::var_os("CPU_AFFINITY_TOOL_TEST_CRASH_REPORT_DIR") {
+        return std::path::PathBuf::from(path);
+    }
+
+    app::adapters::storage::StorageAdapter::active_data_dir().join(REPORT_DIRECTORY_NAME)
+}
+
+#[cfg(all(feature = "diagnostics-test-controls", debug_assertions))]
+#[derive(Clone, Copy)]
+enum DiagnosticsTestFault {
+    PreRuntimePanic,
+    NativeLoopError,
+}
+
+#[cfg(all(feature = "diagnostics-test-controls", debug_assertions))]
+fn requested_diagnostics_test_fault() -> Option<DiagnosticsTestFault> {
+    match std::env::var("CPU_AFFINITY_TOOL_TEST_CRASH_FAULT").as_deref() {
+        Ok("pre-runtime-panic") => Some(DiagnosticsTestFault::PreRuntimePanic),
+        Ok("native-loop-error") => Some(DiagnosticsTestFault::NativeLoopError),
+        _ => None,
     }
 }
 

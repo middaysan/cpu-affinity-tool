@@ -60,6 +60,10 @@ jobs:
             -ExePath target/release/cpu-affinity-tool.exe `
             -PdbPath target/release/cpu_affinity_tool.pdb
 
+      - name: Run Windows crash report probes
+        shell: pwsh
+        run: ./scripts/test-windows-crash-reports.ps1
+
       - name: Verify Windows release manifest
         shell: pwsh
         run: ./scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe

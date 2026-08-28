@@ -8,6 +8,7 @@ pub enum LogRetention {
     Regular,
     Important,
     Sticky,
+    Crash,
 }
 
 /// Represents a single log entry with a message and a timestamp.
@@ -65,7 +66,7 @@ impl LogManager {
         let cap = match retention {
             LogRetention::Regular => Some(REGULAR_LOG_CAP),
             LogRetention::Important => Some(IMPORTANT_LOG_CAP),
-            LogRetention::Sticky => None,
+            LogRetention::Sticky | LogRetention::Crash => None,
         };
 
         let Some(cap) = cap else {
@@ -121,8 +122,22 @@ impl LogManager {
         self.add_sticky_once(message);
     }
 
+    /// Replaces the one persisted crash-context entry shown in Activity.
+    ///
+    /// The report itself remains on disk; this entry only makes the newest
+    /// validated report visible alongside the current run's activity.
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    pub(crate) fn replace_crash_context(&mut self, message: Option<String>) {
+        self.entries
+            .retain(|entry| entry.retention != LogRetention::Crash);
+        if let Some(message) = message {
+            self.push_entry(message, LogRetention::Crash);
+        }
+    }
+
     pub fn clear(&mut self) {
-        self.entries.clear();
+        self.entries
+            .retain(|entry| entry.retention == LogRetention::Crash);
     }
 
     /// Returns an iterator that yields formatted log strings.
@@ -210,6 +225,29 @@ mod tests {
 
         manager.clear();
 
+        assert!(manager.entries.is_empty());
+    }
+
+    #[test]
+    fn crash_context_replaces_the_previous_report_and_survives_clear() {
+        let mut manager = LogManager::default();
+        manager.add_entry("transient activity".into());
+        manager.replace_crash_context(Some("previous crash one".into()));
+        manager.replace_crash_context(Some("previous crash two".into()));
+
+        manager.clear();
+
+        assert_eq!(manager.entries.len(), 1);
+        assert_eq!(
+            manager.entries.front().map(|entry| entry.message.as_str()),
+            Some("previous crash two")
+        );
+        assert_eq!(
+            manager.entries.front().map(|entry| entry.retention),
+            Some(LogRetention::Crash)
+        );
+
+        manager.replace_crash_context(None);
         assert!(manager.entries.is_empty());
     }
 

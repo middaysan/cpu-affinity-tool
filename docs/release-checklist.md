@@ -32,6 +32,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Run `cargo test --features windows --bin cpu-affinity-tool`.
 - Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-release.ps1`.
 - Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-pdb-verifier.ps1 -ExePath target/release/cpu-affinity-tool.exe -PdbPath target/release/cpu_affinity_tool.pdb`.
+- Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-crash-reports.ps1`.
 - Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe`.
 - Run `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`.
 - Run `cargo test --features linux --bin cpu-affinity-tool-linux`.
@@ -47,6 +48,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Run the release-path manual checks from `docs/release-smoke-matrix.md`.
 - Run every release-blocking row in the `Shortcut MVP Smoke` table when saved-rule desktop shortcuts are included in the release notes.
 - Smoke the redesigned **Overview** and **Activity** routes in system, dark, and light themes.
+- Smoke the **Crash reports** Activity subpage, header count, Explorer broker, confirmation dialogs, incomplete-state guidance, privacy copy, and the newest-report summary retained in **Activity** after **Clear**.
 - Check Inter rendering at 100%, 125%, 150%, and 200% Windows display scaling, including Latin, Cyrillic, digits, punctuation, long group/app names, and fallback glyphs.
 - Check compact layout and clipping at the minimum supported window size and at a typical 1920x1080 work area.
 - Reorder groups with both pointer drag-and-drop and the keyboard-accessible reorder path, restart, and verify order plus saved-rule shortcut identity.

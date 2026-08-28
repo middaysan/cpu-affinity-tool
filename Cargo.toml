@@ -48,3 +48,4 @@ winres = "0.1.12"
 [features]
 windows = []
 linux = []
+diagnostics-test-controls = []

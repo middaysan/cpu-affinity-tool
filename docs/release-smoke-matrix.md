@@ -23,8 +23,15 @@ Confirm that the shipped Windows binary starts correctly, applies its core launc
 | Tray hide / restore | App can hide to tray and restore cleanly without becoming unresponsive | Yes |
 | Theme persistence across restart | Theme changes persist after closing and reopening the app | Yes |
 | Theme selector icons | System, light, and dark states use readable painted icons with no missing-glyph square | Yes |
-| **Activity** visible and clearable | Events appear in chronological order and can be cleared without breaking later activity reporting | Yes |
+| **Activity** visible and clearable | Events appear in chronological order and can be cleared without breaking later activity reporting; the newest validated saved crash-report summary remains visible until its report is removed or replaced | Yes |
 | Overview and Activity navigation | The centered navigation switches routes without overlap, clipping, or losing state | Yes |
+| Crash report capture probes | `scripts/test-windows-crash-reports.ps1` creates one complete typed report for the pre-Tokio main-thread panic and synthetic native-loop error, with the expected exit codes | Yes |
+| **Crash reports** header and list | The top-right action shows the saved complete-report count, opens the Activity subpage, and lists newest reports first without blocking the render path | Yes |
+| **Show in Explorer** | A listed report is selected only after the Explorer process token is verified non-elevated and below high integrity; an elevated, missing, or incompatible broker is rejected, no editor is launched, and the path remains copyable | Yes |
+| Crash report deletion and retention | Single and bulk deletion require confirmation, never delete unrelated/nested files, normal background retention keeps only the newest 20 complete reports, and a sequential pre-UI failure probe stops after a writer observes 64 managed entries without delaying normal startup | Yes |
+| Crash report privacy and limits | The page states that reports are local, asks users to review before sharing, recommends redacting a copy, and generated files remain valid UTF-8 at or below 256 KiB | Yes |
+| Crash report coverage limits | Background panic, forced termination, native fault, and external termination are not presented as guaranteed report sources | Yes |
+| Crash report compatibility failures | Unicode report paths, denied ACLs, reparse roots/entries, Explorer restart/failure, and multiple GUI instances fail closed without blocking normal launch, monitoring, tray, or the existing Activity **Data folder** action | Yes |
 | Inter rendering and fallback | Latin and Cyrillic text, digits, punctuation, long names, and fallback glyphs remain readable at 100%, 125%, 150%, and 200% display scaling | Yes |
 | Compact layout and themes | Group boundaries, controls, statuses, and the full-width monitoring footer remain readable at minimum window size in system, dark, and light themes | Yes |
 | CPU-thread selection contrast | Selected Performance and Efficient threads plus **All** use the restrained turquoise primary state and remain distinct from the surrounding surface in dark and light themes | Yes |

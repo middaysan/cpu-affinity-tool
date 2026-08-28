@@ -1,5 +1,8 @@
 #[path = "../../views/central.rs"]
 pub mod central;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+#[path = "../../views/crash_reports.rs"]
+pub mod crash_reports;
 #[path = "../../views/footer.rs"]
 pub mod footer;
 #[path = "../../views/group_editor.rs"]

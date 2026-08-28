@@ -1,4 +1,11 @@
 use crate::app::adapters::storage::StorageAdapter;
+#[cfg(all(test, not(all(target_os = "windows", feature = "windows"))))]
+use crate::app::features::diagnostics::crash_reports::CrashReportManager;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+use crate::app::features::diagnostics::crash_reports::{
+    prepare_report_directory, validated_report_path, CrashReportEntry, CrashReportIndexState,
+    CrashReportManager, DeleteError, ReportSnapshot, REPORT_DIRECTORY_NAME,
+};
 use crate::app::features::execution::{self, RuntimeRegistry};
 use crate::app::features::preferences;
 use crate::app::features::rules::{self, RulesContext};
@@ -123,6 +130,12 @@ pub struct AppState {
     pub(crate) ui: UiSession,
     pub(crate) runtime: RuntimeRegistry,
     pub(crate) log_manager: LogManager,
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    #[cfg_attr(
+        all(test, not(all(target_os = "windows", feature = "windows"))),
+        allow(dead_code)
+    )]
+    pub(crate) crash_reports: CrashReportManager,
     shortcut_creation_role: ShortcutCreationRole,
     #[cfg(test)]
     save_count: usize,
@@ -131,6 +144,12 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let storage = StorageAdapter::load();
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let crash_report_directory = StorageAdapter::active_data_dir().join(REPORT_DIRECTORY_NAME);
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let crash_reports = CrashReportManager::new(crash_report_directory);
+        #[cfg(all(test, not(all(target_os = "windows", feature = "windows"))))]
+        let crash_reports = CrashReportManager::new_inactive(PathBuf::new());
         let persistent_state = storage.shared();
         let rules = persistent_state
             .read()
@@ -147,6 +166,8 @@ impl AppState {
             ui: UiSession::new(effective_total_threads()),
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
+            #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+            crash_reports,
             shortcut_creation_role: default_shortcut_creation_role(),
             #[cfg(test)]
             save_count: 0,
@@ -173,6 +194,8 @@ impl AppState {
             ui: UiSession::new(total_threads),
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
+            #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+            crash_reports: CrashReportManager::new_idle(PathBuf::new()),
             shortcut_creation_role: default_shortcut_creation_role(),
             save_count: 0,
         }
@@ -681,12 +704,23 @@ impl AppState {
         let leaving_app_run_settings =
             matches!(self.ui.current_window, WindowRoute::AppRunSettings)
                 && !matches!(window, WindowRoute::AppRunSettings);
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let leaving_crash_reports = matches!(self.ui.current_window, WindowRoute::CrashReports)
+            && !matches!(window, WindowRoute::CrashReports);
 
         if leaving_installed_app_picker {
             self.reset_installed_app_picker_session();
         }
         if leaving_app_run_settings {
             self.reset_app_run_settings_session();
+        }
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        if leaving_crash_reports {
+            self.ui.crash_report_delete_confirmation = None;
+            self.ui.crash_report_delete_confirmation_focus_pending = false;
+            self.ui.crash_report_delete_saved_confirmation = None;
+            self.ui.crash_report_delete_saved_confirmation_focus_pending = false;
+            self.ui.crash_report_action_message = None;
         }
 
         self.ui.set_current_window(window);
@@ -1317,6 +1351,74 @@ impl AppState {
         }
     }
 
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn crash_report_state(&self) -> &CrashReportIndexState {
+        self.crash_reports.state()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn crash_report_directory(&self) -> PathBuf {
+        self.crash_reports.report_directory().to_path_buf()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn request_crash_report_refresh(&mut self) {
+        self.crash_reports.request_refresh();
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn poll_crash_report_refresh(&mut self) -> bool {
+        let changed = self.crash_reports.poll();
+        if changed {
+            self.log_manager
+                .replace_crash_context(self.crash_reports.latest_activity_message());
+        }
+        changed
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn crash_report_worker_poll_interval(&self) -> Option<std::time::Duration> {
+        self.crash_reports.worker_poll_interval()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn show_crash_report_in_explorer(
+        &mut self,
+        report: &CrashReportEntry,
+    ) -> Result<(), String> {
+        let snapshot = self
+            .crash_reports
+            .state()
+            .snapshot()
+            .cloned()
+            .ok_or_else(|| "the crash report list is not available".to_string())?;
+        let path = validated_report_path(&snapshot, report).map_err(|error| error.to_string())?;
+        let result = crate::app::adapters::os::show_file_in_directory(&path);
+        if result.is_err() {
+            self.request_crash_report_refresh();
+        }
+        result
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn open_crash_report_directory(&mut self) -> Result<(), String> {
+        let path = prepare_report_directory(self.crash_reports.report_directory())?;
+        crate::app::adapters::os::open_directory_via_shell_broker(&path)
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn delete_crash_report(&mut self, report: &CrashReportEntry) -> Result<(), DeleteError> {
+        self.crash_reports.delete_one(report)
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn delete_saved_crash_reports(
+        &mut self,
+        snapshot: &ReportSnapshot,
+    ) -> Result<usize, DeleteError> {
+        self.crash_reports.delete_saved_reports_from(snapshot)
+    }
+
     fn filtered_installed_app_entry_indices(&self) -> Vec<usize> {
         let query = self.ui.installed_app_picker.query.trim().to_lowercase();
         let mut matches: Vec<(usize, (usize, usize, String, String))> = self
@@ -1408,6 +1510,7 @@ mod tests {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use super::RuleShortcutDisabledReason;
     use super::{AppState, MoveRuleToGroupOutcome, RunRuleOutcome};
+    use crate::app::features::diagnostics::crash_reports::CrashReportManager;
     use crate::app::features::execution::RuntimeRegistry;
     use crate::app::features::rules::RulesContext;
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -1520,6 +1623,7 @@ mod tests {
             ui: UiSession::new(4),
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
+            crash_reports: CrashReportManager::new_idle(PathBuf::new()),
             shortcut_creation_role: ShortcutCreationRole::Primary,
             save_count: 0,
         }
