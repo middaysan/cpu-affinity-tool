@@ -20,6 +20,18 @@ fn tray_command_for_double_click(left_button: bool) -> Option<TrayCmd> {
     left_button.then_some(TrayCmd::Show)
 }
 
+pub struct TrayRuntime {
+    rx: Receiver<TrayCmd>,
+    #[cfg(target_os = "windows")]
+    _tray_icon: tray_icon::TrayIcon,
+}
+
+impl TrayRuntime {
+    pub fn drain_commands(&self) -> Vec<TrayCmd> {
+        std::iter::from_fn(|| self.rx.try_recv().ok()).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{menu_command, tray_command_for_double_click, TrayCmd};
@@ -40,20 +52,15 @@ mod tests {
 
 #[cfg(target_os = "windows")]
 mod sys {
-    use super::{Receiver, TrayCmd};
+    use super::{TrayCmd, TrayRuntime};
     use std::sync::mpsc;
     use tray_icon::{
         menu::{Menu, MenuEvent, MenuId, MenuItem},
-        Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent,
+        Icon, MouseButton, TrayIconBuilder, TrayIconEvent,
     };
 
-    pub struct TrayHandle {
-        pub tray_icon: TrayIcon,
-        pub rx: Receiver<TrayCmd>,
-    }
-
     /// Initializes the tray. The application shell owns all window operations.
-    pub fn init_tray(ctx: eframe::egui::Context) -> Result<TrayHandle, String> {
+    pub fn init_tray(ctx: eframe::egui::Context) -> Result<TrayRuntime, String> {
         // Command channel
         let (tx, rx) = mpsc::channel::<TrayCmd>();
 
@@ -106,7 +113,10 @@ mod sys {
             }));
         }
 
-        Ok(TrayHandle { tray_icon, rx })
+        Ok(TrayRuntime {
+            rx,
+            _tray_icon: tray_icon,
+        })
     }
 
     fn decode_png_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
@@ -120,15 +130,11 @@ mod sys {
 
 #[cfg(not(target_os = "windows"))]
 mod sys {
-    use super::{Receiver, TrayCmd};
+    use super::{TrayCmd, TrayRuntime};
 
-    pub struct TrayHandle {
-        pub rx: Receiver<TrayCmd>,
-    }
-
-    pub fn init_tray(_ctx: eframe::egui::Context) -> Result<TrayHandle, String> {
+    pub fn init_tray(_ctx: eframe::egui::Context) -> Result<TrayRuntime, String> {
         let (_tx, rx) = std::sync::mpsc::channel::<TrayCmd>();
-        Ok(TrayHandle { rx })
+        Ok(TrayRuntime { rx })
     }
 }
 

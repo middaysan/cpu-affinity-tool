@@ -20,7 +20,7 @@ use crate::app::shell::presenters::{
 use crate::app::shell::sessions::ShortcutCreationRole;
 use crate::app::shell::{GroupRoute, WindowRoute};
 use crate::app::startup::StartupIntent;
-use crate::tray::{init_tray, TrayCmd};
+use crate::tray::{init_tray, TrayCmd, TrayRuntime};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
@@ -30,13 +30,11 @@ use tokio::sync::RwLock as TokioRwLock;
 
 pub struct App {
     pub state: AppState,
-    tray_rx: Option<Receiver<TrayCmd>>,
+    tray_runtime: Option<TrayRuntime>,
     #[cfg(test)]
     forwarded_command_rx: Option<Receiver<ForwardedIpcCommand>>,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     forwarding_runtime: Option<AppForwardingRuntime>,
-    #[cfg(target_os = "windows")]
-    _tray_icon_guard: Option<tray_icon::TrayIcon>,
     #[cfg(target_os = "windows")]
     hwnd: Option<windows::Win32::Foundation::HWND>,
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -74,6 +72,14 @@ fn reduce_tray_commands(
         }
     }
     action
+}
+
+fn should_hide_to_tray(
+    platform_supports_hide_to_tray: bool,
+    has_tray_runtime: bool,
+    minimized: Option<bool>,
+) -> bool {
+    platform_supports_hide_to_tray && has_tray_runtime && minimized == Some(true)
 }
 
 #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
@@ -214,44 +220,33 @@ impl App {
         let tray_res = init_tray(cc.egui_ctx.clone());
 
         match tray_res {
-            Ok(handle) => {
-                let tray_rx = Some(handle.rx);
-
+            Ok(tray_runtime) => Self {
+                state,
+                tray_runtime: Some(tray_runtime),
+                #[cfg(test)]
+                forwarded_command_rx: None,
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                forwarding_runtime: None,
                 #[cfg(target_os = "windows")]
-                let tray_icon_guard = Some(handle.tray_icon);
-
-                Self {
-                    state,
-                    tray_rx,
-                    #[cfg(test)]
-                    forwarded_command_rx: None,
-                    #[cfg(all(target_os = "windows", feature = "windows"))]
-                    forwarding_runtime: None,
-                    #[cfg(target_os = "windows")]
-                    _tray_icon_guard: tray_icon_guard,
-                    #[cfg(target_os = "windows")]
-                    hwnd,
-                    #[cfg(all(target_os = "windows", feature = "windows"))]
-                    crash_report_viewport_focused: None,
-                    #[cfg(all(target_os = "windows", feature = "windows"))]
-                    windows_event_log_first_frame_rendered: false,
-                    closing_requested: false,
-                    is_hidden: false,
-                }
-            }
+                hwnd,
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                crash_report_viewport_focused: None,
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                windows_event_log_first_frame_rendered: false,
+                closing_requested: false,
+                is_hidden: false,
+            },
             Err(e) => {
                 state
                     .log_manager
                     .add_sticky_once(format!("Tray init failed: {e}"));
                 Self {
                     state,
-                    tray_rx: None,
+                    tray_runtime: None,
                     #[cfg(test)]
                     forwarded_command_rx: None,
                     #[cfg(all(target_os = "windows", feature = "windows"))]
                     forwarding_runtime: None,
-                    #[cfg(target_os = "windows")]
-                    _tray_icon_guard: None,
                     #[cfg(target_os = "windows")]
                     hwnd,
                     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -374,13 +369,11 @@ impl App {
     fn new_for_test(state: AppState) -> Self {
         Self {
             state,
-            tray_rx: None,
+            tray_runtime: None,
             #[cfg(test)]
             forwarded_command_rx: None,
             #[cfg(all(target_os = "windows", feature = "windows"))]
             forwarding_runtime: None,
-            #[cfg(target_os = "windows")]
-            _tray_icon_guard: None,
             #[cfg(target_os = "windows")]
             hwnd: None,
             #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -561,19 +554,24 @@ mod tests {
     }
 
     #[test]
+    fn hide_to_tray_requires_a_live_tray_runtime() {
+        assert!(super::should_hide_to_tray(true, true, Some(true)));
+        assert!(!super::should_hide_to_tray(true, false, Some(true)));
+        assert!(!super::should_hide_to_tray(false, true, Some(true)));
+        assert!(!super::should_hide_to_tray(true, true, Some(false)));
+        assert!(!super::should_hide_to_tray(true, true, None));
+    }
+
+    #[test]
     fn tray_quit_latch_ignores_show_in_a_later_logic_tick() {
-        let (tx, rx) = mpsc::channel();
         let mut app = App::new_for_test(sample_state());
         let ctx = egui::Context::default();
-        app.tray_rx = Some(rx);
         app.is_hidden = true;
 
-        tx.send(TrayCmd::Quit).unwrap();
-        assert!(app.handle_tray_events(&ctx));
+        assert!(app.handle_tray_commands(&ctx, [TrayCmd::Quit]));
         assert!(app.closing_requested);
 
-        tx.send(TrayCmd::Show).unwrap();
-        assert!(app.handle_tray_events(&ctx));
+        assert!(app.handle_tray_commands(&ctx, [TrayCmd::Show]));
         assert!(app.is_hidden);
     }
 
@@ -983,17 +981,20 @@ mod tests {
 
 impl App {
     fn handle_tray_events(&mut self, ctx: &egui::Context) -> bool {
-        if self.closing_requested {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return true;
-        }
-
         let commands = self
-            .tray_rx
+            .tray_runtime
             .as_ref()
-            .map(|rx| std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>())
+            .map(TrayRuntime::drain_commands)
             .unwrap_or_default();
 
+        self.handle_tray_commands(ctx, commands)
+    }
+
+    fn handle_tray_commands(
+        &mut self,
+        ctx: &egui::Context,
+        commands: impl IntoIterator<Item = TrayCmd>,
+    ) -> bool {
         match reduce_tray_commands(self.closing_requested, commands) {
             TrayCommandAction::None => false,
             TrayCommandAction::Show => {
@@ -1103,9 +1104,11 @@ impl App {
             return false;
         }
 
-        if crate::app::adapters::os::supports_hide_to_tray()
-            && ctx.input(|i| i.viewport().minimized == Some(true))
-        {
+        if should_hide_to_tray(
+            crate::app::adapters::os::supports_hide_to_tray(),
+            self.tray_runtime.is_some(),
+            ctx.input(|i| i.viewport().minimized),
+        ) {
             self.hide_to_tray(ctx);
             return false;
         }
