@@ -57,6 +57,8 @@ fn sample_state() -> AppStateStorage {
         },
         theme_index: 2,
         process_monitoring_enabled: true,
+        windows_event_log_diagnostics_enabled: true,
+        windows_event_log_disclosure_seen: false,
         rule_identities: None,
         loaded_version: CURRENT_APP_STATE_VERSION,
         pending_pre_v6_backup: false,
@@ -87,6 +89,8 @@ fn current_schema_state() -> AppStateStorage {
         },
         theme_index: 1,
         process_monitoring_enabled: false,
+        windows_event_log_diagnostics_enabled: true,
+        windows_event_log_disclosure_seen: false,
         rule_identities: None,
         loaded_version: CURRENT_APP_STATE_VERSION,
         pending_pre_v6_backup: false,
@@ -156,8 +160,8 @@ fn test_backup_rotation() {
 }
 
 #[test]
-fn test_load_v7_state_keeps_current_schema_without_rewrite() {
-    with_temp_state_path("v7_current", |state_path| {
+fn test_load_v8_state_keeps_current_schema_without_rewrite() {
+    with_temp_state_path("v8_current", |state_path| {
         let serialized = serde_json::to_string_pretty(&current_schema_state()).unwrap();
         fs::write(state_path, &serialized).unwrap();
 
@@ -166,6 +170,51 @@ fn test_load_v7_state_keeps_current_schema_without_rewrite() {
 
         assert_eq!(loaded.version, CURRENT_APP_STATE_VERSION);
         assert_eq!(persisted, serialized);
+    });
+}
+
+#[test]
+fn test_load_v7_state_defaults_event_log_diagnostics_to_enabled_and_unacknowledged() {
+    with_temp_state_path("v7_event_log_defaults", |state_path| {
+        let mut state = serde_json::to_value(current_schema_state_with_version(7)).unwrap();
+        let fields = state.as_object_mut().unwrap();
+        fields.remove("windows_event_log_diagnostics_enabled");
+        fields.remove("windows_event_log_disclosure_seen");
+        let serialized = serde_json::to_string_pretty(&state).unwrap();
+        fs::write(state_path, &serialized).unwrap();
+
+        let loaded = AppStateStorage::load_from_path(state_path);
+
+        assert!(loaded.windows_event_log_diagnostics_enabled);
+        assert!(!loaded.windows_event_log_disclosure_seen);
+        assert_eq!(loaded.version, 7);
+        assert_eq!(loaded.loaded_version, 7);
+        assert_eq!(fs::read_to_string(state_path).unwrap(), serialized);
+    });
+}
+
+#[test]
+fn test_explicit_v7_save_upgrades_to_v8_with_event_log_preferences() {
+    with_temp_state_path("v7_event_log_upgrade", |state_path| {
+        let mut state = serde_json::to_value(current_schema_state_with_version(7)).unwrap();
+        let fields = state.as_object_mut().unwrap();
+        fields.remove("windows_event_log_diagnostics_enabled");
+        fields.remove("windows_event_log_disclosure_seen");
+        fs::write(state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        let mut loaded = AppStateStorage::load_from_path(state_path);
+        let identities = RulesContext::from_storage(&loaded).to_persisted_identities();
+        loaded.mark_ready_for_current_schema_save(identities);
+        loaded.try_save_to_path(state_path).unwrap();
+        let persisted: Value =
+            serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
+
+        assert_eq!(persisted["version"], json!(8));
+        assert_eq!(
+            persisted["windows_event_log_diagnostics_enabled"],
+            json!(true)
+        );
+        assert_eq!(persisted["windows_event_log_disclosure_seen"], json!(false));
     });
 }
 
@@ -309,6 +358,8 @@ fn test_load_v5_generic_state_refreshes_when_cpu_model_is_known_without_rewrite(
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            windows_event_log_diagnostics_enabled: true,
+            windows_event_log_disclosure_seen: false,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,

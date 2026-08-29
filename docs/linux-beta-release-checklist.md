@@ -16,7 +16,7 @@ Use this checklist with `docs/release-process.md`.
 - Confirm the beta changelog exists at `changelogs/linux-beta-vX.Y.Z-N.txt`.
 - Confirm the prerelease notes call out the schema `v7` save boundary when applicable:
   - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
-  - `v6` to `v7` saves do not write `state.json.pre-v6*`
+  - `v6` or `v7` to `v8` saves do not write `state.json.pre-v6*`
   - downgrade to older binaries is unsupported after that first current-schema save
 - Review release-impacting files if they changed: `assets/cpu_presets.json`, `.github/workflows/ci.yml`, `.github/workflows/release-linux-beta.yml`, `README.md`, `docs/release-process.md`, and `AGENTS.md`.
 

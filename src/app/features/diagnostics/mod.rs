@@ -9,6 +9,8 @@ use std::sync::{Arc, RwLock};
 pub mod crash_reports;
 #[cfg(all(target_os = "windows", feature = "windows"))]
 pub mod crash_reports;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub mod windows_event_log;
 
 pub type DiagnosticEvent = crate::app::shell::events::ShellEvent;
 

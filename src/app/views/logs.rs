@@ -19,6 +19,8 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
         .formatted_entries()
         .rev()
         .collect::<Vec<_>>();
+    let local_crash_context = app.log_manager.local_crash_context().map(str::to_owned);
+    let windows_event_context = app.log_manager.windows_event_context().cloned();
 
     CentralPanel::default()
         .frame(
@@ -58,6 +60,29 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
 
             ui.add_space(5.0);
 
+            if let Some(local_crash_context) = local_crash_context {
+                diagnostic_card(ui, "Saved local crash report", &local_crash_context, false);
+                ui.add_space(5.0);
+            }
+
+            if let Some(context) = windows_event_context {
+                let stale = if context.stale { " (stale)" } else { "" };
+                let detail = format!(
+                    "Record {} at {}\nException code: 0x{:08X}\nFaulting module: {}",
+                    context.event_record_id,
+                    context.timestamp_utc,
+                    context.exception_code,
+                    context.faulting_module,
+                );
+                diagnostic_card(
+                    ui,
+                    &format!("Unverified Windows Event Log record{stale}"),
+                    &detail,
+                    context.stale,
+                );
+                ui.add_space(5.0);
+            }
+
             glass_frame(ui).show(ui, |ui| {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -90,4 +115,22 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     if open_data_folder {
         app.open_active_data_dir();
     }
+}
+
+fn diagnostic_card(ui: &mut egui::Ui, title: &str, detail: &str, stale: bool) {
+    let title_color = if stale {
+        palette(ui).text_secondary
+    } else {
+        palette(ui).text_primary
+    };
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.label(RichText::new(title).strong().color(title_color));
+            ui.label(
+                RichText::new(detail)
+                    .small()
+                    .color(palette(ui).text_secondary),
+            );
+        });
 }

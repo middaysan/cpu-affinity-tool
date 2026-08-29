@@ -36,6 +36,13 @@ pub fn current_exe_path() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|err| format!("failed to resolve current executable: {err}"))
 }
 
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub fn find_latest_windows_application_failure(
+) -> Result<Option<os_api::WindowsApplicationFailure>, String> {
+    let executable_path = current_exe_path()?;
+    os_api::OS::find_latest_application_error(&executable_path)
+}
+
 pub fn current_user_desktop_dir() -> Result<PathBuf, String> {
     os_api::OS::current_user_desktop_dir()
 }

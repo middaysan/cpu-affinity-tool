@@ -23,5 +23,7 @@ pub use app_to_run::{normalize_process_name, AppRuntimeKey, AppToRun, LaunchTarg
 pub use core_group::{AddAppsOutcome, CoreGroup};
 pub use cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 pub use log_manager::LogManager;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub use log_manager::WindowsEventLogActivity;
 pub use meta::{effective_cpu_model, effective_total_threads, APP_VERSION};
 pub use running_app::{AppStatus, RunningApps};

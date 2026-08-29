@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Current version of the application state schema.
-pub const CURRENT_APP_STATE_VERSION: u32 = 7;
+pub const CURRENT_APP_STATE_VERSION: u32 = 8;
+
+pub(crate) const fn default_windows_event_log_diagnostics_enabled() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateStorageMode {
@@ -46,6 +50,12 @@ pub struct AppStateStorage {
     /// Flag indicating whether process monitoring is enabled
     #[serde(default)]
     pub process_monitoring_enabled: bool,
+    /// Enables the Windows-only, read-only Application Event Log diagnostic lookup.
+    #[serde(default = "default_windows_event_log_diagnostics_enabled")]
+    pub windows_event_log_diagnostics_enabled: bool,
+    /// Records whether the user has seen the Event Log diagnostics disclosure.
+    #[serde(default)]
+    pub windows_event_log_disclosure_seen: bool,
     /// Persisted logical identities for groups and rules in schema v6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_identities: Option<PersistedRuleIdentities>,

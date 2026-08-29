@@ -19,5 +19,5 @@ pub use linux::OS;
 #[cfg(target_os = "windows")]
 pub use windows::{
     LocalIpcClientError, LocalIpcEndpoint, LocalIpcGuard, LocalIpcRequest, LocalIpcServer,
-    LocalIpcWake, OS,
+    LocalIpcWake, OS, WindowsApplicationFailure,
 };

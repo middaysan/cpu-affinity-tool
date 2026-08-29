@@ -29,6 +29,7 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     let version_check: VersionCheck = serde_json::from_str(data).ok()?;
 
     match version_check.version {
+        Some(8) => load_v8(data, path),
         Some(7) => load_v7(data, path),
         Some(6) => load_v6(data, path),
         Some(5) => load_v5(data, path),
@@ -37,6 +38,12 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
         Some(2) => load_v2(data, path),
         _ => load_legacy(data, path),
     }
+}
+
+fn load_v8(data: &str, _path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    Some(state.finalize_load(8, false))
 }
 
 fn load_v7(data: &str, _path: &Path) -> Option<AppStateStorage> {
@@ -88,6 +95,8 @@ fn load_v2(data: &str, _path: &Path) -> Option<AppStateStorage> {
         },
         theme_index: v2.theme_index,
         process_monitoring_enabled: v2.process_monitoring_enabled,
+        windows_event_log_diagnostics_enabled: true,
+        windows_event_log_disclosure_seen: false,
         rule_identities: None,
         loaded_version: 0,
         pending_pre_v6_backup: false,
@@ -110,6 +119,8 @@ fn load_legacy(data: &str, _path: &Path) -> Option<AppStateStorage> {
         },
         theme_index: legacy.theme_index,
         process_monitoring_enabled: false,
+        windows_event_log_diagnostics_enabled: true,
+        windows_event_log_disclosure_seen: false,
         rule_identities: None,
         loaded_version: 0,
         pending_pre_v6_backup: false,

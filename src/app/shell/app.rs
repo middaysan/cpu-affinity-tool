@@ -13,6 +13,8 @@ use crate::app::runtime::{AppState, RunRuleOutcome};
 use crate::app::shell::events::ShellEvent;
 #[cfg(all(target_os = "windows", feature = "windows"))]
 use crate::app::shell::presenters::crash_reports;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+use crate::app::shell::presenters::windows_event_log_disclosure;
 use crate::app::shell::presenters::{
     central, footer, group_editor, header, installed_app_picker, logs, run_settings,
 };
@@ -41,6 +43,8 @@ pub struct App {
     hwnd: Option<windows::Win32::Foundation::HWND>,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     crash_report_viewport_focused: Option<bool>,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    windows_event_log_first_frame_rendered: bool,
     is_hidden: bool,
 }
 
@@ -205,6 +209,8 @@ impl App {
                     hwnd,
                     #[cfg(all(target_os = "windows", feature = "windows"))]
                     crash_report_viewport_focused: None,
+                    #[cfg(all(target_os = "windows", feature = "windows"))]
+                    windows_event_log_first_frame_rendered: false,
                     is_hidden: false,
                 }
             }
@@ -225,6 +231,8 @@ impl App {
                     hwnd,
                     #[cfg(all(target_os = "windows", feature = "windows"))]
                     crash_report_viewport_focused: None,
+                    #[cfg(all(target_os = "windows", feature = "windows"))]
+                    windows_event_log_first_frame_rendered: false,
                     is_hidden: false,
                 }
             }
@@ -351,6 +359,8 @@ impl App {
             hwnd: None,
             #[cfg(all(target_os = "windows", feature = "windows"))]
             crash_report_viewport_focused: None,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log_first_frame_rendered: false,
             is_hidden: false,
         }
     }
@@ -380,6 +390,17 @@ impl eframe::App for App {
             if let Some(interval) = self.state.crash_report_worker_poll_interval() {
                 ctx.request_repaint_after(interval);
             }
+            if self.windows_event_log_first_frame_rendered
+                && self.state.start_windows_event_log_scan_after_shell_gate()
+            {
+                ctx.request_repaint();
+            }
+            if self.state.poll_windows_event_log() {
+                ctx.request_repaint();
+            }
+            if let Some(interval) = self.state.windows_event_log_worker_poll_interval() {
+                ctx.request_repaint_after(interval);
+            }
         }
 
         if !self.should_render(ctx) {
@@ -396,6 +417,12 @@ impl eframe::App for App {
         }
 
         self.render_main_ui(ui);
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        windows_event_log_disclosure::draw_windows_event_log_disclosure(&mut self.state, ui);
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        {
+            self.windows_event_log_first_frame_rendered = true;
+        }
     }
 }
 
@@ -484,6 +511,8 @@ mod tests {
                 },
                 theme_index: 0,
                 process_monitoring_enabled: false,
+                windows_event_log_diagnostics_enabled: true,
+                windows_event_log_disclosure_seen: false,
                 rule_identities: None,
                 loaded_version: 5,
                 pending_pre_v6_backup: false,
@@ -634,6 +663,8 @@ mod tests {
                 },
                 theme_index: 0,
                 process_monitoring_enabled: false,
+                windows_event_log_diagnostics_enabled: true,
+                windows_event_log_disclosure_seen: false,
                 rule_identities: None,
                 loaded_version: 5,
                 pending_pre_v6_backup: false,

@@ -23,6 +23,8 @@ pub struct UiSession {
     pub crash_report_delete_saved_confirmation_focus_pending: bool,
     #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
     pub crash_report_action_message: Option<String>,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub windows_event_log_disclosure_error: Option<String>,
 }
 
 impl UiSession {
@@ -55,6 +57,8 @@ impl UiSession {
             crash_report_delete_saved_confirmation_focus_pending: false,
             #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
             crash_report_action_message: None,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log_disclosure_error: None,
         }
     }
 

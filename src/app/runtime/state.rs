@@ -6,6 +6,10 @@ use crate::app::features::diagnostics::crash_reports::{
     prepare_report_directory, validated_report_path, CrashReportEntry, CrashReportIndexState,
     CrashReportManager, DeleteError, ReportSnapshot, REPORT_DIRECTORY_NAME,
 };
+#[cfg(all(target_os = "windows", feature = "windows"))]
+use crate::app::features::diagnostics::windows_event_log::{
+    WindowsEventLogManager, WindowsEventLogPoll,
+};
 use crate::app::features::execution::{self, RuntimeRegistry};
 use crate::app::features::preferences;
 use crate::app::features::rules::{self, RulesContext};
@@ -14,6 +18,8 @@ use crate::app::features::shortcut::{
     SystemRuleShortcutPlatform,
 };
 use crate::app::models::cpu_schema::CpuSchema;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+use crate::app::models::WindowsEventLogActivity;
 use crate::app::models::{
     effective_total_threads, AddAppsOutcome, AppRuntimeKey, AppStateStorage, AppStatus, AppToRun,
     LogManager, StateStorageMode,
@@ -136,6 +142,8 @@ pub struct AppState {
         allow(dead_code)
     )]
     pub(crate) crash_reports: CrashReportManager,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) windows_event_log: WindowsEventLogManager,
     shortcut_creation_role: ShortcutCreationRole,
     #[cfg(test)]
     save_count: usize,
@@ -168,6 +176,9 @@ impl AppState {
             log_manager: LogManager::default(),
             #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
             crash_reports,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log: WindowsEventLogManager::new_idle(),
             shortcut_creation_role: default_shortcut_creation_role(),
             #[cfg(test)]
             save_count: 0,
@@ -196,6 +207,8 @@ impl AppState {
             log_manager: LogManager::default(),
             #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
             crash_reports: CrashReportManager::new_idle(PathBuf::new()),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log: WindowsEventLogManager::new_idle(),
             shortcut_creation_role: default_shortcut_creation_role(),
             save_count: 0,
         }
@@ -1333,6 +1346,98 @@ impl AppState {
         self.log_manager.clear();
     }
 
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn windows_event_log_disclosure_required(&self) -> bool {
+        self.persistent_state
+            .read()
+            .map(|state| !state.windows_event_log_disclosure_seen)
+            .unwrap_or(true)
+    }
+
+    /// Records the user's explicit decision before changing the Event Log
+    /// worker lifecycle. A failed save leaves the effective choice untouched.
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn choose_windows_event_log_diagnostics(&mut self, enabled: bool) -> Result<(), String> {
+        let previous = {
+            let state = self
+                .persistent_state
+                .read()
+                .map_err(|_| "could not read the diagnostics preference".to_string())?;
+            (
+                state.windows_event_log_diagnostics_enabled,
+                state.windows_event_log_disclosure_seen,
+            )
+        };
+        preferences::set_windows_event_log_diagnostics(&self.persistent_state, enabled)?;
+        if !self.persist_state() {
+            if let Ok(mut state) = self.persistent_state.write() {
+                state.windows_event_log_diagnostics_enabled = previous.0;
+                state.windows_event_log_disclosure_seen = previous.1;
+            }
+            return Err("could not save the Windows Event Log diagnostics choice".to_string());
+        }
+
+        if !enabled {
+            self.windows_event_log.disable();
+            self.log_manager.replace_windows_event_context(None);
+        }
+        Ok(())
+    }
+
+    /// Called by the shell only after the first frame has been rendered.
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn start_windows_event_log_scan_after_shell_gate(&mut self) -> bool {
+        let enabled = self
+            .persistent_state
+            .read()
+            .map(|state| {
+                state.windows_event_log_disclosure_seen
+                    && state.windows_event_log_diagnostics_enabled
+            })
+            .unwrap_or(false);
+        if !enabled {
+            return false;
+        }
+        self.windows_event_log.start_initial_scan()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn poll_windows_event_log(&mut self) -> bool {
+        match self.windows_event_log.poll() {
+            WindowsEventLogPoll::Unchanged => false,
+            WindowsEventLogPoll::Completed(Ok(Some(summary))) => {
+                self.log_manager
+                    .replace_windows_event_context(Some(WindowsEventLogActivity {
+                        event_record_id: summary.event_record_id,
+                        timestamp_utc: summary.timestamp_utc,
+                        exception_code: summary.exception_code,
+                        faulting_module: summary.faulting_module,
+                        stale: false,
+                    }));
+                true
+            }
+            WindowsEventLogPoll::Completed(Ok(None)) => {
+                self.log_manager.replace_windows_event_context(None);
+                true
+            }
+            WindowsEventLogPoll::Completed(Err(_)) | WindowsEventLogPoll::MarkedIncomplete => {
+                self.log_manager.mark_windows_event_context_stale();
+                true
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn windows_event_log_worker_poll_interval(&self) -> Option<std::time::Duration> {
+        self.windows_event_log.worker_poll_interval()
+    }
+
+    #[cfg(test)]
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    fn windows_event_log_worker_is_active(&self) -> bool {
+        self.windows_event_log.worker_is_active()
+    }
+
     pub fn active_data_dir(&self) -> PathBuf {
         StorageAdapter::active_data_dir()
     }
@@ -1371,7 +1476,7 @@ impl AppState {
         let changed = self.crash_reports.poll();
         if changed {
             self.log_manager
-                .replace_crash_context(self.crash_reports.latest_activity_message());
+                .replace_local_crash_context(self.crash_reports.latest_activity_message());
         }
         changed
     }
@@ -1511,6 +1616,8 @@ mod tests {
     use super::RuleShortcutDisabledReason;
     use super::{AppState, MoveRuleToGroupOutcome, RunRuleOutcome};
     use crate::app::features::diagnostics::crash_reports::CrashReportManager;
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    use crate::app::features::diagnostics::windows_event_log::WindowsEventLogManager;
     use crate::app::features::execution::RuntimeRegistry;
     use crate::app::features::rules::RulesContext;
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -1607,6 +1714,8 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            windows_event_log_diagnostics_enabled: true,
+            windows_event_log_disclosure_seen: false,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,
@@ -1624,6 +1733,8 @@ mod tests {
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
             crash_reports: CrashReportManager::new_idle(PathBuf::new()),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log: WindowsEventLogManager::new_idle(),
             shortcut_creation_role: ShortcutCreationRole::Primary,
             save_count: 0,
         }
@@ -2639,5 +2750,22 @@ mod tests {
         let snapshot = app.build_installed_app_picker_snapshot();
         let names: Vec<String> = snapshot.rows.into_iter().map(|row| row.name).collect();
         assert_eq!(names, vec!["code", "code-server", "Visual Studio"]);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn event_log_disclosure_choice_persists_without_starting_before_shell_gate() {
+        let mut app = sample_state();
+        let state = app.persistent_state.clone();
+
+        assert!(app.windows_event_log_disclosure_required());
+        assert!(!app.windows_event_log_worker_is_active());
+
+        app.choose_windows_event_log_diagnostics(false).unwrap();
+
+        assert!(!app.windows_event_log_disclosure_required());
+        assert!(!state.read().unwrap().windows_event_log_diagnostics_enabled);
+        assert!(state.read().unwrap().windows_event_log_disclosure_seen);
+        assert!(!app.windows_event_log_worker_is_active());
     }
 }

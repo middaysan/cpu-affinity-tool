@@ -34,7 +34,9 @@ windows = { version = "0.62.2", features = [
     "Win32_System_RemoteDesktop",
     "Win32_Security",
     "Win32_Security_Authorization",
-    "Win32_System_ApplicationInstallationAndServicing"
+    "Win32_System_ApplicationInstallationAndServicing",
+    "Win32_System_EventLog",
+    "Win32_System_Time"
 ] }
 
 [target.'cfg(unix)'.dependencies]

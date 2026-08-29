@@ -35,6 +35,8 @@ For technical problems, include as much of the following as possible:
 
 The Windows build stores crash reports under the app's active data directory and never uploads them automatically. After the next completed startup scan, **Activity** keeps a summary of the newest validated crash report even if normal activity is cleared. Use the small report button in the app header, choose **Show in Explorer**, and review the full file before attaching it to a public issue. A report can contain local paths or other system details. If redaction is needed, make a copy and redact the copy instead of editing the app-managed original.
 
+If you explicitly enabled the optional Windows Event Log diagnostic lookup, **Activity** can also show an `Unverified Windows Event Log record`. It is a local, read-only lookup of recent `Application Error` records for this executable, not an upload or a root-cause determination. The displayed record ID, UTC time, exception code, and module basename are useful for a report, but do not attach raw Event Viewer exports or full event XML without reviewing them for local information.
+
 The absence of a crash report does not rule out a native crash, forced termination, out-of-memory termination, anti-cheat action, or another external stop. If the app disappeared without a report, also include:
 
 - whether the process remained visible in Task Manager

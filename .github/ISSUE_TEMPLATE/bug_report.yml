@@ -105,7 +105,7 @@ body:
     id: unexpected_exit_details
     attributes:
       label: Unexpected exit details
-      description: If the app disappeared without a report, say whether it remained in Task Manager or the tray and include the Reliability Monitor/Event Viewer faulting module and exception code when available.
+      description: If the app disappeared without a report, say whether it remained in Task Manager or the tray. If Activity shows an Unverified Windows Event Log record, include its record ID, UTC time, exception code, and module name; do not paste raw Event Viewer XML without review.
 
   - type: textarea
     id: additional_context
