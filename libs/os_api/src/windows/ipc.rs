@@ -1,8 +1,8 @@
 use std::ffi::{OsStr, c_void};
 use std::os::windows::ffi::OsStrExt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,7 @@ const PIPE_TIMEOUT_MS: u32 = 5000;
 const PIPE_MAX_INSTANCES: u32 = 1;
 const SERVER_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(1);
+const SERVER_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(250);
 const CANCEL_COMPLETION_POLL_MS: u32 = 25;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const OPEN_CLIENT_TOKEN_AS_SELF: bool = true;
@@ -78,9 +79,10 @@ pub struct LocalIpcGuard {
 }
 
 pub struct LocalIpcServer {
-    endpoint: LocalIpcEndpoint,
     request_rx: Receiver<LocalIpcRequest>,
     shutdown: Arc<AtomicBool>,
+    wake: Arc<Mutex<Option<LocalIpcWake>>>,
+    completion_rx: Receiver<()>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -92,11 +94,24 @@ impl LocalIpcServer {
 
 impl Drop for LocalIpcServer {
     fn drop(&mut self) {
+        // Hold the callback lock through clearing so a worker cannot retain or invoke the GUI
+        // context after this server begins closing.
+        let mut wake = self
+            .wake
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *wake = None;
+        drop(wake);
+
         self.shutdown.store(true, Ordering::SeqCst);
-        let _ = OS::send_local_ipc_request(&self.endpoint, b"shutdown", Duration::from_millis(50));
-        if let Some(thread) = self.thread.take() {
+        if let Some(thread) = self.thread.take()
+            && wait_for_server_shutdown(&self.completion_rx)
+        {
             let _ = thread.join();
         }
+        // Dropping an unfinished JoinHandle detaches the worker. The worker owns its listener,
+        // any in-flight OVERLAPPED operation and buffer, plus the primary guard, so it reaps
+        // those resources only after the outstanding I/O has a terminal completion.
     }
 }
 
@@ -158,40 +173,78 @@ impl OS {
         endpoint: &LocalIpcEndpoint,
         wake: Option<LocalIpcWake>,
     ) -> Result<LocalIpcServer, String> {
+        Self::start_local_ipc_server_with_owned_primary_guard(endpoint, None, wake)
+    }
+
+    pub fn start_local_ipc_server_with_wake_and_primary_guard(
+        endpoint: &LocalIpcEndpoint,
+        primary_guard: LocalIpcGuard,
+        wake: Option<LocalIpcWake>,
+    ) -> Result<LocalIpcServer, String> {
+        Self::start_local_ipc_server_with_owned_primary_guard(endpoint, Some(primary_guard), wake)
+    }
+
+    fn start_local_ipc_server_with_owned_primary_guard(
+        endpoint: &LocalIpcEndpoint,
+        primary_guard: Option<LocalIpcGuard>,
+        wake: Option<LocalIpcWake>,
+    ) -> Result<LocalIpcServer, String> {
         let (request_tx, request_rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread_shutdown = Arc::clone(&shutdown);
+        let wake = Arc::new(Mutex::new(wake));
+        let thread_wake = Arc::clone(&wake);
         let endpoint = endpoint.clone();
         let thread_endpoint = endpoint.clone();
         let initial_pipe = create_server_pipe(&endpoint)?;
         let initial_pipe_handle = initial_pipe.0.0 as isize;
         std::mem::forget(initial_pipe);
+        let primary_guard_handle = primary_guard.map(|guard| {
+            let LocalIpcGuard {
+                _handle: guard_handle,
+            } = guard;
+            let handle = guard_handle.0.0 as isize;
+            std::mem::forget(guard_handle);
+            handle
+        });
+        let (completion_tx, completion_rx) = mpsc::channel();
 
         let thread = match thread::Builder::new()
             .name("cpu-affinity-tool-ipc".to_string())
             .spawn(move || {
                 let initial_pipe = HandleGuard(HANDLE(initial_pipe_handle as *mut c_void));
+                let primary_guard = primary_guard_handle.map(|handle| LocalIpcGuard {
+                    _handle: HandleGuard(HANDLE(handle as *mut c_void)),
+                });
                 server_loop(
                     thread_endpoint,
                     request_tx,
                     thread_shutdown,
                     initial_pipe,
-                    wake,
+                    thread_wake,
                 );
+                drop(primary_guard);
+                let _ = completion_tx.send(());
             }) {
             Ok(thread) => thread,
             Err(err) => {
                 unsafe {
                     let _ = CloseHandle(HANDLE(initial_pipe_handle as *mut c_void));
                 }
+                if let Some(handle) = primary_guard_handle {
+                    unsafe {
+                        let _ = CloseHandle(HANDLE(handle as *mut c_void));
+                    }
+                }
                 return Err(format!("failed to spawn local IPC server: {err}"));
             }
         };
 
         Ok(LocalIpcServer {
-            endpoint,
             request_rx,
             shutdown,
+            wake,
+            completion_rx,
             thread: Some(thread),
         })
     }
@@ -232,7 +285,7 @@ fn server_loop(
     request_tx: Sender<LocalIpcRequest>,
     shutdown: Arc<AtomicBool>,
     listener: HandleGuard,
-    wake: Option<LocalIpcWake>,
+    wake: Arc<Mutex<Option<LocalIpcWake>>>,
 ) {
     while !shutdown.load(Ordering::SeqCst) {
         match connect_pipe(listener.0, &shutdown) {
@@ -307,7 +360,8 @@ fn server_loop(
         {
             break;
         }
-        if let Some(wake) = &wake {
+        let wake = wake.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(wake) = wake.as_ref() {
             wake();
         }
 
@@ -506,6 +560,13 @@ impl OverlappedOperation {
     }
 }
 
+fn wait_for_server_shutdown(completion_rx: &Receiver<()>) -> bool {
+    match completion_rx.recv_timeout(SERVER_SHUTDOWN_JOIN_TIMEOUT) {
+        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => true,
+        Err(mpsc::RecvTimeoutError::Timeout) => false,
+    }
+}
+
 fn wait_for_cancel_completion<T>(
     operation: T,
     mut poll: impl FnMut(&T) -> CancelCompletionState,
@@ -680,8 +741,8 @@ fn send_local_ipc_request_once(
         ));
     }
 
-    let mut mode = PIPE_READMODE_MESSAGE;
-    let _ = unsafe { SetNamedPipeHandleState(handle.0, Some(&mut mode), None, None) };
+    let mode = PIPE_READMODE_MESSAGE;
+    let _ = unsafe { SetNamedPipeHandleState(handle.0, Some(&mode), None, None) };
 
     let started = Instant::now();
     write_pipe(handle.0, request, timeout, None).map_err(client_error_from_pipe_io)?;
@@ -1060,6 +1121,40 @@ mod tests {
     }
 
     #[test]
+    fn guard_owned_server_keeps_primary_guard_until_server_shutdown() {
+        let endpoint = unique_endpoint("guard-owned-server");
+        let guard = OS::try_claim_local_ipc_primary_guard(&endpoint)
+            .expect("guard claim should not fail")
+            .expect("guard should be available");
+        let server = OS::start_local_ipc_server_with_wake_and_primary_guard(&endpoint, guard, None)
+            .expect("server should start with the primary guard");
+
+        assert!(
+            OS::try_claim_local_ipc_primary_guard(&endpoint)
+                .expect("second guard claim should not fail")
+                .is_none(),
+            "the server worker must retain the primary guard while it owns the listener"
+        );
+
+        drop(server);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if OS::try_claim_local_ipc_primary_guard(&endpoint)
+                .expect("guard retry should not fail")
+                .is_some()
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "primary guard should be released after the server worker completes shutdown"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
     fn start_local_ipc_server_fails_when_first_pipe_instance_is_already_owned() {
         let endpoint = unique_endpoint("preowned");
         let _squatter = create_raw_pipe(&endpoint).expect("test pipe should be created");
@@ -1398,5 +1493,26 @@ mod tests {
             dropped.get(),
             "operation resources should be released after terminal completion"
         );
+    }
+
+    #[test]
+    fn server_shutdown_wait_is_bounded_when_reaper_is_still_running() {
+        let (done_tx, done_rx) = mpsc::channel();
+        let reaper = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            let _ = done_tx.send(());
+        });
+
+        let started = Instant::now();
+        assert!(
+            !wait_for_server_shutdown(&done_rx),
+            "a still-running reaper must not block the caller until completion"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "server shutdown wait must return on its bounded path"
+        );
+
+        reaper.join().expect("test reaper should not panic");
     }
 }

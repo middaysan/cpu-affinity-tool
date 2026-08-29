@@ -97,16 +97,17 @@ fn theme_preference_for_index(theme_index: usize) -> egui::ThemePreference {
 
 #[cfg(all(target_os = "windows", feature = "windows"))]
 struct ForwardingServerLifetime<Guard, Server> {
-    _guard: Guard,
+    guard: Option<Guard>,
     server: Option<Server>,
 }
 
 #[cfg(all(target_os = "windows", feature = "windows"))]
 impl<Guard, Server> Drop for ForwardingServerLifetime<Guard, Server> {
     fn drop(&mut self) {
-        // LocalIpcServer::drop joins the server thread. Keep the primary guard held until that
-        // shutdown is complete so a replacement process cannot claim a still-owned endpoint.
+        // A pending runtime still owns its guard. Once started, LocalIpcServer transfers that
+        // guard to its worker so an unfinished cancellation cannot admit a replacement owner.
         drop(self.server.take());
+        drop(self.guard.take());
     }
 }
 
@@ -122,7 +123,7 @@ impl AppForwardingRuntime {
         Self {
             endpoint,
             lifetime: ForwardingServerLifetime {
-                _guard: guard,
+                guard: Some(guard),
                 server: None,
             },
         }
@@ -137,7 +138,16 @@ impl AppForwardingRuntime {
         let wake: os_api::LocalIpcWake = Arc::new(move || {
             repaint_ctx.request_repaint();
         });
-        let server = os_api::OS::start_local_ipc_server_with_wake(&self.endpoint, Some(wake))?;
+        let guard = self
+            .lifetime
+            .guard
+            .take()
+            .expect("pending forwarding runtime must retain its primary guard");
+        let server = os_api::OS::start_local_ipc_server_with_wake_and_primary_guard(
+            &self.endpoint,
+            guard,
+            Some(wake),
+        )?;
         self.lifetime.server = Some(server);
         Ok(())
     }
@@ -501,10 +511,10 @@ mod tests {
 
         let events = Arc::new(Mutex::new(Vec::new()));
         let lifetime = ForwardingServerLifetime {
-            _guard: DropProbe {
+            guard: Some(DropProbe {
                 name: "guard",
                 events: events.clone(),
-            },
+            }),
             server: Some(DropProbe {
                 name: "server",
                 events: events.clone(),
