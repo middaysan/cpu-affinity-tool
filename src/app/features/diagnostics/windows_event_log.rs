@@ -55,7 +55,7 @@ pub enum WindowsEventLogPoll {
     MarkedIncomplete,
 }
 
-/// A one-shot, explicitly enabled Event Log reader. It intentionally has no
+/// A one-shot Event Log reader. It intentionally has no
 /// focus-triggered refresh path and never starts work from its constructor.
 pub struct WindowsEventLogManager {
     enabled: bool,
@@ -104,7 +104,7 @@ impl WindowsEventLogManager {
 
     /// Returns the manager-owned typed UI snapshot. Callers must not copy it
     /// into the general Activity log because Event Log evidence has separate
-    /// retention and consent semantics.
+    /// retention semantics.
     pub(crate) fn ui_snapshot(&self) -> WindowsEventLogState {
         self.state.clone()
     }

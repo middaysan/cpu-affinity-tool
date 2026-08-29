@@ -175,7 +175,7 @@ Linux beta notes:
 - Linux still does not have a stable published release artifact
 - tray/taskbar/focus behavior still does not have Windows parity
 
-Windows-only Event Log diagnostics are optional and disabled until the first-run disclosure is accepted. With consent, Activity performs at most a bounded local lookup of recent `Application Error` records and shows only a sanitized Record ID, UTC time, exception code, and faulting-module basename. The lookup is not proof of a crash cause, is never uploaded, and can be revoked from Activity; legacy schema v7 and older state files remain disabled and unacknowledged until an explicit save.
+Windows-only Event Log diagnostics are enabled by default and perform at most one bounded local lookup of recent `Application Error` records after the first rendered frame. Activity shows only a sanitized Record ID, UTC time, exception code, and faulting-module basename. The lookup is not proof of a crash cause, never uploads data, and can be disabled from Activity; schema v8 and older state files adopt the enabled default on their next explicit schema-v9 save.
 
 Useful verification commands:
 

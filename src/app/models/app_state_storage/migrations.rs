@@ -29,6 +29,7 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     let version_check: VersionCheck = serde_json::from_str(data).ok()?;
 
     match version_check.version {
+        Some(9) => load_v9(data, path),
         Some(8) => load_v8(data, path),
         Some(7) => load_v7(data, path),
         Some(6) => load_v6(data, path),
@@ -40,24 +41,29 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     }
 }
 
+fn load_v9(data: &str, _path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    Some(state.finalize_load(9, false))
+}
+
 fn load_v8(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = true;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     Some(state.finalize_load(8, false))
 }
 
 fn load_v7(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
-    state.windows_event_log_diagnostics_enabled = false;
-    state.windows_event_log_disclosure_seen = false;
+    state.windows_event_log_diagnostics_enabled = true;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     Some(state.finalize_load(7, false))
 }
 
 fn load_v6(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
-    state.windows_event_log_diagnostics_enabled = false;
-    state.windows_event_log_disclosure_seen = false;
+    state.windows_event_log_diagnostics_enabled = true;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     state.backfill_tracked_process_names();
     Some(state.finalize_load(6, false))
@@ -65,8 +71,7 @@ fn load_v6(data: &str, _path: &Path) -> Option<AppStateStorage> {
 
 fn load_v5(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
-    state.windows_event_log_diagnostics_enabled = false;
-    state.windows_event_log_disclosure_seen = false;
+    state.windows_event_log_diagnostics_enabled = true;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     state.backfill_tracked_process_names();
     Some(state.finalize_load(5, true))
@@ -74,8 +79,7 @@ fn load_v5(data: &str, _path: &Path) -> Option<AppStateStorage> {
 
 fn load_v4(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
-    state.windows_event_log_diagnostics_enabled = false;
-    state.windows_event_log_disclosure_seen = false;
+    state.windows_event_log_diagnostics_enabled = true;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     state.version = 5;
     state.rule_identities = None;
@@ -85,8 +89,7 @@ fn load_v4(data: &str, _path: &Path) -> Option<AppStateStorage> {
 
 fn load_v3(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
-    state.windows_event_log_diagnostics_enabled = false;
-    state.windows_event_log_disclosure_seen = false;
+    state.windows_event_log_diagnostics_enabled = true;
     state.version = 5;
     state.rule_identities = None;
     state.backfill_tracked_process_names();
@@ -105,8 +108,7 @@ fn load_v2(data: &str, _path: &Path) -> Option<AppStateStorage> {
         },
         theme_index: v2.theme_index,
         process_monitoring_enabled: v2.process_monitoring_enabled,
-        windows_event_log_diagnostics_enabled: false,
-        windows_event_log_disclosure_seen: false,
+        windows_event_log_diagnostics_enabled: true,
         rule_identities: None,
         loaded_version: 0,
         pending_pre_v6_backup: false,
@@ -129,8 +131,7 @@ fn load_legacy(data: &str, _path: &Path) -> Option<AppStateStorage> {
         },
         theme_index: legacy.theme_index,
         process_monitoring_enabled: false,
-        windows_event_log_diagnostics_enabled: false,
-        windows_event_log_disclosure_seen: false,
+        windows_event_log_diagnostics_enabled: true,
         rule_identities: None,
         loaded_version: 0,
         pending_pre_v6_backup: false,

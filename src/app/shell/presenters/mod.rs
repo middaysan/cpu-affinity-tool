@@ -17,6 +17,3 @@ pub mod logs;
 pub mod run_settings;
 #[path = "../../views/shared_elements.rs"]
 pub mod shared_elements;
-#[cfg(all(target_os = "windows", feature = "windows"))]
-#[path = "../../views/windows_event_log_disclosure.rs"]
-pub mod windows_event_log_disclosure;

@@ -20,7 +20,6 @@ pub fn set_windows_event_log_diagnostics(
         .write()
         .map_err(|_| "could not update the diagnostics preference".to_string())?;
     state.windows_event_log_diagnostics_enabled = enabled;
-    state.windows_event_log_disclosure_seen = true;
     Ok(())
 }
 
@@ -42,8 +41,7 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
-            windows_event_log_diagnostics_enabled: false,
-            windows_event_log_disclosure_seen: false,
+            windows_event_log_diagnostics_enabled: true,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,
@@ -69,7 +67,7 @@ mod tests {
 
     #[cfg(any(target_os = "windows", feature = "windows"))]
     #[test]
-    fn event_log_diagnostics_choice_is_idempotent_and_acknowledges_disclosure() {
+    fn event_log_diagnostics_preference_is_idempotent() {
         let state = sample_state();
 
         set_windows_event_log_diagnostics(&state, false).unwrap();
@@ -77,6 +75,5 @@ mod tests {
 
         let state = state.read().unwrap();
         assert!(!state.windows_event_log_diagnostics_enabled);
-        assert!(state.windows_event_log_disclosure_seen);
     }
 }

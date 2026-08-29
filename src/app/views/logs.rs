@@ -27,7 +27,7 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     let mut event_log_choice = None;
     #[cfg(all(target_os = "windows", feature = "windows"))]
-    let windows_event_action_message = app.ui.windows_event_log_disclosure_error.clone();
+    let windows_event_action_message = app.ui.windows_event_log_action_error.clone();
 
     CentralPanel::default()
         .frame(
@@ -126,9 +126,9 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     }
     #[cfg(all(target_os = "windows", feature = "windows"))]
     if let Some(enabled) = event_log_choice {
-        match app.choose_windows_event_log_diagnostics(enabled) {
-            Ok(()) => app.ui.windows_event_log_disclosure_error = None,
-            Err(error) => app.ui.windows_event_log_disclosure_error = Some(error),
+        match app.set_windows_event_log_diagnostics_enabled(enabled) {
+            Ok(()) => app.ui.windows_event_log_action_error = None,
+            Err(error) => app.ui.windows_event_log_action_error = Some(error),
         }
     }
 }

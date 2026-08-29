@@ -13,8 +13,6 @@ use crate::app::runtime::{AppState, RunRuleOutcome};
 use crate::app::shell::events::ShellEvent;
 #[cfg(all(target_os = "windows", feature = "windows"))]
 use crate::app::shell::presenters::crash_reports;
-#[cfg(all(target_os = "windows", feature = "windows"))]
-use crate::app::shell::presenters::windows_event_log_disclosure;
 use crate::app::shell::presenters::{
     central, footer, group_editor, header, installed_app_picker, logs, run_settings,
 };
@@ -449,8 +447,6 @@ impl eframe::App for App {
 
         self.render_main_ui(ui);
         #[cfg(all(target_os = "windows", feature = "windows"))]
-        windows_event_log_disclosure::draw_windows_event_log_disclosure(&mut self.state, ui);
-        #[cfg(all(target_os = "windows", feature = "windows"))]
         {
             self.windows_event_log_first_frame_rendered = true;
         }
@@ -592,8 +588,7 @@ mod tests {
                 },
                 theme_index: 0,
                 process_monitoring_enabled: false,
-                windows_event_log_diagnostics_enabled: false,
-                windows_event_log_disclosure_seen: false,
+                windows_event_log_diagnostics_enabled: true,
                 rule_identities: None,
                 loaded_version: 5,
                 pending_pre_v6_backup: false,
@@ -744,8 +739,7 @@ mod tests {
                 },
                 theme_index: 0,
                 process_monitoring_enabled: false,
-                windows_event_log_diagnostics_enabled: false,
-                windows_event_log_disclosure_seen: false,
+                windows_event_log_diagnostics_enabled: true,
                 rule_identities: None,
                 loaded_version: 5,
                 pending_pre_v6_backup: false,

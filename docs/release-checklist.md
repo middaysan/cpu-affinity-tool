@@ -18,9 +18,9 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Confirm the bundled Inter font and its SIL Open Font License file are present under `assets/fonts` and included in the release commit.
 - Confirm shortcut docs explain current elevated token Desktop placement, including credential-over-the-shoulder UAC placing shortcuts on the elevated account's Desktop.
 - Confirm version markers are aligned manually before tagging: release tag `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`. The workflow validates these again after the tag is pushed.
-- Confirm the changelog and any release note summary call out the schema `v8` save boundary when applicable:
+- Confirm the changelog and any release note summary call out the schema `v9` save boundary when applicable:
   - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
-  - `v6` or `v7` to `v8` saves do not write `state.json.pre-v6*`
+  - `v6`, `v7`, or `v8` to `v9` saves do not write `state.json.pre-v6*`
   - downgrade to older binaries is unsupported after that first current-schema save
 - Review release-impacting files if they changed: `build.rs`, `app.manifest`, `assets/icon.ico`, `assets/cpu_presets.json`, `scripts/build-windows-release.ps1`, `scripts/assert-windows-pdb-matches.ps1`, `scripts/test-windows-pdb-verifier.ps1`, `scripts/assert-windows-release-manifest.ps1`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, and `.github/workflows/release-linux-beta.yml`.
 
@@ -49,7 +49,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Run every release-blocking row in the `Shortcut MVP Smoke` table when saved-rule desktop shortcuts are included in the release notes.
 - Smoke the redesigned **Overview** and **Activity** routes in system, dark, and light themes.
 - Smoke the **Crash reports** Activity subpage, header count, Explorer broker, confirmation dialogs, incomplete-state guidance, privacy copy, and the newest-report summary retained in **Activity** after **Clear**.
-- Smoke the Windows Event Log disclosure before its first decision: choosing **Keep disabled** must make no lookup, and **Enable local lookup** must start only after the displayed frame. Verify Activity's persistent control can revoke consent, clears the record immediately, presents unavailable/error status without leaking raw XML or executable paths, labels evidence with Record ID/UTC time/exception code/sanitized module basename, and leaves the separate diagnostic status/evidence visible after **Clear** without adding Event Log data to chronological entries.
+- Smoke the enabled-by-default Windows Event Log lookup after the first rendered frame. Verify Activity's persistent control can disable it, clears the record immediately, presents unavailable/error status without leaking raw XML or executable paths, labels evidence with Record ID/UTC time/exception code/sanitized module basename, and leaves the separate diagnostic status/evidence visible after **Clear** without adding Event Log data to chronological entries.
 - Check Inter rendering at 100%, 125%, 150%, and 200% Windows display scaling, including Latin, Cyrillic, digits, punctuation, long group/app names, and fallback glyphs.
 - Check compact layout and clipping at the minimum supported window size and at a typical 1920x1080 work area.
 - Reorder groups with both pointer drag-and-drop and the keyboard-accessible reorder path, restart, and verify order plus saved-rule shortcut identity.

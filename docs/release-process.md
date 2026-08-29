@@ -69,7 +69,7 @@ Before pushing a stable Windows tag, align:
 - `Cargo.toml` version
 - `changelogs/vX.Y.Z.txt`
 - release-facing docs if platform or process truth changed
-- if the release includes the first shipped schema `v8` build, call out that the first explicit save upgrades `state.json` to `v8`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6` or `v7` to `v8` does not
+- if the release includes the first shipped schema `v9` build, call out that the first explicit save upgrades `state.json` to `v9`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6`, `v7`, or `v8` to `v9` does not
 
 Before pushing a Linux beta tag, align:
 
@@ -77,7 +77,7 @@ Before pushing a Linux beta tag, align:
 - `Cargo.toml` version: `X.Y.Z`
 - `changelogs/linux-beta-vX.Y.Z-N.txt`
 - Linux beta release-facing docs if platform or process truth changed
-- if the prerelease includes the first shipped schema `v8` build, call out that the first explicit save upgrades `state.json` to `v8`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6` or `v7` to `v8` does not
+- if the prerelease includes the first shipped schema `v9` build, call out that the first explicit save upgrades `state.json` to `v9`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6`, `v7`, or `v8` to `v9` does not
 
 ## Recommended stable release steps
 

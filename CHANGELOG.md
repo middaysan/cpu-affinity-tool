@@ -12,19 +12,19 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 - Added a bounded **Crash reports** Activity subpage with a header count, retention of the newest 20 complete reports, confirmed deletion, and **Show in Explorer**
 - Added a persistent Activity summary of the newest validated crash report after the next startup, so **Clear** does not hide the last crash context
 - Added a non-shipping Windows crash-capture probe for pre-Tokio panic and native-loop error ordering
-- Added opt-in, Windows-only Event Log diagnostics with first-run disclosure and sanitized Activity evidence
+- Added Windows-only Event Log diagnostics, enabled by default after the first rendered frame, with sanitized Activity evidence
 
 ### Changed
 
 - Returned both binaries to the platform system allocator instead of installing `mimalloc` globally
 - Stable Windows releases now publish an identity-verified matching PDB with line-table debug information for crash symbolization, and pull-request CI reproduces that symbol build
-- Legacy state files through schema v7 now default to disabled, unacknowledged Event Log diagnostics without an eager rewrite; consent is saved only after an explicit choice
+- Schema v9 stores the Event Log diagnostics preference without a disclosure marker; schema v8 and older state adopts the enabled default without an eager rewrite
 
 ### Fixed
 
 - Kept overlapped named-pipe operation resources alive through every pending completion state, including cancellation and `ERROR_IO_INCOMPLETE`, preventing timeout-path use-after-free
 - Kept the saved-rule primary guard held until its forwarding server has stopped, preventing a replacement cold start from racing the previous named-pipe owner during shutdown
-- Prevented stale Event Log worker results from resurfacing after revoke/re-enable, and kept Event Log evidence out of chronological Activity entries
+- Prevented stale Event Log worker results from resurfacing after disable/re-enable, and kept Event Log evidence out of chronological Activity entries
 
 ### Security
 

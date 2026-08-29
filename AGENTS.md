@@ -141,7 +141,7 @@ Current runtime split:
   - dropped files
   - installed app picker session and cached catalog
   - crash-report delete confirmations and the last report action message
-  - Windows Event Log disclosure error state
+  - Windows Event Log preference action error state
 - `features::rules::RulesContext` owns logical `GroupId` / `RuleId` allocation, index projection, and persisted `rule_identities`
 - `features::execution::RuntimeRegistry` owns runtime process tracking:
   - `running_apps`
@@ -153,7 +153,7 @@ Current runtime split:
 - shell presenters are owned under `shell::presenters`; their source files still live under `src/app/views/` via path-based module ownership
 - workers emit typed `shell::events::ShellEvent` messages and do not hold `egui::Context`
 - Windows crash-report discovery uses an initial/on-demand single-flight standard thread plus at most one coalesced follow-up refresh; egui rendering reads only the last completed snapshot and synchronizes its newest validated report into the retained Activity context; the Linux beta does not start this worker or expose the Crash reports route
-- Windows Event Log diagnostics uses a separate single-flight worker. It is never started by construction, focus gain, tray restore, or periodic refresh: after the first rendered UI frame it can run one bounded lookup only after the persisted disclosure decision allows it, with at most one delayed retry after a successful empty result.
+- Windows Event Log diagnostics uses a separate single-flight worker. It is never started by construction, focus gain, tray restore, or periodic refresh: after the first rendered UI frame it can run one bounded lookup when the persisted enabled-by-default preference allows it, with at most one delayed retry after a successful empty result.
 
 Windows runtime flow:
 1. Entry point parses startup arguments into a narrow startup intent; normal GUI startup remains the default, while `--run-rule <group-id> <rule-id>` is accepted as a saved-rule startup intent.
@@ -172,7 +172,7 @@ Windows runtime flow:
    - `RunRule` startup then skips normal autorun and dispatches only the requested saved rule
    - if a `RunRule` cold start claimed the primary guard but cannot start the forwarding server, the requested saved rule is blocked and logged instead of launching without an owned forwarding endpoint
 9. If `run_native` returns `Err`, the entrypoint synchronously writes a typed native-loop report before preserving exit code `1`, then marks the report phase as closing.
-10. `App::logic` handles tray events, monitor notifications, local forwarded shortcut commands, initial/on-demand crash-report refresh polling, the gated Windows Event Log worker, focus-gain refresh, hidden-window flow, file drops, and theme application; tray callbacks only enqueue typed restore/quit commands and request repaint, while `App::logic` owns all `HWND` restore/focus/taskbar work and requests an orderly root-viewport close for Quit. Once Quit is latched, no further shell work or rendering occurs before eframe shutdown. `App::ui` renders the active view and then the first-run Event Log disclosure from the root `egui::Ui`.
+10. `App::logic` handles tray events, monitor notifications, local forwarded shortcut commands, initial/on-demand crash-report refresh polling, the gated Windows Event Log worker, focus-gain refresh, hidden-window flow, file drops, and theme application; tray callbacks only enqueue typed restore/quit commands and request repaint, while `App::logic` owns all `HWND` restore/focus/taskbar work and requests an orderly root-viewport close for Quit. Once Quit is latched, no further shell work or rendering occurs before eframe shutdown. `App::ui` renders the active view; the Event Log worker may be armed only after that first rendered frame.
 
 Linux entrypoint now reaches the shared `shell::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
 
@@ -211,14 +211,14 @@ Persisted state facts:
   - Windows: `%LOCALAPPDATA%\CpuAffinityTool\state.json`
   - Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/cpu-affinity-tool/state.json`
 - there is no automatic migration or copy between the legacy sidecar path and the platform data path
-- current persisted schema version: `8`
+- current persisted schema version: `9`
 - schema `v5` and older formats are dual-read and normalized in memory without eager rewrite on load
 - schema `v6` and older path-target app rules receive an in-memory one-time compatibility backfill that adds the primary executable filename to `additional_processes` when no normalized equivalent already exists
 - schema `v7` treats an empty `additional_processes` list as intentional user state and does not re-add the primary executable filename on load
-- schema `v8` adds `windows_event_log_diagnostics_enabled` and `windows_event_log_disclosure_seen`; v7 and older files are effective disabled and unacknowledged, and are not rewritten until an explicit save
+- schema `v9` stores `windows_event_log_diagnostics_enabled`; the pre-release schema-v8 disclosure field is ignored, and v8 and older files are effective enabled without an eager rewrite
 - the upgrade from pre-`v6` data or `v6` data to the current schema happens only on an explicit save path
 - before the first current-schema save after loading pre-`v6` state, persistence creates an additional `state.json.pre-v6`, `state.json.pre-v6-1`, and so on backup series
-- loading `v6` or `v7` for upgrade to `v8` does not create a `pre-v6` backup
+- loading `v6`, `v7`, or `v8` for upgrade to `v9` does not create a `pre-v6` backup
 - after the first current-schema save, downgrade to an older binary that only understands earlier state is unsupported
 - backup rotation uses `state.json.old`, `state.json.old1`, `state.json.old2`, and so on
 - persistence loading is split into `state_path`, `storage_io`, `migrations`, and `schema_refresh`
@@ -255,7 +255,7 @@ Important contract facts:
   - `Important` capped at 200 entries
   - `Sticky` retained outside normal rotation for startup and critical diagnostics
   - the local crash-report context is runtime-only and separate from chronological entries; Activity's **Clear** action preserves it
-- local Windows crash reports are separate from `AppStateStorage` and do not change schema `v8`:
+- local Windows crash reports are separate from `AppStateStorage` and do not change schema `v9`:
   - directory: `<active-data-dir>/crash-reports/`
   - event kinds: main-thread panic and native UI-loop error
   - maximum complete report size: 256 KiB; maximum payload section: 8 KiB
@@ -266,11 +266,11 @@ Important contract facts:
   - after a completed background scan, Activity shows the newest validated report's type, timestamp, reason, and full-report path; the report file remains the complete support artifact
   - reports are never uploaded automatically and can contain local paths or system details
 - Windows Event Log diagnostics is separate from crash reports and remains runtime-only, owned by `WindowsEventLogManager` rather than `LogManager`:
-  - it reads only recent local `Application Error` Event ID 1000 records from the local Application log after explicit disclosure
+  - it reads only recent local `Application Error` Event ID 1000 records from the local Application log after the first rendered frame when the enabled-by-default preference remains on
   - it uses an exact executable-name plus fully-qualified-path match and accepts false negatives rather than filename-only matches
   - only record ID, UTC time, exception code, and a sanitized faulting-module basename may enter the retained Activity context; no raw XML, event payload, path, clipboard, state.json, crash report, or automatic upload is used
   - an Activity record is unverified supplemental evidence, not proof of a previous launch or crash cause
-  - Activity can revoke consent persistently; disabling clears the visible record immediately, while a failed save is reported as session-only
+  - Activity can disable the lookup persistently; disabling clears the visible record immediately, while a failed save is reported as session-only
 
 CPU presets:
 - `assets/cpu_presets.json` is a compile-time source file
@@ -292,7 +292,7 @@ Data source separation:
 - installed package metadata lookup on Windows
 - opening the active data directory in the platform file manager
 - opening crash-report directories and selecting report files through an Explorer shell process whose token is verified non-elevated and below high integrity; the pre-existing Activity data-folder action retains its direct Explorer launch contract
-- bounded read-only lookup of matching local Windows Application Event Log records for optional diagnostics
+- bounded read-only lookup of matching local Windows Application Event Log records for enabled-by-default diagnostics
 - resolving the current elevated token's per-user Desktop directory for Windows shortcut creation
 - Windows shortcut creation for saved-rule launch shortcuts
 - affinity read and set
@@ -345,7 +345,7 @@ Linux gaps:
 - no tray parity
 - no focus parity
 - no crash-report capture, index worker, Crash reports UI, or Explorer-broker parity
-- no Windows Event Log diagnostics capture, worker, disclosure, or Activity context
+- no Windows Event Log diagnostics capture, worker, or Activity context
 - no Windows-style installed-app activation, AUMID identity, or package metadata parity
 - `os_api` is not symmetric between Windows and Linux
 - no Linux stable release artifacts, installer packaging, AppImage, Flatpak, or parity with the Windows stable release contract
