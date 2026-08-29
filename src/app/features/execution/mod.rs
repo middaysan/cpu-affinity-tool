@@ -12,9 +12,11 @@ pub(crate) use launch::{run_app_row_action, AppRowActionRequest};
 pub use launch::{
     run_app_with_affinity_sync, start_app_with_autorun, AppRowAction, LaunchDispatchOutcome,
 };
+#[cfg(test)]
+pub(crate) use monitor_events::monitor_event_channel;
 pub(crate) use monitor_events::{
-    monitor_event_channel, monitor_event_channel_with_wake, MonitorDrainStatus,
-    MonitorEventReceiver, MonitorEventSender, MonitorWake,
+    monitor_event_channel_with_wake, MonitorDrainStatus, MonitorEventReceiver, MonitorEventSender,
+    MonitorWake,
 };
 pub use reconcile::run_process_settings_monitor;
 pub use store::RuntimeRegistry;

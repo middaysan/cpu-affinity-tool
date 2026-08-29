@@ -197,6 +197,13 @@ impl ExecutionStore {
         }
     }
 
+    pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
+        self.running_apps
+            .try_read()
+            .ok()
+            .and_then(|apps| apps.apps.get(app_key).map(|app| app.pids.clone()))
+    }
+
     pub(crate) fn mark_running_app_settings_matched(
         &mut self,
         app_key: &AppRuntimeKey,
@@ -307,6 +314,10 @@ impl RuntimeRegistry {
 
     pub fn get_app_status_sync(&mut self, app_key: &AppRuntimeKey) -> AppStatus {
         self.store.get_app_status_sync(app_key)
+    }
+
+    pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
+        self.store.get_running_app_pids(app_key)
     }
 
     pub(crate) fn lookup_running_app_instances(
