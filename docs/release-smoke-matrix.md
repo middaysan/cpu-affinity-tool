@@ -20,7 +20,7 @@ Confirm that the shipped Windows binary starts correctly, applies its core launc
 | **Focus** on a protected running app | Existing window is activated without reapplying settings or spawning another process | Yes |
 | Single-run and `Run All` | Individual launch and group launch both work without missing or duplicate starts | Yes |
 | **Monitoring active** / **Pause monitor** | Monitoring can be paused and resumed, corrections still apply while active, and expected events appear in **Activity** | Yes |
-| Tray hide / restore | App can hide to tray and restore cleanly without becoming unresponsive | Yes |
+| Tray hide / restore / quit | From the hidden state, **Restore** and left double-click each restore the app exactly once; rapid Restore/double-click then **Quit** leaves the app closing without another restore. **Quit** from visible and hidden states exits cleanly, removes the tray icon, creates no crash report, and allows an immediate normal or saved-rule relaunch to claim the forwarding endpoint. Run this scenario on both Windows 10 and Windows 11 when available. | Yes |
 | Theme persistence across restart | Theme changes persist after closing and reopening the app | Yes |
 | Theme selector icons | System, light, and dark states use readable painted icons with no missing-glyph square | Yes |
 | **Activity** visible and clearable | Events appear in chronological order and can be cleared without breaking later activity reporting; the newest validated saved crash-report summary remains visible until its report is removed or replaced | Yes |

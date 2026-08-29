@@ -45,7 +45,37 @@ pub struct App {
     crash_report_viewport_focused: Option<bool>,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     windows_event_log_first_frame_rendered: bool,
+    closing_requested: bool,
     is_hidden: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayCommandAction {
+    None,
+    Show,
+    Quit,
+}
+
+fn reduce_tray_commands(
+    closing_requested: bool,
+    commands: impl IntoIterator<Item = TrayCmd>,
+) -> TrayCommandAction {
+    if closing_requested {
+        return TrayCommandAction::Quit;
+    }
+
+    let mut action = TrayCommandAction::None;
+    for command in commands {
+        match command {
+            TrayCmd::Show => {
+                if action != TrayCommandAction::Quit {
+                    action = TrayCommandAction::Show;
+                }
+            }
+            TrayCmd::Quit => action = TrayCommandAction::Quit,
+        }
+    }
+    action
 }
 
 #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
@@ -180,11 +210,7 @@ impl App {
         }
 
         #[cfg(target_os = "windows")]
-        let tray_res = if let Some(hwnd_value) = hwnd {
-            init_tray(cc.egui_ctx.clone(), hwnd_value)
-        } else {
-            Err("HWND not found".to_string())
-        };
+        let tray_res = init_tray(cc.egui_ctx.clone());
 
         #[cfg(not(target_os = "windows"))]
         let tray_res = init_tray(cc.egui_ctx.clone());
@@ -211,6 +237,7 @@ impl App {
                     crash_report_viewport_focused: None,
                     #[cfg(all(target_os = "windows", feature = "windows"))]
                     windows_event_log_first_frame_rendered: false,
+                    closing_requested: false,
                     is_hidden: false,
                 }
             }
@@ -233,6 +260,7 @@ impl App {
                     crash_report_viewport_focused: None,
                     #[cfg(all(target_os = "windows", feature = "windows"))]
                     windows_event_log_first_frame_rendered: false,
+                    closing_requested: false,
                     is_hidden: false,
                 }
             }
@@ -361,6 +389,7 @@ impl App {
             crash_report_viewport_focused: None,
             #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log_first_frame_rendered: false,
+            closing_requested: false,
             is_hidden: false,
         }
     }
@@ -368,7 +397,9 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.handle_tray_events(ctx);
+        if self.handle_tray_events(ctx) {
+            return;
+        }
         self.handle_monitor_events(ctx);
         #[cfg(all(target_os = "windows", feature = "windows"))]
         self.handle_local_ipc_requests(ctx);
@@ -412,7 +443,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.is_hidden {
+        if self.closing_requested || self.is_hidden {
             return;
         }
 
@@ -428,7 +459,10 @@ impl eframe::App for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{theme_preference_for_index, viewport_gained_focus, App};
+    use super::{
+        reduce_tray_commands, theme_preference_for_index, viewport_gained_focus, App,
+        TrayCommandAction,
+    };
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use super::{AppForwardingRuntime, ForwardingServerLifetime};
     use crate::app::instance_forwarding::{
@@ -449,6 +483,7 @@ mod tests {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use crate::app::shell::sessions::ShortcutCreationRole;
     use crate::app::startup::StartupIntent;
+    use crate::tray::TrayCmd;
     use eframe::egui;
     use os_api::PriorityClass;
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -498,6 +533,52 @@ mod tests {
         assert_eq!(theme_preference_for_index(1), egui::ThemePreference::Light);
         assert_eq!(theme_preference_for_index(2), egui::ThemePreference::Dark);
         assert_eq!(theme_preference_for_index(99), egui::ThemePreference::Dark);
+    }
+
+    #[test]
+    fn tray_command_reducer_coalesces_show_requests() {
+        assert_eq!(
+            reduce_tray_commands(false, [TrayCmd::Show, TrayCmd::Show]),
+            TrayCommandAction::Show
+        );
+    }
+
+    #[test]
+    fn tray_command_reducer_makes_quit_terminal_regardless_of_order() {
+        assert_eq!(
+            reduce_tray_commands(false, [TrayCmd::Show, TrayCmd::Quit, TrayCmd::Show]),
+            TrayCommandAction::Quit
+        );
+        assert_eq!(
+            reduce_tray_commands(false, [TrayCmd::Quit, TrayCmd::Show]),
+            TrayCommandAction::Quit
+        );
+    }
+
+    #[test]
+    fn tray_command_reducer_ignores_later_show_after_quit_is_latched() {
+        assert_eq!(
+            reduce_tray_commands(true, [TrayCmd::Show]),
+            TrayCommandAction::Quit
+        );
+        assert_eq!(reduce_tray_commands(false, []), TrayCommandAction::None);
+    }
+
+    #[test]
+    fn tray_quit_latch_ignores_show_in_a_later_logic_tick() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new_for_test(sample_state());
+        let ctx = egui::Context::default();
+        app.tray_rx = Some(rx);
+        app.is_hidden = true;
+
+        tx.send(TrayCmd::Quit).unwrap();
+        assert!(app.handle_tray_events(&ctx));
+        assert!(app.closing_requested);
+
+        tx.send(TrayCmd::Show).unwrap();
+        assert!(app.handle_tray_events(&ctx));
+        assert!(app.is_hidden);
     }
 
     fn sample_state() -> AppState {
@@ -907,19 +988,29 @@ mod tests {
 }
 
 impl App {
-    fn handle_tray_events(&mut self, ctx: &egui::Context) {
-        let mut show_requested = false;
-
-        if let Some(rx) = &self.tray_rx {
-            while let Ok(cmd) = rx.try_recv() {
-                match cmd {
-                    TrayCmd::Show => show_requested = true,
-                }
-            }
+    fn handle_tray_events(&mut self, ctx: &egui::Context) -> bool {
+        if self.closing_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return true;
         }
 
-        if show_requested {
-            self.show_from_tray(ctx);
+        let commands = self
+            .tray_rx
+            .as_ref()
+            .map(|rx| std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        match reduce_tray_commands(self.closing_requested, commands) {
+            TrayCommandAction::None => false,
+            TrayCommandAction::Show => {
+                self.show_from_tray(ctx);
+                false
+            }
+            TrayCommandAction::Quit => {
+                self.closing_requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                true
+            }
         }
     }
 

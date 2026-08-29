@@ -123,6 +123,7 @@ Current runtime split:
   - Windows local shortcut-forwarding server and primary guard
   - Windows tray icon guard
   - Windows `HWND`
+  - terminal tray-quit latch
   - hidden-window flag
 - `runtime::AppState` is the composition root over:
   - `persistent_state`
@@ -165,27 +166,27 @@ Windows runtime flow:
 4. `tokio` runtime is created. A main-thread panic from this point is written best-effort without changing Rust panic semantics; background-thread/task panics delegate to the previous hook without creating a crash report.
 5. The process lowers its own priority to `BelowNormal`.
 6. The Windows entrypoint marks the crash-report phase as UI-running and enters `eframe::run_native`.
-7. The Windows entrypoint creates `App` without dispatching startup intent, which creates `AppState`, seeds in-memory logical identities, writes startup diagnostics, starts execution monitors, captures `HWND`, initializes tray integration, and starts the bounded crash-report index refresh.
+7. The Windows entrypoint creates `App` without dispatching startup intent, which creates `AppState`, seeds in-memory logical identities, writes startup diagnostics, starts execution monitors, captures `HWND`, initializes command-only tray integration, and starts the bounded crash-report index refresh.
 8. The Windows entrypoint installs the prepared shortcut-forwarding runtime with the GUI wake callback before dispatching startup intent.
    - normal GUI startup then runs autorun once
    - `RunRule` startup then skips normal autorun and dispatches only the requested saved rule
    - if a `RunRule` cold start claimed the primary guard but cannot start the forwarding server, the requested saved rule is blocked and logged instead of launching without an owned forwarding endpoint
 9. If `run_native` returns `Err`, the entrypoint synchronously writes a typed native-loop report before preserving exit code `1`, then marks the report phase as closing.
-10. `App::logic` handles tray events, monitor notifications, local forwarded shortcut commands, initial/on-demand crash-report refresh polling, the gated Windows Event Log worker, focus-gain refresh, hidden-window flow, file drops, and theme application; `App::ui` renders the active view and then the first-run Event Log disclosure from the root `egui::Ui`.
+10. `App::logic` handles tray events, monitor notifications, local forwarded shortcut commands, initial/on-demand crash-report refresh polling, the gated Windows Event Log worker, focus-gain refresh, hidden-window flow, file drops, and theme application; tray callbacks only enqueue typed restore/quit commands and request repaint, while `App::logic` owns all `HWND` restore/focus/taskbar work and requests an orderly root-viewport close for Quit. Once Quit is latched, no further shell work or rendering occurs before eframe shutdown. `App::ui` renders the active view and then the first-run Event Log disclosure from the root `egui::Ui`.
 
 Linux entrypoint now reaches the shared `shell::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
 
 ## Concurrency model
 - GUI runs on the main thread
 - background tasks use `tokio`
-- tray commands flow through `tray_rx` owned by `shell::App`
+- tray callbacks only enqueue typed commands and wake egui; `tray_rx` is owned and drained by `shell::App` on the GUI thread, which exclusively owns `HWND` operations and the terminal Quit transition
 - Windows local shortcut-forwarding requests flow through a shell-owned named-pipe server thread into `shell::App`, with per-request reply channels; request enqueue wakes the `egui` context for prompt draining
 - `AppForwardingRuntime` stops and joins the local shortcut-forwarding server before releasing the primary guard, so a replacement process cannot claim the endpoint while the previous server still owns its named pipe
 - monitor notifications flow through typed `ShellEvent` messages in `monitor_rx` owned by `RuntimeRegistry`
 - persisted state uses `Arc<RwLock<AppStateStorage>>`
 - running-process tracking uses `Arc<TokioRwLock<RunningApps>>`
 - installed-package runtime metadata cache and ownership state use in-memory `Arc<RwLock<...>>`
-- Windows tray integration uses tray-icon and muda event handlers instead of a polling loop
+- Windows tray integration uses tray-icon and muda event handlers instead of a polling loop; their process-global callbacks are installed once for the GUI process lifetime, never capture or operate on `HWND`, and retain only the typed command sender plus repaint context
 - crash-report capture uses immutable precomputed context, a thread-local recursion guard, and a non-blocking process-wide writer guard; the hook does not take app-state or GUI locks
 
 Background loops:
