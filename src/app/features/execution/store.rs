@@ -25,13 +25,6 @@ pub struct RuntimeRegistry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RunningAppPidsLookup {
-    Found(Vec<u32>),
-    NotFound,
-    Busy,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RunningAppInstancesLookup {
     Found(Vec<(u32, ProcessInstanceToken)>),
     NotFound,
@@ -179,18 +172,6 @@ impl ExecutionStore {
         }
     }
 
-    pub(crate) fn lookup_running_app_pids(&self, app_key: &AppRuntimeKey) -> RunningAppPidsLookup {
-        match self.running_apps.try_read() {
-            Ok(apps) => apps
-                .apps
-                .get(app_key)
-                .map_or(RunningAppPidsLookup::NotFound, |app| {
-                    RunningAppPidsLookup::Found(app.pids.clone())
-                }),
-            Err(_) => RunningAppPidsLookup::Busy,
-        }
-    }
-
     pub(crate) fn lookup_running_app_instances(
         &self,
         app_key: &AppRuntimeKey,
@@ -213,13 +194,6 @@ impl ExecutionStore {
                     )
                 }),
             Err(_) => RunningAppInstancesLookup::Busy,
-        }
-    }
-
-    pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
-        match self.lookup_running_app_pids(app_key) {
-            RunningAppPidsLookup::Found(pids) => Some(pids),
-            RunningAppPidsLookup::NotFound | RunningAppPidsLookup::Busy => None,
         }
     }
 
@@ -333,10 +307,6 @@ impl RuntimeRegistry {
 
     pub fn get_app_status_sync(&mut self, app_key: &AppRuntimeKey) -> AppStatus {
         self.store.get_app_status_sync(app_key)
-    }
-
-    pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
-        self.store.get_running_app_pids(app_key)
     }
 
     pub(crate) fn lookup_running_app_instances(

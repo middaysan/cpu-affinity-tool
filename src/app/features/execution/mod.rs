@@ -31,19 +31,6 @@ pub(crate) fn is_excluded_installed_auto_process(process_name: &str) -> bool {
     )
 }
 
-pub fn spawn_monitors(
-    running_apps: Arc<TokioRwLock<RunningApps>>,
-    installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
-    persistent_state: Arc<RwLock<AppStateStorage>>,
-) -> MonitorEventReceiver {
-    spawn_monitors_with_wake(
-        running_apps,
-        installed_package_tracking,
-        persistent_state,
-        None,
-    )
-}
-
 pub(crate) fn spawn_monitors_with_wake(
     running_apps: Arc<TokioRwLock<RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
