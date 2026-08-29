@@ -930,6 +930,20 @@ impl OS {
             .map_err(|e| format!("failed to read /proc/{pid}/exe: {e}"))
     }
 
+    pub fn get_process_image_path_and_instance_token(pid: u32) -> Result<(PathBuf, u64), String> {
+        let token_before = Self::get_process_instance_token(pid)?;
+        let path = Self::get_process_image_path(pid)?;
+        let token_after = Self::get_process_instance_token(pid)?;
+        if token_before != token_after {
+            return Err(format!("process {pid} changed while it was inspected"));
+        }
+        Ok((path, token_before))
+    }
+
+    pub fn get_process_parent_pid(pid: u32) -> Result<Option<u32>, String> {
+        Self::read_proc_stat(pid).map(|(parent_pid, _, _)| Some(parent_pid))
+    }
+
     pub fn focus_window_by_pid(_pid: u32) -> bool {
         false
     }
@@ -985,6 +999,13 @@ impl OS {
 
     pub fn get_process_app_user_model_id(_pid: u32) -> Result<Option<String>, String> {
         Ok(None)
+    }
+
+    pub fn get_process_app_user_model_id_and_instance_token(
+        pid: u32,
+    ) -> Result<(Option<String>, u64), String> {
+        let token = Self::get_process_instance_token(pid)?;
+        Ok((None, token))
     }
 
     pub fn resolve_installed_package_runtime_info(

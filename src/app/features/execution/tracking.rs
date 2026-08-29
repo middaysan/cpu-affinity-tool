@@ -1,12 +1,12 @@
 use crate::app::features::execution::{
-    cleanup_orphaned_package_owners, ensure_package_owner_claim,
-    is_excluded_installed_auto_process, resolve_installed_package_runtime_info_cached,
-    InstalledPackageTrackingState, MonitorEventSender,
+    InstalledPackageTrackingState, MonitorEventSender, cleanup_orphaned_package_owners,
+    ensure_package_owner_claim, is_excluded_installed_auto_process,
+    resolve_installed_package_runtime_info_cached,
 };
 use crate::app::features::rules::RulesContext;
 use crate::app::models::{
-    normalize_process_name, AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget,
-    ProcessInstanceToken, RunningApp, RunningApps,
+    AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, ProcessInstanceToken, RunningApp,
+    RunningApps, normalize_process_name,
 };
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::events::ShellEvent;
@@ -36,8 +36,14 @@ enum ConfiguredProgramMatcher {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PackageLocalPidCandidates {
-    same_aumid_pids: Vec<u32>,
-    no_identity_pids: Vec<u32>,
+    same_aumid_pids: Vec<BoundProcessInstance>,
+    no_identity_pids: Vec<BoundProcessInstance>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BoundProcessInstance {
+    pid: u32,
+    token: ProcessInstanceToken,
 }
 
 #[derive(Debug, Clone)]
@@ -59,9 +65,14 @@ struct RunningAppsIterationOutcome {
 
 trait RunningAppsOs {
     fn snapshot_process_tree(&self) -> Result<ProcessSnapshot, String>;
-    fn get_process_image_path(&self, pid: u32) -> Result<PathBuf, String>;
+    fn get_process_image_path_and_instance_token(&self, pid: u32)
+    -> Result<(PathBuf, u64), String>;
     fn get_process_instance_token(&self, pid: u32) -> Result<u64, String>;
-    fn get_process_app_user_model_id(&self, pid: u32) -> Result<Option<String>, String>;
+    fn get_process_app_user_model_id_and_instance_token(
+        &self,
+        pid: u32,
+    ) -> Result<(Option<String>, u64), String>;
+    fn get_process_parent_pid(&self, pid: u32) -> Result<Option<u32>, String>;
     fn resolve_installed_package_runtime_info(
         &self,
         aumid: &str,
@@ -78,16 +89,26 @@ impl RunningAppsOs for RealRunningAppsOs {
         })
     }
 
-    fn get_process_image_path(&self, pid: u32) -> Result<PathBuf, String> {
-        OS::get_process_image_path(pid)
+    fn get_process_image_path_and_instance_token(
+        &self,
+        pid: u32,
+    ) -> Result<(PathBuf, u64), String> {
+        OS::get_process_image_path_and_instance_token(pid)
     }
 
     fn get_process_instance_token(&self, pid: u32) -> Result<u64, String> {
         OS::get_process_instance_token(pid)
     }
 
-    fn get_process_app_user_model_id(&self, pid: u32) -> Result<Option<String>, String> {
-        OS::get_process_app_user_model_id(pid)
+    fn get_process_app_user_model_id_and_instance_token(
+        &self,
+        pid: u32,
+    ) -> Result<(Option<String>, u64), String> {
+        OS::get_process_app_user_model_id_and_instance_token(pid)
+    }
+
+    fn get_process_parent_pid(&self, pid: u32) -> Result<Option<u32>, String> {
+        OS::get_process_parent_pid(pid)
     }
 
     fn resolve_installed_package_runtime_info(
@@ -243,15 +264,15 @@ fn build_name_to_pids(snapshot: &ProcessSnapshot) -> HashMap<String, Vec<u32>> {
 fn build_aumid_to_seed_pids<O: RunningAppsOs>(
     snapshot: &ProcessSnapshot,
     os: &O,
-) -> HashMap<String, Vec<u32>> {
-    let mut aumid_to_pids: HashMap<String, Vec<u32>> = HashMap::new();
+) -> HashMap<String, Vec<BoundProcessInstance>> {
+    let mut aumid_to_pids: HashMap<String, Vec<BoundProcessInstance>> = HashMap::new();
 
     for &pid in snapshot.names.keys() {
-        if let Ok(Some(aumid)) = os.get_process_app_user_model_id(pid) {
+        if let Ok((Some(aumid), token)) = os.get_process_app_user_model_id_and_instance_token(pid) {
             aumid_to_pids
                 .entry(aumid.to_lowercase())
                 .or_default()
-                .push(pid);
+                .push(BoundProcessInstance { pid, token });
         }
     }
 
@@ -262,7 +283,7 @@ fn collect_path_verified_pids<O: RunningAppsOs>(
     matcher: &ConfiguredProgramMatcher,
     name_to_pids: &HashMap<String, Vec<u32>>,
     os: &O,
-) -> Vec<u32> {
+) -> Vec<BoundProcessInstance> {
     let ConfiguredProgramMatcher::Path {
         primary_name,
         bin_path,
@@ -275,17 +296,17 @@ fn collect_path_verified_pids<O: RunningAppsOs>(
         return Vec::new();
     };
 
-    let mut verified_pids = Vec::new();
+    let mut verified_pids: Vec<BoundProcessInstance> = Vec::new();
 
     if let Some(pids) = name_to_pids.get(primary_name) {
         for &pid in pids {
-            if verified_pids.contains(&pid) {
+            if verified_pids.iter().any(|candidate| candidate.pid == pid) {
                 continue;
             }
 
-            if let Ok(image_path) = os.get_process_image_path(pid) {
+            if let Ok((image_path, token)) = os.get_process_image_path_and_instance_token(pid) {
                 if path_eq_case_insensitive(&image_path, bin_path) {
-                    verified_pids.push(pid);
+                    verified_pids.push(BoundProcessInstance { pid, token });
                 }
             }
         }
@@ -337,13 +358,13 @@ fn path_is_under_root_case_insensitive(path: &Path, install_root: &Path) -> bool
 }
 
 fn collect_package_local_pid_candidates<O: RunningAppsOs>(
-    tracked_pids: &[u32],
+    tracked_pids: &[BoundProcessInstance],
     snapshot: &ProcessSnapshot,
     install_root: &Path,
     expected_aumid: &str,
     os: &O,
 ) -> Result<PackageLocalPidCandidates, String> {
-    let tracked_set: HashSet<u32> = tracked_pids.iter().copied().collect();
+    let tracked_set: HashSet<u32> = tracked_pids.iter().map(|candidate| candidate.pid).collect();
     let mut candidates = PackageLocalPidCandidates::default();
 
     for &pid in snapshot.names.keys() {
@@ -351,46 +372,67 @@ fn collect_package_local_pid_candidates<O: RunningAppsOs>(
             continue;
         }
 
-        let Ok(image_path) = os.get_process_image_path(pid) else {
+        let Ok((image_path, path_token)) = os.get_process_image_path_and_instance_token(pid) else {
             continue;
         };
         if !path_is_under_root_case_insensitive(&image_path, install_root) {
             continue;
         }
 
-        match os.get_process_app_user_model_id(pid)? {
+        let (aumid, aumid_token) = os.get_process_app_user_model_id_and_instance_token(pid)?;
+        if path_token != aumid_token {
+            continue;
+        }
+        let candidate = BoundProcessInstance {
+            pid,
+            token: path_token,
+        };
+
+        match aumid {
             Some(aumid) if !aumid.trim().is_empty() => {
                 if aumid.eq_ignore_ascii_case(expected_aumid) {
-                    candidates.same_aumid_pids.push(pid);
+                    candidates.same_aumid_pids.push(candidate);
                 }
             }
-            _ => candidates.no_identity_pids.push(pid),
+            _ => candidates.no_identity_pids.push(candidate),
         }
     }
 
     Ok(candidates)
 }
 
-fn extend_with_named_processes(
-    tracked_pids: &mut Vec<u32>,
+fn extend_with_named_processes<O: RunningAppsOs>(
+    tracked_pids: &mut Vec<BoundProcessInstance>,
     additional_processes: &[String],
     name_to_pids: &HashMap<String, Vec<u32>>,
+    os: &O,
 ) {
-    for pid in collect_named_process_pids(additional_processes, name_to_pids) {
-        push_unique_pid(tracked_pids, pid);
+    for candidate in collect_named_process_pids(additional_processes, name_to_pids, os) {
+        push_unique_pid(tracked_pids, candidate);
     }
 }
 
-fn collect_named_process_pids(
+fn collect_named_process_pids<O: RunningAppsOs>(
     additional_processes: &[String],
     name_to_pids: &HashMap<String, Vec<u32>>,
-) -> Vec<u32> {
+    os: &O,
+) -> Vec<BoundProcessInstance> {
     let mut tracked_pids = Vec::new();
 
     for process_name in additional_processes {
         if let Some(pids) = name_to_pids.get(process_name) {
             for &pid in pids {
-                push_unique_pid(&mut tracked_pids, pid);
+                let Ok((image_path, token)) = os.get_process_image_path_and_instance_token(pid)
+                else {
+                    continue;
+                };
+                let current_name = image_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(normalize_process_name);
+                if current_name.as_deref() == Some(process_name.as_str()) {
+                    push_unique_pid(&mut tracked_pids, BoundProcessInstance { pid, token });
+                }
             }
         }
     }
@@ -398,9 +440,12 @@ fn collect_named_process_pids(
     tracked_pids
 }
 
-fn push_unique_pid(tracked_pids: &mut Vec<u32>, pid: u32) {
-    if !tracked_pids.contains(&pid) {
-        tracked_pids.push(pid);
+fn push_unique_pid(tracked_pids: &mut Vec<BoundProcessInstance>, candidate: BoundProcessInstance) {
+    if !tracked_pids
+        .iter()
+        .any(|existing| existing.pid == candidate.pid)
+    {
+        tracked_pids.push(candidate);
     }
 }
 
@@ -420,25 +465,49 @@ fn is_known_auto_managed_installed_pid(snapshot: &ProcessSnapshot, pid: u32) -> 
 
 fn retain_auto_managed_installed_pids(
     snapshot: &ProcessSnapshot,
-    tracked_pids: &mut Vec<u32>,
+    tracked_pids: &mut Vec<BoundProcessInstance>,
     explicit_pids: &HashSet<u32>,
 ) {
-    tracked_pids.retain(|&pid| {
-        explicit_pids.contains(&pid) || is_auto_managed_installed_pid(snapshot, pid)
+    tracked_pids.retain(|candidate| {
+        explicit_pids.contains(&candidate.pid)
+            || is_auto_managed_installed_pid(snapshot, candidate.pid)
     });
 }
 
-fn extend_with_descendants(snapshot: &ProcessSnapshot, tracked_pids: &mut Vec<u32>) {
-    let mut visited: HashSet<u32> = tracked_pids.iter().copied().collect();
+fn extend_with_descendants<O: RunningAppsOs>(
+    snapshot: &ProcessSnapshot,
+    tracked_pids: &mut Vec<BoundProcessInstance>,
+    os: &O,
+) {
+    let mut visited: HashSet<u32> = tracked_pids.iter().map(|candidate| candidate.pid).collect();
     let mut stack = tracked_pids.clone();
 
-    while let Some(parent_pid) = stack.pop() {
-        if let Some(children) = snapshot.children_of.get(&parent_pid) {
+    while let Some(parent) = stack.pop() {
+        if let Some(children) = snapshot.children_of.get(&parent.pid) {
             for &child_pid in children {
-                if snapshot.names.contains_key(&child_pid) && visited.insert(child_pid) {
-                    tracked_pids.push(child_pid);
-                    stack.push(child_pid);
+                if !snapshot.names.contains_key(&child_pid) || visited.contains(&child_pid) {
+                    continue;
                 }
+
+                let Ok((_, child_token)) = os.get_process_image_path_and_instance_token(child_pid)
+                else {
+                    continue;
+                };
+                if child_token <= parent.token
+                    || os.get_process_parent_pid(child_pid).ok().flatten() != Some(parent.pid)
+                    || os.get_process_instance_token(parent.pid).ok() != Some(parent.token)
+                    || os.get_process_instance_token(child_pid).ok() != Some(child_token)
+                {
+                    continue;
+                }
+
+                let child = BoundProcessInstance {
+                    pid: child_pid,
+                    token: child_token,
+                };
+                visited.insert(child_pid);
+                tracked_pids.push(child);
+                stack.push(child);
             }
         }
     }
@@ -446,7 +515,7 @@ fn extend_with_descendants(snapshot: &ProcessSnapshot, tracked_pids: &mut Vec<u3
 
 fn replace_with_current_process_instances<O: RunningAppsOs>(
     app: &mut RunningApp,
-    candidate_pids: Vec<u32>,
+    candidate_pids: Vec<BoundProcessInstance>,
     snapshot: &ProcessSnapshot,
     os: &O,
 ) {
@@ -454,14 +523,17 @@ fn replace_with_current_process_instances<O: RunningAppsOs>(
     let mut pid_instance_tokens: HashMap<u32, ProcessInstanceToken> = HashMap::new();
 
     for pid in candidate_pids {
-        if pids.contains(&pid) || !snapshot.names.contains_key(&pid) {
+        if pids.contains(&pid.pid) || !snapshot.names.contains_key(&pid.pid) {
             continue;
         }
-        let Ok(token) = os.get_process_instance_token(pid) else {
+        let Ok(token) = os.get_process_instance_token(pid.pid) else {
             continue;
         };
-        pids.push(pid);
-        pid_instance_tokens.insert(pid, token);
+        if token != pid.token {
+            continue;
+        }
+        pids.push(pid.pid);
+        pid_instance_tokens.insert(pid.pid, token);
     }
 
     app.pids = pids;
@@ -473,7 +545,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
     configured_programs: Vec<ConfiguredProgramSnapshot>,
     snapshot: &ProcessSnapshot,
     name_to_pids: &HashMap<String, Vec<u32>>,
-    aumid_to_seed_pids: &HashMap<String, Vec<u32>>,
+    aumid_to_seed_pids: &HashMap<String, Vec<BoundProcessInstance>>,
     installed_package_tracking: &Arc<RwLock<InstalledPackageTrackingState>>,
     os: &O,
 ) -> RunningAppsIterationOutcome {
@@ -494,7 +566,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
         let mut detected_pids = match &configured.matcher {
             ConfiguredProgramMatcher::Path { fallback_names, .. } => {
                 let mut pids = verified_path_roots.clone();
-                extend_with_named_processes(&mut pids, fallback_names, name_to_pids);
+                extend_with_named_processes(&mut pids, fallback_names, name_to_pids, os);
                 pids
             }
             ConfiguredProgramMatcher::Installed { aumid } => {
@@ -519,7 +591,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
             ConfiguredProgramMatcher::Installed { .. } => {
                 detected_pids
                     .iter()
-                    .any(|&pid| is_known_auto_managed_installed_pid(snapshot, pid))
+                    .any(|candidate| is_known_auto_managed_installed_pid(snapshot, candidate.pid))
                     || apps.apps.get(&key).is_some_and(|app| {
                         app.pids
                             .iter()
@@ -546,17 +618,26 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                 ConfiguredProgramMatcher::Path { fallback_names, .. } => {
                     let mut managed_pids = verified_path_roots.clone();
                     if configured.manage_descendants {
-                        extend_with_descendants(snapshot, &mut managed_pids);
+                        extend_with_descendants(snapshot, &mut managed_pids, os);
                     }
-                    extend_with_named_processes(&mut managed_pids, fallback_names, name_to_pids);
+                    extend_with_named_processes(
+                        &mut managed_pids,
+                        fallback_names,
+                        name_to_pids,
+                        os,
+                    );
                     replace_with_current_process_instances(app, managed_pids, snapshot, os);
                 }
                 ConfiguredProgramMatcher::Installed { aumid } => {
                     let explicit_pids = collect_named_process_pids(
                         &configured.additional_processes_normalized,
                         name_to_pids,
+                        os,
                     );
-                    let explicit_pid_set: HashSet<u32> = explicit_pids.iter().copied().collect();
+                    let explicit_pid_set: HashSet<u32> = explicit_pids
+                        .iter()
+                        .map(|candidate| candidate.pid)
+                        .collect();
                     let mut managed_pids = detected_pids.clone();
 
                     if let Some(package_info) = installed_package_info.as_ref() {
@@ -584,7 +665,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                         &explicit_pid_set,
                     );
                     if configured.manage_descendants {
-                        extend_with_descendants(snapshot, &mut managed_pids);
+                        extend_with_descendants(snapshot, &mut managed_pids, os);
                     }
                     for pid in explicit_pids {
                         push_unique_pid(&mut managed_pids, pid);
@@ -626,16 +707,20 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
             ConfiguredProgramMatcher::Path { fallback_names, .. } => {
                 detected_pids = verified_path_roots.clone();
                 if configured.manage_descendants {
-                    extend_with_descendants(snapshot, &mut detected_pids);
+                    extend_with_descendants(snapshot, &mut detected_pids, os);
                 }
-                extend_with_named_processes(&mut detected_pids, fallback_names, name_to_pids);
+                extend_with_named_processes(&mut detected_pids, fallback_names, name_to_pids, os);
             }
             ConfiguredProgramMatcher::Installed { aumid } => {
                 let explicit_pids = collect_named_process_pids(
                     &configured.additional_processes_normalized,
                     name_to_pids,
+                    os,
                 );
-                let explicit_pid_set: HashSet<u32> = explicit_pids.iter().copied().collect();
+                let explicit_pid_set: HashSet<u32> = explicit_pids
+                    .iter()
+                    .map(|candidate| candidate.pid)
+                    .collect();
 
                 if let Some(package_info) = installed_package_info.as_ref() {
                     if let Ok(package_candidates) = collect_package_local_pid_candidates(
@@ -658,7 +743,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
 
                 retain_auto_managed_installed_pids(snapshot, &mut detected_pids, &explicit_pid_set);
                 if configured.manage_descendants {
-                    extend_with_descendants(snapshot, &mut detected_pids);
+                    extend_with_descendants(snapshot, &mut detected_pids, os);
                 }
                 for pid in explicit_pids {
                     push_unique_pid(&mut detected_pids, pid);
@@ -671,21 +756,27 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
             continue;
         }
 
-        outcome.notifications.push(format!(
-            "App detected: {} (PID {})",
-            configured.display_name, detected_pids[0]
-        ));
-        apps.add_app(
-            &key,
-            detected_pids[0],
-            configured.group_id,
-            configured.rule_id,
-        );
-        outcome.changed = true;
+        let initial_pid = detected_pids[0].pid;
+        apps.add_app(&key, initial_pid, configured.group_id, configured.rule_id);
 
         if let Some(app) = apps.apps.get_mut(&key) {
             replace_with_current_process_instances(app, detected_pids, snapshot, os);
         }
+        let Some(current_pid) = apps
+            .apps
+            .get(&key)
+            .and_then(|app| app.pids.first())
+            .copied()
+        else {
+            apps.remove_app(&key);
+            continue;
+        };
+
+        outcome.notifications.push(format!(
+            "App detected: {} (PID {})",
+            configured.display_name, current_pid
+        ));
+        outcome.changed = true;
     }
 
     let app_keys: Vec<AppRuntimeKey> = apps.apps.keys().cloned().collect();
@@ -704,9 +795,9 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
 #[cfg(test)]
 mod tests {
     use super::{
+        BoundProcessInstance, ConfiguredProgramMatcher, ProcessSnapshot, RunningAppsOs,
         build_aumid_to_seed_pids, build_name_to_pids, collect_configured_programs,
-        extend_with_descendants, process_running_apps_iteration_with_os, ConfiguredProgramMatcher,
-        ProcessSnapshot, RunningAppsOs,
+        extend_with_descendants, process_running_apps_iteration_with_os,
     };
     use crate::app::features::execution::InstalledPackageTrackingState;
     use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, RunningApps};
@@ -720,10 +811,13 @@ mod tests {
     struct FakeRunningAppsOs {
         snapshot: Result<ProcessSnapshot, String>,
         image_paths: HashMap<u32, PathBuf>,
+        image_instance_tokens: HashMap<u32, u64>,
         #[allow(dead_code)]
         live_pids: HashSet<u32>,
         instance_tokens: HashMap<u32, u64>,
         aumids: HashMap<u32, String>,
+        aumid_instance_tokens: HashMap<u32, u64>,
+        current_parent_pids: HashMap<u32, u32>,
         aumid_lookup_count: Cell<usize>,
         installed_package_infos: HashMap<String, Result<InstalledPackageRuntimeInfo, String>>,
         metadata_lookup_count: Cell<usize>,
@@ -734,9 +828,12 @@ mod tests {
             Self {
                 snapshot: Ok(ProcessSnapshot::default()),
                 image_paths: HashMap::new(),
+                image_instance_tokens: HashMap::new(),
                 live_pids: HashSet::new(),
                 instance_tokens: HashMap::new(),
                 aumids: HashMap::new(),
+                aumid_instance_tokens: HashMap::new(),
+                current_parent_pids: HashMap::new(),
                 aumid_lookup_count: Cell::new(0),
                 installed_package_infos: HashMap::new(),
                 metadata_lookup_count: Cell::new(0),
@@ -749,11 +846,28 @@ mod tests {
             self.snapshot.clone()
         }
 
-        fn get_process_image_path(&self, pid: u32) -> Result<PathBuf, String> {
-            self.image_paths
+        fn get_process_image_path_and_instance_token(
+            &self,
+            pid: u32,
+        ) -> Result<(PathBuf, u64), String> {
+            let path = self
+                .image_paths
                 .get(&pid)
                 .cloned()
-                .ok_or_else(|| format!("missing image path for pid {pid}"))
+                .or_else(|| {
+                    self.snapshot
+                        .as_ref()
+                        .ok()
+                        .and_then(|snapshot| snapshot.names.get(&pid).map(PathBuf::from))
+                })
+                .ok_or_else(|| format!("missing image path for pid {pid}"))?;
+            let token = self
+                .image_instance_tokens
+                .get(&pid)
+                .copied()
+                .or_else(|| self.get_process_instance_token(pid).ok())
+                .ok_or_else(|| format!("missing image instance token for pid {pid}"))?;
+            Ok((path, token))
         }
 
         fn get_process_instance_token(&self, pid: u32) -> Result<u64, String> {
@@ -768,10 +882,30 @@ mod tests {
                 .ok_or_else(|| format!("missing process instance token for pid {pid}"))
         }
 
-        fn get_process_app_user_model_id(&self, pid: u32) -> Result<Option<String>, String> {
+        fn get_process_app_user_model_id_and_instance_token(
+            &self,
+            pid: u32,
+        ) -> Result<(Option<String>, u64), String> {
             self.aumid_lookup_count
                 .set(self.aumid_lookup_count.get() + 1);
-            Ok(self.aumids.get(&pid).cloned())
+            let token = self
+                .aumid_instance_tokens
+                .get(&pid)
+                .copied()
+                .or_else(|| self.get_process_instance_token(pid).ok())
+                .ok_or_else(|| format!("missing AUMID instance token for pid {pid}"))?;
+            Ok((self.aumids.get(&pid).cloned(), token))
+        }
+
+        fn get_process_parent_pid(&self, pid: u32) -> Result<Option<u32>, String> {
+            Ok(self.current_parent_pids.get(&pid).copied().or_else(|| {
+                self.snapshot.as_ref().ok().and_then(|snapshot| {
+                    snapshot
+                        .children_of
+                        .iter()
+                        .find_map(|(&parent, children)| children.contains(&pid).then_some(parent))
+                })
+            }))
         }
 
         fn resolve_installed_package_runtime_info(
@@ -1358,9 +1492,12 @@ mod tests {
                 names: HashMap::from([(21, "spotifyhelper.exe".to_string())]),
             }),
             image_paths: HashMap::new(),
+            image_instance_tokens: HashMap::new(),
             live_pids: HashSet::from([21]),
             instance_tokens: HashMap::new(),
             aumids: HashMap::new(),
+            aumid_instance_tokens: HashMap::new(),
+            current_parent_pids: HashMap::new(),
             aumid_lookup_count: Cell::new(0),
             metadata_lookup_count: Cell::new(0),
             installed_package_infos: HashMap::from([(
@@ -1642,6 +1779,104 @@ mod tests {
     }
 
     #[test]
+    fn test_path_proof_is_rejected_when_instance_changes_before_tracking() {
+        let state = sample_path_program_state();
+        let configured = collect_configured_programs(&state);
+        let key = state.groups[0].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::new(),
+                names: HashMap::from([(10, "game.exe".to_string())]),
+            }),
+            image_paths: HashMap::from([(10, PathBuf::from(r"C:\game.exe"))]),
+            image_instance_tokens: HashMap::from([(10, 1)]),
+            instance_tokens: HashMap::from([(10, 2)]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        assert!(!outcome.changed);
+        assert!(outcome.notifications.is_empty());
+        assert!(!apps.apps.contains_key(&key));
+    }
+
+    #[test]
+    fn test_aumid_proof_is_rejected_when_instance_changes_before_tracking() {
+        let state = sample_installed_program_state();
+        let configured = collect_configured_programs(&state);
+        let key = state.groups[0].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::new(),
+                names: HashMap::from([(20, "spotify.exe".to_string())]),
+            }),
+            aumids: HashMap::from([(
+                20,
+                "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+            )]),
+            aumid_instance_tokens: HashMap::from([(20, 1)]),
+            instance_tokens: HashMap::from([(20, 2)]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        assert!(!outcome.changed);
+        assert!(outcome.notifications.is_empty());
+        assert!(!apps.apps.contains_key(&key));
+    }
+
+    #[test]
+    fn test_descendant_is_rejected_when_creation_precedes_verified_parent() {
+        let mut state = sample_path_program_state();
+        state.groups[0].programs[0].manage_descendants = true;
+        let configured = collect_configured_programs(&state);
+        let key = state.groups[0].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::from([(10, vec![12])]),
+                names: HashMap::from([(10, "game.exe".to_string()), (12, "child.exe".to_string())]),
+            }),
+            image_paths: HashMap::from([(10, PathBuf::from(r"C:\game.exe"))]),
+            instance_tokens: HashMap::from([(10, 100), (12, 99)]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        assert!(outcome.changed);
+        assert_eq!(apps.apps[&key].pids, vec![10]);
+    }
+
+    #[test]
+    fn test_descendant_is_rejected_when_current_parent_relation_changed() {
+        let mut state = sample_path_program_state();
+        state.groups[0].programs[0].manage_descendants = true;
+        let configured = collect_configured_programs(&state);
+        let key = state.groups[0].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                children_of: HashMap::from([(10, vec![12])]),
+                names: HashMap::from([(10, "game.exe".to_string()), (12, "child.exe".to_string())]),
+            }),
+            image_paths: HashMap::from([(10, PathBuf::from(r"C:\game.exe"))]),
+            instance_tokens: HashMap::from([(10, 100), (12, 120)]),
+            current_parent_pids: HashMap::from([(12, 99)]),
+            ..Default::default()
+        };
+
+        let outcome = run_iteration(&mut apps, configured, &os);
+
+        assert!(outcome.changed);
+        assert_eq!(apps.apps[&key].pids, vec![10]);
+    }
+
+    #[test]
     fn test_extend_with_descendants_walks_known_child_to_grandchild() {
         let snapshot = ProcessSnapshot {
             children_of: HashMap::from([(10, vec![11]), (11, vec![12])]),
@@ -1651,10 +1886,21 @@ mod tests {
                 (12, "grandchild.exe".to_string()),
             ]),
         };
-        let mut tracked_pids = vec![10];
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(snapshot.clone()),
+            ..Default::default()
+        };
+        let mut tracked_pids = vec![BoundProcessInstance { pid: 10, token: 10 }];
 
-        extend_with_descendants(&snapshot, &mut tracked_pids);
+        extend_with_descendants(&snapshot, &mut tracked_pids, &os);
 
-        assert_eq!(tracked_pids, vec![10, 11, 12]);
+        assert_eq!(
+            tracked_pids,
+            vec![
+                BoundProcessInstance { pid: 10, token: 10 },
+                BoundProcessInstance { pid: 11, token: 11 },
+                BoundProcessInstance { pid: 12, token: 12 },
+            ]
+        );
     }
 }

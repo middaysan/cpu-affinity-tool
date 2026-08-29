@@ -3,7 +3,7 @@ use std::mem::size_of;
 use std::path::PathBuf;
 
 use windows::Win32::Foundation::{
-    APPMODEL_ERROR_NO_APPLICATION, ERROR_INSUFFICIENT_BUFFER, FILETIME, STILL_ACTIVE,
+    APPMODEL_ERROR_NO_APPLICATION, ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, STILL_ACTIVE,
 };
 use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -26,17 +26,66 @@ pub struct ProcessTree {
     pub names: HashMap<u32, String>,
 }
 
-fn process_instance_token_internal(pid: u32) -> Result<u64, OsError> {
+fn process_instance_token_from_handle(handle: HANDLE) -> Result<u64, OsError> {
     unsafe {
-        let handle = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
-            .or_else(|_| open_process(pid, PROCESS_QUERY_INFORMATION))?;
-        let _hg = HandleGuard(handle);
         let mut created = FILETIME::default();
         let mut exited = FILETIME::default();
         let mut kernel = FILETIME::default();
         let mut user = FILETIME::default();
         GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user)?;
         Ok(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
+    }
+}
+
+fn process_instance_token_internal(pid: u32) -> Result<u64, OsError> {
+    let handle = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+        .or_else(|_| open_process(pid, PROCESS_QUERY_INFORMATION))?;
+    let _hg = HandleGuard(handle);
+    process_instance_token_from_handle(handle)
+}
+
+fn process_image_path_from_handle(handle: HANDLE) -> Result<PathBuf, OsError> {
+    unsafe {
+        let mut buffer = [0u16; 2048];
+        let len = K32GetModuleFileNameExW(Some(handle), None, &mut buffer);
+        if len == 0 {
+            return Err(OsError::Win(windows::core::Error::from_thread()));
+        }
+
+        Ok(PathBuf::from(String::from_utf16_lossy(
+            &buffer[..len as usize],
+        )))
+    }
+}
+
+fn process_app_user_model_id_from_handle(handle: HANDLE) -> Result<Option<String>, OsError> {
+    unsafe {
+        let mut len = 0u32;
+        let status = GetApplicationUserModelId(handle, &mut len, Some(PWSTR::null()));
+        if status == APPMODEL_ERROR_NO_APPLICATION {
+            return Ok(None);
+        }
+        if status != ERROR_INSUFFICIENT_BUFFER {
+            return Err(OsError::Msg(format!(
+                "GetApplicationUserModelId sizing call failed with status {:?}",
+                status
+            )));
+        }
+
+        let mut buffer = vec![0u16; len as usize];
+        let status = GetApplicationUserModelId(handle, &mut len, Some(PWSTR(buffer.as_mut_ptr())));
+        if status == APPMODEL_ERROR_NO_APPLICATION {
+            return Ok(None);
+        }
+        if status != windows::Win32::Foundation::WIN32_ERROR(0) {
+            return Err(OsError::Msg(format!(
+                "GetApplicationUserModelId failed with status {:?}",
+                status
+            )));
+        }
+
+        let slice_len = len.saturating_sub(1) as usize;
+        Ok(Some(String::from_utf16_lossy(&buffer[..slice_len])))
     }
 }
 
@@ -88,12 +137,6 @@ fn snapshot_process_tree_internal() -> Result<ProcessTree, OsError> {
             names,
         })
     }
-}
-
-#[allow(dead_code)]
-fn get_parent_pid(pid: u32) -> Option<u32> {
-    let tree = snapshot_process_tree_internal().ok()?;
-    tree.parent_of.get(&pid).copied()
 }
 
 #[allow(dead_code)]
@@ -277,58 +320,58 @@ impl OS {
     }
 
     pub fn get_process_image_path(pid: u32) -> Result<PathBuf, String> {
-        (|| unsafe {
-            let handle = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
-                .or_else(|_| open_process(pid, PROCESS_QUERY_INFORMATION))?;
+        (|| {
+            let handle = open_process(pid, PROCESS_QUERY_INFORMATION)
+                .or_else(|_| open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION))?;
             let _hg = HandleGuard(handle);
-
-            let mut buffer = [0u16; 2048];
-            let len = K32GetModuleFileNameExW(Some(handle), None, &mut buffer);
-            if len == 0 {
-                return Err(OsError::Win(windows::core::Error::from_thread()));
-            }
-
-            let path_str = String::from_utf16_lossy(&buffer[..len as usize]);
-            Ok(PathBuf::from(path_str))
+            process_image_path_from_handle(handle)
         })()
         .map_err(|e: OsError| format!("Failed to get image path for process {}: {}", pid, e))
     }
 
+    /// Returns the executable path and creation token from one pinned process object.
+    pub fn get_process_image_path_and_instance_token(pid: u32) -> Result<(PathBuf, u64), String> {
+        (|| {
+            let handle = open_process(pid, PROCESS_QUERY_INFORMATION)
+                .or_else(|_| open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION))?;
+            let _hg = HandleGuard(handle);
+            let token = process_instance_token_from_handle(handle)?;
+            let path = process_image_path_from_handle(handle)?;
+            Ok((path, token))
+        })()
+        .map_err(|e: OsError| format!("Failed to inspect process {pid}: {e}"))
+    }
+
     pub fn get_process_app_user_model_id(pid: u32) -> Result<Option<String>, String> {
-        (|| unsafe {
+        (|| {
             let handle = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
                 .or_else(|_| open_process(pid, PROCESS_QUERY_INFORMATION))?;
             let _hg = HandleGuard(handle);
-
-            let mut len = 0u32;
-            let status = GetApplicationUserModelId(handle, &mut len, Some(PWSTR::null()));
-            if status == APPMODEL_ERROR_NO_APPLICATION {
-                return Ok(None);
-            }
-            if status != ERROR_INSUFFICIENT_BUFFER {
-                return Err(OsError::Msg(format!(
-                    "GetApplicationUserModelId sizing call failed with status {:?}",
-                    status
-                )));
-            }
-
-            let mut buffer = vec![0u16; len as usize];
-            let status =
-                GetApplicationUserModelId(handle, &mut len, Some(PWSTR(buffer.as_mut_ptr())));
-            if status == APPMODEL_ERROR_NO_APPLICATION {
-                return Ok(None);
-            }
-            if status != windows::Win32::Foundation::WIN32_ERROR(0) {
-                return Err(OsError::Msg(format!(
-                    "GetApplicationUserModelId failed with status {:?}",
-                    status
-                )));
-            }
-
-            let slice_len = len.saturating_sub(1) as usize;
-            Ok(Some(String::from_utf16_lossy(&buffer[..slice_len])))
+            process_app_user_model_id_from_handle(handle)
         })()
         .map_err(|e: OsError| format!("Failed to get AppUserModelId for process {}: {}", pid, e))
+    }
+
+    /// Returns the AUMID and creation token from one pinned process object.
+    pub fn get_process_app_user_model_id_and_instance_token(
+        pid: u32,
+    ) -> Result<(Option<String>, u64), String> {
+        (|| {
+            let handle = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+                .or_else(|_| open_process(pid, PROCESS_QUERY_INFORMATION))?;
+            let _hg = HandleGuard(handle);
+            let token = process_instance_token_from_handle(handle)?;
+            let aumid = process_app_user_model_id_from_handle(handle)?;
+            Ok((aumid, token))
+        })()
+        .map_err(|e: OsError| format!("Failed to inspect process {pid}: {e}"))
+    }
+
+    /// Reads the current Toolhelp parent relation for one PID.
+    pub fn get_process_parent_pid(pid: u32) -> Result<Option<u32>, String> {
+        snapshot_process_tree_internal()
+            .map(|tree| tree.parent_of.get(&pid).copied())
+            .map_err(|error| format!("Failed to inspect parent process for {pid}: {error}"))
     }
 }
 
