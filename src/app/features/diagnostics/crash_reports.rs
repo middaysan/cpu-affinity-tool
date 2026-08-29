@@ -1261,7 +1261,7 @@ impl CrashReportManager {
         let snapshot = self.state.snapshot()?;
         let report = snapshot.reports.first()?;
         Some(format!(
-            "Previous crash report: {} at {} UTC (app v{}).\\nReason: {}\\nFull report: {}",
+            "Previous crash report: {} at {} UTC (app v{}).\nReason: {}\nFull report: {}",
             report.kind.user_title(),
             report.timestamp_utc,
             report.app_version,
@@ -2176,6 +2176,8 @@ mod tests {
         assert!(message.contains("newer panic"));
         assert!(!message.contains("older panic"));
         assert!(message.contains("Previous crash report"));
+        assert!(message.contains("\nReason: newer panic\nFull report: "));
+        assert!(!message.contains(r"\nReason:"));
     }
 
     #[test]

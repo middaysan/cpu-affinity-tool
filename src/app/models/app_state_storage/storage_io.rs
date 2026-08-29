@@ -97,7 +97,8 @@ pub(super) fn save_to_path_with_filesystem<T: Serialize>(
     }
 
     // Linux needs an explicit directory sync after rename for durable name publication.
-    // Windows publishing uses write-through replacement APIs below.
+    // The Windows path has already synchronized staged file contents; its parent-directory
+    // sync is intentionally a no-op because Rust cannot portably open directories there.
     filesystem.sync_parent(path)?;
     Ok(())
 }
@@ -200,7 +201,7 @@ fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()>
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{
-        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
+        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACE_FILE_FLAGS,
     };
 
     let staged_wide = staged_path
@@ -222,7 +223,9 @@ fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()>
                 PCWSTR(destination_wide.as_ptr()),
                 PCWSTR(staged_wide.as_ptr()),
                 PCWSTR::null(),
-                REPLACEFILE_WRITE_THROUGH,
+                // REPLACEFILE_WRITE_THROUGH is documented as unsupported. The staged
+                // file contents were synchronized before this atomic replacement.
+                REPLACE_FILE_FLAGS(0),
                 None,
                 None,
             )

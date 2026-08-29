@@ -21,7 +21,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Confirm the changelog and any release note summary call out the schema `v10` save boundary when applicable:
   - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
   - `v6`, `v7`, `v8`, or `v9` to `v10` saves do not write `state.json.pre-v6*`
-  - missing `manage_descendants` in pre-`v10` rules preserves existing automatic descendant management; newly created rules default it to off
+  - missing `manage_descendants` in pre-`v10` rules preserves existing automatic descendant management; missing values in `v10` and newly created rules default it to off
   - downgrade to older binaries is unsupported after that first current-schema save
 - Review release-impacting files if they changed: `build.rs`, `app.manifest`, `assets/icon.ico`, `assets/cpu_presets.json`, `scripts/build-windows-release.ps1`, `scripts/assert-windows-pdb-matches.ps1`, `scripts/test-windows-pdb-verifier.ps1`, `scripts/assert-windows-release-manifest.ps1`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, and `.github/workflows/release-linux-beta.yml`.
 

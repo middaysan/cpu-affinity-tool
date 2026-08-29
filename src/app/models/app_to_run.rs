@@ -367,9 +367,9 @@ impl AppToRun {
     }
 }
 
-/// Rules saved before schema v10 retain their established descendant behavior.
+/// Missing policy outside a version-aware state migration uses the safe default.
 fn default_manage_descendants() -> bool {
-    true
+    false
 }
 
 pub fn normalize_process_name(candidate: &str) -> String {
@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v5_shape_deserializes_to_installed_target() {
+    fn test_v5_shape_without_schema_context_uses_safe_descendant_default() {
         let value = json!({
             "name": "Spotify",
             "launch_target": {
@@ -639,11 +639,11 @@ mod tests {
             Some("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify")
         );
         assert!(app.is_installed_target());
-        assert!(app.manage_descendants);
+        assert!(!app.manage_descendants);
     }
 
     #[test]
-    fn test_missing_descendant_setting_preserves_existing_rule_behavior() {
+    fn test_missing_descendant_setting_without_schema_context_defaults_off() {
         let value = json!({
             "name": "Sample",
             "launch_target": {
@@ -660,6 +660,6 @@ mod tests {
 
         let app: AppToRun = serde_json::from_value(value).unwrap();
 
-        assert!(app.manage_descendants);
+        assert!(!app.manage_descendants);
     }
 }

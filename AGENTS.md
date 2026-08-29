@@ -216,13 +216,13 @@ Persisted state facts:
 - schema `v6` and older path-target app rules receive an in-memory one-time compatibility backfill that adds the primary executable filename to `additional_processes` when no normalized equivalent already exists
 - schema `v7` treats an empty `additional_processes` list as intentional user state and does not re-add the primary executable filename on load
 - schema `v9` stores `windows_event_log_diagnostics_enabled`; the pre-release schema-v8 disclosure field is ignored, and v8 and older files are effective enabled without an eager rewrite
-- schema `v10` stores each rule's `manage_descendants` policy. Missing values in pre-v10 state preserve the previous behavior (`true`), while new rules default to `false`.
+- schema `v10` stores each rule's `manage_descendants` policy. Version-aware loading materializes missing values in pre-v10 state as the previous behavior (`true`); missing values in v10, schema-less rule inputs, and new rules use the safer `false` default.
 - the upgrade from pre-`v6` data or `v6` data to the current schema happens only on an explicit save path
 - before the first current-schema save after loading pre-`v6` state, persistence creates an additional `state.json.pre-v6`, `state.json.pre-v6-1`, and so on backup series
 - loading `v6`, `v7`, `v8`, or `v9` for upgrade to `v10` does not create a `pre-v6` backup
 - after the first current-schema save, downgrade to an older binary that only understands earlier state is unsupported
 - backup rotation uses `state.json.old`, `state.json.old1`, `state.json.old2`, and so on
-- persistence loading is split into `state_path`, `storage_io`, `migrations`, and `schema_refresh`; saves stage and sync a same-directory temporary file before a write-through replacement on Windows or an atomic rename plus directory sync on Linux. Recovery and migration backups are copy-and-sync operations that preserve their source before publishing.
+- persistence loading is split into `state_path`, `storage_io`, `migrations`, and `schema_refresh`; saves stage and sync a same-directory temporary file before an atomic replacement on Windows or an atomic rename plus directory sync on Linux. Windows does not claim parent-directory durability across power loss; recovery and migration backups are copy-and-sync operations that preserve their source before publishing.
 
 Key entities:
 - `CoreGroup` - CPU core group plus assigned apps

@@ -18,7 +18,7 @@ Use this checklist with `docs/release-process.md`.
 - Confirm the prerelease notes call out the schema `v10` save boundary when applicable:
   - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
   - `v6`, `v7`, `v8`, or `v9` to `v10` saves do not write `state.json.pre-v6*`
-  - missing `manage_descendants` in pre-`v10` rules preserves existing automatic descendant management; newly created rules default it to off
+  - missing `manage_descendants` in pre-`v10` rules preserves existing automatic descendant management; missing values in `v10` and newly created rules default it to off
   - downgrade to older binaries is unsupported after that first current-schema save
 - Review release-impacting files if they changed: `assets/cpu_presets.json`, `.github/workflows/ci.yml`, `.github/workflows/release-linux-beta.yml`, `README.md`, `docs/release-process.md`, and `AGENTS.md`.
 

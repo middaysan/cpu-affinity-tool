@@ -176,7 +176,7 @@ Linux beta notes:
 - Linux still does not have a stable published release artifact
 - tray/taskbar/focus behavior still does not have Windows parity
 
-Windows-only Event Log diagnostics are enabled by default and perform at most one bounded local lookup of recent `Application Error` records after the first rendered frame. Activity shows only a sanitized Record ID, UTC time, exception code, faulting-module basename, module version, faulting offset, and process creation time when Windows supplied valid values. The lookup is not proof of a crash cause, never uploads data, and can be disabled from Activity. It does not create dumps, modify Windows Error Reporting, or change registry settings.
+Windows-only Event Log diagnostics are enabled by default and perform one bounded local lookup of recent `Application Error` records after the first rendered frame, with at most one delayed retry when that lookup succeeds but finds nothing. Activity shows only a sanitized Record ID, UTC time, exception code, faulting-module basename, module version, faulting offset, and process creation time when Windows supplied valid values. The lookup is not proof of a crash cause, never uploads data, and can be disabled from Activity. It does not create dumps, modify Windows Error Reporting, or change registry settings.
 
 Useful verification commands:
 

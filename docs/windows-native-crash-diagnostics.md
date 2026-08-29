@@ -8,16 +8,20 @@ This is a manual, opt-in support procedure. CPU Affinity Tool never enables Wind
 
 - Reproduce with the exact release `cpu-affinity-tool.exe` that failed.
 - Keep the matching `cpu_affinity_tool.pdb` from the same release. A PDB with a different GUID or age cannot reliably symbolize that EXE.
-- Choose a directory that the elevated application can write to, for example `C:\CpuAffinityToolDumps`.
+- Choose a private directory in the intended user's local profile, for example `%LOCALAPPDATA%\CpuAffinityTool\SupportDumps`. Do not use a shared, public, synchronized, or repository directory.
+- Because the app runs elevated, confirm that `%LOCALAPPDATA%` resolves to the intended account. With credential-over-the-shoulder elevation it can resolve to the administrator account instead.
 - Treat every dump as sensitive: it can contain paths, command lines, in-memory text, and data from the application or related processes. Do not attach one publicly without reviewing it and getting maintainer guidance.
 
 ## Enable a small, bounded capture
 
-1. Create the dump directory in Explorer or from an elevated PowerShell prompt:
+1. Create the dump directory in the intended account's local application-data folder:
 
    ```powershell
-   New-Item -ItemType Directory -Force -Path C:\CpuAffinityToolDumps
+   $dumpDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CpuAffinityTool\SupportDumps'
+   New-Item -ItemType Directory -Force -Path $dumpDir
    ```
+
+   In **Properties > Security**, restrict the directory to the intended user and `SYSTEM`; remove inherited access for other users only if you understand the resulting ACL. Confirm the final path and permissions before enabling capture.
 
 2. Open Registry Editor as an administrator and create this key exactly:
 
@@ -29,7 +33,7 @@ This is a manual, opt-in support procedure. CPU Affinity Tool never enables Wind
 
    | Name | Type | Value | Purpose |
    | --- | --- | --- | --- |
-   | `DumpFolder` | `REG_EXPAND_SZ` | `C:\CpuAffinityToolDumps` | Destination for captures |
+   | `DumpFolder` | `REG_EXPAND_SZ` | `%LOCALAPPDATA%\CpuAffinityTool\SupportDumps` | Private per-user destination for captures |
    | `DumpType` | `REG_DWORD` | `1` | Mini dump; start here |
    | `DumpCount` | `REG_DWORD` | `3` | Retains at most three dumps |
 
@@ -46,4 +50,4 @@ This is a manual, opt-in support procedure. CPU Affinity Tool never enables Wind
 
 ## Disable and remove the capture
 
-After collecting the requested evidence, delete the `cpu-affinity-tool.exe` key under `LocalDumps` in Registry Editor. Then review the dump directory and delete or securely archive the files according to your support agreement. Removing the key restores the normal WER behavior for this executable.
+After collecting the requested evidence, delete the `cpu-affinity-tool.exe` key under `LocalDumps` in Registry Editor. Then review the dump directory and securely delete or move the files into an encrypted, access-controlled archive according to your support agreement. Do not leave dumps in Downloads, Desktop, a repository, or a synchronized folder. Removing the key restores the normal WER behavior for this executable.

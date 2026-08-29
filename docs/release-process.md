@@ -69,7 +69,7 @@ Before pushing a stable Windows tag, align:
 - `Cargo.toml` version
 - `changelogs/vX.Y.Z.txt`
 - release-facing docs if platform or process truth changed
-- if the release includes the first shipped schema `v10` build, call out that the first explicit save upgrades `state.json` to `v10`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6`, `v7`, `v8`, or `v9` to `v10` does not. State clearly that missing descendant-management values preserve the prior enabled behavior and newly created rules default it to off.
+- if the release includes the first shipped schema `v10` build, call out that the first explicit save upgrades `state.json` to `v10`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6`, `v7`, `v8`, or `v9` to `v10` does not. State clearly that version-aware loading preserves the prior enabled behavior for missing pre-`v10` descendant-management values, while missing values in `v10` and newly created rules default it to off.
 
 Before pushing a Linux beta tag, align:
 
@@ -77,7 +77,7 @@ Before pushing a Linux beta tag, align:
 - `Cargo.toml` version: `X.Y.Z`
 - `changelogs/linux-beta-vX.Y.Z-N.txt`
 - Linux beta release-facing docs if platform or process truth changed
-- if the prerelease includes the first shipped schema `v10` build, call out that the first explicit save upgrades `state.json` to `v10`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6`, `v7`, `v8`, or `v9` to `v10` does not. State clearly that missing descendant-management values preserve the prior enabled behavior and newly created rules default it to off.
+- if the prerelease includes the first shipped schema `v10` build, call out that the first explicit save upgrades `state.json` to `v10`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6`, `v7`, `v8`, or `v9` to `v10` does not. State clearly that version-aware loading preserves the prior enabled behavior for missing pre-`v10` descendant-management values, while missing values in `v10` and newly created rules default it to off.
 
 ## Recommended stable release steps
 

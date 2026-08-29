@@ -201,6 +201,26 @@ fn test_load_v9_rule_defaults_descendant_management_on_and_persists_v10() {
 }
 
 #[test]
+fn test_load_v10_rule_missing_descendant_management_defaults_off() {
+    with_temp_state_path("v10_missing_descendant_management", |state_path| {
+        let mut value = serde_json::to_value(sample_state()).unwrap();
+        value["groups"][0]["programs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("manage_descendants");
+        let original = serde_json::to_string_pretty(&value).unwrap();
+        fs::write(state_path, &original).unwrap();
+
+        let loaded = AppStateStorage::load_from_path(state_path);
+
+        assert_eq!(loaded.version, CURRENT_APP_STATE_VERSION);
+        assert_eq!(loaded.loaded_version, CURRENT_APP_STATE_VERSION);
+        assert!(!loaded.groups[0].programs[0].manage_descendants);
+        assert_eq!(fs::read_to_string(state_path).unwrap(), original);
+    });
+}
+
+#[test]
 fn test_load_v7_state_defaults_event_log_diagnostics_to_enabled_without_rewrite() {
     with_temp_state_path("v7_event_log_defaults", |state_path| {
         let mut state = serde_json::to_value(current_schema_state_with_version(7)).unwrap();
