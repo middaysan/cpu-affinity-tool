@@ -105,7 +105,7 @@ body:
     id: unexpected_exit_details
     attributes:
       label: Unexpected exit details
-      description: If the app disappeared without a report, say whether it remained in Task Manager or the tray. If Activity shows an Unverified Windows Event Log record, include its record ID, UTC time, exception code, and module name; do not paste raw Event Viewer XML without review.
+      description: If the app disappeared without a report, say whether it remained in Task Manager or the tray. If Activity shows an Unverified Windows Event Log record, include its record ID, UTC time, exception code, module name, module version, faulting offset, and process creation time when shown; do not paste raw Event Viewer XML without review. Do not attach a memory dump unless a maintainer requests it and you have reviewed its contents.
 
   - type: textarea
     id: additional_context

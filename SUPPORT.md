@@ -35,7 +35,7 @@ For technical problems, include as much of the following as possible:
 
 The Windows build stores crash reports under the app's active data directory and never uploads them automatically. After the next completed startup scan, **Activity** keeps a summary of the newest validated crash report even if normal activity is cleared. Use the small report button in the app header, choose **Show in Explorer**, and review the full file before attaching it to a public issue. A report can contain local paths or other system details. If redaction is needed, make a copy and redact the copy instead of editing the app-managed original.
 
-Windows Event Log diagnostics are enabled by default, so **Activity** can show an `Unverified Windows Event Log record`. It is a local, read-only lookup of recent `Application Error` records for this executable, not an upload or a root-cause determination. The displayed Record ID, UTC time, exception code, and sanitized module basename are useful for a report, but do not attach raw Event Viewer exports or full event XML without reviewing them for local information. You can disable the lookup from Activity; disabling clears the visible record immediately. If saving the disable fails, the app reports that it is session-only and keeps lookups disabled for the current run.
+Windows Event Log diagnostics are enabled by default, so **Activity** can show an `Unverified Windows Event Log record`. It is a local, read-only lookup of recent `Application Error` records for this executable, not an upload or a root-cause determination. The displayed Record ID, UTC time, exception code, sanitized module basename, module version, faulting offset, and process creation time are useful when Windows supplied valid values. Do not attach raw Event Viewer exports or full event XML without reviewing them for local information. You can disable the lookup from Activity; disabling clears the visible record immediately. If saving the disable fails, the app reports that it is session-only and keeps lookups disabled for the current run. The lookup does not create dumps or modify Windows Error Reporting or the registry.
 
 The absence of a crash report does not rule out a native crash, forced termination, out-of-memory termination, anti-cheat action, or another external stop. If the app disappeared without a report, also include:
 
@@ -43,6 +43,8 @@ The absence of a crash report does not rule out a native crash, forced terminati
 - whether the tray icon remained available
 - the relevant Reliability Monitor or Event Viewer entry
 - the faulting module and exception code, if Windows recorded them
+
+For an unreproducible native access violation, a maintainer may ask for a manually enabled Windows LocalDumps capture. It is never enabled by the application. Follow [docs/windows-native-crash-diagnostics.md](docs/windows-native-crash-diagnostics.md), use the exact release EXE/PDB pair, and review any dump before sharing: memory dumps can contain sensitive application and personal data.
 
 ## Security issues
 

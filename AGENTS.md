@@ -108,7 +108,7 @@ Layers:
 - `shell` owns the top-level `eframe::App`, tray/window lifecycle, route enums, UI sessions, presenter dispatch, and repaint policy
 - `features` own product behavior:
   - `rules` owns group and rule mutations plus logical `GroupId` / `RuleId` identity
-  - `execution` owns launch, runtime tracking, reconcile loops, package-owner claims, and typed monitor notifications
+  - `execution` owns launch, process-instance revalidation, runtime tracking, reconcile loops, package-owner claims, and typed monitor notifications
   - `shortcut` owns saved-rule desktop shortcut service, shortcut filename allocation, OS adapter seam, and user-safe shortcut creation errors
   - `preferences` owns theme and monitoring toggles
   - `topology` owns CPU model/thread detection helpers
@@ -181,7 +181,7 @@ Linux entrypoint now reaches the shared `shell::App` shell, startup logging, aut
 - background tasks use `tokio`
 - tray callbacks only enqueue typed commands and wake egui; `tray_rx` is owned and drained by `shell::App` on the GUI thread, which exclusively owns `HWND` operations and the terminal Quit transition
 - Windows local shortcut-forwarding requests flow through a shell-owned named-pipe server thread into `shell::App`, with per-request reply channels; request enqueue wakes the `egui` context for prompt draining
-- `AppForwardingRuntime` stops and joins the local shortcut-forwarding server before releasing the primary guard, so a replacement process cannot claim the endpoint while the previous server still owns its named pipe
+- `AppForwardingRuntime` clears the GUI wake callback and requests server shutdown during drop. It joins promptly when the worker reaches a terminal I/O completion; otherwise the detached reaper retains the pipe listener, in-flight `OVERLAPPED` buffers, and primary guard until it can safely release them. A replacement process therefore cannot claim the endpoint while that worker still owns it.
 - monitor notifications flow through typed `ShellEvent` messages in `monitor_rx` owned by `RuntimeRegistry`
 - persisted state uses `Arc<RwLock<AppStateStorage>>`
 - running-process tracking uses `Arc<TokioRwLock<RunningApps>>`
@@ -211,17 +211,18 @@ Persisted state facts:
   - Windows: `%LOCALAPPDATA%\CpuAffinityTool\state.json`
   - Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/cpu-affinity-tool/state.json`
 - there is no automatic migration or copy between the legacy sidecar path and the platform data path
-- current persisted schema version: `9`
+- current persisted schema version: `10`
 - schema `v5` and older formats are dual-read and normalized in memory without eager rewrite on load
 - schema `v6` and older path-target app rules receive an in-memory one-time compatibility backfill that adds the primary executable filename to `additional_processes` when no normalized equivalent already exists
 - schema `v7` treats an empty `additional_processes` list as intentional user state and does not re-add the primary executable filename on load
 - schema `v9` stores `windows_event_log_diagnostics_enabled`; the pre-release schema-v8 disclosure field is ignored, and v8 and older files are effective enabled without an eager rewrite
+- schema `v10` stores each rule's `manage_descendants` policy. Missing values in pre-v10 state preserve the previous behavior (`true`), while new rules default to `false`.
 - the upgrade from pre-`v6` data or `v6` data to the current schema happens only on an explicit save path
 - before the first current-schema save after loading pre-`v6` state, persistence creates an additional `state.json.pre-v6`, `state.json.pre-v6-1`, and so on backup series
-- loading `v6`, `v7`, or `v8` for upgrade to `v9` does not create a `pre-v6` backup
+- loading `v6`, `v7`, `v8`, or `v9` for upgrade to `v10` does not create a `pre-v6` backup
 - after the first current-schema save, downgrade to an older binary that only understands earlier state is unsupported
 - backup rotation uses `state.json.old`, `state.json.old1`, `state.json.old2`, and so on
-- persistence loading is split into `state_path`, `storage_io`, `migrations`, and `schema_refresh`
+- persistence loading is split into `state_path`, `storage_io`, `migrations`, and `schema_refresh`; saves stage and sync a same-directory temporary file before a write-through replacement on Windows or an atomic rename plus directory sync on Linux. Recovery and migration backups are copy-and-sync operations that preserve their source before publishing.
 
 Key entities:
 - `CoreGroup` - CPU core group plus assigned apps
@@ -242,6 +243,7 @@ Important contract facts:
 - `AppToRun` path targets store both source path and resolved executable path
 - `AppToRun` installed targets store Windows `AUMID` and do not expose user-editable args in the current contract
 - runtime tracking identity keeps the existing stable encoded key contract, but it now flows through typed `AppRuntimeKey` instead of raw `String` keys across runtime core
+- tracked process IDs carry a process-instance creation token. A PID is not retained merely because it is live: rediscovery rebuilds roots from current verified provenance and associates only current token-bearing processes; descendant expansion is governed by the persisted rule policy.
 - logical group and rule ownership persist in `AppStateStorage.rule_identities` starting with schema `v6`
 - `rule_identities` also persists next group/rule allocation counters so deleted logical IDs are not reused after save and reload
 - older `rule_identities` data without allocation counters remains readable; missing counters are reconstructed from the highest existing logical IDs and persisted on the next explicit save
@@ -255,7 +257,7 @@ Important contract facts:
   - `Important` capped at 200 entries
   - `Sticky` retained outside normal rotation for startup and critical diagnostics
   - the local crash-report context is runtime-only and separate from chronological entries; Activity's **Clear** action preserves it
-- local Windows crash reports are separate from `AppStateStorage` and do not change schema `v9`:
+- local Windows crash reports are separate from `AppStateStorage` and do not change schema `v10`:
   - directory: `<active-data-dir>/crash-reports/`
   - event kinds: main-thread panic and native UI-loop error
   - maximum complete report size: 256 KiB; maximum payload section: 8 KiB
@@ -268,9 +270,9 @@ Important contract facts:
 - Windows Event Log diagnostics is separate from crash reports and remains runtime-only, owned by `WindowsEventLogManager` rather than `LogManager`:
   - it reads only recent local `Application Error` Event ID 1000 records from the local Application log after the first rendered frame when the enabled-by-default preference remains on
   - it uses an exact executable-name plus fully-qualified-path match and accepts false negatives rather than filename-only matches
-  - only record ID, UTC time, exception code, and a sanitized faulting-module basename may enter the retained Activity context; no raw XML, event payload, path, clipboard, state.json, crash report, or automatic upload is used
+  - only record ID, UTC time, exception code, a sanitized faulting-module basename, and strictly validated optional module version, faulting offset, and process creation time may enter the retained Activity context; no raw XML, event payload, path, clipboard, state.json, crash report, dump, or automatic upload is used
   - an Activity record is unverified supplemental evidence, not proof of a previous launch or crash cause
-  - Activity can disable the lookup persistently; disabling clears the visible record immediately, while a failed save is reported as session-only
+  - Activity can disable the lookup persistently; disabling clears the visible record immediately, while a failed save is reported as session-only. The app never creates dumps or changes WER/registry settings.
 
 CPU presets:
 - `assets/cpu_presets.json` is a compile-time source file
@@ -293,6 +295,7 @@ Data source separation:
 - opening the active data directory in the platform file manager
 - opening crash-report directories and selecting report files through an Explorer shell process whose token is verified non-elevated and below high integrity; the pre-existing Activity data-folder action retains its direct Explorer launch contract
 - bounded read-only lookup of matching local Windows Application Event Log records for enabled-by-default diagnostics
+- process-instance token lookup used to prevent retained/reused PIDs from being managed as a different process instance
 - resolving the current elevated token's per-user Desktop directory for Windows shortcut creation
 - Windows shortcut creation for saved-rule launch shortcuts
 - affinity read and set
@@ -319,12 +322,14 @@ Internal backend structure:
 
 Windows release-path surface:
 - tray integration
+- tray initialization falls back to a reachable normal window when the icon cannot be created; it never hides the window without a usable tray
 - taskbar and focus behavior
 - `.lnk` and `.url` parsing
 - `.lnk` creation through `os_api::ShortcutSpec`
 - current-token per-user Desktop resolution through the Windows known-folder API for saved-rule shortcut creation; credential-over-the-shoulder UAC can place shortcuts on the elevated account's Desktop instead of the unelevated shell user's Desktop
 - token-verified Explorer-process shell execution for crash-report folder open and report selection; elevated/high-integrity or unknown brokers fail closed, and the app does not launch a default text editor for managed crash reports
 - local named-pipe and primary-guard forwarding for saved-rule shortcut launches
+- bounded named-pipe shutdown with an ownership-preserving worker reaper for incomplete overlapped I/O
 - registry-based URI resolution
 - `AppsFolder + Start Menu shortcuts + App Paths` installed app discovery and AUMID activation
 - runtime-only package metadata lookup and package-local helper tracking for installed targets
