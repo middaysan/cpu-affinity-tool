@@ -1003,6 +1003,16 @@ fn open_report_file_for_delete(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
+#[cfg(target_os = "windows")]
+fn file_rename_path(path: &Path) -> (Vec<u16>, u32) {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut wide_path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let name_length = (wide_path.len() * size_of::<u16>()) as u32;
+    wide_path.push(0);
+    (wide_path, name_length)
+}
+
 #[cfg(all(any(feature = "windows", test), target_os = "windows"))]
 fn publish_open_file_no_replace(
     file: &File,
@@ -1010,14 +1020,13 @@ fn publish_open_file_no_replace(
     final_path: &Path,
 ) -> io::Result<()> {
     use std::mem::{offset_of, size_of};
-    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
     };
 
-    let final_name = final_path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let (final_name, final_name_length) = file_rename_path(final_path);
     let name_offset = offset_of!(FILE_RENAME_INFO, FileName);
     let byte_count = name_offset + final_name.len() * size_of::<u16>();
     let word_count = byte_count.div_ceil(size_of::<usize>());
@@ -1027,7 +1036,7 @@ fn publish_open_file_no_replace(
     unsafe {
         (*information).Anonymous.ReplaceIfExists = false;
         (*information).RootDirectory = HANDLE::default();
-        (*information).FileNameLength = (final_name.len() * size_of::<u16>()) as u32;
+        (*information).FileNameLength = final_name_length;
         std::ptr::copy_nonoverlapping(
             final_name.as_ptr(),
             storage
@@ -1746,6 +1755,18 @@ mod tests {
         let parsed = parse_report(report.as_bytes()).expect("parse untrusted metadata");
         assert!(parsed.app_version.len() <= 128);
         assert!(!parsed.app_version.chars().any(char::is_control));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rename_target_path_is_nul_terminated_but_length_excludes_terminator() {
+        let (wide_path, name_length) = file_rename_path(Path::new(r"C:\\reports\\crash.txt"));
+
+        assert_eq!(wide_path.last(), Some(&0));
+        assert_eq!(
+            name_length as usize,
+            (wide_path.len() - 1) * size_of::<u16>()
+        );
     }
 
     #[test]
