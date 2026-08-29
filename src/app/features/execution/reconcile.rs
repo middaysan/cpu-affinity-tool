@@ -2,7 +2,7 @@ use crate::app::features::rules::RulesContext;
 use crate::app::models::{AppRuntimeKey, AppStateStorage, RunningApps};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::events::ShellEvent;
-use os_api::{PriorityClass, OS};
+use os_api::{PriorityClass, ProcessSettingsApplyOutcome, OS};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
@@ -23,37 +23,34 @@ struct ProcessSettingsIterationOutcome {
 }
 
 trait ProcessSettingsOs {
-    fn get_process_affinity(&mut self, pid: u32) -> Result<usize, String>;
-    fn get_process_priority(&mut self, pid: u32) -> Result<PriorityClass, String>;
-    fn set_process_affinity_by_pid(&mut self, pid: u32, mask: usize) -> Result<(), String>;
-    fn set_process_priority_by_pid(
+    fn apply_process_settings_if_instance(
         &mut self,
         pid: u32,
+        expected_instance_token: u64,
+        mask: usize,
         priority: PriorityClass,
-    ) -> Result<(), String>;
+        apply_changes: bool,
+    ) -> Result<ProcessSettingsApplyOutcome, String>;
 }
 
 struct RealProcessSettingsOs;
 
 impl ProcessSettingsOs for RealProcessSettingsOs {
-    fn get_process_affinity(&mut self, pid: u32) -> Result<usize, String> {
-        OS::get_process_affinity(pid)
-    }
-
-    fn get_process_priority(&mut self, pid: u32) -> Result<PriorityClass, String> {
-        OS::get_process_priority(pid)
-    }
-
-    fn set_process_affinity_by_pid(&mut self, pid: u32, mask: usize) -> Result<(), String> {
-        OS::set_process_affinity_by_pid(pid, mask)
-    }
-
-    fn set_process_priority_by_pid(
+    fn apply_process_settings_if_instance(
         &mut self,
         pid: u32,
+        expected_instance_token: u64,
+        mask: usize,
         priority: PriorityClass,
-    ) -> Result<(), String> {
-        OS::set_process_priority_by_pid(pid, priority)
+        apply_changes: bool,
+    ) -> Result<ProcessSettingsApplyOutcome, String> {
+        OS::apply_process_settings_if_instance(
+            pid,
+            expected_instance_token,
+            mask,
+            priority,
+            apply_changes,
+        )
     }
 }
 
@@ -113,12 +110,9 @@ fn collect_program_settings(
     let snapshot = rules.snapshot(state);
 
     for group in snapshot.groups {
-        let mut expected_mask = 0usize;
-        for &core_index in &group.cores {
-            if core_index < (std::mem::size_of::<usize>() * 8) {
-                expected_mask |= 1 << core_index;
-            }
-        }
+        let Ok(expected_mask) = affinity_mask_from_cores(&group.cores) else {
+            continue;
+        };
 
         for program in group.rules {
             settings.insert(
@@ -135,6 +129,20 @@ fn collect_program_settings(
     }
 
     settings
+}
+
+fn affinity_mask_from_cores(cores: &[usize]) -> Result<usize, String> {
+    let mut mask = 0usize;
+    for &core_index in cores {
+        let bit = 1usize
+            .checked_shl(core_index as u32)
+            .ok_or_else(|| format!("core index {core_index} out of range for affinity mask"))?;
+        mask |= bit;
+    }
+    if mask == 0 {
+        return Err("affinity mask is empty".to_string());
+    }
+    Ok(mask)
 }
 
 fn process_settings_iteration_with_os<O: ProcessSettingsOs>(
@@ -154,36 +162,43 @@ fn process_settings_iteration_with_os<O: ProcessSettingsOs>(
             let mut all_matched = true;
 
             for &pid in &app.pids {
-                if let Ok(current_mask) = os.get_process_affinity(pid) {
-                    if current_mask != settings.expected_mask {
-                        all_matched = false;
-                        if monitoring_enabled
-                            && os
-                                .set_process_affinity_by_pid(pid, settings.expected_mask)
-                                .is_ok()
-                        {
-                            outcome.notifications.push(format!(
-                                "Fixed affinity for {} (PID {}): {:X} -> {:X}",
-                                settings.name, pid, current_mask, settings.expected_mask
-                            ));
-                        }
-                    }
-                }
+                let Some(&instance_token) = app.pid_instance_tokens.get(&pid) else {
+                    all_matched = false;
+                    continue;
+                };
 
-                if let Ok(current_priority) = os.get_process_priority(pid) {
-                    if current_priority != settings.expected_priority {
+                match os.apply_process_settings_if_instance(
+                    pid,
+                    instance_token,
+                    settings.expected_mask,
+                    settings.expected_priority,
+                    monitoring_enabled,
+                ) {
+                    Ok(applied) if applied.affinity_changed || applied.priority_changed => {
                         all_matched = false;
-                        if monitoring_enabled
-                            && os
-                                .set_process_priority_by_pid(pid, settings.expected_priority)
-                                .is_ok()
-                        {
-                            outcome.notifications.push(format!(
-                                "Fixed priority for {} (PID {}): {:?} -> {:?}",
-                                settings.name, pid, current_priority, settings.expected_priority
-                            ));
+                        if monitoring_enabled {
+                            if applied.affinity_changed {
+                                outcome.notifications.push(format!(
+                                    "Fixed affinity for {} (PID {}): {:X} -> {:X}",
+                                    settings.name,
+                                    pid,
+                                    applied.previous_affinity,
+                                    settings.expected_mask
+                                ));
+                            }
+                            if applied.priority_changed {
+                                outcome.notifications.push(format!(
+                                    "Fixed priority for {} (PID {}): {:?} -> {:?}",
+                                    settings.name,
+                                    pid,
+                                    applied.previous_priority,
+                                    settings.expected_priority
+                                ));
+                            }
                         }
                     }
+                    Ok(_) => {}
+                    Err(_) => all_matched = false,
                 }
             }
 
@@ -199,16 +214,17 @@ fn process_settings_iteration_with_os<O: ProcessSettingsOs>(
 
 #[cfg(test)]
 mod tests {
-    use super::{process_settings_iteration_with_os, ProcessSettingsOs};
+    use super::{affinity_mask_from_cores, process_settings_iteration_with_os, ProcessSettingsOs};
     use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, RunningApps};
     use crate::app::shared::ids::{GroupId, RuleId};
-    use os_api::PriorityClass;
+    use os_api::{PriorityClass, ProcessSettingsApplyOutcome};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
     struct FakeProcessSettingsOs {
         affinity: HashMap<u32, usize>,
         priority: HashMap<u32, PriorityClass>,
+        tokens: HashMap<u32, u64>,
         affinity_sets: Vec<(u32, usize)>,
         priority_sets: Vec<(u32, PriorityClass)>,
     }
@@ -218,6 +234,7 @@ mod tests {
             Self {
                 affinity,
                 priority,
+                tokens: HashMap::new(),
                 affinity_sets: Vec::new(),
                 priority_sets: Vec::new(),
             }
@@ -225,34 +242,43 @@ mod tests {
     }
 
     impl ProcessSettingsOs for FakeProcessSettingsOs {
-        fn get_process_affinity(&mut self, pid: u32) -> Result<usize, String> {
-            self.affinity
-                .get(&pid)
-                .copied()
-                .ok_or_else(|| format!("missing affinity for pid {pid}"))
-        }
-
-        fn get_process_priority(&mut self, pid: u32) -> Result<PriorityClass, String> {
-            self.priority
-                .get(&pid)
-                .copied()
-                .ok_or_else(|| format!("missing priority for pid {pid}"))
-        }
-
-        fn set_process_affinity_by_pid(&mut self, pid: u32, mask: usize) -> Result<(), String> {
-            self.affinity.insert(pid, mask);
-            self.affinity_sets.push((pid, mask));
-            Ok(())
-        }
-
-        fn set_process_priority_by_pid(
+        fn apply_process_settings_if_instance(
             &mut self,
             pid: u32,
+            expected_instance_token: u64,
+            mask: usize,
             priority: PriorityClass,
-        ) -> Result<(), String> {
-            self.priority.insert(pid, priority);
-            self.priority_sets.push((pid, priority));
-            Ok(())
+            apply_changes: bool,
+        ) -> Result<ProcessSettingsApplyOutcome, String> {
+            if self.tokens.get(&pid).copied() != Some(expected_instance_token) {
+                return Err("process instance no longer matches the tracked PID".to_string());
+            }
+            let previous_affinity = self
+                .affinity
+                .get(&pid)
+                .copied()
+                .ok_or_else(|| format!("missing affinity for pid {pid}"))?;
+            let previous_priority = self
+                .priority
+                .get(&pid)
+                .copied()
+                .ok_or_else(|| format!("missing priority for pid {pid}"))?;
+            let affinity_changed = previous_affinity != mask;
+            let priority_changed = previous_priority != priority;
+            if apply_changes && affinity_changed {
+                self.affinity.insert(pid, mask);
+                self.affinity_sets.push((pid, mask));
+            }
+            if apply_changes && priority_changed {
+                self.priority.insert(pid, priority);
+                self.priority_sets.push((pid, priority));
+            }
+            Ok(ProcessSettingsApplyOutcome {
+                previous_affinity,
+                previous_priority,
+                affinity_changed,
+                priority_changed,
+            })
         }
     }
 
@@ -312,6 +338,21 @@ mod tests {
         RuleId(format!("rule-{value}"))
     }
 
+    fn seed_tracked_instance(
+        apps: &mut RunningApps,
+        key: &crate::app::models::AppRuntimeKey,
+        pid: u32,
+        os: &mut FakeProcessSettingsOs,
+    ) {
+        let token = u64::from(pid) + 10_000;
+        apps.apps
+            .get_mut(key)
+            .unwrap()
+            .pid_instance_tokens
+            .insert(pid, token);
+        os.tokens.insert(pid, token);
+    }
+
     #[test]
     fn test_remap_group_and_rule_ids_by_app_key() {
         let state = sample_state();
@@ -329,6 +370,7 @@ mod tests {
             HashMap::from([(77, 0b110)]),
             HashMap::from([(77, PriorityClass::High)]),
         );
+        seed_tracked_instance(&mut apps, &key, 77, &mut os);
 
         let outcome =
             process_settings_iteration_with_os(&mut apps, &reordered_state, false, &mut os);
@@ -349,6 +391,7 @@ mod tests {
             HashMap::from([(88, 0b001)]),
             HashMap::from([(88, PriorityClass::Normal)]),
         );
+        seed_tracked_instance(&mut apps, &key, 88, &mut os);
 
         let outcome = process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
 
@@ -369,6 +412,7 @@ mod tests {
             HashMap::from([(89, 0b001)]),
             HashMap::from([(89, PriorityClass::Normal)]),
         );
+        seed_tracked_instance(&mut apps, &key, 89, &mut os);
 
         let outcome = process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
 
@@ -389,6 +433,7 @@ mod tests {
             HashMap::from([(90, 0b001)]),
             HashMap::from([(90, PriorityClass::Normal)]),
         );
+        seed_tracked_instance(&mut apps, &key, 90, &mut os);
 
         let first = process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
         assert!(first.changed);
@@ -410,11 +455,47 @@ mod tests {
             HashMap::from([(91, 0b001)]),
             HashMap::from([(91, PriorityClass::Normal)]),
         );
+        seed_tracked_instance(&mut apps, &key, 91, &mut os);
 
         let outcome = process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
 
         assert!(!outcome.changed);
         assert!(outcome.notifications.is_empty());
         assert!(apps.apps.get(&key).unwrap().settings_matched);
+    }
+
+    #[test]
+    fn stale_pid_token_never_applies_settings() {
+        let state = sample_state();
+        let key = state.groups[1].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        apps.add_app(&key, 92, group_id(1), rule_id(0));
+        apps.apps
+            .get_mut(&key)
+            .unwrap()
+            .pid_instance_tokens
+            .insert(92, 1);
+        let mut os = FakeProcessSettingsOs::new(
+            HashMap::from([(92, 0b001)]),
+            HashMap::from([(92, PriorityClass::Normal)]),
+        );
+        os.tokens.insert(92, 2);
+
+        let outcome = process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
+
+        assert!(outcome.changed);
+        assert!(outcome.notifications.is_empty());
+        assert!(os.affinity_sets.is_empty());
+        assert!(os.priority_sets.is_empty());
+    }
+
+    #[test]
+    fn affinity_mask_rejects_empty_and_out_of_range_cores() {
+        assert_eq!(
+            affinity_mask_from_cores(&[]),
+            Err("affinity mask is empty".to_string())
+        );
+        let error = affinity_mask_from_cores(&[usize::BITS as usize]).unwrap_err();
+        assert!(error.contains("out of range"));
     }
 }

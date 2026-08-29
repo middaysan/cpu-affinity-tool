@@ -17,11 +17,11 @@ use libc::{
 use nix::sched::{CpuSet, sched_getaffinity, sched_setaffinity};
 use nix::unistd::Pid;
 
-use crate::PriorityClass;
 use crate::{
     InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
     InstalledPackageRuntimeInfo, ShortcutSpec,
 };
+use crate::{PriorityClass, ProcessSettingsApplyOutcome};
 
 pub struct OS;
 
@@ -736,6 +736,39 @@ impl OS {
 
     pub fn set_process_priority_by_pid(pid: u32, priority: PriorityClass) -> Result<(), String> {
         Self::set_priority_for_pid(pid as pid_t, priority)
+    }
+
+    /// Linux has no retained process-handle equivalent here. The token check rejects a PID
+    /// that was already reused before this call, but cannot close the later PID-reuse race.
+    pub fn apply_process_settings_if_instance(
+        pid: u32,
+        expected_instance_token: u64,
+        mask: usize,
+        priority: PriorityClass,
+        apply_changes: bool,
+    ) -> Result<ProcessSettingsApplyOutcome, String> {
+        if mask == 0 {
+            return Err("affinity mask is empty".to_string());
+        }
+        if Self::get_process_instance_token(pid)? != expected_instance_token {
+            return Err("process instance no longer matches the tracked PID".to_string());
+        }
+        let previous_affinity = Self::get_process_affinity(pid)?;
+        let previous_priority = Self::get_process_priority(pid)?;
+        let affinity_changed = previous_affinity != mask;
+        let priority_changed = previous_priority != priority;
+        if apply_changes && affinity_changed {
+            Self::set_process_affinity_by_pid(pid, mask)?;
+        }
+        if apply_changes && priority_changed {
+            Self::set_process_priority_by_pid(pid, priority)?;
+        }
+        Ok(ProcessSettingsApplyOutcome {
+            previous_affinity,
+            previous_priority,
+            affinity_changed,
+            priority_changed,
+        })
     }
 
     pub fn set_current_process_priority(priority: PriorityClass) -> Result<(), String> {

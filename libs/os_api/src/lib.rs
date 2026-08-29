@@ -5,7 +5,7 @@ pub use catalog::{
     InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
     InstalledPackageRuntimeInfo,
 };
-pub use process::PriorityClass;
+pub use process::{PriorityClass, ProcessSettingsApplyOutcome};
 pub use shortcut::ShortcutSpec;
 
 #[cfg(target_os = "linux")]
