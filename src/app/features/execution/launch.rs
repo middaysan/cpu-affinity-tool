@@ -785,6 +785,7 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
     });
 }
 
+#[allow(clippy::too_many_arguments)] // The test seam mirrors the bounded post-launch request.
 fn post_launch_correction_poll_with_os<O: LaunchOs>(
     os: &O,
     expected_aumid: &str,

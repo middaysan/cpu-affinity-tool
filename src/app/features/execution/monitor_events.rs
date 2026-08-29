@@ -40,6 +40,7 @@ pub(crate) struct MonitorEventReceiver {
     dropped_warnings: Arc<AtomicUsize>,
 }
 
+#[cfg(test)]
 pub(crate) fn monitor_event_channel() -> (MonitorEventSender, MonitorEventReceiver) {
     monitor_event_channel_with_wake(None)
 }

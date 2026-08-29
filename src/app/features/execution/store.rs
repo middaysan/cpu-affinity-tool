@@ -86,6 +86,7 @@ impl ExecutionStore {
         )
     }
 
+    #[cfg(test)]
     pub fn add_running_app(
         &self,
         app_key: &AppRuntimeKey,
@@ -276,6 +277,7 @@ impl RuntimeRegistry {
             .resolve_installed_package_runtime_info_with(aumid, resolver)
     }
 
+    #[cfg(test)]
     pub fn add_running_app(
         &self,
         app_key: &AppRuntimeKey,

@@ -1,12 +1,12 @@
 use crate::app::features::execution::{
-    InstalledPackageTrackingState, MonitorEventSender, cleanup_orphaned_package_owners,
-    ensure_package_owner_claim, is_excluded_installed_auto_process,
-    resolve_installed_package_runtime_info_cached,
+    cleanup_orphaned_package_owners, ensure_package_owner_claim,
+    is_excluded_installed_auto_process, resolve_installed_package_runtime_info_cached,
+    InstalledPackageTrackingState, MonitorEventSender,
 };
 use crate::app::features::rules::RulesContext;
 use crate::app::models::{
-    AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, ProcessInstanceToken, RunningApp,
-    RunningApps, normalize_process_name,
+    normalize_process_name, AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget,
+    ProcessInstanceToken, RunningApp, RunningApps,
 };
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::events::ShellEvent;
@@ -66,7 +66,7 @@ struct RunningAppsIterationOutcome {
 trait RunningAppsOs {
     fn snapshot_process_tree(&self) -> Result<ProcessSnapshot, String>;
     fn get_process_image_path_and_instance_token(&self, pid: u32)
-    -> Result<(PathBuf, u64), String>;
+        -> Result<(PathBuf, u64), String>;
     fn get_process_instance_token(&self, pid: u32) -> Result<u64, String>;
     fn get_process_app_user_model_id_and_instance_token(
         &self,
@@ -795,9 +795,9 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundProcessInstance, ConfiguredProgramMatcher, ProcessSnapshot, RunningAppsOs,
         build_aumid_to_seed_pids, build_name_to_pids, collect_configured_programs,
-        extend_with_descendants, process_running_apps_iteration_with_os,
+        extend_with_descendants, process_running_apps_iteration_with_os, BoundProcessInstance,
+        ConfiguredProgramMatcher, ProcessSnapshot, RunningAppsOs,
     };
     use crate::app::features::execution::InstalledPackageTrackingState;
     use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, RunningApps};
