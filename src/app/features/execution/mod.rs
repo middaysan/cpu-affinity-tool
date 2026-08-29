@@ -36,20 +36,6 @@ pub fn spawn_monitors(
     persistent_state: Arc<RwLock<AppStateStorage>>,
 ) -> MonitorEventReceiver {
     let (monitor_tx, monitor_rx) = monitor_event_channel();
-    let (legacy_monitor_tx, legacy_monitor_rx) = std::sync::mpsc::channel();
-    let bridge_tx = monitor_tx.clone();
-
-    // `reconcile` still uses the legacy std sender while its process-identity
-    // hardening is being integrated. The bridge is the only temporary
-    // compatibility point; it preserves a bounded, non-blocking GUI queue.
-    std::thread::Builder::new()
-        .name("monitor-event-bridge".to_string())
-        .spawn(move || {
-            while let Ok(event) = legacy_monitor_rx.recv() {
-                bridge_tx.try_send(event);
-            }
-        })
-        .expect("failed to start monitor event bridge");
 
     tokio::spawn(run_running_app_monitor(
         running_apps.clone(),
@@ -60,7 +46,7 @@ pub fn spawn_monitors(
     tokio::spawn(run_process_settings_monitor(
         running_apps,
         persistent_state,
-        legacy_monitor_tx,
+        monitor_tx,
     ));
 
     monitor_rx

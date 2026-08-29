@@ -1,4 +1,5 @@
 use crate::app::features::rules::RulesContext;
+use crate::app::features::execution::MonitorEventSender;
 use crate::app::models::{AppRuntimeKey, AppStateStorage, RunningApps};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::events::ShellEvent;
@@ -57,7 +58,7 @@ impl ProcessSettingsOs for RealProcessSettingsOs {
 pub async fn run_process_settings_monitor(
     running_apps: Arc<TokioRwLock<RunningApps>>,
     app_state: Arc<RwLock<AppStateStorage>>,
-    monitor_tx: std::sync::mpsc::Sender<ShellEvent>,
+    monitor_tx: MonitorEventSender,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
     let mut os = RealProcessSettingsOs;
@@ -69,7 +70,7 @@ pub async fn run_process_settings_monitor(
             let state = match app_state.read() {
                 Ok(guard) => guard,
                 Err(_) => {
-                    let _ = monitor_tx.send(ShellEvent::Warning(
+                    monitor_tx.try_send(ShellEvent::Warning(
                         "WARNING: persistent_state lock poisoned, skipping monitor iteration"
                             .to_string(),
                     ));
@@ -89,14 +90,14 @@ pub async fn run_process_settings_monitor(
 
             if !outcome.notifications.is_empty() {
                 for message in outcome.notifications {
-                    let _ = monitor_tx.send(ShellEvent::Monitor(format!("MONITOR: {}", message)));
+                    monitor_tx.try_send(ShellEvent::Monitor(format!("MONITOR: {}", message)));
                     #[cfg(debug_assertions)]
                     println!("MONITOR: {}", message);
                 }
             }
 
             if outcome.changed {
-                let _ = monitor_tx.send(ShellEvent::RuntimeStateChanged);
+                monitor_tx.try_send(ShellEvent::RuntimeStateChanged);
             }
         }
     }
