@@ -1,5 +1,5 @@
-use crate::app::features::rules::RulesContext;
 use crate::app::features::execution::MonitorEventSender;
+use crate::app::features::rules::RulesContext;
 use crate::app::models::{AppRuntimeKey, AppStateStorage, RunningApps};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::events::ShellEvent;
