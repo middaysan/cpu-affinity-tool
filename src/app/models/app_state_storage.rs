@@ -70,20 +70,31 @@ impl AppStateStorage {
     }
 
     pub(crate) fn load_from_path(path: &Path) -> AppStateStorage {
-        storage_io::read_state_file(path)
+        let mut filesystem = storage_io::RealStateFilesystem;
+        Self::load_from_path_with_filesystem(path, &mut filesystem)
+    }
+
+    pub(crate) fn load_from_path_with_filesystem(
+        path: &Path,
+        filesystem: &mut impl storage_io::StateFilesystem,
+    ) -> AppStateStorage {
+        storage_io::read_state_file_with_filesystem(path, filesystem)
             .and_then(|data| migrations::load_from_data(&data, path))
             .unwrap_or_else(|| {
-                storage_io::backup_state_file(path);
-
                 let default_state = schema_refresh::build_default_state();
-                let _ = default_state.save_to_path(path);
+                if let Err(error) = storage_io::backup_state_file_with_filesystem(path, filesystem)
+                {
+                    eprintln!(
+                        "ERROR: Failed to preserve unreadable state before recovery: {error}"
+                    );
+                } else if let Err(error) =
+                    storage_io::save_to_path_with_filesystem(&default_state, path, filesystem)
+                {
+                    eprintln!("ERROR: Failed to publish recovered default state: {error}");
+                }
 
                 default_state
             })
-    }
-
-    fn save_to_path(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        storage_io::save_to_path(self, path)
     }
 
     #[cfg_attr(test, allow(dead_code))]
@@ -93,10 +104,19 @@ impl AppStateStorage {
     }
 
     fn try_save_to_path(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let mut filesystem = storage_io::RealStateFilesystem;
+        self.try_save_to_path_with_filesystem(path, &mut filesystem)
+    }
+
+    fn try_save_to_path_with_filesystem(
+        &mut self,
+        path: &Path,
+        filesystem: &mut impl storage_io::StateFilesystem,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if self.pending_pre_v6_backup {
-            storage_io::backup_pre_v6_state_file(path)?;
+            storage_io::backup_pre_v6_state_file_with_filesystem(path, filesystem)?;
         }
-        self.save_to_path(path)?;
+        storage_io::save_to_path_with_filesystem(self, path, filesystem)?;
         self.loaded_version = self.version;
         self.pending_pre_v6_backup = false;
         Ok(())
