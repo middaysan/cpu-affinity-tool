@@ -281,6 +281,7 @@ mod tests {
                     },
                     args: vec![],
                     additional_processes: vec![],
+                    manage_descendants: false,
                     autorun: false,
                     priority: PriorityClass::Normal,
                 }],
@@ -433,6 +434,7 @@ mod tests {
             },
             args: vec!["--debug".to_string()],
             additional_processes: vec!["helper.exe".to_string()],
+            manage_descendants: false,
             autorun: true,
             priority: PriorityClass::High,
         };

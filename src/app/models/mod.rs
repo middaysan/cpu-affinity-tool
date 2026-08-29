@@ -24,4 +24,4 @@ pub use core_group::{AddAppsOutcome, CoreGroup};
 pub use cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 pub use log_manager::LogManager;
 pub use meta::{effective_cpu_model, effective_total_threads, APP_VERSION};
-pub use running_app::{AppStatus, RunningApps};
+pub use running_app::{AppStatus, ProcessInstanceToken, RunningApp, RunningApps};

@@ -420,7 +420,7 @@ impl OS {
         PathBuf::from("/proc").join(pid.to_string()).join(entry)
     }
 
-    fn read_proc_stat(pid: u32) -> Result<(u32, String), String> {
+    fn read_proc_stat(pid: u32) -> Result<(u32, String, u64), String> {
         let stat = fs::read_to_string(Self::proc_path(pid, "stat"))
             .map_err(|e| format!("failed to read /proc/{pid}/stat: {e}"))?;
         let open = stat
@@ -432,15 +432,21 @@ impl OS {
 
         let comm = stat[open + 1..close].to_string();
         let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
-        if rest.len() < 3 {
-            return Err(format!("failed to parse parent pid for /proc/{pid}/stat"));
+        if rest.len() < 20 {
+            return Err(format!(
+                "failed to parse process metadata for /proc/{pid}/stat"
+            ));
         }
 
         let parent_pid = rest[1]
             .parse::<u32>()
             .map_err(|e| format!("failed to parse parent pid for /proc/{pid}: {e}"))?;
 
-        Ok((parent_pid, comm))
+        let start_time_ticks = rest[19]
+            .parse::<u64>()
+            .map_err(|e| format!("failed to parse start time for /proc/{pid}: {e}"))?;
+
+        Ok((parent_pid, comm, start_time_ticks))
     }
 
     fn process_name_from_pid(pid: u32) -> String {
@@ -782,7 +788,7 @@ impl OS {
         let mut names = HashMap::new();
 
         for pid in Self::get_all_pids() {
-            let Ok((parent_pid, _comm)) = Self::read_proc_stat(pid) else {
+            let Ok((parent_pid, _comm, _instance_token)) = Self::read_proc_stat(pid) else {
                 continue;
             };
 
@@ -801,7 +807,7 @@ impl OS {
     pub fn get_parent_pid(pid: u32) -> Option<u32> {
         Self::read_proc_stat(pid)
             .ok()
-            .map(|(parent_pid, _)| parent_pid)
+            .map(|(parent_pid, _, _)| parent_pid)
     }
 
     pub fn get_all_pids() -> Vec<u32> {
@@ -880,6 +886,10 @@ impl OS {
 
     pub fn is_pid_live(pid: u32) -> bool {
         Self::proc_path(pid, "").is_dir()
+    }
+
+    pub fn get_process_instance_token(pid: u32) -> Result<u64, String> {
+        Self::read_proc_stat(pid).map(|(_, _, token)| token)
     }
 
     pub fn get_process_image_path(pid: u32) -> Result<PathBuf, String> {

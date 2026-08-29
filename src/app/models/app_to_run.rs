@@ -79,6 +79,9 @@ pub struct AppToRun {
     /// Additional process names to track (e.g. "discord.exe")
     #[serde(default)]
     pub additional_processes: Vec<String>,
+    /// Whether descendants of verified managed processes receive this rule's settings.
+    #[serde(default = "default_manage_descendants")]
+    pub manage_descendants: bool,
     /// Whether the application should start automatically on application startup
     pub autorun: bool,
     /// Process priority class to assign to the application
@@ -93,6 +96,8 @@ struct AppToRunV5 {
     args: Vec<String>,
     #[serde(default)]
     additional_processes: Vec<String>,
+    #[serde(default = "default_manage_descendants")]
+    manage_descendants: bool,
     autorun: bool,
     priority: PriorityClass,
 }
@@ -106,6 +111,8 @@ struct AppToRunV4 {
     bin_path: PathBuf,
     #[serde(default)]
     additional_processes: Vec<String>,
+    #[serde(default = "default_manage_descendants")]
+    manage_descendants: bool,
     autorun: bool,
     priority: PriorityClass,
 }
@@ -128,6 +135,7 @@ impl<'de> Deserialize<'de> for AppToRun {
                 launch_target: v5.launch_target,
                 args: v5.args,
                 additional_processes: v5.additional_processes,
+                manage_descendants: v5.manage_descendants,
                 autorun: v5.autorun,
                 priority: v5.priority,
             }),
@@ -139,6 +147,7 @@ impl<'de> Deserialize<'de> for AppToRun {
                 },
                 args: v4.args,
                 additional_processes: v4.additional_processes,
+                manage_descendants: v4.manage_descendants,
                 autorun: v4.autorun,
                 priority: v4.priority,
             }),
@@ -170,6 +179,7 @@ impl AppToRun {
             },
             args,
             additional_processes: Vec::new(),
+            manage_descendants: false,
             autorun,
             priority,
         };
@@ -188,6 +198,7 @@ impl AppToRun {
             launch_target: LaunchTarget::Installed { aumid },
             args: Vec::new(),
             additional_processes: Vec::new(),
+            manage_descendants: false,
             autorun,
             priority,
         }
@@ -356,6 +367,11 @@ impl AppToRun {
     }
 }
 
+/// Rules saved before schema v10 retain their established descendant behavior.
+fn default_manage_descendants() -> bool {
+    true
+}
+
 pub fn normalize_process_name(candidate: &str) -> String {
     let file_name = candidate
         .rsplit(['/', '\\'])
@@ -493,6 +509,7 @@ mod tests {
 
         assert_eq!(path.primary_process_name().as_deref(), Some("foo.bar.exe"));
         assert_eq!(path.additional_processes, vec!["foo.bar.exe".to_string()]);
+        assert!(!path.manage_descendants);
     }
 
     #[test]
@@ -622,5 +639,27 @@ mod tests {
             Some("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify")
         );
         assert!(app.is_installed_target());
+        assert!(app.manage_descendants);
+    }
+
+    #[test]
+    fn test_missing_descendant_setting_preserves_existing_rule_behavior() {
+        let value = json!({
+            "name": "Sample",
+            "launch_target": {
+                "Path": {
+                    "dropped_path": r"C:\\Sample.lnk",
+                    "bin_path": r"C:\\Sample.exe"
+                }
+            },
+            "args": [],
+            "additional_processes": ["Sample.exe"],
+            "autorun": false,
+            "priority": "Normal"
+        });
+
+        let app: AppToRun = serde_json::from_value(value).unwrap();
+
+        assert!(app.manage_descendants);
     }
 }

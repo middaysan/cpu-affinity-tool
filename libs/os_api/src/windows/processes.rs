@@ -3,7 +3,7 @@ use std::mem::size_of;
 use std::path::PathBuf;
 
 use windows::Win32::Foundation::{
-    APPMODEL_ERROR_NO_APPLICATION, ERROR_INSUFFICIENT_BUFFER, STILL_ACTIVE,
+    APPMODEL_ERROR_NO_APPLICATION, ERROR_INSUFFICIENT_BUFFER, FILETIME, STILL_ACTIVE,
 };
 use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -11,7 +11,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows::Win32::System::ProcessStatus::{K32EnumProcesses, K32GetModuleFileNameExW};
 use windows::Win32::System::Threading::{
-    GetExitCodeProcess, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetExitCodeProcess, GetProcessTimes, PROCESS_QUERY_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::core::PWSTR;
 
@@ -23,6 +24,20 @@ pub struct ProcessTree {
     pub parent_of: HashMap<u32, u32>,
     pub children_of: HashMap<u32, Vec<u32>>,
     pub names: HashMap<u32, String>,
+}
+
+fn process_instance_token_internal(pid: u32) -> Result<u64, OsError> {
+    unsafe {
+        let handle = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+            .or_else(|_| open_process(pid, PROCESS_QUERY_INFORMATION))?;
+        let _hg = HandleGuard(handle);
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user)?;
+        Ok(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
+    }
 }
 
 fn snapshot_process_tree_internal() -> Result<ProcessTree, OsError> {
@@ -254,6 +269,11 @@ impl OS {
 
             result.is_ok() && exit_code == STILL_ACTIVE.0 as u32
         }
+    }
+
+    pub fn get_process_instance_token(pid: u32) -> Result<u64, String> {
+        process_instance_token_internal(pid)
+            .map_err(|error| format!("Failed to get instance token for process {pid}: {error}"))
     }
 
     pub fn get_process_image_path(pid: u32) -> Result<PathBuf, String> {

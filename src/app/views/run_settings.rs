@@ -251,6 +251,25 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                     ui.add_space(6.0);
                 }
 
+                if ui
+                    .checkbox(
+                        &mut selected_app.manage_descendants,
+                        "Manage descendant processes",
+                    )
+                    .on_hover_text(
+                        "Apply this rule to children of verified primary processes. "
+                            .to_string()
+                            + "Tracked process names stay explicit matches and never become descendant roots.",
+                    )
+                    .changed()
+                {
+                    draft_changed = true;
+                }
+
+                ui.add_space(9.0);
+                ui.separator();
+                ui.add_space(6.0);
+
                 ui.label(RichText::new("Tracked Process Names:").strong());
                 ui.add_space(3.0);
 
