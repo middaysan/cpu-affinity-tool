@@ -199,9 +199,10 @@ impl WindowsEventLogManager {
                 }
             }
             Err(TryRecvError::Empty) => {
-                if self
-                    .worker_started
-                    .is_some_and(|started| started.elapsed() >= WORKER_SLOW_AFTER)
+                if self.enabled
+                    && self
+                        .worker_started
+                        .is_some_and(|started| started.elapsed() >= WORKER_SLOW_AFTER)
                     && !matches!(self.state, WindowsEventLogState::Incomplete { .. })
                 {
                     let last_complete = self.state.latest_complete().cloned();
@@ -316,7 +317,9 @@ impl WindowsEventLogManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{WindowsEventLogManager, WindowsEventLogPoll, WindowsEventLogState};
+    use super::{
+        WindowsEventLogManager, WindowsEventLogPoll, WindowsEventLogState, WORKER_SLOW_AFTER,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -422,6 +425,32 @@ mod tests {
         }
         assert!(!manager.worker_is_active());
         assert_eq!(manager.state(), &WindowsEventLogState::Disabled);
+    }
+
+    #[test]
+    fn disable_keeps_the_snapshot_disabled_while_a_slow_worker_drains() {
+        let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let release_receiver = Arc::new(std::sync::Mutex::new(release_receiver));
+        let worker_receiver = Arc::clone(&release_receiver);
+        let mut manager = WindowsEventLogManager::new_with_test_scan(move || {
+            entered_sender.send(()).unwrap();
+            worker_receiver.lock().unwrap().recv().unwrap();
+            Ok(None)
+        });
+
+        manager.enable();
+        assert!(manager.start_initial_scan());
+        entered_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        manager.disable();
+        manager.worker_started = Some(Instant::now() - WORKER_SLOW_AFTER);
+
+        assert!(matches!(manager.poll(), WindowsEventLogPoll::Unchanged));
+        assert_eq!(manager.state(), &WindowsEventLogState::Disabled);
+
+        release_sender.send(()).unwrap();
     }
 
     #[test]

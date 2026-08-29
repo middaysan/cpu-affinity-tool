@@ -144,9 +144,11 @@ pub struct AppState {
     pub(crate) windows_event_log: WindowsEventLogManager,
     /// Session-only acknowledgement retained when a preference save fails.
     /// This prevents a disclosure loop while keeping the on-disk choice intact.
+    #[cfg(all(target_os = "windows", feature = "windows"))]
     windows_event_log_disclosure_seen_for_session: bool,
     /// Privacy-safe session override used when disabling diagnostics cannot be
     /// persisted. It prevents an older saved opt-in from re-arming a lookup.
+    #[cfg(all(target_os = "windows", feature = "windows"))]
     windows_event_log_disabled_for_session: bool,
     shortcut_creation_role: ShortcutCreationRole,
     #[cfg(test)]
@@ -182,7 +184,9 @@ impl AppState {
             crash_reports,
             #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log: WindowsEventLogManager::new_idle(),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log_disclosure_seen_for_session: false,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log_disabled_for_session: false,
             shortcut_creation_role: default_shortcut_creation_role(),
             #[cfg(test)]
@@ -214,7 +218,9 @@ impl AppState {
             crash_reports: CrashReportManager::new_idle(PathBuf::new()),
             #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log: WindowsEventLogManager::new_idle(),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log_disclosure_seen_for_session: false,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log_disabled_for_session: false,
             shortcut_creation_role: default_shortcut_creation_role(),
             save_count: 0,
@@ -1767,7 +1773,9 @@ mod tests {
             crash_reports: CrashReportManager::new_idle(PathBuf::new()),
             #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log: WindowsEventLogManager::new_idle(),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log_disclosure_seen_for_session: false,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log_disabled_for_session: false,
             shortcut_creation_role: ShortcutCreationRole::Primary,
             save_count: 0,

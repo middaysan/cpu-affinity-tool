@@ -4,7 +4,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS, ERROR_TIMEOUT, FILETIME, SYSTEMTIME,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS, FILETIME, SYSTEMTIME,
 };
 use windows::Win32::Globalization::CompareStringOrdinal;
 use windows::Win32::System::EventLog::{
@@ -28,6 +28,7 @@ const MAX_EVENT_TEXT_CHARS: usize = 256;
 const MAX_RENDER_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_SCANNED_EVENTS: usize = 64;
 const EVENT_BATCH_SIZE: usize = 8;
+const EVENT_BATCH_TIMEOUT_MS: u32 = 500;
 const EVENT_QUERY: &str = "*[System[Provider[@Name='Application Error'] and EventID=1000 and TimeCreated[timediff(@SystemTime) <= 604800000]]]";
 const RENDER_PATHS: [&str; 5] = [
     "Event/EventData/Data[@Name='AppName']",
@@ -314,7 +315,15 @@ impl OS {
         while scanned < MAX_SCANNED_EVENTS {
             let mut events = [0isize; EVENT_BATCH_SIZE];
             let mut returned = 0u32;
-            let next = unsafe { EvtNext(query.0, &mut events, 0, 0, &mut returned) };
+            let next = unsafe {
+                EvtNext(
+                    query.0,
+                    &mut events,
+                    EVENT_BATCH_TIMEOUT_MS,
+                    0,
+                    &mut returned,
+                )
+            };
             if let Err(error) = next {
                 if is_query_complete_error(error.code()) {
                     break;
@@ -425,7 +434,6 @@ impl OS {
 
 fn is_query_complete_error(code: HRESULT) -> bool {
     code == HRESULT::from_win32(ERROR_NO_MORE_ITEMS.0)
-        || code == HRESULT::from_win32(ERROR_TIMEOUT.0)
 }
 
 fn create_render_contexts() -> Result<RenderContexts, String> {
@@ -655,11 +663,11 @@ mod tests {
     use windows::core::{HRESULT, PCWSTR};
 
     #[test]
-    fn query_completion_accepts_end_of_results_and_zero_timeout() {
+    fn query_completion_accepts_only_end_of_results() {
         assert!(is_query_complete_error(HRESULT::from_win32(
             ERROR_NO_MORE_ITEMS.0
         )));
-        assert!(is_query_complete_error(HRESULT::from_win32(
+        assert!(!is_query_complete_error(HRESULT::from_win32(
             ERROR_TIMEOUT.0
         )));
         assert!(!is_query_complete_error(HRESULT::from_win32(
