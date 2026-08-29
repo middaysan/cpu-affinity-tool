@@ -1,9 +1,8 @@
+use crate::app::features::execution::MonitorEventReceiver;
 use crate::app::models::{AppRuntimeKey, AppStatus, RunningApps};
 use crate::app::shared::ids::{GroupId, RuleId};
-use crate::app::shell::events::ShellEvent;
 use os_api::InstalledPackageRuntimeInfo;
 use std::collections::HashMap;
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 
@@ -22,7 +21,7 @@ pub(crate) struct InstalledPackageTrackingState {
 
 pub struct RuntimeRegistry {
     pub(crate) store: ExecutionStore,
-    pub(crate) monitor_rx: Option<Receiver<ShellEvent>>,
+    pub(crate) monitor_rx: Option<MonitorEventReceiver>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

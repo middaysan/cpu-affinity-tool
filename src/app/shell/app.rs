@@ -1,6 +1,6 @@
 use crate::app::features::diagnostics;
 use crate::app::features::execution;
-use crate::app::features::execution::InstalledPackageTrackingState;
+use crate::app::features::execution::{InstalledPackageTrackingState, MonitorEventReceiver};
 #[cfg(test)]
 use crate::app::instance_forwarding::ForwardedIpcCommand;
 #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
@@ -10,7 +10,6 @@ use crate::app::instance_forwarding::{
 };
 use crate::app::models::RunningApps;
 use crate::app::runtime::{AppState, RunRuleOutcome};
-use crate::app::shell::events::ShellEvent;
 #[cfg(all(target_os = "windows", feature = "windows"))]
 use crate::app::shell::presenters::crash_reports;
 use crate::app::shell::presenters::{
@@ -44,6 +43,8 @@ pub struct App {
     closing_requested: bool,
     is_hidden: bool,
 }
+
+const MONITOR_EVENT_GUI_DRAIN_LIMIT: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayCommandAction {
@@ -320,7 +321,7 @@ impl App {
             Arc<TokioRwLock<RunningApps>>,
             Arc<RwLock<InstalledPackageTrackingState>>,
             Arc<RwLock<crate::app::models::AppStateStorage>>,
-        ) -> Receiver<ShellEvent>,
+        ) -> MonitorEventReceiver,
     {
         Self::bootstrap_runtime_without_startup(state, spawn_monitors);
         Self::handle_startup_intent(state, startup_intent);
@@ -332,7 +333,7 @@ impl App {
             Arc<TokioRwLock<RunningApps>>,
             Arc<RwLock<InstalledPackageTrackingState>>,
             Arc<RwLock<crate::app::models::AppStateStorage>>,
-        ) -> Receiver<ShellEvent>,
+        ) -> MonitorEventReceiver,
     {
         diagnostics::log_startup(&mut state.log_manager, &state.persistent_state);
         state.runtime.monitor_rx = Some(spawn_monitors(
@@ -460,10 +461,11 @@ impl eframe::App for App {
 mod tests {
     use super::{
         reduce_tray_commands, theme_preference_for_index, viewport_gained_focus, App,
-        TrayCommandAction,
+        TrayCommandAction, MONITOR_EVENT_GUI_DRAIN_LIMIT,
     };
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use super::{AppForwardingRuntime, ForwardingServerLifetime};
+    use crate::app::features::execution;
     use crate::app::instance_forwarding::{
         parse_ipc_response_frame, serialize_ipc_command_frame, ForwardedIpcCommand, IpcCommand,
         IpcResponseCode,
@@ -759,7 +761,7 @@ mod tests {
     #[test]
     fn test_bootstrap_runtime_logs_startup_and_drains_monitor_notifications() {
         let ctx = egui::Context::default();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = execution::monitor_event_channel();
         let mut state = sample_state();
 
         App::bootstrap_runtime(
@@ -782,10 +784,8 @@ mod tests {
             .any(|entry| entry.message.starts_with("Detected CPU:")));
 
         let mut app = App::new_for_test(state);
-        tx.send(ShellEvent::Warning("WARNING: monitor warning".to_string()))
-            .unwrap();
-        tx.send(ShellEvent::Monitor("MONITOR: corrected".to_string()))
-            .unwrap();
+        tx.try_send(ShellEvent::Warning("WARNING: monitor warning".to_string()));
+        tx.try_send(ShellEvent::Monitor("MONITOR: corrected".to_string()));
 
         app.handle_monitor_events(&ctx);
 
@@ -810,9 +810,33 @@ mod tests {
     }
 
     #[test]
+    fn monitor_event_handling_drains_a_bounded_batch_then_continues() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = execution::monitor_event_channel();
+        let mut app = App::new_for_test(sample_state());
+        app.state.runtime.monitor_rx = Some(rx);
+
+        for index in 0..(MONITOR_EVENT_GUI_DRAIN_LIMIT + 1) {
+            tx.try_send(ShellEvent::Monitor(format!("MONITOR: event-{index}")));
+        }
+
+        app.handle_monitor_events(&ctx);
+        assert_eq!(
+            app.state.log_manager.entries.len(),
+            MONITOR_EVENT_GUI_DRAIN_LIMIT
+        );
+
+        app.handle_monitor_events(&ctx);
+        assert_eq!(
+            app.state.log_manager.entries.len(),
+            MONITOR_EVENT_GUI_DRAIN_LIMIT + 1
+        );
+    }
+
+    #[test]
     fn test_bootstrap_runtime_normal_gui_runs_autorun() {
         let ctx = egui::Context::default();
-        let (_tx, rx) = mpsc::channel();
+        let (_tx, rx) = execution::monitor_event_channel();
         let mut state = sample_state_with_programs(vec![
             app_to_run("AutorunApp", true),
             app_to_run("ManualApp", false),
@@ -848,7 +872,7 @@ mod tests {
     #[test]
     fn test_bootstrap_runtime_run_rule_skips_autorun_and_runs_requested_rule() {
         let ctx = egui::Context::default();
-        let (_tx, rx) = mpsc::channel();
+        let (_tx, rx) = execution::monitor_event_channel();
         let mut state = sample_state_with_programs(vec![
             app_to_run("AutorunApp", true),
             app_to_run("ShortcutApp", false),
@@ -1021,9 +1045,15 @@ impl App {
 
     fn handle_monitor_events(&mut self, ctx: &egui::Context) {
         let mut repaint_requested = false;
+        let mut drained = 0usize;
+        let mut drain_status = execution::MonitorDrainStatus::default();
 
         if let Some(rx) = &self.state.runtime.monitor_rx {
-            while let Ok(event) = rx.try_recv() {
+            while drained < MONITOR_EVENT_GUI_DRAIN_LIMIT {
+                let Ok(event) = rx.try_recv() else {
+                    break;
+                };
+                drained += 1;
                 if let Some((message, sticky)) = event.legacy_log_message() {
                     if sticky {
                         self.state.log_manager.add_sticky_once(message.to_string());
@@ -1034,10 +1064,22 @@ impl App {
 
                 repaint_requested |= event.needs_repaint();
             }
+
+            drain_status = rx.finish_drain();
         }
 
-        if repaint_requested {
+        if drain_status.dropped_monitor_messages > 0 || drain_status.dropped_warnings > 0 {
+            self.state.log_manager.add_important_entry(format!(
+                "WARNING: Monitoring notification queue was saturated; skipped {} routine message(s) and {} warning(s). The current runtime state was refreshed.",
+                drain_status.dropped_monitor_messages, drain_status.dropped_warnings
+            ));
+        }
+
+        if repaint_requested || drain_status.needs_repaint {
             ctx.request_repaint();
+        }
+        if drain_status.has_more_work || drained == MONITOR_EVENT_GUI_DRAIN_LIMIT {
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
 

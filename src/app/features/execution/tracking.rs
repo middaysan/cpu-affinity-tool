@@ -1,7 +1,7 @@
 use crate::app::features::execution::{
     cleanup_orphaned_package_owners, ensure_package_owner_claim,
     is_excluded_installed_auto_process, resolve_installed_package_runtime_info_cached,
-    InstalledPackageTrackingState,
+    InstalledPackageTrackingState, MonitorEventSender,
 };
 use crate::app::features::rules::RulesContext;
 use crate::app::models::{
@@ -102,7 +102,7 @@ pub async fn run_running_app_monitor(
     running_apps: Arc<TokioRwLock<RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     app_state: Arc<RwLock<AppStateStorage>>,
-    monitor_tx: std::sync::mpsc::Sender<ShellEvent>,
+    monitor_tx: MonitorEventSender,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
     let os = RealRunningAppsOs;
@@ -114,7 +114,7 @@ pub async fn run_running_app_monitor(
             let state = match app_state.read() {
                 Ok(guard) => guard,
                 Err(_) => {
-                    let _ = monitor_tx.send(ShellEvent::Warning(
+                    monitor_tx.try_send(ShellEvent::Warning(
                         "WARNING: persistent_state lock poisoned, skipping monitor iteration"
                             .to_string(),
                     ));
@@ -153,11 +153,11 @@ pub async fn run_running_app_monitor(
             );
 
             for message in outcome.notifications {
-                let _ = monitor_tx.send(ShellEvent::Monitor(message));
+                monitor_tx.try_send(ShellEvent::Monitor(message));
             }
 
             if outcome.changed {
-                let _ = monitor_tx.send(ShellEvent::RuntimeStateChanged);
+                monitor_tx.try_send(ShellEvent::RuntimeStateChanged);
             }
         }
     }
