@@ -102,6 +102,7 @@ pub(super) fn save_to_path_with_filesystem<T: Serialize>(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn backup_state_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut filesystem = RealStateFilesystem;
     backup_state_file_with_filesystem(path, &mut filesystem)

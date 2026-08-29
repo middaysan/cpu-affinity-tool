@@ -22,6 +22,7 @@ use crate::app::startup::StartupIntent;
 use crate::tray::{init_tray, TrayCmd, TrayRuntime};
 use eframe::egui;
 use std::path::PathBuf;
+#[cfg(test)]
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
