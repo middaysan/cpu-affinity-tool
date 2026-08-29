@@ -2023,7 +2023,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_group_program_reports_accepted_for_existing_rule() {
+    fn test_run_group_program_rejects_existing_rule_without_verified_identity() {
         let mut app = sample_state();
         let existing_group_id = group_id(&app, 0);
         let existing_rule_id = rule_id(&app, 0, 0);
@@ -2036,10 +2036,11 @@ mod tests {
             existing_rule_id.clone()
         ));
 
-        assert_eq!(
+        assert!(matches!(
             app.run_group_program(existing_group_id, existing_rule_id),
-            RunRuleOutcome::Accepted
-        );
+            RunRuleOutcome::LaunchRejected(message)
+                if message.contains("tracked process identity is not available")
+        ));
     }
 
     #[test]

@@ -846,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bootstrap_runtime_normal_gui_runs_autorun() {
+    fn test_bootstrap_runtime_normal_gui_rejects_unverified_existing_autorun() {
         let ctx = egui::Context::default();
         let (_tx, rx) = execution::monitor_event_channel();
         let mut state = sample_state_with_programs(vec![
@@ -873,16 +873,15 @@ mod tests {
             .iter()
             .map(|entry| entry.message.as_str())
             .collect::<Vec<_>>();
-        assert!(messages
-            .iter()
-            .any(|message| message.contains("AutorunApp") && message.contains("already running")));
+        assert!(messages.iter().any(|message| message.contains("AutorunApp")
+            && message.contains("tracked process identity is not available")));
         assert!(!messages
             .iter()
             .any(|message| message.contains("ManualApp") || message.contains("ManualApp.exe")));
     }
 
     #[test]
-    fn test_bootstrap_runtime_run_rule_skips_autorun_and_runs_requested_rule() {
+    fn test_bootstrap_runtime_run_rule_rejects_unverified_existing_target() {
         let ctx = egui::Context::default();
         let (_tx, rx) = execution::monitor_event_channel();
         let mut state = sample_state_with_programs(vec![
@@ -917,7 +916,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(messages
             .iter()
-            .any(|message| message.contains("ShortcutApp") && message.contains("already running")));
+            .any(|message| message.contains("ShortcutApp")
+                && message.contains("tracked process identity is not available")));
         assert!(!messages
             .iter()
             .any(|message| message.contains("AutorunApp") || message.contains("AutorunApp.exe")));
@@ -955,7 +955,7 @@ mod tests {
         app.handle_forwarded_commands(&ctx);
 
         let response = response_rx.try_recv().unwrap();
-        assert_eq!(response.code, IpcResponseCode::Accepted);
+        assert_eq!(response.code, IpcResponseCode::LaunchRejected);
         let messages = app
             .state
             .log_manager
@@ -965,7 +965,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(messages
             .iter()
-            .any(|message| message.contains("ShortcutApp") && message.contains("already running")));
+            .any(|message| message.contains("ShortcutApp")
+                && message.contains("tracked process identity is not available")));
         assert!(!messages
             .iter()
             .any(|message| message.contains("AutorunApp") || message.contains("AutorunApp.exe")));
@@ -1011,7 +1012,7 @@ mod tests {
         let response_frame = app.handle_local_ipc_request_frame(&request);
 
         let response = parse_ipc_response_frame(&response_frame).unwrap();
-        assert_eq!(response.code, IpcResponseCode::Accepted);
+        assert_eq!(response.code, IpcResponseCode::LaunchRejected);
     }
 
     #[test]
