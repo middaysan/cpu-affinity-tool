@@ -8,7 +8,7 @@ use crate::app::features::diagnostics::crash_reports::{
 };
 #[cfg(all(target_os = "windows", feature = "windows"))]
 use crate::app::features::diagnostics::windows_event_log::{
-    WindowsEventLogManager, WindowsEventLogPoll,
+    WindowsEventLogManager, WindowsEventLogPoll, WindowsEventLogState,
 };
 use crate::app::features::execution::{self, RuntimeRegistry};
 use crate::app::features::preferences;
@@ -18,8 +18,6 @@ use crate::app::features::shortcut::{
     SystemRuleShortcutPlatform,
 };
 use crate::app::models::cpu_schema::CpuSchema;
-#[cfg(all(target_os = "windows", feature = "windows"))]
-use crate::app::models::WindowsEventLogActivity;
 use crate::app::models::{
     effective_total_threads, AddAppsOutcome, AppRuntimeKey, AppStateStorage, AppStatus, AppToRun,
     LogManager, StateStorageMode,
@@ -144,6 +142,12 @@ pub struct AppState {
     pub(crate) crash_reports: CrashReportManager,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     pub(crate) windows_event_log: WindowsEventLogManager,
+    /// Session-only acknowledgement retained when a preference save fails.
+    /// This prevents a disclosure loop while keeping the on-disk choice intact.
+    windows_event_log_disclosure_seen_for_session: bool,
+    /// Privacy-safe session override used when disabling diagnostics cannot be
+    /// persisted. It prevents an older saved opt-in from re-arming a lookup.
+    windows_event_log_disabled_for_session: bool,
     shortcut_creation_role: ShortcutCreationRole,
     #[cfg(test)]
     save_count: usize,
@@ -177,8 +181,9 @@ impl AppState {
             #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
             crash_reports,
             #[cfg(all(target_os = "windows", feature = "windows"))]
-            #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log: WindowsEventLogManager::new_idle(),
+            windows_event_log_disclosure_seen_for_session: false,
+            windows_event_log_disabled_for_session: false,
             shortcut_creation_role: default_shortcut_creation_role(),
             #[cfg(test)]
             save_count: 0,
@@ -209,6 +214,8 @@ impl AppState {
             crash_reports: CrashReportManager::new_idle(PathBuf::new()),
             #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log: WindowsEventLogManager::new_idle(),
+            windows_event_log_disclosure_seen_for_session: false,
+            windows_event_log_disabled_for_session: false,
             shortcut_creation_role: default_shortcut_creation_role(),
             save_count: 0,
         }
@@ -1350,36 +1357,63 @@ impl AppState {
     pub fn windows_event_log_disclosure_required(&self) -> bool {
         self.persistent_state
             .read()
-            .map(|state| !state.windows_event_log_disclosure_seen)
-            .unwrap_or(true)
+            .map(|state| {
+                !state.windows_event_log_disclosure_seen
+                    && !self.windows_event_log_disclosure_seen_for_session
+            })
+            .unwrap_or(!self.windows_event_log_disclosure_seen_for_session)
     }
 
-    /// Records the user's explicit decision before changing the Event Log
-    /// worker lifecycle. A failed save leaves the effective choice untouched.
+    /// Records the user's explicit decision and applies the worker lifecycle.
+    /// Enabling is committed before the worker can be armed. Disabling takes
+    /// effect immediately; if persistence fails it remains session-only.
     #[cfg(all(target_os = "windows", feature = "windows"))]
     pub fn choose_windows_event_log_diagnostics(&mut self, enabled: bool) -> Result<(), String> {
+        // Invalidate visible evidence and worker/retry state before even
+        // attempting to read or write persistent state. A poisoned lock or a
+        // failed disk write must not keep diagnostics active.
+        if !enabled {
+            self.windows_event_log.disable();
+            self.windows_event_log_disclosure_seen_for_session = true;
+            self.windows_event_log_disabled_for_session = true;
+        }
         let previous = {
-            let state = self
-                .persistent_state
-                .read()
-                .map_err(|_| "could not read the diagnostics preference".to_string())?;
+            let state = match self.persistent_state.read() {
+                Ok(state) => state,
+                Err(_) => {
+                    return Err(
+                        "could not read the diagnostics preference; diagnostics remain disabled for this session"
+                            .to_string(),
+                    )
+                }
+            };
             (
                 state.windows_event_log_diagnostics_enabled,
                 state.windows_event_log_disclosure_seen,
             )
         };
-        preferences::set_windows_event_log_diagnostics(&self.persistent_state, enabled)?;
+        if let Err(error) =
+            preferences::set_windows_event_log_diagnostics(&self.persistent_state, enabled)
+        {
+            return Err(format!(
+                "{error}; diagnostics remain disabled for this session"
+            ));
+        }
         if !self.persist_state() {
             if let Ok(mut state) = self.persistent_state.write() {
                 state.windows_event_log_diagnostics_enabled = previous.0;
                 state.windows_event_log_disclosure_seen = previous.1;
             }
-            return Err("could not save the Windows Event Log diagnostics choice".to_string());
+            if enabled {
+                return Err("could not save the Windows Event Log diagnostics choice; diagnostics remain disabled for this session".to_string());
+            }
+            return Err("Windows Event Log diagnostics disabled for this session, but the choice could not be saved".to_string());
         }
 
-        if !enabled {
-            self.windows_event_log.disable();
-            self.log_manager.replace_windows_event_context(None);
+        self.windows_event_log_disclosure_seen_for_session = true;
+        if enabled {
+            self.windows_event_log_disabled_for_session = false;
+            self.windows_event_log.enable();
         }
         Ok(())
     }
@@ -1387,6 +1421,9 @@ impl AppState {
     /// Called by the shell only after the first frame has been rendered.
     #[cfg(all(target_os = "windows", feature = "windows"))]
     pub fn start_windows_event_log_scan_after_shell_gate(&mut self) -> bool {
+        if self.windows_event_log_disabled_for_session {
+            return false;
+        }
         let enabled = self
             .persistent_state
             .read()
@@ -1398,6 +1435,9 @@ impl AppState {
         if !enabled {
             return false;
         }
+        if !self.windows_event_log.is_enabled() {
+            self.windows_event_log.enable();
+        }
         self.windows_event_log.start_initial_scan()
     }
 
@@ -1405,31 +1445,23 @@ impl AppState {
     pub fn poll_windows_event_log(&mut self) -> bool {
         match self.windows_event_log.poll() {
             WindowsEventLogPoll::Unchanged => false,
-            WindowsEventLogPoll::Completed(Ok(Some(summary))) => {
-                self.log_manager
-                    .replace_windows_event_context(Some(WindowsEventLogActivity {
-                        event_record_id: summary.event_record_id,
-                        timestamp_utc: summary.timestamp_utc,
-                        exception_code: summary.exception_code,
-                        faulting_module: summary.faulting_module,
-                        stale: false,
-                    }));
-                true
-            }
-            WindowsEventLogPoll::Completed(Ok(None)) => {
-                self.log_manager.replace_windows_event_context(None);
-                true
-            }
-            WindowsEventLogPoll::Completed(Err(_)) | WindowsEventLogPoll::MarkedIncomplete => {
-                self.log_manager.mark_windows_event_context_stale();
-                true
-            }
+            WindowsEventLogPoll::Completed(_) | WindowsEventLogPoll::MarkedIncomplete => true,
         }
     }
 
     #[cfg(all(target_os = "windows", feature = "windows"))]
     pub fn windows_event_log_worker_poll_interval(&self) -> Option<std::time::Duration> {
         self.windows_event_log.worker_poll_interval()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn windows_event_log_snapshot(&self) -> WindowsEventLogState {
+        self.windows_event_log.ui_snapshot()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn windows_event_log_diagnostics_enabled(&self) -> bool {
+        self.windows_event_log.is_enabled()
     }
 
     #[cfg(test)]
@@ -1714,7 +1746,7 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
-            windows_event_log_diagnostics_enabled: true,
+            windows_event_log_diagnostics_enabled: false,
             windows_event_log_disclosure_seen: false,
             rule_identities: None,
             loaded_version: 5,
@@ -1735,6 +1767,8 @@ mod tests {
             crash_reports: CrashReportManager::new_idle(PathBuf::new()),
             #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log: WindowsEventLogManager::new_idle(),
+            windows_event_log_disclosure_seen_for_session: false,
+            windows_event_log_disabled_for_session: false,
             shortcut_creation_role: ShortcutCreationRole::Primary,
             save_count: 0,
         }
@@ -2766,6 +2800,22 @@ mod tests {
         assert!(!app.windows_event_log_disclosure_required());
         assert!(!state.read().unwrap().windows_event_log_diagnostics_enabled);
         assert!(state.read().unwrap().windows_event_log_disclosure_seen);
+        assert!(!app.windows_event_log_worker_is_active());
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn session_only_disable_blocks_an_older_persisted_opt_in() {
+        let mut app = sample_state();
+        {
+            let mut state = app.persistent_state.write().unwrap();
+            state.windows_event_log_diagnostics_enabled = true;
+            state.windows_event_log_disclosure_seen = true;
+        }
+        app.windows_event_log_disabled_for_session = true;
+        app.windows_event_log.enable();
+
+        assert!(!app.start_windows_event_log_scan_after_shell_gate());
         assert!(!app.windows_event_log_worker_is_active());
     }
 }

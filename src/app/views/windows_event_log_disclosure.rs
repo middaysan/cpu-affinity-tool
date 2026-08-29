@@ -17,7 +17,7 @@ pub fn draw_windows_event_log_disclosure(app: &mut AppState, root_ui: &mut egui:
             ui.label(RichText::new("Optional local Windows Event Log lookup").strong());
             ui.add_space(6.0);
             ui.label(
-                "After you continue, the app may read a small, recent subset of the local Application log to find an unverified crash record for this executable.",
+                "If you enable it, the app may read a small, recent subset of the local Application log to find an unverified crash record for this executable. This choice is saved and can be revoked from Activity.",
             );
             ui.label(
                 "It does not upload data, change Windows settings, read raw event XML, or copy anything to the clipboard.",
@@ -25,7 +25,7 @@ pub fn draw_windows_event_log_disclosure(app: &mut AppState, root_ui: &mut egui:
             ui.add_space(8.0);
             ui.label(
                 RichText::new(
-                    "Activity can show only the record time, exception code, and faulting module name.",
+                    "Activity can show only the Record ID, UTC time, exception code, and sanitized faulting module basename.",
                 )
                 .small()
                 .weak(),
@@ -36,10 +36,10 @@ pub fn draw_windows_event_log_disclosure(app: &mut AppState, root_ui: &mut egui:
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.button("Disable").clicked() {
+                if ui.button("Keep disabled").clicked() {
                     choice = Some(false);
                 }
-                if ui.button("Continue").clicked() {
+                if ui.button("Enable local lookup").clicked() {
                     choice = Some(true);
                 }
             });

@@ -1010,7 +1010,7 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
-            windows_event_log_diagnostics_enabled: true,
+            windows_event_log_diagnostics_enabled: false,
             windows_event_log_disclosure_seen: false,
             rule_identities: None,
             loaded_version: 5,

@@ -214,7 +214,7 @@ Persisted state facts:
 - schema `v5` and older formats are dual-read and normalized in memory without eager rewrite on load
 - schema `v6` and older path-target app rules receive an in-memory one-time compatibility backfill that adds the primary executable filename to `additional_processes` when no normalized equivalent already exists
 - schema `v7` treats an empty `additional_processes` list as intentional user state and does not re-add the primary executable filename on load
-- schema `v8` adds `windows_event_log_diagnostics_enabled` and `windows_event_log_disclosure_seen`; v7 and older files read as enabled but unacknowledged, and are not rewritten until an explicit save
+- schema `v8` adds `windows_event_log_diagnostics_enabled` and `windows_event_log_disclosure_seen`; v7 and older files are effective disabled and unacknowledged, and are not rewritten until an explicit save
 - the upgrade from pre-`v6` data or `v6` data to the current schema happens only on an explicit save path
 - before the first current-schema save after loading pre-`v6` state, persistence creates an additional `state.json.pre-v6`, `state.json.pre-v6-1`, and so on backup series
 - loading `v6` or `v7` for upgrade to `v8` does not create a `pre-v6` backup
@@ -249,11 +249,11 @@ Important contract facts:
 - tracked Windows installed targets now use a runtime-only package metadata cache plus package-local PID enrichment while the target stays tracked
 - package-local helper PID ownership for multiple installed targets in the same package follows `first active target wins`
 - `AppStateStorage` may rebuild `cpu_schema` for the current machine through presets when the stored schema is generic or outdated for the detected CPU model
-- `LogManager` keeps a bounded in-memory chronological history with three retention classes plus separate retained diagnostic contexts:
+- `LogManager` keeps a bounded in-memory chronological history with three retention classes plus the retained local crash-report context:
   - `Regular` capped at 1000 entries
   - `Important` capped at 200 entries
   - `Sticky` retained outside normal rotation for startup and critical diagnostics
-  - retained diagnostic contexts are runtime-only and separate from chronological entries: one newest validated local crash-report summary and one optional Windows Event Log summary; Activity's **Clear** action preserves both
+  - the local crash-report context is runtime-only and separate from chronological entries; Activity's **Clear** action preserves it
 - local Windows crash reports are separate from `AppStateStorage` and do not change schema `v8`:
   - directory: `<active-data-dir>/crash-reports/`
   - event kinds: main-thread panic and native UI-loop error
@@ -264,11 +264,12 @@ Important contract facts:
   - no crash-report scan or deletion is added to the synchronous startup path; a successful normal background refresh prunes complete reports to 20, while incomplete or invalid entries require user review
   - after a completed background scan, Activity shows the newest validated report's type, timestamp, reason, and full-report path; the report file remains the complete support artifact
   - reports are never uploaded automatically and can contain local paths or system details
-- Windows Event Log diagnostics is separate from crash reports and remains runtime-only:
+- Windows Event Log diagnostics is separate from crash reports and remains runtime-only, owned by `WindowsEventLogManager` rather than `LogManager`:
   - it reads only recent local `Application Error` Event ID 1000 records from the local Application log after explicit disclosure
   - it uses an exact executable-name plus fully-qualified-path match and accepts false negatives rather than filename-only matches
   - only record ID, UTC time, exception code, and a sanitized faulting-module basename may enter the retained Activity context; no raw XML, event payload, path, clipboard, state.json, crash report, or automatic upload is used
   - an Activity record is unverified supplemental evidence, not proof of a previous launch or crash cause
+  - Activity can revoke consent persistently; disabling clears the visible record immediately, while a failed save is reported as session-only
 
 CPU presets:
 - `assets/cpu_presets.json` is a compile-time source file
@@ -311,6 +312,7 @@ Internal backend structure:
   - `launch`
   - `window`
   - `cpu`
+  - `event_log`
 - crate-root public shape remains intentionally narrow: external callers still interact through `OS` plus small boundary value types such as `PriorityClass` and `ShortcutSpec`
 - Linux backend remains a single-file minimal backend and is not forced into parity with the Windows internal layout
 

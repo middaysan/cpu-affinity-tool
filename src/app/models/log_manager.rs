@@ -37,17 +37,6 @@ impl LogEntry {
     }
 }
 
-/// Runtime-only, bounded diagnostic evidence shown separately from ordinary
-/// Activity entries. It is deliberately not part of the persisted state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WindowsEventLogActivity {
-    pub event_record_id: u64,
-    pub timestamp_utc: String,
-    pub exception_code: u32,
-    pub faulting_module: String,
-    pub stale: bool,
-}
-
 /// Manages application log entries with timestamps.
 /// This structure is responsible for storing and formatting log messages
 /// that can be displayed to the user for debugging and informational purposes.
@@ -56,7 +45,6 @@ pub struct LogManager {
     /// Chronological log entries with bounded retention for non-sticky classes.
     pub entries: VecDeque<LogEntry>,
     local_crash_context: Option<String>,
-    windows_event_context: Option<WindowsEventLogActivity>,
 }
 
 impl LogManager {
@@ -140,27 +128,8 @@ impl LogManager {
         self.local_crash_context = message;
     }
 
-    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
-    pub(crate) fn replace_windows_event_context(
-        &mut self,
-        context: Option<WindowsEventLogActivity>,
-    ) {
-        self.windows_event_context = context;
-    }
-
-    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
-    pub(crate) fn mark_windows_event_context_stale(&mut self) {
-        if let Some(context) = &mut self.windows_event_context {
-            context.stale = true;
-        }
-    }
-
     pub(crate) fn local_crash_context(&self) -> Option<&str> {
         self.local_crash_context.as_deref()
-    }
-
-    pub(crate) fn windows_event_context(&self) -> Option<&WindowsEventLogActivity> {
-        self.windows_event_context.as_ref()
     }
 
     pub fn clear(&mut self) {
@@ -175,9 +144,7 @@ impl LogManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LogManager, LogRetention, WindowsEventLogActivity, IMPORTANT_LOG_CAP, REGULAR_LOG_CAP,
-    };
+    use super::{LogManager, LogRetention, IMPORTANT_LOG_CAP, REGULAR_LOG_CAP};
 
     #[test]
     fn test_regular_retention_is_capped() {
@@ -271,37 +238,6 @@ mod tests {
 
         manager.replace_local_crash_context(None);
         assert!(manager.local_crash_context().is_none());
-    }
-
-    #[test]
-    fn retained_diagnostic_contexts_coexist_and_survive_clear() {
-        let mut manager = LogManager::default();
-        manager.add_entry("transient activity".into());
-        manager.replace_local_crash_context(Some("local crash report".into()));
-        manager.replace_windows_event_context(Some(WindowsEventLogActivity {
-            event_record_id: 42,
-            timestamp_utc: "2026-08-29T12:00:00.000Z".into(),
-            exception_code: 0xc000_0005,
-            faulting_module: "kernelbase.dll".into(),
-            stale: false,
-        }));
-
-        manager.clear();
-
-        assert!(manager.entries.is_empty());
-        assert_eq!(manager.local_crash_context(), Some("local crash report"));
-        assert_eq!(
-            manager
-                .windows_event_context()
-                .map(|context| context.event_record_id),
-            Some(42)
-        );
-        manager.mark_windows_event_context_stale();
-        assert!(manager.windows_event_context().unwrap().stale);
-
-        manager.replace_windows_event_context(None);
-        assert!(manager.windows_event_context().is_none());
-        assert_eq!(manager.local_crash_context(), Some("local crash report"));
     }
 
     #[test]

@@ -48,12 +48,16 @@ fn load_v8(data: &str, _path: &Path) -> Option<AppStateStorage> {
 
 fn load_v7(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = false;
+    state.windows_event_log_disclosure_seen = false;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     Some(state.finalize_load(7, false))
 }
 
 fn load_v6(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = false;
+    state.windows_event_log_disclosure_seen = false;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     state.backfill_tracked_process_names();
     Some(state.finalize_load(6, false))
@@ -61,6 +65,8 @@ fn load_v6(data: &str, _path: &Path) -> Option<AppStateStorage> {
 
 fn load_v5(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = false;
+    state.windows_event_log_disclosure_seen = false;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     state.backfill_tracked_process_names();
     Some(state.finalize_load(5, true))
@@ -68,6 +74,8 @@ fn load_v5(data: &str, _path: &Path) -> Option<AppStateStorage> {
 
 fn load_v4(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = false;
+    state.windows_event_log_disclosure_seen = false;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     state.version = 5;
     state.rule_identities = None;
@@ -77,6 +85,8 @@ fn load_v4(data: &str, _path: &Path) -> Option<AppStateStorage> {
 
 fn load_v3(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = false;
+    state.windows_event_log_disclosure_seen = false;
     state.version = 5;
     state.rule_identities = None;
     state.backfill_tracked_process_names();
@@ -95,7 +105,7 @@ fn load_v2(data: &str, _path: &Path) -> Option<AppStateStorage> {
         },
         theme_index: v2.theme_index,
         process_monitoring_enabled: v2.process_monitoring_enabled,
-        windows_event_log_diagnostics_enabled: true,
+        windows_event_log_diagnostics_enabled: false,
         windows_event_log_disclosure_seen: false,
         rule_identities: None,
         loaded_version: 0,
@@ -119,7 +129,7 @@ fn load_legacy(data: &str, _path: &Path) -> Option<AppStateStorage> {
         },
         theme_index: legacy.theme_index,
         process_monitoring_enabled: false,
-        windows_event_log_diagnostics_enabled: true,
+        windows_event_log_diagnostics_enabled: false,
         windows_event_log_disclosure_seen: false,
         rule_identities: None,
         loaded_version: 0,

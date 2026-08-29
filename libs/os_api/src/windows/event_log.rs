@@ -1,14 +1,19 @@
 use std::ffi::OsStr;
+use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, FILETIME, SYSTEMTIME};
+use windows::Win32::Foundation::{
+    ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS, ERROR_TIMEOUT, FILETIME, SYSTEMTIME,
+};
 use windows::Win32::Globalization::CompareStringOrdinal;
 use windows::Win32::System::EventLog::{
     EVT_HANDLE, EVT_VARIANT, EVT_VARIANT_TYPE_ARRAY, EVT_VARIANT_TYPE_MASK, EvtCreateRenderContext,
     EvtNext, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection, EvtRender,
-    EvtRenderContextValues, EvtRenderEventValues, EvtVarTypeByte, EvtVarTypeFileTime,
-    EvtVarTypeString, EvtVarTypeSysTime, EvtVarTypeUInt16, EvtVarTypeUInt64,
+    EvtRenderContextSystem, EvtRenderContextUser, EvtRenderContextValues, EvtRenderEventValues,
+    EvtSystemEventID, EvtSystemEventRecordId, EvtSystemPropertyIdEND, EvtSystemProviderName,
+    EvtSystemTimeCreated, EvtSystemVersion, EvtVarTypeByte, EvtVarTypeFileTime, EvtVarTypeString,
+    EvtVarTypeSysTime, EvtVarTypeUInt16, EvtVarTypeUInt64,
 };
 use windows::Win32::System::Time::FileTimeToSystemTime;
 use windows::core::{HRESULT, PCWSTR};
@@ -24,33 +29,14 @@ const MAX_RENDER_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_SCANNED_EVENTS: usize = 64;
 const EVENT_BATCH_SIZE: usize = 8;
 const EVENT_QUERY: &str = "*[System[Provider[@Name='Application Error'] and EventID=1000 and TimeCreated[timediff(@SystemTime) <= 604800000]]]";
-const RENDER_PATHS: [&str; 25] = [
-    "Event/System/Provider/@Name",
-    "Event/System/EventID",
-    "Event/System/Version",
-    "Event/System/EventRecordID",
-    "Event/System/TimeCreated/@SystemTime",
+const RENDER_PATHS: [&str; 5] = [
     "Event/EventData/Data[@Name='AppName']",
     "Event/EventData/Data[@Name='AppPath']",
     "Event/EventData/Data[@Name='ModuleName']",
     "Event/EventData/Data[@Name='ModulePath']",
     "Event/EventData/Data[@Name='ExceptionCode']",
-    "Event/EventData/Data[1]",
-    "Event/EventData/Data[2]",
-    "Event/EventData/Data[3]",
-    "Event/EventData/Data[4]",
-    "Event/EventData/Data[5]",
-    "Event/EventData/Data[6]",
-    "Event/EventData/Data[7]",
-    "Event/EventData/Data[8]",
-    "Event/EventData/Data[9]",
-    "Event/EventData/Data[10]",
-    "Event/EventData/Data[11]",
-    "Event/EventData/Data[12]",
-    "Event/EventData/Data[13]",
-    "Event/EventData/Data[14]",
-    "Event/EventData/Data[15]",
 ];
+const SYSTEM_PROPERTY_COUNT: usize = EvtSystemPropertyIdEND.0 as usize;
 
 struct EventLogHandle(EVT_HANDLE);
 
@@ -59,6 +45,70 @@ impl Drop for EventLogHandle {
         unsafe {
             let _ = windows::Win32::System::EventLog::EvtClose(self.0);
         }
+    }
+}
+
+struct RenderContexts {
+    system: EventLogHandle,
+    named: EventLogHandle,
+    user: Option<EventLogHandle>,
+}
+
+impl RenderContexts {
+    fn user_context(&mut self) -> Result<EVT_HANDLE, String> {
+        if self.user.is_none() {
+            self.user = Some(create_user_render_context()?);
+        }
+        Ok(self.user.as_ref().expect("context was initialized").0)
+    }
+}
+
+struct RenderedValues {
+    buffer: Vec<EVT_VARIANT>,
+    property_count: usize,
+    buffer_used: usize,
+}
+
+impl RenderedValues {
+    fn values(&self) -> &[EVT_VARIANT] {
+        &self.buffer[..self.property_count]
+    }
+
+    fn utf16_z(&self, pointer: *const u16) -> Option<String> {
+        let buffer_start = self.buffer.as_ptr().cast::<u8>().addr();
+        let buffer_end = buffer_start.checked_add(self.buffer_used)?;
+        let pointer_address = pointer.addr();
+        if pointer_address < buffer_start
+            || pointer_address >= buffer_end
+            || !pointer_address.is_multiple_of(std::mem::align_of::<u16>())
+        {
+            return None;
+        }
+
+        let available_units = (buffer_end.checked_sub(pointer_address)?) / size_of::<u16>();
+        let units_to_scan = available_units.min(MAX_EVENT_TEXT_CHARS + 1);
+        if units_to_scan == 0 {
+            return None;
+        }
+
+        let units = unsafe { std::slice::from_raw_parts(pointer, units_to_scan) };
+        let length = units.iter().position(|unit| *unit == 0)?;
+        String::from_utf16(&units[..length]).ok()
+    }
+
+    fn system_time(&self, pointer: *const SYSTEMTIME) -> Option<SYSTEMTIME> {
+        let buffer_start = self.buffer.as_ptr().cast::<u8>().addr();
+        let buffer_end = buffer_start.checked_add(self.buffer_used)?;
+        let pointer_address = pointer.addr();
+        let system_time_end = pointer_address.checked_add(size_of::<SYSTEMTIME>())?;
+        if pointer_address < buffer_start
+            || system_time_end > buffer_end
+            || !pointer_address.is_multiple_of(std::mem::align_of::<SYSTEMTIME>())
+        {
+            return None;
+        }
+
+        Some(unsafe { *pointer })
     }
 }
 
@@ -254,21 +304,28 @@ impl OS {
         };
         let query = EventLogHandle(query);
 
-        let render_context = create_render_context()?;
+        let mut contexts = create_render_contexts()?;
         let mut scanned = 0usize;
+        let mut system_render_failures = 0usize;
+        let mut matching_candidates = 0usize;
+        let mut data_render_successes = 0usize;
+        let mut data_render_failures = 0usize;
 
         while scanned < MAX_SCANNED_EVENTS {
             let mut events = [0isize; EVENT_BATCH_SIZE];
             let mut returned = 0u32;
             let next = unsafe { EvtNext(query.0, &mut events, 0, 0, &mut returned) };
             if let Err(error) = next {
-                if error.code() == HRESULT::from_win32(ERROR_NO_MORE_ITEMS.0) {
-                    return Ok(None);
+                if is_query_complete_error(error.code()) {
+                    break;
                 }
                 return Err("could not read the local Windows Application log".to_string());
             }
 
-            let returned = (returned as usize).min(EVENT_BATCH_SIZE);
+            let returned = returned as usize;
+            if returned == 0 || returned > EVENT_BATCH_SIZE {
+                return Err("Windows Event Log returned an invalid event batch".to_string());
+            }
             let event_handles: Vec<EventLogHandle> = events[..returned]
                 .iter()
                 .copied()
@@ -280,21 +337,112 @@ impl OS {
                     break;
                 }
                 scanned += 1;
-                let values = match render_event_values(render_context.0, event.0) {
-                    Ok(values) => values,
-                    Err(_) => continue,
+                let system = match render_event_values(contexts.system.0, event.0) {
+                    Ok(values) => system_values_from_rendered(&values),
+                    Err(_) => {
+                        system_render_failures += 1;
+                        continue;
+                    }
                 };
-                if let Some(failure) = failure_from_rendered_values(&values, executable_path) {
+                let Some(system) = system else {
+                    continue;
+                };
+                if system.provider != APPLICATION_ERROR_PROVIDER
+                    || system.event_id != APPLICATION_ERROR_EVENT_ID
+                {
+                    continue;
+                }
+                matching_candidates += 1;
+
+                let named = match render_event_values(contexts.named.0, event.0) {
+                    Ok(values) => {
+                        data_render_successes += 1;
+                        values
+                    }
+                    Err(_) => {
+                        data_render_failures += 1;
+                        if system.version != 0 {
+                            continue;
+                        }
+                        RenderedValues {
+                            buffer: Vec::new(),
+                            property_count: 0,
+                            buffer_used: 0,
+                        }
+                    }
+                };
+                let named_values = named_event_data_from_rendered(&named).unwrap_or_default();
+                if let Some(failure) = application_error_from_values(
+                    system.clone(),
+                    named_values,
+                    &[],
+                    executable_path,
+                ) {
+                    return Ok(Some(failure));
+                }
+
+                if system.version != 0 {
+                    continue;
+                }
+
+                let user_context = match contexts.user_context() {
+                    Ok(context) => context,
+                    Err(_) => {
+                        data_render_failures += 1;
+                        continue;
+                    }
+                };
+                let positional = match render_event_values(user_context, event.0) {
+                    Ok(values) => {
+                        data_render_successes += 1;
+                        positional_event_data_from_rendered(&values)
+                    }
+                    Err(_) => {
+                        data_render_failures += 1;
+                        continue;
+                    }
+                };
+                if let Some(failure) = application_error_from_values(
+                    system,
+                    NamedEventData::default(),
+                    &positional,
+                    executable_path,
+                ) {
                     return Ok(Some(failure));
                 }
             }
         }
 
+        if scanned > 0 && system_render_failures == scanned {
+            return Err("could not render any Windows Event Log records".to_string());
+        }
+        if matching_candidates > 0 && data_render_successes == 0 && data_render_failures > 0 {
+            return Err("could not render any matching Windows Event Log records".to_string());
+        }
         Ok(None)
     }
 }
 
-fn create_render_context() -> Result<EventLogHandle, String> {
+fn is_query_complete_error(code: HRESULT) -> bool {
+    code == HRESULT::from_win32(ERROR_NO_MORE_ITEMS.0)
+        || code == HRESULT::from_win32(ERROR_TIMEOUT.0)
+}
+
+fn create_render_contexts() -> Result<RenderContexts, String> {
+    Ok(RenderContexts {
+        system: create_system_render_context()?,
+        named: create_named_render_context()?,
+        user: None,
+    })
+}
+
+fn create_system_render_context() -> Result<EventLogHandle, String> {
+    let context = unsafe { EvtCreateRenderContext(None, EvtRenderContextSystem.0) }
+        .map_err(|_| "could not prepare the Windows Event Log system reader".to_string())?;
+    Ok(EventLogHandle(context))
+}
+
+fn create_named_render_context() -> Result<EventLogHandle, String> {
     let wide_paths: Vec<Vec<u16>> = RENDER_PATHS
         .iter()
         .map(|path| to_wide_z_str(path))
@@ -304,14 +452,20 @@ fn create_render_context() -> Result<EventLogHandle, String> {
         .map(|path| PCWSTR(path.as_ptr()))
         .collect();
     let context = unsafe { EvtCreateRenderContext(Some(&paths), EvtRenderContextValues.0) }
-        .map_err(|_| "could not prepare the Windows Event Log reader".to_string())?;
+        .map_err(|_| "could not prepare the Windows Event Log named-value reader".to_string())?;
     Ok(EventLogHandle(context))
 }
 
-fn render_event_values(context: EVT_HANDLE, event: EVT_HANDLE) -> Result<Vec<EVT_VARIANT>, String> {
+fn create_user_render_context() -> Result<EventLogHandle, String> {
+    let context = unsafe { EvtCreateRenderContext(None, EvtRenderContextUser.0) }
+        .map_err(|_| "could not prepare the Windows Event Log user-data reader".to_string())?;
+    Ok(EventLogHandle(context))
+}
+
+fn render_event_values(context: EVT_HANDLE, event: EVT_HANDLE) -> Result<RenderedValues, String> {
     let mut buffer_used = 0u32;
     let mut property_count = 0u32;
-    let _ = unsafe {
+    match unsafe {
         EvtRender(
             Some(context),
             event,
@@ -321,12 +475,25 @@ fn render_event_values(context: EVT_HANDLE, event: EVT_HANDLE) -> Result<Vec<EVT
             &mut buffer_used,
             &mut property_count,
         )
-    };
+    } {
+        Ok(()) if buffer_used == 0 && property_count == 0 => {
+            return Ok(RenderedValues {
+                buffer: Vec::new(),
+                property_count: 0,
+                buffer_used: 0,
+            });
+        }
+        Ok(()) => return Err("Windows Event Log record has an invalid render probe".to_string()),
+        Err(error) if error.code() != HRESULT::from_win32(ERROR_INSUFFICIENT_BUFFER.0) => {
+            return Err("Windows Event Log record is not available".to_string());
+        }
+        Err(_) => {}
+    }
     if buffer_used == 0 || buffer_used as usize > MAX_RENDER_BUFFER_BYTES {
         return Err("Windows Event Log record is not available".to_string());
     }
 
-    let variant_size = std::mem::size_of::<EVT_VARIANT>();
+    let variant_size = size_of::<EVT_VARIANT>();
     let variants_needed = (buffer_used as usize).div_ceil(variant_size);
     let mut buffer = vec![EVT_VARIANT::default(); variants_needed];
     unsafe {
@@ -342,37 +509,56 @@ fn render_event_values(context: EVT_HANDLE, event: EVT_HANDLE) -> Result<Vec<EVT
     }
     .map_err(|_| "Windows Event Log record is not available".to_string())?;
 
-    if property_count as usize != RENDER_PATHS.len() || property_count as usize > buffer.len() {
+    let buffer_used = buffer_used as usize;
+    let property_count = property_count as usize;
+    if buffer_used > MAX_RENDER_BUFFER_BYTES
+        || buffer_used > buffer.len() * variant_size
+        || property_count > buffer_used / variant_size
+    {
         return Err("Windows Event Log record has an unexpected shape".to_string());
     }
-    buffer.truncate(property_count as usize);
-    Ok(buffer)
+    Ok(RenderedValues {
+        buffer,
+        property_count,
+        buffer_used,
+    })
 }
 
-fn failure_from_rendered_values(
-    values: &[EVT_VARIANT],
-    executable_path: &Path,
-) -> Option<WindowsApplicationFailure> {
-    if values.len() != RENDER_PATHS.len() {
+fn system_values_from_rendered(values: &RenderedValues) -> Option<EventSystemValues> {
+    if values.values().len() != SYSTEM_PROPERTY_COUNT {
         return None;
     }
 
-    let system = EventSystemValues {
-        provider: variant_string(&values[0])?,
-        event_id: variant_u16(&values[1])?,
-        version: variant_u8(&values[2])?,
-        event_record_id: variant_u64(&values[3])?,
-        timestamp_utc: variant_timestamp_utc(&values[4])?,
-    };
-    let named = NamedEventData {
-        app_name: variant_string(&values[5]),
-        app_path: variant_string(&values[6]),
-        faulting_module_name: variant_string(&values[7]),
-        faulting_module_path: variant_string(&values[8]),
-        exception_code: variant_string(&values[9]),
-    };
-    let positional = values[10..].iter().map(variant_string).collect::<Vec<_>>();
-    application_error_from_values(system, named, &positional, executable_path)
+    Some(EventSystemValues {
+        provider: variant_string(values, EvtSystemProviderName.0 as usize)?,
+        event_id: variant_u16(values.values().get(EvtSystemEventID.0 as usize)?)?,
+        version: variant_u8(values.values().get(EvtSystemVersion.0 as usize)?)?,
+        event_record_id: variant_u64(values.values().get(EvtSystemEventRecordId.0 as usize)?)?,
+        timestamp_utc: variant_timestamp_utc(values, EvtSystemTimeCreated.0 as usize)?,
+    })
+}
+
+fn named_event_data_from_rendered(values: &RenderedValues) -> Option<NamedEventData> {
+    if values.values().len() != RENDER_PATHS.len() {
+        return None;
+    }
+
+    Some(NamedEventData {
+        app_name: variant_string(values, 0),
+        app_path: variant_string(values, 1),
+        faulting_module_name: variant_string(values, 2),
+        faulting_module_path: variant_string(values, 3),
+        exception_code: variant_string(values, 4),
+    })
+}
+
+fn positional_event_data_from_rendered(values: &RenderedValues) -> Vec<Option<String>> {
+    values
+        .values()
+        .iter()
+        .enumerate()
+        .map(|(index, _)| variant_string(values, index))
+        .collect()
 }
 
 fn variant_type(value: &EVT_VARIANT) -> u32 {
@@ -380,12 +566,11 @@ fn variant_type(value: &EVT_VARIANT) -> u32 {
 }
 
 fn is_scalar(value: &EVT_VARIANT, expected_type: i32) -> bool {
-    value.Count == 1
-        && value.Type & EVT_VARIANT_TYPE_ARRAY == 0
-        && variant_type(value) == expected_type as u32
+    value.Type & EVT_VARIANT_TYPE_ARRAY == 0 && variant_type(value) == expected_type as u32
 }
 
-fn variant_string(value: &EVT_VARIANT) -> Option<String> {
+fn variant_string(values: &RenderedValues, index: usize) -> Option<String> {
+    let value = values.values().get(index)?;
     if !is_scalar(value, EvtVarTypeString.0) {
         return None;
     }
@@ -393,29 +578,34 @@ fn variant_string(value: &EVT_VARIANT) -> Option<String> {
     if pointer.is_null() {
         return None;
     }
-    let mut length = 0usize;
-    while length <= MAX_EVENT_TEXT_CHARS && unsafe { *pointer.add(length) } != 0 {
-        length += 1;
-    }
-    if length > MAX_EVENT_TEXT_CHARS {
-        return None;
-    }
-    String::from_utf16(unsafe { std::slice::from_raw_parts(pointer, length) }).ok()
+    // EvtRender guarantees string pointers refer to its output buffer. The caller keeps the
+    // rendered buffer alive and bounds the read to the bytes Windows reported as initialized.
+    values.utf16_z(pointer)
 }
 
 fn variant_u16(value: &EVT_VARIANT) -> Option<u16> {
-    is_scalar(value, EvtVarTypeUInt16.0).then(|| unsafe { value.Anonymous.UInt16Val })
+    if !is_scalar(value, EvtVarTypeUInt16.0) {
+        return None;
+    }
+    Some(unsafe { value.Anonymous.UInt16Val })
 }
 
 fn variant_u8(value: &EVT_VARIANT) -> Option<u8> {
-    is_scalar(value, EvtVarTypeByte.0).then(|| unsafe { value.Anonymous.ByteVal })
+    if !is_scalar(value, EvtVarTypeByte.0) {
+        return None;
+    }
+    Some(unsafe { value.Anonymous.ByteVal })
 }
 
 fn variant_u64(value: &EVT_VARIANT) -> Option<u64> {
-    is_scalar(value, EvtVarTypeUInt64.0).then(|| unsafe { value.Anonymous.UInt64Val })
+    if !is_scalar(value, EvtVarTypeUInt64.0) {
+        return None;
+    }
+    Some(unsafe { value.Anonymous.UInt64Val })
 }
 
-fn variant_timestamp_utc(value: &EVT_VARIANT) -> Option<String> {
+fn variant_timestamp_utc(values: &RenderedValues, index: usize) -> Option<String> {
+    let value = values.values().get(index)?;
     let system_time = if is_scalar(value, EvtVarTypeFileTime.0) {
         let raw = unsafe { value.Anonymous.FileTimeVal };
         let file_time = FILETIME {
@@ -430,7 +620,7 @@ fn variant_timestamp_utc(value: &EVT_VARIANT) -> Option<String> {
         if pointer.is_null() {
             return None;
         }
-        unsafe { *pointer }
+        values.system_time(pointer)?
     } else {
         return None;
     };
@@ -452,10 +642,30 @@ fn variant_timestamp_utc(value: &EVT_VARIANT) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EventSystemValues, NamedEventData, RENDER_PATHS, application_error_from_values,
-        parse_exception_code,
+        EventSystemValues, NamedEventData, RENDER_PATHS, RenderedValues,
+        application_error_from_values, create_render_contexts, is_query_complete_error, is_scalar,
+        parse_exception_code, variant_string,
     };
+    use std::mem::size_of;
     use std::path::Path;
+    use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_NO_MORE_ITEMS, ERROR_TIMEOUT};
+    use windows::Win32::System::EventLog::{
+        EVT_VARIANT, EVT_VARIANT_0, EVT_VARIANT_TYPE_ARRAY, EvtVarTypeUInt16,
+    };
+    use windows::core::{HRESULT, PCWSTR};
+
+    #[test]
+    fn query_completion_accepts_end_of_results_and_zero_timeout() {
+        assert!(is_query_complete_error(HRESULT::from_win32(
+            ERROR_NO_MORE_ITEMS.0
+        )));
+        assert!(is_query_complete_error(HRESULT::from_win32(
+            ERROR_TIMEOUT.0
+        )));
+        assert!(!is_query_complete_error(HRESULT::from_win32(
+            ERROR_ACCESS_DENIED.0
+        )));
+    }
 
     #[test]
     fn parses_the_application_error_access_violation_code() {
@@ -548,11 +758,85 @@ mod tests {
     }
 
     #[test]
-    fn renders_standard_event_1000_named_fields_from_the_event_root() {
-        assert!(RENDER_PATHS.iter().all(|path| path.starts_with("Event/")));
+    fn only_renders_named_event_1000_fields_from_the_event_root() {
+        assert_eq!(RENDER_PATHS.len(), 5);
+        assert!(
+            RENDER_PATHS
+                .iter()
+                .all(|path| path.starts_with("Event/EventData/Data[@Name='"))
+        );
         assert!(RENDER_PATHS.contains(&"Event/EventData/Data[@Name='AppPath']"));
         assert!(RENDER_PATHS.contains(&"Event/EventData/Data[@Name='ModuleName']"));
         assert!(RENDER_PATHS.contains(&"Event/EventData/Data[@Name='ModulePath']"));
+    }
+
+    #[test]
+    fn scalar_type_check_ignores_count_but_rejects_arrays() {
+        let scalar_with_zero_count = EVT_VARIANT {
+            Anonymous: EVT_VARIANT_0 { UInt16Val: 1000 },
+            Count: 0,
+            Type: EvtVarTypeUInt16.0 as u32,
+        };
+        let array = EVT_VARIANT {
+            Anonymous: EVT_VARIANT_0 { UInt16Val: 1000 },
+            Count: 1,
+            Type: EvtVarTypeUInt16.0 as u32 | EVT_VARIANT_TYPE_ARRAY,
+        };
+
+        assert!(is_scalar(&scalar_with_zero_count, EvtVarTypeUInt16.0));
+        assert!(!is_scalar(&array, EvtVarTypeUInt16.0));
+    }
+
+    #[test]
+    fn string_values_must_point_inside_the_rendered_buffer() {
+        let mut buffer = vec![EVT_VARIANT::default(); 2];
+        let text = ['A' as u16, 0];
+        let text_offset = size_of::<EVT_VARIANT>();
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                text.as_ptr().cast::<u8>(),
+                buffer.as_mut_ptr().cast::<u8>().add(text_offset),
+                size_of_val(&text),
+            );
+        }
+        let valid_pointer = unsafe { buffer.as_ptr().cast::<u8>().add(text_offset).cast::<u16>() };
+        buffer[0] = EVT_VARIANT {
+            Anonymous: EVT_VARIANT_0 {
+                StringVal: PCWSTR(valid_pointer),
+            },
+            Count: 0,
+            Type: windows::Win32::System::EventLog::EvtVarTypeString.0 as u32,
+        };
+        let rendered = RenderedValues {
+            buffer,
+            property_count: 1,
+            buffer_used: text_offset + size_of_val(&text),
+        };
+
+        assert_eq!(variant_string(&rendered, 0), Some("A".to_string()));
+
+        let outside = EVT_VARIANT {
+            Anonymous: EVT_VARIANT_0 {
+                StringVal: PCWSTR(0x10usize as *const u16),
+            },
+            Count: 0,
+            Type: windows::Win32::System::EventLog::EvtVarTypeString.0 as u32,
+        };
+        let rendered_with_bad_pointer = RenderedValues {
+            buffer: vec![outside],
+            property_count: 1,
+            buffer_used: size_of::<EVT_VARIANT>(),
+        };
+        assert_eq!(variant_string(&rendered_with_bad_pointer, 0), None);
+    }
+
+    #[test]
+    fn creates_the_three_supported_windows_event_log_render_contexts() {
+        let mut contexts =
+            create_render_contexts().expect("system and named Event Log contexts must be valid");
+        let _user = contexts
+            .user_context()
+            .expect("the fallback user Event Log context must be valid");
     }
 
     #[test]

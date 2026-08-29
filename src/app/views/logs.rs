@@ -1,3 +1,5 @@
+#[cfg(all(target_os = "windows", feature = "windows"))]
+use crate::app::features::diagnostics::windows_event_log::WindowsEventLogState;
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
     glass_frame, palette, toned_button, ToneRole, BUTTON_FONT_SIZE,
@@ -20,7 +22,12 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
         .rev()
         .collect::<Vec<_>>();
     let local_crash_context = app.log_manager.local_crash_context().map(str::to_owned);
-    let windows_event_context = app.log_manager.windows_event_context().cloned();
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    let windows_event_snapshot = app.windows_event_log_snapshot();
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    let mut event_log_choice = None;
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    let windows_event_action_message = app.ui.windows_event_log_disclosure_error.clone();
 
     CentralPanel::default()
         .frame(
@@ -55,33 +62,35 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                     {
                         open_data_folder = true;
                     }
+                    #[cfg(all(target_os = "windows", feature = "windows"))]
+                    {
+                        let mut enabled = app.windows_event_log_diagnostics_enabled();
+                        if ui
+                            .checkbox(&mut enabled, "Event Log diagnostics")
+                            .on_hover_text("Read a bounded, local Application Error record lookup")
+                            .changed()
+                        {
+                            event_log_choice = Some(enabled);
+                        }
+                    }
                 });
             });
 
             ui.add_space(5.0);
+
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            if let Some(message) = &windows_event_action_message {
+                ui.colored_label(ui.visuals().error_fg_color, message);
+                ui.add_space(5.0);
+            }
 
             if let Some(local_crash_context) = local_crash_context {
                 diagnostic_card(ui, "Saved local crash report", &local_crash_context, false);
                 ui.add_space(5.0);
             }
 
-            if let Some(context) = windows_event_context {
-                let stale = if context.stale { " (stale)" } else { "" };
-                let detail = format!(
-                    "Record {} at {}\nException code: 0x{:08X}\nFaulting module: {}",
-                    context.event_record_id,
-                    context.timestamp_utc,
-                    context.exception_code,
-                    context.faulting_module,
-                );
-                diagnostic_card(
-                    ui,
-                    &format!("Unverified Windows Event Log record{stale}"),
-                    &detail,
-                    context.stale,
-                );
-                ui.add_space(5.0);
-            }
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            draw_windows_event_log_status(ui, &windows_event_snapshot);
 
             glass_frame(ui).show(ui, |ui| {
                 ScrollArea::vertical()
@@ -115,6 +124,61 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     if open_data_folder {
         app.open_active_data_dir();
     }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    if let Some(enabled) = event_log_choice {
+        match app.choose_windows_event_log_diagnostics(enabled) {
+            Ok(()) => app.ui.windows_event_log_disclosure_error = None,
+            Err(error) => app.ui.windows_event_log_disclosure_error = Some(error),
+        }
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "windows"))]
+fn draw_windows_event_log_status(ui: &mut egui::Ui, state: &WindowsEventLogState) {
+    let (title, detail, stale) = match state {
+        WindowsEventLogState::Disabled => return,
+        WindowsEventLogState::Idle => return,
+        WindowsEventLogState::Loading { last_complete } => (
+            "Windows Event Log lookup in progress",
+            last_complete.as_ref().map(format_event_record),
+            true,
+        ),
+        WindowsEventLogState::Ready {
+            latest: Some(record),
+        } => (
+            "Unverified Windows Event Log record",
+            Some(format_event_record(record)),
+            record.stale,
+        ),
+        WindowsEventLogState::Ready { latest: None } => (
+            "Windows Event Log: no matching record",
+            Some("No matching recent Application Error record was found.".to_string()),
+            false,
+        ),
+        WindowsEventLogState::Incomplete {
+            last_complete,
+            reason,
+        } => (
+            "Windows Event Log unavailable",
+            Some(match last_complete {
+                Some(record) => format!("{reason}\n{}", format_event_record(record)),
+                None => reason.clone(),
+            }),
+            true,
+        ),
+    };
+    diagnostic_card(ui, title, detail.as_deref().unwrap_or(""), stale);
+    ui.add_space(5.0);
+}
+
+#[cfg(all(target_os = "windows", feature = "windows"))]
+fn format_event_record(
+    record: &crate::app::features::diagnostics::windows_event_log::WindowsEventLogRecord,
+) -> String {
+    format!(
+        "Record ID: {}\nUTC time: {}\nException code: 0x{:08X}\nFaulting module: {}",
+        record.event_record_id, record.timestamp_utc, record.exception_code, record.faulting_module,
+    )
 }
 
 fn diagnostic_card(ui: &mut egui::Ui, title: &str, detail: &str, stale: bool) {

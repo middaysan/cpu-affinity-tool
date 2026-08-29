@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub const CURRENT_APP_STATE_VERSION: u32 = 8;
 
 pub(crate) const fn default_windows_event_log_diagnostics_enabled() -> bool {
-    true
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

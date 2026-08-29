@@ -9,29 +9,41 @@ const WORKER_SLOW_AFTER: Duration = Duration::from_secs(2);
 type ScanResult = Result<Option<WindowsApplicationFailure>, String>;
 type ScanFn = dyn Fn() -> ScanResult + Send + Sync + 'static;
 
+/// Sanitized Event Log evidence owned by the diagnostics manager. It is not a
+/// chronological Activity entry and is never persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsEventLogRecord {
+    pub event_record_id: u64,
+    pub timestamp_utc: String,
+    pub exception_code: u32,
+    pub faulting_module: String,
+    pub stale: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowsEventLogState {
+    Disabled,
     Idle,
     Loading {
-        last_complete: Option<WindowsApplicationFailure>,
+        last_complete: Option<WindowsEventLogRecord>,
     },
     Ready {
-        latest: Option<WindowsApplicationFailure>,
+        latest: Option<WindowsEventLogRecord>,
     },
     Incomplete {
-        last_complete: Option<WindowsApplicationFailure>,
+        last_complete: Option<WindowsEventLogRecord>,
         reason: String,
     },
 }
 
 impl WindowsEventLogState {
-    pub fn latest_complete(&self) -> Option<&WindowsApplicationFailure> {
+    pub fn latest_complete(&self) -> Option<&WindowsEventLogRecord> {
         match self {
             Self::Ready { latest } => latest.as_ref(),
             Self::Loading { last_complete } | Self::Incomplete { last_complete, .. } => {
                 last_complete.as_ref()
             }
-            Self::Idle => None,
+            Self::Disabled | Self::Idle => None,
         }
     }
 }
@@ -54,6 +66,7 @@ pub struct WindowsEventLogManager {
     state: WindowsEventLogState,
     worker: Option<Receiver<(u64, ScanResult)>>,
     worker_started: Option<Instant>,
+    rearm_after_worker: bool,
     scan: Arc<ScanFn>,
 }
 
@@ -66,14 +79,15 @@ impl WindowsEventLogManager {
 
     fn new_with_scan(scan: Arc<ScanFn>) -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             initial_scan_started: false,
             retry_used: false,
             retry_due: None,
             generation: 0,
-            state: WindowsEventLogState::Idle,
+            state: WindowsEventLogState::Disabled,
             worker: None,
             worker_started: None,
+            rearm_after_worker: false,
             scan,
         }
     }
@@ -88,6 +102,17 @@ impl WindowsEventLogManager {
         &self.state
     }
 
+    /// Returns the manager-owned typed UI snapshot. Callers must not copy it
+    /// into the general Activity log because Event Log evidence has separate
+    /// retention and consent semantics.
+    pub(crate) fn ui_snapshot(&self) -> WindowsEventLogState {
+        self.state.clone()
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     pub fn start_initial_scan(&mut self) -> bool {
         if !self.enabled || self.initial_scan_started {
             return false;
@@ -96,11 +121,38 @@ impl WindowsEventLogManager {
         self.start_worker()
     }
 
+    /// Enables diagnostics without starting a lookup. The shell gate must
+    /// call `start_initial_scan` later, after the first rendered frame.
+    pub fn enable(&mut self) -> bool {
+        if self.enabled {
+            return false;
+        }
+
+        self.enabled = true;
+        self.initial_scan_started = false;
+        self.retry_used = false;
+        self.retry_due = None;
+        self.generation = self.generation.wrapping_add(1);
+        if self.worker.is_some() {
+            // The old worker cannot be cancelled. Keep its slot until poll
+            // observes completion, then rearm exactly once from that path.
+            self.rearm_after_worker = true;
+        } else {
+            self.state = WindowsEventLogState::Idle;
+            self.rearm_after_worker = false;
+        }
+        true
+    }
+
     pub fn disable(&mut self) {
+        if !self.enabled {
+            return;
+        }
         self.enabled = false;
         self.generation = self.generation.wrapping_add(1);
         self.retry_due = None;
-        self.state = WindowsEventLogState::Idle;
+        self.rearm_after_worker = false;
+        self.state = WindowsEventLogState::Disabled;
     }
 
     pub fn poll(&mut self) -> WindowsEventLogPoll {
@@ -114,6 +166,11 @@ impl WindowsEventLogManager {
                 self.worker = None;
                 self.worker_started = None;
                 if !self.enabled || generation != self.generation {
+                    if self.enabled && self.rearm_after_worker {
+                        self.rearm_after_worker = false;
+                        self.initial_scan_started = true;
+                        let _ = self.start_worker();
+                    }
                     return WindowsEventLogPoll::Unchanged;
                 }
 
@@ -124,6 +181,12 @@ impl WindowsEventLogManager {
             Err(TryRecvError::Disconnected) => {
                 self.worker = None;
                 self.worker_started = None;
+                if self.enabled && self.rearm_after_worker {
+                    self.rearm_after_worker = false;
+                    self.initial_scan_started = true;
+                    let _ = self.start_worker();
+                    return WindowsEventLogPoll::Unchanged;
+                }
                 if self.enabled {
                     let last_complete = self.state.latest_complete().cloned();
                     self.state = WindowsEventLogState::Incomplete {
@@ -185,7 +248,13 @@ impl WindowsEventLogManager {
         match result {
             Ok(latest) => {
                 self.state = WindowsEventLogState::Ready {
-                    latest: latest.clone(),
+                    latest: latest.as_ref().map(|record| WindowsEventLogRecord {
+                        event_record_id: record.event_record_id,
+                        timestamp_utc: record.timestamp_utc.clone(),
+                        exception_code: record.exception_code,
+                        faulting_module: record.faulting_module.clone(),
+                        stale: false,
+                    }),
                 };
                 if latest.is_none() && !self.retry_used {
                     self.retry_used = true;
@@ -286,6 +355,7 @@ mod tests {
             Ok(None)
         });
 
+        assert!(manager.enable());
         assert!(manager.start_initial_scan());
         assert!(matches!(
             poll_until_complete(&mut manager),
@@ -309,6 +379,7 @@ mod tests {
         let mut manager =
             WindowsEventLogManager::new_with_test_scan(|| Err("access denied".into()));
 
+        assert!(manager.enable());
         assert!(manager.start_initial_scan());
         assert!(matches!(
             poll_until_complete(&mut manager),
@@ -321,6 +392,7 @@ mod tests {
             manager.state(),
             WindowsEventLogState::Incomplete { .. }
         ));
+        assert!(manager.state().latest_complete().is_none());
     }
 
     #[test]
@@ -335,6 +407,7 @@ mod tests {
             Ok(None)
         });
 
+        manager.enable();
         assert!(manager.start_initial_scan());
         entered_receiver
             .recv_timeout(Duration::from_secs(1))
@@ -348,6 +421,47 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(!manager.worker_is_active());
-        assert_eq!(manager.state(), &WindowsEventLogState::Idle);
+        assert_eq!(manager.state(), &WindowsEventLogState::Disabled);
+    }
+
+    #[test]
+    fn reenable_while_old_worker_is_in_flight_rearms_once_after_release() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let call_counter = Arc::clone(&calls);
+        let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let release_receiver = Arc::new(std::sync::Mutex::new(release_receiver));
+        let worker_receiver = Arc::clone(&release_receiver);
+        let mut manager = WindowsEventLogManager::new_with_test_scan(move || {
+            let call = call_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 1 {
+                entered_sender.send(()).unwrap();
+                worker_receiver.lock().unwrap().recv().unwrap();
+            }
+            Ok(None)
+        });
+
+        manager.enable();
+        assert!(manager.start_initial_scan());
+        entered_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        manager.disable();
+        assert!(manager.enable());
+        assert!(!manager.start_initial_scan());
+        release_sender.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while calls.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            let _ = manager.poll();
+            std::thread::yield_now();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(manager.worker_is_active());
+        assert!(matches!(
+            poll_until_complete(&mut manager),
+            WindowsEventLogPoll::Completed(Ok(None))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

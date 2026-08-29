@@ -174,7 +174,7 @@ fn test_load_v8_state_keeps_current_schema_without_rewrite() {
 }
 
 #[test]
-fn test_load_v7_state_defaults_event_log_diagnostics_to_enabled_and_unacknowledged() {
+fn test_load_v7_state_defaults_event_log_diagnostics_to_disabled_and_unacknowledged() {
     with_temp_state_path("v7_event_log_defaults", |state_path| {
         let mut state = serde_json::to_value(current_schema_state_with_version(7)).unwrap();
         let fields = state.as_object_mut().unwrap();
@@ -185,10 +185,25 @@ fn test_load_v7_state_defaults_event_log_diagnostics_to_enabled_and_unacknowledg
 
         let loaded = AppStateStorage::load_from_path(state_path);
 
-        assert!(loaded.windows_event_log_diagnostics_enabled);
+        assert!(!loaded.windows_event_log_diagnostics_enabled);
         assert!(!loaded.windows_event_log_disclosure_seen);
         assert_eq!(loaded.version, 7);
         assert_eq!(loaded.loaded_version, 7);
+        assert_eq!(fs::read_to_string(state_path).unwrap(), serialized);
+    });
+}
+
+#[test]
+fn test_load_v7_state_forces_event_log_diagnostics_disabled_without_rewrite() {
+    with_temp_state_path("v7_event_log_forced_disabled", |state_path| {
+        let serialized =
+            serde_json::to_string_pretty(&current_schema_state_with_version(7)).unwrap();
+        fs::write(state_path, &serialized).unwrap();
+
+        let loaded = AppStateStorage::load_from_path(state_path);
+
+        assert!(!loaded.windows_event_log_diagnostics_enabled);
+        assert!(!loaded.windows_event_log_disclosure_seen);
         assert_eq!(fs::read_to_string(state_path).unwrap(), serialized);
     });
 }
@@ -212,7 +227,7 @@ fn test_explicit_v7_save_upgrades_to_v8_with_event_log_preferences() {
         assert_eq!(persisted["version"], json!(8));
         assert_eq!(
             persisted["windows_event_log_diagnostics_enabled"],
-            json!(true)
+            json!(false)
         );
         assert_eq!(persisted["windows_event_log_disclosure_seen"], json!(false));
     });
