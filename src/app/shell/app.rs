@@ -201,7 +201,18 @@ impl App {
             .set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
 
         let mut state = AppState::new();
-        Self::bootstrap_runtime_without_startup(&mut state, execution::spawn_monitors);
+        let monitor_ctx = cc.egui_ctx.clone();
+        Self::bootstrap_runtime_without_startup(
+            &mut state,
+            move |running_apps, package_tracking, persistent_state| {
+                execution::spawn_monitors_with_wake(
+                    running_apps,
+                    package_tracking,
+                    persistent_state,
+                    Some(Arc::new(move || monitor_ctx.request_repaint())),
+                )
+            },
+        );
 
         #[cfg(target_os = "windows")]
         let mut hwnd = None;

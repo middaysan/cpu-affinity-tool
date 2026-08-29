@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::Arc;
 
+pub(crate) type MonitorWake = Arc<dyn Fn() + Send + Sync>;
+
 /// A small, non-blocking boundary between monitor tasks and the GUI thread.
 ///
 /// Monitor workers must never wait for an unresponsive GUI.  Runtime-state
@@ -27,6 +29,7 @@ pub(crate) struct MonitorEventSender {
     repaint_pending: Arc<AtomicBool>,
     dropped_monitor_messages: Arc<AtomicUsize>,
     dropped_warnings: Arc<AtomicUsize>,
+    wake: Option<MonitorWake>,
 }
 
 pub(crate) struct MonitorEventReceiver {
@@ -38,6 +41,12 @@ pub(crate) struct MonitorEventReceiver {
 }
 
 pub(crate) fn monitor_event_channel() -> (MonitorEventSender, MonitorEventReceiver) {
+    monitor_event_channel_with_wake(None)
+}
+
+pub(crate) fn monitor_event_channel_with_wake(
+    wake: Option<MonitorWake>,
+) -> (MonitorEventSender, MonitorEventReceiver) {
     let (tx, rx) = mpsc::sync_channel(MONITOR_EVENT_QUEUE_CAPACITY);
     let queued = Arc::new(AtomicUsize::new(0));
     let repaint_pending = Arc::new(AtomicBool::new(false));
@@ -51,6 +60,7 @@ pub(crate) fn monitor_event_channel() -> (MonitorEventSender, MonitorEventReceiv
             repaint_pending: repaint_pending.clone(),
             dropped_monitor_messages: dropped_monitor_messages.clone(),
             dropped_warnings: dropped_warnings.clone(),
+            wake,
         },
         MonitorEventReceiver {
             rx,
@@ -72,12 +82,15 @@ impl MonitorEventSender {
         if matches!(event, DiagnosticEvent::RuntimeStateChanged)
             && self.repaint_pending.swap(true, Ordering::AcqRel)
         {
+            self.request_repaint();
             return;
         }
 
+        let mut wake_needed = false;
         match self.tx.try_send(event) {
             Ok(()) => {
                 self.queued.fetch_add(1, Ordering::Release);
+                wake_needed = true;
             }
             Err(TrySendError::Full(event)) => match event {
                 DiagnosticEvent::RuntimeStateChanged => {}
@@ -85,13 +98,25 @@ impl MonitorEventSender {
                     self.dropped_monitor_messages
                         .fetch_add(1, Ordering::Relaxed);
                     self.repaint_pending.store(true, Ordering::Release);
+                    wake_needed = true;
                 }
                 DiagnosticEvent::Warning(_) => {
                     self.dropped_warnings.fetch_add(1, Ordering::Relaxed);
                     self.repaint_pending.store(true, Ordering::Release);
+                    wake_needed = true;
                 }
             },
             Err(TrySendError::Disconnected(_)) => {}
+        }
+
+        if wake_needed {
+            self.request_repaint();
+        }
+    }
+
+    fn request_repaint(&self) {
+        if let Some(wake) = &self.wake {
+            wake();
         }
     }
 }
@@ -129,8 +154,13 @@ impl MonitorEventReceiver {
 
 #[cfg(test)]
 mod tests {
-    use super::{monitor_event_channel, MONITOR_EVENT_QUEUE_CAPACITY};
+    use super::{
+        monitor_event_channel, monitor_event_channel_with_wake, MonitorWake,
+        MONITOR_EVENT_QUEUE_CAPACITY,
+    };
     use crate::app::shell::events::ShellEvent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn runtime_state_notifications_are_coalesced() {
@@ -171,5 +201,23 @@ mod tests {
 
         rx.try_recv().unwrap();
         assert!(rx.finish_drain().has_more_work);
+    }
+
+    #[test]
+    fn producer_wakes_the_reactive_gui_for_new_or_coalesced_work() {
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let wake: MonitorWake = {
+            let wake_count = wake_count.clone();
+            Arc::new(move || {
+                wake_count.fetch_add(1, Ordering::Relaxed);
+            })
+        };
+        let (tx, _rx) = monitor_event_channel_with_wake(Some(wake));
+
+        tx.try_send(ShellEvent::Monitor("first".to_string()));
+        tx.try_send(ShellEvent::RuntimeStateChanged);
+        tx.try_send(ShellEvent::RuntimeStateChanged);
+
+        assert_eq!(wake_count.load(Ordering::Relaxed), 3);
     }
 }

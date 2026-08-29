@@ -13,7 +13,8 @@ pub use launch::{
     run_app_with_affinity_sync, start_app_with_autorun, AppRowAction, LaunchDispatchOutcome,
 };
 pub(crate) use monitor_events::{
-    monitor_event_channel, MonitorDrainStatus, MonitorEventReceiver, MonitorEventSender,
+    monitor_event_channel, monitor_event_channel_with_wake, MonitorDrainStatus,
+    MonitorEventReceiver, MonitorEventSender, MonitorWake,
 };
 pub use reconcile::run_process_settings_monitor;
 pub use store::RuntimeRegistry;
@@ -35,7 +36,21 @@ pub fn spawn_monitors(
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     persistent_state: Arc<RwLock<AppStateStorage>>,
 ) -> MonitorEventReceiver {
-    let (monitor_tx, monitor_rx) = monitor_event_channel();
+    spawn_monitors_with_wake(
+        running_apps,
+        installed_package_tracking,
+        persistent_state,
+        None,
+    )
+}
+
+pub(crate) fn spawn_monitors_with_wake(
+    running_apps: Arc<TokioRwLock<RunningApps>>,
+    installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
+    persistent_state: Arc<RwLock<AppStateStorage>>,
+    wake: Option<MonitorWake>,
+) -> MonitorEventReceiver {
+    let (monitor_tx, monitor_rx) = monitor_event_channel_with_wake(wake);
 
     tokio::spawn(run_running_app_monitor(
         running_apps.clone(),
