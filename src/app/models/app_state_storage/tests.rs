@@ -127,8 +127,8 @@ fn test_backup_rotation() {
     with_temp_state_path("backup_rotation", |state_path| {
         // 1. First backup
         fs::write(state_path, "original").unwrap();
-        storage_io::backup_state_file(state_path);
-        assert!(!state_path.exists());
+        storage_io::backup_state_file(state_path).unwrap();
+        assert!(state_path.exists());
         assert!(state_path.with_file_name("state.json.old").exists());
         assert_eq!(
             fs::read_to_string(state_path.with_file_name("state.json.old")).unwrap(),
@@ -137,8 +137,8 @@ fn test_backup_rotation() {
 
         // 2. Second backup (should be .old1)
         fs::write(state_path, "second").unwrap();
-        storage_io::backup_state_file(state_path);
-        assert!(!state_path.exists());
+        storage_io::backup_state_file(state_path).unwrap();
+        assert!(state_path.exists());
         assert!(state_path.with_file_name("state.json.old1").exists());
         assert_eq!(
             fs::read_to_string(state_path.with_file_name("state.json.old1")).unwrap(),
@@ -147,8 +147,8 @@ fn test_backup_rotation() {
 
         // 3. Third backup (should be .old2)
         fs::write(state_path, "third").unwrap();
-        storage_io::backup_state_file(state_path);
-        assert!(!state_path.exists());
+        storage_io::backup_state_file(state_path).unwrap();
+        assert!(state_path.exists());
         assert!(state_path.with_file_name("state.json.old2").exists());
         assert_eq!(
             fs::read_to_string(state_path.with_file_name("state.json.old2")).unwrap(),
@@ -158,8 +158,8 @@ fn test_backup_rotation() {
 }
 
 #[test]
-fn test_load_v9_state_keeps_current_schema_without_rewrite() {
-    with_temp_state_path("v9_current", |state_path| {
+fn test_load_v10_state_keeps_current_schema_without_rewrite() {
+    with_temp_state_path("v10_current", |state_path| {
         let serialized = serde_json::to_string_pretty(&current_schema_state()).unwrap();
         fs::write(state_path, &serialized).unwrap();
 
@@ -168,6 +168,35 @@ fn test_load_v9_state_keeps_current_schema_without_rewrite() {
 
         assert_eq!(loaded.version, CURRENT_APP_STATE_VERSION);
         assert_eq!(persisted, serialized);
+    });
+}
+
+#[test]
+fn test_load_v9_rule_defaults_descendant_management_on_and_persists_v10() {
+    with_temp_state_path("v9_descendant_management", |state_path| {
+        let mut value = serde_json::to_value(sample_state_with_version(9)).unwrap();
+        value["groups"][0]["programs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("manage_descendants");
+        let original = serde_json::to_string_pretty(&value).unwrap();
+        fs::write(state_path, &original).unwrap();
+
+        let mut loaded = AppStateStorage::load_from_path(state_path);
+
+        assert_eq!(loaded.version, 9);
+        assert_eq!(loaded.loaded_version, 9);
+        assert!(loaded.groups[0].programs[0].manage_descendants);
+        assert_eq!(fs::read_to_string(state_path).unwrap(), original);
+
+        persist_explicit_current_schema_upgrade(&mut loaded, state_path);
+        let persisted: Value =
+            serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
+        assert_eq!(persisted["version"], json!(10));
+        assert_eq!(
+            persisted["groups"][0]["programs"][0]["manage_descendants"],
+            json!(true)
+        );
     });
 }
 
@@ -204,7 +233,7 @@ fn test_load_v7_state_forces_event_log_diagnostics_enabled_without_rewrite() {
 }
 
 #[test]
-fn test_explicit_v7_save_upgrades_to_v9_with_enabled_event_log_diagnostics() {
+fn test_explicit_v7_save_upgrades_to_v10_with_enabled_event_log_diagnostics() {
     with_temp_state_path("v7_event_log_upgrade", |state_path| {
         let mut state = serde_json::to_value(current_schema_state_with_version(7)).unwrap();
         let fields = state.as_object_mut().unwrap();
@@ -218,7 +247,7 @@ fn test_explicit_v7_save_upgrades_to_v9_with_enabled_event_log_diagnostics() {
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
 
-        assert_eq!(persisted["version"], json!(9));
+        assert_eq!(persisted["version"], json!(10));
         assert_eq!(
             persisted["windows_event_log_diagnostics_enabled"],
             json!(true)

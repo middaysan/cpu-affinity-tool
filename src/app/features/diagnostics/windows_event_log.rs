@@ -17,6 +17,9 @@ pub struct WindowsEventLogRecord {
     pub timestamp_utc: String,
     pub exception_code: u32,
     pub faulting_module: String,
+    pub faulting_module_version: Option<String>,
+    pub faulting_offset: Option<u64>,
+    pub process_creation_time_utc: Option<String>,
     pub stale: bool,
 }
 
@@ -254,6 +257,9 @@ impl WindowsEventLogManager {
                         timestamp_utc: record.timestamp_utc.clone(),
                         exception_code: record.exception_code,
                         faulting_module: record.faulting_module.clone(),
+                        faulting_module_version: record.faulting_module_version.clone(),
+                        faulting_offset: record.faulting_offset,
+                        process_creation_time_utc: record.process_creation_time_utc.clone(),
                         stale: false,
                     }),
                 };

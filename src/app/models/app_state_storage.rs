@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Current version of the application state schema.
-pub const CURRENT_APP_STATE_VERSION: u32 = 9;
+pub const CURRENT_APP_STATE_VERSION: u32 = 10;
 
 pub(crate) const fn default_windows_event_log_diagnostics_enabled() -> bool {
     true

@@ -175,10 +175,20 @@ fn draw_windows_event_log_status(ui: &mut egui::Ui, state: &WindowsEventLogState
 fn format_event_record(
     record: &crate::app::features::diagnostics::windows_event_log::WindowsEventLogRecord,
 ) -> String {
-    format!(
+    let mut output = format!(
         "Record ID: {}\nUTC time: {}\nException code: 0x{:08X}\nFaulting module: {}",
         record.event_record_id, record.timestamp_utc, record.exception_code, record.faulting_module,
-    )
+    );
+    if let Some(version) = &record.faulting_module_version {
+        output.push_str(&format!("\nFaulting module version: {version}"));
+    }
+    if let Some(offset) = record.faulting_offset {
+        output.push_str(&format!("\nFaulting offset: 0x{offset:X}"));
+    }
+    if let Some(created) = &record.process_creation_time_utc {
+        output.push_str(&format!("\nProcess creation UTC: {created}"));
+    }
+    output
 }
 
 fn diagnostic_card(ui: &mut egui::Ui, title: &str, detail: &str, stale: bool) {

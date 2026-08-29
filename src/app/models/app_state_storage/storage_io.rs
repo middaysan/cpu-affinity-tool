@@ -102,28 +102,9 @@ pub(super) fn save_to_path_with_filesystem<T: Serialize>(
     Ok(())
 }
 
-#[cfg(test)]
-pub(super) fn backup_state_file(path: &Path) {
-    if !path.exists() {
-        return;
-    }
-
-    let mut backup_path = PathBuf::from(path);
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(STATE_FILE_NAME);
-    let mut backup_name = format!("{file_name}.old");
-    backup_path.set_file_name(&backup_name);
-
-    let mut counter = 1;
-    while backup_path.exists() {
-        backup_name = format!("{file_name}.old{counter}");
-        backup_path.set_file_name(&backup_name);
-        counter += 1;
-    }
-
-    let _ = fs::rename(path, backup_path);
+pub(super) fn backup_state_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut filesystem = RealStateFilesystem;
+    backup_state_file_with_filesystem(path, &mut filesystem)
 }
 
 pub(super) fn backup_state_file_with_filesystem(

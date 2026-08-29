@@ -30,12 +30,15 @@ const MAX_SCANNED_EVENTS: usize = 64;
 const EVENT_BATCH_SIZE: usize = 8;
 const EVENT_BATCH_TIMEOUT_MS: u32 = 500;
 const EVENT_QUERY: &str = "*[System[Provider[@Name='Application Error'] and EventID=1000 and TimeCreated[timediff(@SystemTime) <= 604800000]]]";
-const RENDER_PATHS: [&str; 5] = [
+const RENDER_PATHS: [&str; 8] = [
     "Event/EventData/Data[@Name='AppName']",
     "Event/EventData/Data[@Name='AppPath']",
     "Event/EventData/Data[@Name='ModuleName']",
     "Event/EventData/Data[@Name='ModulePath']",
     "Event/EventData/Data[@Name='ExceptionCode']",
+    "Event/EventData/Data[@Name='ModuleVersion']",
+    "Event/EventData/Data[@Name='FaultingOffset']",
+    "Event/EventData/Data[@Name='ProcessCreationTime']",
 ];
 const SYSTEM_PROPERTY_COUNT: usize = EvtSystemPropertyIdEND.0 as usize;
 
@@ -119,6 +122,9 @@ pub struct WindowsApplicationFailure {
     pub timestamp_utc: String,
     pub exception_code: u32,
     pub faulting_module: String,
+    pub faulting_module_version: Option<String>,
+    pub faulting_offset: Option<u64>,
+    pub process_creation_time_utc: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +143,9 @@ struct NamedEventData {
     faulting_module_name: Option<String>,
     faulting_module_path: Option<String>,
     exception_code: Option<String>,
+    faulting_module_version: Option<String>,
+    faulting_offset: Option<String>,
+    process_creation_time: Option<String>,
 }
 
 fn parse_exception_code(value: &str) -> Option<u32> {
@@ -149,6 +158,46 @@ fn parse_exception_code(value: &str) -> Option<u32> {
     }
 
     u32::from_str_radix(value, 16).ok()
+}
+
+fn parse_module_version(value: &str) -> Option<String> {
+    const MAX_MODULE_VERSION_CHARS: usize = 32;
+    (!value.is_empty()
+        && value.len() <= MAX_MODULE_VERSION_CHARS
+        && value.bytes().any(|byte| byte.is_ascii_digit())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')))
+    .then(|| value.to_string())
+}
+
+fn parse_faulting_offset(value: &str) -> Option<u64> {
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    (!digits.is_empty()
+        && digits.len() <= 16
+        && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| u64::from_str_radix(digits, 16).ok())
+    .flatten()
+}
+
+fn parse_process_creation_time_utc(value: &str) -> Option<String> {
+    let filetime = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        (!hex.is_empty() && hex.len() <= 16 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| u64::from_str_radix(hex, 16).ok())
+            .flatten()?
+    } else {
+        (!value.is_empty() && value.len() <= 20 && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| value.parse::<u64>().ok())
+            .flatten()?
+    };
+
+    timestamp_utc_from_filetime(filetime)
 }
 
 fn application_error_from_values(
@@ -164,19 +213,34 @@ fn application_error_from_values(
         return None;
     }
 
-    let (app_name, app_path, faulting_module, faulting_module_path, exception_code) = match named {
+    let (
+        app_name,
+        app_path,
+        faulting_module,
+        faulting_module_path,
+        exception_code,
+        module_version,
+        faulting_offset,
+        process_creation_time,
+    ) = match named {
         NamedEventData {
             app_name: Some(app_name),
             app_path: Some(app_path),
             faulting_module_name: Some(faulting_module_name),
             faulting_module_path,
             exception_code: Some(exception_code),
+            faulting_module_version,
+            faulting_offset,
+            process_creation_time,
         } => (
             app_name,
             app_path,
             faulting_module_name,
             faulting_module_path,
             exception_code,
+            faulting_module_version,
+            faulting_offset,
+            process_creation_time,
         ),
         _ if system.version == 0
             && positional.len() == APPLICATION_ERROR_V0_DATA_COUNT
@@ -188,6 +252,9 @@ fn application_error_from_values(
                 positional[3].clone()?,
                 positional[11].clone(),
                 positional[6].clone()?,
+                positional[4].clone(),
+                positional[7].clone(),
+                positional[9].clone(),
             )
         }
         _ => return None,
@@ -209,6 +276,11 @@ fn application_error_from_values(
         timestamp_utc: system.timestamp_utc,
         exception_code,
         faulting_module,
+        faulting_module_version: module_version.as_deref().and_then(parse_module_version),
+        faulting_offset: faulting_offset.as_deref().and_then(parse_faulting_offset),
+        process_creation_time_utc: process_creation_time
+            .as_deref()
+            .and_then(parse_process_creation_time_utc),
     })
 }
 
@@ -557,6 +629,9 @@ fn named_event_data_from_rendered(values: &RenderedValues) -> Option<NamedEventD
         faulting_module_name: variant_string(values, 2),
         faulting_module_path: variant_string(values, 3),
         exception_code: variant_string(values, 4),
+        faulting_module_version: variant_string(values, 5),
+        faulting_offset: variant_string(values, 6),
+        process_creation_time: variant_string(values, 7),
     })
 }
 
@@ -616,13 +691,7 @@ fn variant_timestamp_utc(values: &RenderedValues, index: usize) -> Option<String
     let value = values.values().get(index)?;
     let system_time = if is_scalar(value, EvtVarTypeFileTime.0) {
         let raw = unsafe { value.Anonymous.FileTimeVal };
-        let file_time = FILETIME {
-            dwLowDateTime: raw as u32,
-            dwHighDateTime: (raw >> 32) as u32,
-        };
-        let mut system_time = SYSTEMTIME::default();
-        unsafe { FileTimeToSystemTime(&file_time, &mut system_time).ok()? };
-        system_time
+        return timestamp_utc_from_filetime(raw);
     } else if is_scalar(value, EvtVarTypeSysTime.0) {
         let pointer = unsafe { value.Anonymous.SysTimeVal };
         if pointer.is_null() {
@@ -633,6 +702,20 @@ fn variant_timestamp_utc(values: &RenderedValues, index: usize) -> Option<String
         return None;
     };
 
+    format_system_time_utc(system_time)
+}
+
+fn timestamp_utc_from_filetime(raw: u64) -> Option<String> {
+    let file_time = FILETIME {
+        dwLowDateTime: raw as u32,
+        dwHighDateTime: (raw >> 32) as u32,
+    };
+    let mut system_time = SYSTEMTIME::default();
+    unsafe { FileTimeToSystemTime(&file_time, &mut system_time).ok()? };
+    format_system_time_utc(system_time)
+}
+
+fn format_system_time_utc(system_time: SYSTEMTIME) -> Option<String> {
     (system_time.wMonth >= 1 && system_time.wMonth <= 12 && system_time.wDay >= 1).then(|| {
         format!(
             "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
@@ -652,7 +735,8 @@ mod tests {
     use super::{
         EventSystemValues, NamedEventData, RENDER_PATHS, RenderedValues,
         application_error_from_values, create_render_contexts, is_query_complete_error, is_scalar,
-        parse_exception_code, variant_string,
+        parse_exception_code, parse_faulting_offset, parse_module_version,
+        parse_process_creation_time_utc, variant_string,
     };
     use std::mem::size_of;
     use std::path::Path;
@@ -682,6 +766,19 @@ mod tests {
         assert_eq!(parse_exception_code("not-a-code"), None);
     }
 
+    #[test]
+    fn optional_diagnostic_fields_are_strict_and_canonical() {
+        assert_eq!(parse_module_version("1.5.0.0"), Some("1.5.0.0".to_string()));
+        assert_eq!(parse_module_version("C:\\secret"), None);
+        assert_eq!(parse_faulting_offset("0x0000000000A8B6F6"), Some(0xA8_B6F6));
+        assert_eq!(parse_faulting_offset("0x10000000000000000"), None);
+        assert_eq!(
+            parse_process_creation_time_utc("0x01DC09CB19645580"),
+            Some("2025-08-10T07:48:02.328Z".to_string())
+        );
+        assert_eq!(parse_process_creation_time_utc("not-a-filetime"), None);
+    }
+
     fn valid_system(version: u8) -> EventSystemValues {
         EventSystemValues {
             provider: "Application Error".to_string(),
@@ -702,6 +799,7 @@ mod tests {
                 faulting_module_name: Some("kernelbase.dll".to_string()),
                 faulting_module_path: None,
                 exception_code: Some("c0000005".to_string()),
+                ..NamedEventData::default()
             },
             &[],
             Path::new(r"C:\Tools\cpu-affinity-tool.exe"),
@@ -767,7 +865,7 @@ mod tests {
 
     #[test]
     fn only_renders_named_event_1000_fields_from_the_event_root() {
-        assert_eq!(RENDER_PATHS.len(), 5);
+        assert_eq!(RENDER_PATHS.len(), 8);
         assert!(
             RENDER_PATHS
                 .iter()
@@ -776,6 +874,9 @@ mod tests {
         assert!(RENDER_PATHS.contains(&"Event/EventData/Data[@Name='AppPath']"));
         assert!(RENDER_PATHS.contains(&"Event/EventData/Data[@Name='ModuleName']"));
         assert!(RENDER_PATHS.contains(&"Event/EventData/Data[@Name='ModulePath']"));
+        assert!(RENDER_PATHS.contains(&"Event/EventData/Data[@Name='ModuleVersion']"));
+        assert!(RENDER_PATHS.contains(&"Event/EventData/Data[@Name='FaultingOffset']"));
+        assert!(RENDER_PATHS.contains(&"Event/EventData/Data[@Name='ProcessCreationTime']"));
     }
 
     #[test]
@@ -857,6 +958,7 @@ mod tests {
                 faulting_module_name: Some("ntdll.dll".to_string()),
                 faulting_module_path: None,
                 exception_code: Some("c0000005".to_string()),
+                ..NamedEventData::default()
             },
             &[],
             Path::new(r"C:\Tools\cpu-affinity-tool.exe"),
@@ -877,6 +979,7 @@ mod tests {
                 ),
                 faulting_module_path: None,
                 exception_code: Some("c0000005".to_string()),
+                ..NamedEventData::default()
             },
             &[],
             Path::new(r"C:\Tools\cpu-affinity-tool.exe"),
