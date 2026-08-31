@@ -4,7 +4,7 @@ This file records reviewed RustSec findings that remain in the lockfile so relea
 
 ## `quick-xml 0.39.4`
 
-Reviewed: 2026-07-16
+Reviewed: 2026-09-01
 
 Advisories:
 
@@ -25,7 +25,7 @@ Release assessment:
 
 Decision:
 
-Accept this as a build-time, non-user-input exposure for `v1.5.0`. Do not remove Wayland beta support or vendor a private scanner fork solely to force the transitive upgrade. Re-evaluate when `wayland-scanner` accepts `quick-xml >=0.41.0`, when the GUI stack is updated, or if the dependency begins parsing untrusted XML.
+Accept this as a build-time, non-user-input exposure for `v1.6.0`. Do not remove Wayland beta support or vendor a private scanner fork solely to force the transitive upgrade. Re-evaluate when `wayland-scanner` accepts `quick-xml >=0.41.0`, when the GUI stack is updated, or if the dependency begins parsing untrusted XML.
 
 Audit command for the reviewed lockfile:
 
@@ -34,3 +34,9 @@ cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
 ```
 
 The unignored audit must still be inspected so new advisories cannot hide behind these two reviewed exceptions.
+
+## Resolved during the `v1.6.0` review
+
+- Updated `webbrowser` from 1.2.1 to 1.2.2, resolving `RUSTSEC-2026-0257` in the Unix `BROWSER` handling path.
+- Updated `event-listener` from 5.4.1 to 5.4.2, resolving the `RUSTSEC-2026-0221` thread-safety warning in the Linux accessibility dependency path.
+- `cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195` reports no remaining vulnerabilities. Informational unmaintained warnings remain in resolved transitive dependencies; the GTK3/GLib entries reported from the all-target lockfile are not present in either the Windows stable or Linux beta target graph.

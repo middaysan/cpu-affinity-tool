@@ -6,6 +6,8 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-01
+
 ### Added
 
 - Added local Windows crash reports for main-thread Rust panics and native UI-loop errors
@@ -13,23 +15,35 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 - Added a persistent Activity summary of the newest validated crash report after the next startup, so **Clear** does not hide the last crash context
 - Added a non-shipping Windows crash-capture probe for pre-Tokio panic and native-loop error ordering
 - Added Windows-only Event Log diagnostics, enabled by default after the first rendered frame, with sanitized Activity evidence
+- Added an opt-in Windows native crash-dump guide for failures that cannot be captured by the in-app report writer
+- Added per-rule descendant process management, disabled by default for newly created rules
 
 ### Changed
 
 - Returned both binaries to the platform system allocator instead of installing `mimalloc` globally
 - Stable Windows releases now publish an identity-verified matching PDB with line-table debug information for crash symbolization, and pull-request CI reproduces that symbol build
-- Schema v9 stores the Event Log diagnostics preference without a disclosure marker; schema v8 and older state adopts the enabled default without an eager rewrite
+- Process tracking and actions now bind a PID to verified process identity and creation time before applying affinity, priority, focus, or descendant ownership
+- Monitoring uses bounded event delivery and wakes the GUI directly instead of relying on an unbounded bridge or UI-thread sleeps
+- Tray commands are routed through the GUI thread; if tray initialization fails, the window remains reachable instead of hiding without a restore path
+- Persisted state schema is now v10. Existing pre-v10 rules preserve their previous descendant-management behavior, while newly created rules and missing v10 values default it to off
 
 ### Fixed
 
 - Kept overlapped named-pipe operation resources alive through every pending completion state, including cancellation and `ERROR_IO_INCOMPLETE`, preventing timeout-path use-after-free
 - Kept the saved-rule primary guard held until its forwarding server has stopped, preventing a replacement cold start from racing the previous named-pipe owner during shutdown
 - Prevented stale Event Log worker results from resurfacing after disable/re-enable, and kept Event Log evidence out of chronological Activity entries
+- Prevented PID reuse from redirecting runtime actions to a different process instance
+- Prevented unverified or older processes from being claimed as descendants of a tracked launch
+- Made state replacement crash-safe with validated temporary files and recovery backups instead of allowing an interrupted save to truncate the active state
+- Cleaned up suspended Windows launches when process setup fails before resume
+- Bounded monitor and IPC worker shutdown so stale workers cannot outlive the runtime state they serve
+- Updated `webbrowser` and `event-listener` to patched releases identified during the v1.6.0 dependency audit
 
 ### Security
 
 - Crash-report Explorer actions verify and execute through a non-elevated, below-high-integrity Explorer shell process; the existing Activity **Data folder** action keeps its prior direct-launch behavior
 - Crash report writes use unique partial files, no-replace publication, bounded UTF-8 content, reparse checks, and file-identity validation before managed deletion
+- Windows Event Log diagnostics are read-only, sanitize displayed fields, never upload data, and do not modify Windows Error Reporting or registry settings
 
 ## [1.5.0] - 2026-07-16
 
