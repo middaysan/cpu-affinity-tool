@@ -8,6 +8,7 @@ pub enum TrayCmd {
     Quit,
 }
 
+#[cfg(any(test, target_os = "windows"))]
 fn menu_command(id: &str) -> Option<TrayCmd> {
     match id {
         "1" => Some(TrayCmd::Show),
@@ -16,6 +17,7 @@ fn menu_command(id: &str) -> Option<TrayCmd> {
     }
 }
 
+#[cfg(any(test, target_os = "windows"))]
 fn tray_command_for_double_click(left_button: bool) -> Option<TrayCmd> {
     left_button.then_some(TrayCmd::Show)
 }
