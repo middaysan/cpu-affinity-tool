@@ -9,17 +9,29 @@ use std::ptr::null_mut;
 
 use serde::Deserialize;
 use windows::Win32::Foundation::{HLOCAL, HWND, LocalFree};
+use windows::Win32::Security::{
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_ELEVATION,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenElevation, TokenIntegrityLevel,
+};
 use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-    CoTaskMemFree, IPersistFile, STGM_READ,
+    CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance,
+    CoInitializeEx, CoTaskMemFree, IDispatch, IPersistFile, IServiceProvider, STGM_READ,
 };
+use windows::Win32::System::Ole::IOleWindow;
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
-use windows::Win32::UI::Shell::{
-    CommandLineToArgvW, FOLDERID_Desktop, IShellLinkW, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
-    SLGP_UNCPRIORITY, SLR_NO_UI, ShellLink,
+use windows::Win32::System::Threading::{
+    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::core::{Interface, PCWSTR, PWSTR};
+use windows::Win32::System::Variant::VARIANT;
+use windows::Win32::UI::Shell::{
+    CommandLineToArgvW, FOLDERID_Desktop, IShellBrowser, IShellDispatch2, IShellFolderViewDual,
+    IShellLinkW, IShellView, IShellWindows, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+    SID_STopLevelBrowser, SLGP_UNCPRIORITY, SLR_NO_UI, SVGIO_BACKGROUND, SWC_DESKTOP,
+    SWFO_NEEDDISPATCH, ShellLink, ShellWindows,
+};
+use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+use windows::core::{BSTR, Interface, PCWSTR, PWSTR};
 use winreg::RegKey;
 use winreg::enums::{HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
@@ -29,7 +41,7 @@ use crate::{
 };
 
 use super::OS;
-use super::common::{ComGuard, OsError, decode_ansi, expand_env, to_wide_z};
+use super::common::{ComGuard, HandleGuard, OsError, decode_ansi, expand_env, to_wide_z};
 use super::launch::quote_arg_windows;
 
 #[derive(Deserialize)]
@@ -695,6 +707,148 @@ fn create_shortcut_file(spec: &ShortcutSpec) -> Result<(), String> {
     Ok(())
 }
 
+fn explorer_arguments(path: &Path, select: bool) -> String {
+    let quoted_path = quote_arg_windows(&path.to_string_lossy());
+    if select {
+        format!("/select,{quoted_path}")
+    } else {
+        quoted_path
+    }
+}
+
+fn explorer_broker_token_is_acceptable(
+    token_is_elevated: bool,
+    integrity_rid: Option<u32>,
+) -> bool {
+    const SECURITY_MANDATORY_HIGH_RID: u32 = 0x3000;
+    !token_is_elevated && integrity_rid.is_some_and(|rid| rid < SECURITY_MANDATORY_HIGH_RID)
+}
+
+fn require_unelevated_explorer_browser(shell_browser: &IShellBrowser) -> Result<(), String> {
+    unsafe {
+        let ole_window: IOleWindow = shell_browser
+            .cast()
+            .map_err(|error| format!("failed to query the Explorer browser window: {error}"))?;
+        let browser_window = ole_window
+            .GetWindow()
+            .map_err(|error| format!("failed to get the Explorer browser window: {error}"))?;
+        let mut process_id = 0u32;
+        if GetWindowThreadProcessId(browser_window, Some(&mut process_id)) == 0 || process_id == 0 {
+            return Err("failed to resolve the Explorer process".to_string());
+        }
+
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id)
+            .map_err(|error| format!("failed to open the Explorer process: {error}"))?;
+        let process = HandleGuard(process);
+        let mut token = windows::Win32::Foundation::HANDLE::default();
+        OpenProcessToken(process.0, TOKEN_QUERY, &mut token)
+            .map_err(|error| format!("failed to open the Explorer process token: {error}"))?;
+        let token = HandleGuard(token);
+
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut returned = 0u32;
+        GetTokenInformation(
+            token.0,
+            TokenElevation,
+            Some((&raw mut elevation).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+        .map_err(|error| format!("failed to query the Explorer token elevation: {error}"))?;
+        if returned < std::mem::size_of::<TOKEN_ELEVATION>() as u32 {
+            return Err("Explorer returned incomplete token elevation data".to_string());
+        }
+        let mut integrity_size = 0u32;
+        let _ = GetTokenInformation(token.0, TokenIntegrityLevel, None, 0, &mut integrity_size);
+        if integrity_size < std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32 {
+            return Err("Explorer returned invalid token integrity data".to_string());
+        }
+        let word_size = std::mem::size_of::<usize>();
+        let mut integrity_storage = vec![0usize; (integrity_size as usize).div_ceil(word_size)];
+        GetTokenInformation(
+            token.0,
+            TokenIntegrityLevel,
+            Some(integrity_storage.as_mut_ptr().cast()),
+            integrity_size,
+            &mut integrity_size,
+        )
+        .map_err(|error| format!("failed to query the Explorer token integrity: {error}"))?;
+        let integrity_label = &*(integrity_storage.as_ptr().cast::<TOKEN_MANDATORY_LABEL>());
+        let subauthority_count = GetSidSubAuthorityCount(integrity_label.Label.Sid);
+        let integrity_rid = if subauthority_count.is_null() || *subauthority_count == 0 {
+            None
+        } else {
+            let rid = GetSidSubAuthority(
+                integrity_label.Label.Sid,
+                u32::from(*subauthority_count) - 1,
+            );
+            (!rid.is_null()).then(|| *rid)
+        };
+
+        if !explorer_broker_token_is_acceptable(elevation.TokenIsElevated != 0, integrity_rid) {
+            return Err(
+                "the available Explorer shell is elevated or has high integrity; refusing to use \
+                 it as a broker"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn execute_in_explorer_process(file: &str, arguments: Option<&str>) -> Result<(), String> {
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|error| format!("failed to initialize COM for Explorer: {error}"))?;
+        let _com = ComGuard;
+
+        let shell_windows: IShellWindows =
+            CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER)
+                .map_err(|error| format!("failed to connect to Windows Explorer: {error}"))?;
+        let empty = VARIANT::default();
+        let mut desktop_window = 0i32;
+        let desktop_dispatch = shell_windows
+            .FindWindowSW(
+                &raw const empty,
+                &raw const empty,
+                SWC_DESKTOP,
+                &mut desktop_window,
+                SWFO_NEEDDISPATCH,
+            )
+            .map_err(|error| format!("failed to find the Explorer desktop view: {error}"))?;
+        let service_provider: IServiceProvider = desktop_dispatch
+            .cast()
+            .map_err(|error| format!("failed to query the Explorer desktop service: {error}"))?;
+        let top_level_browser_service = SID_STopLevelBrowser;
+        let shell_browser: IShellBrowser = service_provider
+            .QueryService(&raw const top_level_browser_service)
+            .map_err(|error| format!("failed to query the Explorer shell browser: {error}"))?;
+        require_unelevated_explorer_browser(&shell_browser)?;
+        let shell_view: IShellView = shell_browser
+            .QueryActiveShellView()
+            .map_err(|error| format!("failed to query the Explorer shell view: {error}"))?;
+        let background: IDispatch = shell_view
+            .GetItemObject(SVGIO_BACKGROUND)
+            .map_err(|error| format!("failed to query the Explorer view background: {error}"))?;
+        let folder_view: IShellFolderViewDual = background
+            .cast()
+            .map_err(|error| format!("failed to query the Explorer folder view: {error}"))?;
+        let application = folder_view
+            .Application()
+            .map_err(|error| format!("failed to query the Explorer application: {error}"))?;
+        let shell_dispatch: IShellDispatch2 = application
+            .cast()
+            .map_err(|error| format!("failed to query the Explorer shell dispatcher: {error}"))?;
+
+        let file = BSTR::from(file);
+        let argument_value = arguments.map(VARIANT::from).unwrap_or_default();
+        shell_dispatch
+            .ShellExecute(&file, &argument_value, &empty, &empty, &empty)
+            .map_err(|error| format!("Explorer could not open the requested path: {error}"))
+    }
+}
+
 fn current_user_desktop_dir_shell() -> Result<PathBuf, String> {
     let desktop = unsafe { SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, None) }
         .map_err(|e| e.to_string())?;
@@ -760,6 +914,28 @@ impl OS {
             .map_err(|e| format!("Failed to open directory '{}': {}", target.display(), e))
     }
 
+    pub fn open_directory_via_shell_broker(path: &Path) -> Result<(), String> {
+        let target = normalize_existing_windows_path(path);
+        let arguments = explorer_arguments(&target, false);
+        execute_in_explorer_process("explorer.exe", Some(&arguments)).map_err(|error| {
+            format!(
+                "Failed to open directory '{}' through Windows Explorer: {error}",
+                target.display()
+            )
+        })
+    }
+
+    pub fn show_file_in_directory(path: &Path) -> Result<(), String> {
+        let target = normalize_existing_windows_path(path);
+        let arguments = explorer_arguments(&target, true);
+        execute_in_explorer_process("explorer.exe", Some(&arguments)).map_err(|error| {
+            format!(
+                "Failed to show file '{}' through Windows Explorer: {error}",
+                target.display()
+            )
+        })
+    }
+
     pub fn resolve_installed_package_runtime_info(
         aumid: &str,
     ) -> Result<InstalledPackageRuntimeInfo, String> {
@@ -796,10 +972,10 @@ mod tests {
     use super::{
         OS, app_paths_display_name, classify_app_paths_entry, classify_catalog_record,
         classify_start_menu_entry, collect_start_menu_entries_from_dir, dedup_catalog_entries,
-        is_ignored_start_menu_entry_name, merge_catalog_sources, normalize_existing_windows_path,
-        package_family_name_from_aumid, parse_apps_folder_json,
-        parse_appx_package_runtime_info_json, parse_url_file, strip_windows_verbatim_prefix,
-        target_identity,
+        explorer_arguments, explorer_broker_token_is_acceptable, is_ignored_start_menu_entry_name,
+        merge_catalog_sources, normalize_existing_windows_path, package_family_name_from_aumid,
+        parse_apps_folder_json, parse_appx_package_runtime_info_json, parse_url_file,
+        strip_windows_verbatim_prefix, target_identity,
     };
     use crate::windows::common::{ComGuard, to_wide_z};
     use crate::{
@@ -813,6 +989,27 @@ mod tests {
             .unwrap()
             .as_nanos();
         format!("{}-{}", process::id(), nanos)
+    }
+
+    #[test]
+    fn explorer_arguments_quote_paths_and_keep_select_as_one_switch() {
+        assert_eq!(
+            explorer_arguments(Path::new(r"C:\Crash Reports\crash one.txt"), true),
+            r#"/select,"C:\Crash Reports\crash one.txt""#
+        );
+        assert_eq!(
+            explorer_arguments(Path::new(r"C:\Crash Reports"), false),
+            r#""C:\Crash Reports""#
+        );
+    }
+
+    #[test]
+    fn explorer_broker_rejects_elevated_or_unknown_tokens() {
+        assert!(explorer_broker_token_is_acceptable(false, Some(0x2000)));
+        assert!(explorer_broker_token_is_acceptable(false, Some(0x1000)));
+        assert!(!explorer_broker_token_is_acceptable(true, Some(0x2000)));
+        assert!(!explorer_broker_token_is_acceptable(false, Some(0x3000)));
+        assert!(!explorer_broker_token_is_acceptable(false, None));
     }
 
     struct TempFileGuard {

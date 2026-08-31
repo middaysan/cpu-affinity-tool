@@ -10,7 +10,7 @@ Confirm that the shipped Windows binary starts correctly, applies its core launc
 
 | Scenario | Expected result | Release-blocking if it fails |
 | --- | --- | --- |
-| Cold start with existing `state.json` | App starts, loads saved state, and shows the expected groups, apps, and theme without corruption prompts | Yes |
+| Cold start with existing `state.json` | App starts, loads saved state, and shows the expected groups, apps, and theme without corruption prompts; an interrupted save must leave a complete prior or new file rather than a truncated state file | Yes |
 | Add app via **Add installed...** | Selected app is added once, remains visible, and survives restart after save | Yes |
 | Add app via **Add file...** | Selected path or launcher is added once, remains visible, and survives restart after save | Yes |
 | Add app via drag-drop | Dropped app is added exactly once to the intended group | Yes |
@@ -19,12 +19,20 @@ Confirm that the shipped Windows binary starts correctly, applies its core launc
 | **Fix** on a mismatched running app | Saved affinity and priority are applied without launching or focusing; protected/green appears only after every setting call succeeds | Yes |
 | **Focus** on a protected running app | Existing window is activated without reapplying settings or spawning another process | Yes |
 | Single-run and `Run All` | Individual launch and group launch both work without missing or duplicate starts | Yes |
-| **Monitoring active** / **Pause monitor** | Monitoring can be paused and resumed, corrections still apply while active, and expected events appear in **Activity** | Yes |
-| Tray hide / restore | App can hide to tray and restore cleanly without becoming unresponsive | Yes |
+| **Monitoring active** / **Pause monitor** | Monitoring can be paused and resumed, corrections still apply while active, and expected events appear in **Activity**. A new rule manages only its verified root by default; descendants are affected only after explicit opt-in, while existing pre-v10 rules retain their prior descendant behavior. | Yes |
+| Tray hide / restore / quit | From the hidden state, **Restore** and left double-click each restore the app exactly once; rapid Restore/double-click then **Quit** leaves the app closing without another restore. If the tray cannot initialize, close/minimize must keep the window reachable instead of hiding it. **Quit** from visible and hidden states exits cleanly, removes the tray icon, creates no crash report, and allows an immediate normal or saved-rule relaunch to claim the forwarding endpoint. Run this scenario on both Windows 10 and Windows 11 when available. | Yes |
 | Theme persistence across restart | Theme changes persist after closing and reopening the app | Yes |
 | Theme selector icons | System, light, and dark states use readable painted icons with no missing-glyph square | Yes |
-| **Activity** visible and clearable | Events appear in chronological order and can be cleared without breaking later activity reporting | Yes |
+| **Activity** visible and clearable | Events appear in chronological order and can be cleared without breaking later activity reporting; the newest validated saved crash-report summary remains visible until its report is removed or replaced | Yes |
 | Overview and Activity navigation | The centered navigation switches routes without overlap, clipping, or losing state | Yes |
+| Crash report capture probes | `scripts/test-windows-crash-reports.ps1` creates one complete typed report for the pre-Tokio main-thread panic and synthetic native-loop error, with the expected exit codes | Yes |
+| **Crash reports** header and list | The top-right action shows the saved complete-report count, opens the Activity subpage, and lists newest reports first without blocking the render path | Yes |
+| **Show in Explorer** | A listed report is selected only after the Explorer process token is verified non-elevated and below high integrity; an elevated, missing, or incompatible broker is rejected, no editor is launched, and the path remains copyable | Yes |
+| Crash report deletion and retention | Single and bulk deletion require confirmation, never delete unrelated/nested files, normal background retention keeps only the newest 20 complete reports, and a sequential pre-UI failure probe stops after a writer observes 64 managed entries without delaying normal startup | Yes |
+| Crash report privacy and limits | The page states that reports are local, asks users to review before sharing, recommends redacting a copy, and generated files remain valid UTF-8 at or below 256 KiB | Yes |
+| Crash report coverage limits | Background panic, forced termination, native fault, and external termination are not presented as guaranteed report sources | Yes |
+| Windows Event Log supplemental details | Activity may show only sanitized Event ID details: record ID, UTC time, exception code, module basename, and valid optional module version, faulting offset, and process creation time. It must remain clearly unverified supplemental evidence and must not alter WER, registry, or dump settings. | Yes |
+| Crash report compatibility failures | Unicode report paths, denied ACLs, reparse roots/entries, Explorer restart/failure, and multiple GUI instances fail closed without blocking normal launch, monitoring, tray, or the existing Activity **Data folder** action | Yes |
 | Inter rendering and fallback | Latin and Cyrillic text, digits, punctuation, long names, and fallback glyphs remain readable at 100%, 125%, 150%, and 200% display scaling | Yes |
 | Compact layout and themes | Group boundaries, controls, statuses, and the full-width monitoring footer remain readable at minimum window size in system, dark, and light themes | Yes |
 | CPU-thread selection contrast | Selected Performance and Efficient threads plus **All** use the restrained turquoise primary state and remain distinct from the surrounding surface in dark and light themes | Yes |

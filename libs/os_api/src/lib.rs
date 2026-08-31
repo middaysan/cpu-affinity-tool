@@ -5,7 +5,7 @@ pub use catalog::{
     InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
     InstalledPackageRuntimeInfo,
 };
-pub use process::PriorityClass;
+pub use process::{PriorityClass, ProcessSettingsApplyOutcome};
 pub use shortcut::ShortcutSpec;
 
 #[cfg(target_os = "linux")]
@@ -19,5 +19,5 @@ pub use linux::OS;
 #[cfg(target_os = "windows")]
 pub use windows::{
     LocalIpcClientError, LocalIpcEndpoint, LocalIpcGuard, LocalIpcRequest, LocalIpcServer,
-    LocalIpcWake, OS,
+    LocalIpcWake, OS, WindowsApplicationFailure,
 };

@@ -1,4 +1,15 @@
 use crate::app::adapters::storage::StorageAdapter;
+#[cfg(all(test, not(all(target_os = "windows", feature = "windows"))))]
+use crate::app::features::diagnostics::crash_reports::CrashReportManager;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+use crate::app::features::diagnostics::crash_reports::{
+    prepare_report_directory, validated_report_path, CrashReportEntry, CrashReportIndexState,
+    CrashReportManager, DeleteError, ReportSnapshot, REPORT_DIRECTORY_NAME,
+};
+#[cfg(all(target_os = "windows", feature = "windows"))]
+use crate::app::features::diagnostics::windows_event_log::{
+    WindowsEventLogManager, WindowsEventLogPoll, WindowsEventLogState,
+};
 use crate::app::features::execution::{self, RuntimeRegistry};
 use crate::app::features::preferences;
 use crate::app::features::rules::{self, RulesContext};
@@ -123,6 +134,18 @@ pub struct AppState {
     pub(crate) ui: UiSession,
     pub(crate) runtime: RuntimeRegistry,
     pub(crate) log_manager: LogManager,
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    #[cfg_attr(
+        all(test, not(all(target_os = "windows", feature = "windows"))),
+        allow(dead_code)
+    )]
+    pub(crate) crash_reports: CrashReportManager,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) windows_event_log: WindowsEventLogManager,
+    /// Privacy-safe session override used when disabling diagnostics cannot be
+    /// persisted. It prevents the saved enabled preference from re-arming a lookup.
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    windows_event_log_disabled_for_session: bool,
     shortcut_creation_role: ShortcutCreationRole,
     #[cfg(test)]
     save_count: usize,
@@ -131,6 +154,12 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let storage = StorageAdapter::load();
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let crash_report_directory = StorageAdapter::active_data_dir().join(REPORT_DIRECTORY_NAME);
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let crash_reports = CrashReportManager::new(crash_report_directory);
+        #[cfg(all(test, not(all(target_os = "windows", feature = "windows"))))]
+        let crash_reports = CrashReportManager::new_inactive(PathBuf::new());
         let persistent_state = storage.shared();
         let rules = persistent_state
             .read()
@@ -147,6 +176,12 @@ impl AppState {
             ui: UiSession::new(effective_total_threads()),
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
+            #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+            crash_reports,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log: WindowsEventLogManager::new_idle(),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log_disabled_for_session: false,
             shortcut_creation_role: default_shortcut_creation_role(),
             #[cfg(test)]
             save_count: 0,
@@ -173,6 +208,12 @@ impl AppState {
             ui: UiSession::new(total_threads),
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
+            #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+            crash_reports: CrashReportManager::new_idle(PathBuf::new()),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log: WindowsEventLogManager::new_idle(),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log_disabled_for_session: false,
             shortcut_creation_role: default_shortcut_creation_role(),
             save_count: 0,
         }
@@ -681,12 +722,23 @@ impl AppState {
         let leaving_app_run_settings =
             matches!(self.ui.current_window, WindowRoute::AppRunSettings)
                 && !matches!(window, WindowRoute::AppRunSettings);
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let leaving_crash_reports = matches!(self.ui.current_window, WindowRoute::CrashReports)
+            && !matches!(window, WindowRoute::CrashReports);
 
         if leaving_installed_app_picker {
             self.reset_installed_app_picker_session();
         }
         if leaving_app_run_settings {
             self.reset_app_run_settings_session();
+        }
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        if leaving_crash_reports {
+            self.ui.crash_report_delete_confirmation = None;
+            self.ui.crash_report_delete_confirmation_focus_pending = false;
+            self.ui.crash_report_delete_saved_confirmation = None;
+            self.ui.crash_report_delete_saved_confirmation_focus_pending = false;
+            self.ui.crash_report_action_message = None;
         }
 
         self.ui.set_current_window(window);
@@ -1299,6 +1351,108 @@ impl AppState {
         self.log_manager.clear();
     }
 
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn set_windows_event_log_diagnostics_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), String> {
+        // Invalidate visible evidence and worker/retry state before even
+        // attempting to read or write persistent state. A poisoned lock or a
+        // failed disk write must not keep diagnostics active.
+        if !enabled {
+            self.windows_event_log.disable();
+            self.windows_event_log_disabled_for_session = true;
+        }
+        let previous = {
+            let state = match self.persistent_state.read() {
+                Ok(state) => state,
+                Err(_) => {
+                    return Err(
+                        "could not read the diagnostics preference; diagnostics remain disabled for this session"
+                            .to_string(),
+                    )
+                }
+            };
+            state.windows_event_log_diagnostics_enabled
+        };
+        if let Err(error) =
+            preferences::set_windows_event_log_diagnostics(&self.persistent_state, enabled)
+        {
+            return Err(format!(
+                "{error}; diagnostics remain disabled for this session"
+            ));
+        }
+        if !self.persist_state() {
+            if let Ok(mut state) = self.persistent_state.write() {
+                state.windows_event_log_diagnostics_enabled = previous;
+            }
+            if enabled {
+                return Err("could not save the Windows Event Log diagnostics setting; diagnostics remain disabled for this session".to_string());
+            }
+            return Err("Windows Event Log diagnostics disabled for this session, but the setting could not be saved".to_string());
+        }
+
+        if enabled {
+            self.windows_event_log_disabled_for_session = false;
+            self.windows_event_log.enable();
+        }
+        Ok(())
+    }
+
+    /// Called by the shell only after the first frame has been rendered.
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn start_windows_event_log_scan_after_shell_gate(&mut self) -> bool {
+        if self.windows_event_log_disabled_for_session {
+            return false;
+        }
+        let enabled = self
+            .persistent_state
+            .read()
+            .map(|state| state.windows_event_log_diagnostics_enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return false;
+        }
+        if !self.windows_event_log.is_enabled() {
+            self.windows_event_log.enable();
+        }
+        self.windows_event_log.start_initial_scan()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn poll_windows_event_log(&mut self) -> bool {
+        match self.windows_event_log.poll() {
+            WindowsEventLogPoll::Unchanged => false,
+            WindowsEventLogPoll::Completed(_) | WindowsEventLogPoll::MarkedIncomplete => true,
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn windows_event_log_worker_poll_interval(&self) -> Option<std::time::Duration> {
+        self.windows_event_log.worker_poll_interval()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn windows_event_log_snapshot(&self) -> WindowsEventLogState {
+        self.windows_event_log.ui_snapshot()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn windows_event_log_diagnostics_enabled(&self) -> bool {
+        !self.windows_event_log_disabled_for_session
+            && self
+                .persistent_state
+                .read()
+                .map(|state| state.windows_event_log_diagnostics_enabled)
+                .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    fn windows_event_log_worker_is_active(&self) -> bool {
+        self.windows_event_log.worker_is_active()
+    }
+
     pub fn active_data_dir(&self) -> PathBuf {
         StorageAdapter::active_data_dir()
     }
@@ -1315,6 +1469,74 @@ impl AppState {
                 data_dir.display()
             ));
         }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn crash_report_state(&self) -> &CrashReportIndexState {
+        self.crash_reports.state()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn crash_report_directory(&self) -> PathBuf {
+        self.crash_reports.report_directory().to_path_buf()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn request_crash_report_refresh(&mut self) {
+        self.crash_reports.request_refresh();
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn poll_crash_report_refresh(&mut self) -> bool {
+        let changed = self.crash_reports.poll();
+        if changed {
+            self.log_manager
+                .replace_local_crash_context(self.crash_reports.latest_activity_message());
+        }
+        changed
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn crash_report_worker_poll_interval(&self) -> Option<std::time::Duration> {
+        self.crash_reports.worker_poll_interval()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn show_crash_report_in_explorer(
+        &mut self,
+        report: &CrashReportEntry,
+    ) -> Result<(), String> {
+        let snapshot = self
+            .crash_reports
+            .state()
+            .snapshot()
+            .cloned()
+            .ok_or_else(|| "the crash report list is not available".to_string())?;
+        let path = validated_report_path(&snapshot, report).map_err(|error| error.to_string())?;
+        let result = crate::app::adapters::os::show_file_in_directory(&path);
+        if result.is_err() {
+            self.request_crash_report_refresh();
+        }
+        result
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn open_crash_report_directory(&mut self) -> Result<(), String> {
+        let path = prepare_report_directory(self.crash_reports.report_directory())?;
+        crate::app::adapters::os::open_directory_via_shell_broker(&path)
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn delete_crash_report(&mut self, report: &CrashReportEntry) -> Result<(), DeleteError> {
+        self.crash_reports.delete_one(report)
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub fn delete_saved_crash_reports(
+        &mut self,
+        snapshot: &ReportSnapshot,
+    ) -> Result<usize, DeleteError> {
+        self.crash_reports.delete_saved_reports_from(snapshot)
     }
 
     fn filtered_installed_app_entry_indices(&self) -> Vec<usize> {
@@ -1408,6 +1630,9 @@ mod tests {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use super::RuleShortcutDisabledReason;
     use super::{AppState, MoveRuleToGroupOutcome, RunRuleOutcome};
+    use crate::app::features::diagnostics::crash_reports::CrashReportManager;
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    use crate::app::features::diagnostics::windows_event_log::WindowsEventLogManager;
     use crate::app::features::execution::RuntimeRegistry;
     use crate::app::features::rules::RulesContext;
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -1504,6 +1729,7 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            windows_event_log_diagnostics_enabled: true,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,
@@ -1520,6 +1746,11 @@ mod tests {
             ui: UiSession::new(4),
             runtime: RuntimeRegistry::new(),
             log_manager: LogManager::default(),
+            crash_reports: CrashReportManager::new_idle(PathBuf::new()),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log: WindowsEventLogManager::new_idle(),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log_disabled_for_session: false,
             shortcut_creation_role: ShortcutCreationRole::Primary,
             save_count: 0,
         }
@@ -1792,7 +2023,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_group_program_reports_accepted_for_existing_rule() {
+    fn test_run_group_program_rejects_existing_rule_without_verified_identity() {
         let mut app = sample_state();
         let existing_group_id = group_id(&app, 0);
         let existing_rule_id = rule_id(&app, 0, 0);
@@ -1805,10 +2036,11 @@ mod tests {
             existing_rule_id.clone()
         ));
 
-        assert_eq!(
+        assert!(matches!(
             app.run_group_program(existing_group_id, existing_rule_id),
-            RunRuleOutcome::Accepted
-        );
+            RunRuleOutcome::LaunchRejected(message)
+                if message.contains("tracked process identity is not available")
+        ));
     }
 
     #[test]
@@ -2535,5 +2767,36 @@ mod tests {
         let snapshot = app.build_installed_app_picker_snapshot();
         let names: Vec<String> = snapshot.rows.into_iter().map(|row| row.name).collect();
         assert_eq!(names, vec!["code", "code-server", "Visual Studio"]);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn event_log_diagnostics_default_on_without_starting_before_shell_gate() {
+        let mut app = sample_state();
+        let state = app.persistent_state.clone();
+
+        assert!(app.windows_event_log_diagnostics_enabled());
+        assert!(!app.windows_event_log_worker_is_active());
+
+        app.set_windows_event_log_diagnostics_enabled(false)
+            .unwrap();
+
+        assert!(!state.read().unwrap().windows_event_log_diagnostics_enabled);
+        assert!(!app.windows_event_log_worker_is_active());
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn session_only_disable_blocks_an_older_persisted_opt_in() {
+        let mut app = sample_state();
+        {
+            let mut state = app.persistent_state.write().unwrap();
+            state.windows_event_log_diagnostics_enabled = true;
+        }
+        app.windows_event_log_disabled_for_session = true;
+        app.windows_event_log.enable();
+
+        assert!(!app.start_windows_event_log_scan_after_shell_gate());
+        assert!(!app.windows_event_log_worker_is_active());
     }
 }

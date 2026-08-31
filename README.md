@@ -40,10 +40,12 @@ This is a control tool, not a promise of better FPS.
 - Add apps from direct paths and launcher files with **Add file...**
 - Add supported installed apps with **Add installed...** (`Start`-backed entries on Windows, desktop entries plus matching `PATH` executables during search on Linux beta)
 - Re-apply affinity and priority while **Monitoring active** is shown
+- Keep a new rule's descendant-process management off unless its child processes are known to need the same settings
 - Autorun selected apps with the tool
 - Create Windows desktop shortcuts for saved rules so a configured app can use a quick shortcut launch
 - Add targets by drag and drop
 - Inspect launches, corrections, and monitoring events in **Activity**
+- Review locally saved **Crash reports** after a main application panic or native UI-loop error; reports are never uploaded automatically
 - Open the active data folder directly from **Activity**
 - Switch between light, dark, and system theme modes
 
@@ -71,7 +73,9 @@ For a longer explanation, see [docs/why.md](docs/why.md).
 4. Add an app with **Add file...**, **Add installed...**, or drag and drop.
 5. Set the desired affinity and priority, then save the rule.
 6. On Windows, optionally open the saved rule settings and create a desktop shortcut for quick shortcut launch.
-7. Launch the app from the tool or shortcut and keep **Monitoring active** if you want settings re-applied automatically. Use **Pause monitor** when you want to suspend corrections.
+7. Launch the app from the tool or shortcut and keep **Monitoring active** if you want settings re-applied automatically. New rules manage their verified root process by default; enable descendant management only when you intentionally want child processes to receive the same settings. Use **Pause monitor** when you want to suspend corrections.
+
+On Windows, if CPU Affinity Tool closes because of a main application panic or its native UI loop returns an error, use the small report button in the top-right header to open **Crash reports**. After the next completed background scan, **Activity** retains a summary of the newest validated report even if normal activity is cleared. The app normally keeps the newest 20 complete reports, up to 256 KiB each, under the active data directory. If repeated startup failures prevent normal background cleanup, each writer stops after it observes 64 managed files instead of adding synchronous cleanup to application startup; simultaneous GUI processes can exceed that safety ceiling slightly. **Show in Explorer** is available only through a verified non-elevated Windows shell; otherwise the path remains copyable and no editor is launched. Review a report before sharing it because it may contain local paths or system details; make and redact a copy if needed. Forced termination, native faults, out-of-memory termination, and background task panics may not produce a report. For a native crash that does not create one of these reports, see the manual, opt-in [Windows LocalDumps guide](docs/windows-native-crash-diagnostics.md).
 
 ## Comparison
 
@@ -172,6 +176,8 @@ Linux beta notes:
 - Linux still does not have a stable published release artifact
 - tray/taskbar/focus behavior still does not have Windows parity
 
+Windows-only Event Log diagnostics are enabled by default and perform one bounded local lookup of recent `Application Error` records after the first rendered frame, with at most one delayed retry when that lookup succeeds but finds nothing. Activity shows only a sanitized Record ID, UTC time, exception code, faulting-module basename, module version, faulting offset, and process creation time when Windows supplied valid values. The lookup is not proof of a crash cause, never uploads data, and can be disabled from Activity. It does not create dumps, modify Windows Error Reporting, or change registry settings.
+
 Useful verification commands:
 
 ```bash
@@ -181,6 +187,7 @@ cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings
 cargo test --manifest-path libs/os_api/Cargo.toml
 cargo test --features windows --bin cpu-affinity-tool
 cargo build --release --features windows --bin cpu-affinity-tool
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-crash-reports.ps1
 cargo test --features linux --bin cpu-affinity-tool-linux
 cargo build --release --features linux --bin cpu-affinity-tool-linux
 ```

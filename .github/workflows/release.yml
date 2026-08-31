@@ -73,18 +73,32 @@ jobs:
       - name: Run tests
         run: cargo test --features windows --bin cpu-affinity-tool
 
-      - name: Build Windows binary
-        run: cargo build --release --features windows --bin cpu-affinity-tool
+      - name: Build Windows release binary
+        shell: pwsh
+        run: ./scripts/build-windows-release.ps1
+
+      - name: Verify Windows debug symbols
+        shell: pwsh
+        run: |
+          ./scripts/assert-windows-pdb-matches.ps1 `
+            -ExePath target/release/cpu-affinity-tool.exe `
+            -PdbPath target/release/cpu_affinity_tool.pdb
+
+      - name: Run Windows crash report probes
+        shell: pwsh
+        run: ./scripts/test-windows-crash-reports.ps1
 
       - name: Verify Windows release manifest
         shell: pwsh
         run: ./scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe
 
-      - name: Upload Windows binary
+      - name: Upload Windows release artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: windows-binary
-          path: target/release/cpu-affinity-tool.exe
+          name: windows-release-artifacts
+          path: |
+            target/release/cpu-affinity-tool.exe
+            target/release/cpu_affinity_tool.pdb
           if-no-files-found: error
 
   create-release:
@@ -96,10 +110,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Download Windows binary
+      - name: Download Windows release artifacts
         uses: actions/download-artifact@v8
         with:
-          name: windows-binary
+          name: windows-release-artifacts
           path: ./artifacts/windows
 
       - name: Get version from tag
@@ -116,3 +130,5 @@ jobs:
           body_path: changelogs/v${{ steps.get_version.outputs.VERSION }}.txt
           files: |
             ./artifacts/windows/cpu-affinity-tool.exe
+            ./artifacts/windows/cpu_affinity_tool.pdb
+          fail_on_unmatched_files: true

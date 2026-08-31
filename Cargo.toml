@@ -23,7 +23,6 @@ overflow-checks = false     # Disable integer overflow checks.
 debug = true
 
 [dependencies]
-mimalloc = "0.1.52"
 tokio = { version = "1.52.3", features = ["time", "sync", "rt", "macros", "full"] }
 os_api = { path = "libs/os_api" }
 eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
@@ -49,3 +48,4 @@ winres = "0.1.12"
 [features]
 windows = []
 linux = []
+diagnostics-test-controls = []

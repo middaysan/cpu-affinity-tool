@@ -5,7 +5,7 @@ This document describes the current release contract for CPU Affinity Tool.
 It is intentionally narrow and truthful:
 
 - stable releases are Windows-only
-- Windows stable tags publish `cpu-affinity-tool.exe`
+- Windows stable tags publish `cpu-affinity-tool.exe` and its matching `cpu_affinity_tool.pdb`
 - Linux beta prerelease tags publish a raw Linux binary, a `tar.gz`, and `SHA256SUMS.txt`
 - CI validates the Linux beta build/test/clippy path from source on pinned Ubuntu runners; desktop-session smoke remains manual beta validation
 - there is no installer, AppImage, Flatpak, code signing, or winget package in the current release contract
@@ -20,6 +20,9 @@ Use these files together:
 - `.github/workflows/ci.yml`
 - `.github/workflows/release.yml`
 - `.github/workflows/release-linux-beta.yml`
+- `scripts/build-windows-release.ps1`
+- `scripts/assert-windows-pdb-matches.ps1`
+- `scripts/test-windows-pdb-verifier.ps1`
 - `scripts/assert-windows-release-manifest.ps1`
 - `changelogs/vX.Y.Z.txt`
 - `changelogs/linux-beta-vX.Y.Z-N.txt`
@@ -41,9 +44,9 @@ When a stable tag matching `v*` is pushed:
 2. the workflow validates the tag format against `vX.Y.Z`
 3. the workflow confirms `Cargo.toml` version matches `X.Y.Z`
 4. the workflow requires `changelogs/vX.Y.Z.txt`
-5. the workflow runs formatting, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `libs/os_api` tests, `cargo test --features windows --bin cpu-affinity-tool`, and `cargo build --release --features windows --bin cpu-affinity-tool`
-6. the workflow runs `scripts/assert-windows-release-manifest.ps1` against the built exe and requires `requestedExecutionLevel=requireAdministrator` plus `uiAccess=false`
-7. the workflow uploads `cpu-affinity-tool.exe`
+5. the workflow runs formatting, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `libs/os_api` tests, `cargo test --features windows --bin cpu-affinity-tool`, and the line-table production build through `scripts/build-windows-release.ps1`
+6. the workflow requires `cpu_affinity_tool.pdb` to match the EXE's embedded PDB basename, CodeView GUID, and age through `scripts/assert-windows-pdb-matches.ps1`, then runs `scripts/assert-windows-release-manifest.ps1` against the built exe and requires `requestedExecutionLevel=requireAdministrator` plus `uiAccess=false`
+7. the workflow uploads `cpu-affinity-tool.exe` and its matching `cpu_affinity_tool.pdb`
 8. a publish job on `ubuntu-24.04` creates the GitHub Release with the body from `changelogs/vX.Y.Z.txt`
 
 When a Linux beta tag matching `linux-beta-v*` is pushed:
@@ -66,7 +69,7 @@ Before pushing a stable Windows tag, align:
 - `Cargo.toml` version
 - `changelogs/vX.Y.Z.txt`
 - release-facing docs if platform or process truth changed
-- if the release includes the first shipped schema `v7` build, call out that the first explicit save upgrades `state.json` to `v7`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6` to `v7` does not
+- if the release includes the first shipped schema `v10` build, call out that the first explicit save upgrades `state.json` to `v10`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6`, `v7`, `v8`, or `v9` to `v10` does not. State clearly that version-aware loading preserves the prior enabled behavior for missing pre-`v10` descendant-management values, while missing values in `v10` and newly created rules default it to off.
 
 Before pushing a Linux beta tag, align:
 
@@ -74,7 +77,7 @@ Before pushing a Linux beta tag, align:
 - `Cargo.toml` version: `X.Y.Z`
 - `changelogs/linux-beta-vX.Y.Z-N.txt`
 - Linux beta release-facing docs if platform or process truth changed
-- if the prerelease includes the first shipped schema `v7` build, call out that the first explicit save upgrades `state.json` to `v7`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6` to `v7` does not
+- if the prerelease includes the first shipped schema `v10` build, call out that the first explicit save upgrades `state.json` to `v10`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6`, `v7`, `v8`, or `v9` to `v10` does not. State clearly that version-aware loading preserves the prior enabled behavior for missing pre-`v10` descendant-management values, while missing values in `v10` and newly created rules default it to off.
 
 ## Recommended stable release steps
 
@@ -84,7 +87,7 @@ Before pushing a Linux beta tag, align:
 4. Run the manual smoke from `docs/release-smoke-matrix.md`.
 5. Push the release commit.
 6. Push the stable tag `vX.Y.Z`.
-7. Confirm the GitHub Release workflow succeeded and published `cpu-affinity-tool.exe`.
+7. Confirm the GitHub Release workflow succeeded and published `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb`.
 
 ## Recommended Linux beta release steps
 
@@ -100,8 +103,9 @@ Before pushing a Linux beta tag, align:
 Stable published artifact:
 
 - `cpu-affinity-tool.exe`
+- `cpu_affinity_tool.pdb`
 
-The Windows CI and stable release workflows verify the built exe's embedded `RT_MANIFEST` resource with `scripts/assert-windows-release-manifest.ps1`. The script confirms `requireAdministrator` and `uiAccess=false`; actual UAC prompt behavior still belongs to manual Windows smoke.
+`scripts/build-windows-release.ps1` sets `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` for the stable Windows build. This leaves the shared release profile plus the Linux beta artifact set and debug-information policy unchanged. Windows pull-request CI tests the verifier against matching and deliberately mismatched PDB inputs, while the stable workflow requires matching EXE/PDB basename, CodeView GUID, and age before upload. The Windows CI and stable release workflows also verify the built exe's embedded `RT_MANIFEST` resource with `scripts/assert-windows-release-manifest.ps1`. The manifest script confirms `requireAdministrator` and `uiAccess=false`; actual UAC prompt behavior still belongs to manual Windows smoke.
 
 Linux beta prerelease artifacts:
 

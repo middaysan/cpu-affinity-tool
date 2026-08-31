@@ -1,17 +1,22 @@
 mod launch;
+mod monitor_events;
 mod reconcile;
 mod store;
 mod tracking;
 
-use crate::app::features::diagnostics::DiagnosticEvent;
 use crate::app::models::{normalize_process_name, AppStateStorage, RunningApps};
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 
 pub(crate) use launch::{run_app_row_action, AppRowActionRequest};
 pub use launch::{
     run_app_with_affinity_sync, start_app_with_autorun, AppRowAction, LaunchDispatchOutcome,
+};
+#[cfg(test)]
+pub(crate) use monitor_events::monitor_event_channel;
+pub(crate) use monitor_events::{
+    monitor_event_channel_with_wake, MonitorDrainStatus, MonitorEventReceiver, MonitorEventSender,
+    MonitorWake,
 };
 pub use reconcile::run_process_settings_monitor;
 pub use store::RuntimeRegistry;
@@ -28,12 +33,13 @@ pub(crate) fn is_excluded_installed_auto_process(process_name: &str) -> bool {
     )
 }
 
-pub fn spawn_monitors(
+pub(crate) fn spawn_monitors_with_wake(
     running_apps: Arc<TokioRwLock<RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     persistent_state: Arc<RwLock<AppStateStorage>>,
-) -> Receiver<DiagnosticEvent> {
-    let (monitor_tx, monitor_rx) = std::sync::mpsc::channel();
+    wake: Option<MonitorWake>,
+) -> MonitorEventReceiver {
+    let (monitor_tx, monitor_rx) = monitor_event_channel_with_wake(wake);
 
     tokio::spawn(run_running_app_monitor(
         running_apps.clone(),

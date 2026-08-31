@@ -2,35 +2,67 @@ use std::sync::mpsc::Receiver;
 
 /// Simple commands from the tray to the application
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCmd {
     Show,
+    Quit,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn menu_command(id: &str) -> Option<TrayCmd> {
+    match id {
+        "1" => Some(TrayCmd::Show),
+        "3" => Some(TrayCmd::Quit),
+        _ => None,
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn tray_command_for_double_click(left_button: bool) -> Option<TrayCmd> {
+    left_button.then_some(TrayCmd::Show)
+}
+
+pub struct TrayRuntime {
+    rx: Receiver<TrayCmd>,
+    #[cfg(target_os = "windows")]
+    _tray_icon: tray_icon::TrayIcon,
+}
+
+impl TrayRuntime {
+    pub fn drain_commands(&self) -> Vec<TrayCmd> {
+        std::iter::from_fn(|| self.rx.try_recv().ok()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{menu_command, tray_command_for_double_click, TrayCmd};
+
+    #[test]
+    fn menu_events_map_to_typed_commands() {
+        assert_eq!(menu_command("1"), Some(TrayCmd::Show));
+        assert_eq!(menu_command("3"), Some(TrayCmd::Quit));
+        assert_eq!(menu_command("unknown"), None);
+    }
+
+    #[test]
+    fn only_left_double_click_restores_the_window() {
+        assert_eq!(tray_command_for_double_click(true), Some(TrayCmd::Show));
+        assert_eq!(tray_command_for_double_click(false), None);
+    }
 }
 
 #[cfg(target_os = "windows")]
 mod sys {
-    use super::{Receiver, TrayCmd};
+    use super::{TrayCmd, TrayRuntime};
     use std::sync::mpsc;
     use tray_icon::{
         menu::{Menu, MenuEvent, MenuId, MenuItem},
-        Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent,
+        Icon, MouseButton, TrayIconBuilder, TrayIconEvent,
     };
 
-    pub struct TrayHandle {
-        pub tray_icon: TrayIcon,
-        pub rx: Receiver<TrayCmd>,
-    }
-
-    #[derive(Clone, Copy)]
-    struct SendHwnd(isize);
-    unsafe impl Send for SendHwnd {}
-    unsafe impl Sync for SendHwnd {}
-
-    /// Initializes the tray. Does not require WindowHandle — creates its own hidden window for messages.
-    pub fn init_tray(
-        ctx: eframe::egui::Context,
-        hwnd: windows::Win32::Foundation::HWND,
-    ) -> Result<TrayHandle, String> {
+    /// Initializes the tray. The application shell owns all window operations.
+    pub fn init_tray(ctx: eframe::egui::Context) -> Result<TrayRuntime, String> {
         // Command channel
         let (tx, rx) = mpsc::channel::<TrayCmd>();
 
@@ -58,25 +90,13 @@ mod sys {
             .build()
             .map_err(|e| format!("Failed to build tray icon: {e}"))?;
 
-        let hwnd_val = SendHwnd(hwnd.0 as isize);
-
         {
             let tx = tx.clone();
             let ctx = ctx.clone();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-                let id = event.id.0.as_str();
-                match id {
-                    "1" => {
-                        let hwnd =
-                            windows::Win32::Foundation::HWND(hwnd_val.0 as *mut core::ffi::c_void);
-                        crate::app::adapters::os::restore_and_focus_window(hwnd);
-                        let _ = tx.send(TrayCmd::Show);
-                        ctx.request_repaint();
-                    }
-                    "3" => {
-                        std::process::exit(0);
-                    }
-                    _ => {}
+                if let Some(command) = super::menu_command(event.id.0.as_str()) {
+                    let _ = tx.send(command);
+                    ctx.request_repaint();
                 }
             }));
         }
@@ -85,21 +105,20 @@ mod sys {
             let tx = tx.clone();
             let ctx = ctx.clone();
             TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-                if let TrayIconEvent::DoubleClick {
-                    button: MouseButton::Left,
-                    ..
-                } = event
-                {
-                    let hwnd =
-                        windows::Win32::Foundation::HWND(hwnd_val.0 as *mut core::ffi::c_void);
-                    crate::app::adapters::os::restore_and_focus_window(hwnd);
-                    let _ = tx.send(TrayCmd::Show);
-                    ctx.request_repaint();
+                if let TrayIconEvent::DoubleClick { button, .. } = event {
+                    let left_button = matches!(button, MouseButton::Left);
+                    if let Some(command) = super::tray_command_for_double_click(left_button) {
+                        let _ = tx.send(command);
+                        ctx.request_repaint();
+                    }
                 }
             }));
         }
 
-        Ok(TrayHandle { tray_icon, rx })
+        Ok(TrayRuntime {
+            rx,
+            _tray_icon: tray_icon,
+        })
     }
 
     fn decode_png_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
@@ -113,15 +132,11 @@ mod sys {
 
 #[cfg(not(target_os = "windows"))]
 mod sys {
-    use super::{Receiver, TrayCmd};
+    use super::{TrayCmd, TrayRuntime};
 
-    pub struct TrayHandle {
-        pub rx: Receiver<TrayCmd>,
-    }
-
-    pub fn init_tray(_ctx: eframe::egui::Context) -> Result<TrayHandle, String> {
+    pub fn init_tray(_ctx: eframe::egui::Context) -> Result<TrayRuntime, String> {
         let (_tx, rx) = std::sync::mpsc::channel::<TrayCmd>();
-        Ok(TrayHandle { rx })
+        Ok(TrayRuntime { rx })
     }
 }
 

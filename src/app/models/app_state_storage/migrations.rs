@@ -2,6 +2,7 @@ use super::{schema_refresh, AppStateStorage};
 use crate::app::models::core_group::CoreGroup;
 use crate::app::models::cpu_schema::{CoreInfo, CoreType, CpuCluster, CpuSchema};
 use serde::Deserialize;
+use serde_json::Value;
 use std::path::Path;
 
 #[derive(Deserialize)]
@@ -27,8 +28,19 @@ struct LegacyAppStateStorage {
 
 pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage> {
     let version_check: VersionCheck = serde_json::from_str(data).ok()?;
+    let normalized_data;
+    let data = match version_check.version {
+        Some(version) if version >= 10 => data,
+        _ => {
+            normalized_data = with_legacy_descendant_default(data)?;
+            normalized_data.as_str()
+        }
+    };
 
     match version_check.version {
+        Some(10) => load_v10(data, path),
+        Some(9) => load_v9(data, path),
+        Some(8) => load_v8(data, path),
         Some(7) => load_v7(data, path),
         Some(6) => load_v6(data, path),
         Some(5) => load_v5(data, path),
@@ -39,14 +51,59 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     }
 }
 
+/// Schema versions before v10 managed descendants implicitly. Materialize that
+/// historical default before deserializing rules so the rule type itself can use
+/// the safer default for current-schema and schema-less inputs.
+fn with_legacy_descendant_default(data: &str) -> Option<String> {
+    let mut value: Value = serde_json::from_str(data).ok()?;
+    let groups = value.get_mut("groups")?.as_array_mut()?;
+
+    for group in groups {
+        let Some(programs) = group.get_mut("programs").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for program in programs {
+            let Some(program) = program.as_object_mut() else {
+                continue;
+            };
+            program
+                .entry("manage_descendants")
+                .or_insert(Value::Bool(true));
+        }
+    }
+
+    serde_json::to_string(&value).ok()
+}
+
+fn load_v10(data: &str, _path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    Some(state.finalize_load(10, false))
+}
+
+fn load_v9(data: &str, _path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    Some(state.finalize_load(9, false))
+}
+
+fn load_v8(data: &str, _path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = true;
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    Some(state.finalize_load(8, false))
+}
+
 fn load_v7(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = true;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     Some(state.finalize_load(7, false))
 }
 
 fn load_v6(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = true;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     state.backfill_tracked_process_names();
     Some(state.finalize_load(6, false))
@@ -54,6 +111,7 @@ fn load_v6(data: &str, _path: &Path) -> Option<AppStateStorage> {
 
 fn load_v5(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = true;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     state.backfill_tracked_process_names();
     Some(state.finalize_load(5, true))
@@ -61,6 +119,7 @@ fn load_v5(data: &str, _path: &Path) -> Option<AppStateStorage> {
 
 fn load_v4(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = true;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     state.version = 5;
     state.rule_identities = None;
@@ -70,6 +129,7 @@ fn load_v4(data: &str, _path: &Path) -> Option<AppStateStorage> {
 
 fn load_v3(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    state.windows_event_log_diagnostics_enabled = true;
     state.version = 5;
     state.rule_identities = None;
     state.backfill_tracked_process_names();
@@ -88,6 +148,7 @@ fn load_v2(data: &str, _path: &Path) -> Option<AppStateStorage> {
         },
         theme_index: v2.theme_index,
         process_monitoring_enabled: v2.process_monitoring_enabled,
+        windows_event_log_diagnostics_enabled: true,
         rule_identities: None,
         loaded_version: 0,
         pending_pre_v6_backup: false,
@@ -110,6 +171,7 @@ fn load_legacy(data: &str, _path: &Path) -> Option<AppStateStorage> {
         },
         theme_index: legacy.theme_index,
         process_monitoring_enabled: false,
+        windows_event_log_diagnostics_enabled: true,
         rule_identities: None,
         loaded_version: 0,
         pending_pre_v6_backup: false,

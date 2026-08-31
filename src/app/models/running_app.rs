@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use crate::app::models::AppRuntimeKey;
 use crate::app::shared::ids::{GroupId, RuleId};
 
+/// OS-provided token that distinguishes successive process instances sharing a PID.
+pub type ProcessInstanceToken = u64;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppStatus {
     NotRunning,
@@ -17,6 +20,8 @@ pub enum AppStatus {
 pub struct RunningApp {
     /// List of process IDs associated with this application
     pub pids: Vec<u32>,
+    /// Creation tokens captured with `pids`; absent tokens are not monitor-retainable.
+    pub pid_instance_tokens: HashMap<u32, ProcessInstanceToken>,
     /// Logical group identity for the tracked rule.
     pub group_id: GroupId,
     /// Logical rule identity for the tracked rule.
@@ -59,6 +64,7 @@ impl RunningApps {
             app_key.clone(),
             RunningApp {
                 pids: vec![pid],
+                pid_instance_tokens: HashMap::new(),
                 group_id,
                 rule_id,
                 created_at: std::time::SystemTime::now(),
@@ -106,6 +112,7 @@ mod tests {
 
         let app = apps.apps.get(&app_key).unwrap();
         assert_eq!(app.pids, vec![42]);
+        assert!(app.pid_instance_tokens.is_empty());
         assert_eq!(app.group_id, group_id);
         assert_eq!(app.rule_id, rule_id);
         assert!(app.settings_matched);

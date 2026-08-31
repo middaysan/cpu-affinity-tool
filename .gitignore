@@ -4,3 +4,6 @@ target
 state.json
 AGENTS.md
 ROADMAP*.md
+
+# Local task handoff workspace
+/tasks/

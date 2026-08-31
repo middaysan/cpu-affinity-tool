@@ -17,6 +17,7 @@ pub(super) fn build_default_state() -> AppStateStorage {
         cpu_schema,
         theme_index: 0,
         process_monitoring_enabled: false,
+        windows_event_log_diagnostics_enabled: true,
         rule_identities: None,
         loaded_version: CURRENT_APP_STATE_VERSION,
         pending_pre_v6_backup: false,

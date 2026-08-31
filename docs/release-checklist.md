@@ -7,10 +7,10 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 
 ## Before Tagging
 
-- Confirm the release stays Windows-only: `.github/workflows/release.yml` should publish only `cpu-affinity-tool.exe` for `x86_64-pc-windows-msvc`.
+- Confirm the release stays Windows-only: `.github/workflows/release.yml` should publish only `cpu-affinity-tool.exe` and its matching `cpu_affinity_tool.pdb` for `x86_64-pc-windows-msvc`.
 - Confirm Linux beta prereleases stay isolated: `.github/workflows/release-linux-beta.yml` should publish only Linux beta prerelease assets for tags matching `linux-beta-v*`.
-- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs separate Windows and Linux beta jobs, cancels superseded runs per branch or PR, restores Rust cache, runs shared formatting and `libs/os_api` tests, keeps the Windows release-path checks on `windows-latest`, verifies the built Windows artifact manifest, and verifies the Linux beta binary on `ubuntu-24.04`.
-- Confirm the tag-release gate matches reality: `.github/workflows/release.yml` validates `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`, runs the same formatting, lint, `libs/os_api`, and root test gates, builds the Windows artifact, verifies its embedded manifest resource, and then publishes it.
+- Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs separate Windows and Linux beta jobs, cancels superseded runs per branch or PR, restores Rust cache, runs shared formatting and `libs/os_api` tests, keeps the Windows release-path checks on `windows-latest`, reproduces the stable line-table build, verifies the Windows EXE/PDB identity and embedded manifest, and verifies the Linux beta binary on `ubuntu-24.04`.
+- Confirm the tag-release gate matches reality: `.github/workflows/release.yml` validates `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`, runs the same formatting, lint, `libs/os_api`, and root test gates, builds the Windows artifact with line tables, verifies the EXE/PDB identity and embedded manifest resource, and then publishes it.
 - Confirm no project docs claim full cross-platform support or Linux release parity.
 - Confirm `README.md` and `AGENTS.md` describe Windows as the primary stable released platform and Linux as a separate beta prerelease track without stable parity.
 - Confirm `README.md` documents the administrator/UAC expectation from `app.manifest`, including that saved-rule shortcut launches may show UAC.
@@ -18,11 +18,12 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Confirm the bundled Inter font and its SIL Open Font License file are present under `assets/fonts` and included in the release commit.
 - Confirm shortcut docs explain current elevated token Desktop placement, including credential-over-the-shoulder UAC placing shortcuts on the elevated account's Desktop.
 - Confirm version markers are aligned manually before tagging: release tag `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`. The workflow validates these again after the tag is pushed.
-- Confirm the changelog and any release note summary call out the schema `v7` save boundary when applicable:
+- Confirm the changelog and any release note summary call out the schema `v10` save boundary when applicable:
   - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
-  - `v6` to `v7` saves do not write `state.json.pre-v6*`
+  - `v6`, `v7`, `v8`, or `v9` to `v10` saves do not write `state.json.pre-v6*`
+  - missing `manage_descendants` in pre-`v10` rules preserves existing automatic descendant management; missing values in `v10` and newly created rules default it to off
   - downgrade to older binaries is unsupported after that first current-schema save
-- Review release-impacting files if they changed: `build.rs`, `app.manifest`, `assets/icon.ico`, `assets/cpu_presets.json`, `scripts/assert-windows-release-manifest.ps1`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, and `.github/workflows/release-linux-beta.yml`.
+- Review release-impacting files if they changed: `build.rs`, `app.manifest`, `assets/icon.ico`, `assets/cpu_presets.json`, `scripts/build-windows-release.ps1`, `scripts/assert-windows-pdb-matches.ps1`, `scripts/test-windows-pdb-verifier.ps1`, `scripts/assert-windows-release-manifest.ps1`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, and `.github/workflows/release-linux-beta.yml`.
 
 ## Build Verification
 
@@ -30,12 +31,15 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Run `cargo test --manifest-path libs/os_api/Cargo.toml`.
 - Run `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`.
 - Run `cargo test --features windows --bin cpu-affinity-tool`.
-- Run `cargo build --release --features windows --bin cpu-affinity-tool`.
+- Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-release.ps1`.
+- Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-pdb-verifier.ps1 -ExePath target/release/cpu-affinity-tool.exe -PdbPath target/release/cpu_affinity_tool.pdb`.
+- Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-crash-reports.ps1`.
 - Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe`.
 - Run `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`.
 - Run `cargo test --features linux --bin cpu-affinity-tool-linux`.
 - Run `cargo build --release --features linux --bin cpu-affinity-tool-linux`.
 - Confirm the expected Windows artifact exists at `target/release/cpu-affinity-tool.exe`.
+- Confirm the matching Windows debug symbols exist at `target/release/cpu_affinity_tool.pdb`.
 - If `assets/cpu_presets.json` changed, confirm the binary was rebuilt after that change because presets are embedded via `include_str!`.
 - Confirm a clean checkout contains `assets/fonts/InterVariable.ttf` before building because the font is embedded with `include_bytes!`.
 - Run `cargo audit`; reconcile every vulnerability before release. The two current `quick-xml` exceptions and their build-time reachability assessment are documented in `docs/dependency-advisories.md`; do not ignore any additional advisory.
@@ -45,6 +49,10 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Run the release-path manual checks from `docs/release-smoke-matrix.md`.
 - Run every release-blocking row in the `Shortcut MVP Smoke` table when saved-rule desktop shortcuts are included in the release notes.
 - Smoke the redesigned **Overview** and **Activity** routes in system, dark, and light themes.
+- Smoke the **Crash reports** Activity subpage, header count, Explorer broker, confirmation dialogs, incomplete-state guidance, privacy copy, and the newest-report summary retained in **Activity** after **Clear**.
+- Smoke the enabled-by-default Windows Event Log lookup after the first rendered frame. Verify Activity's persistent control can disable it, clears the record immediately, presents unavailable/error status without leaking raw XML or executable paths, labels evidence with Record ID/UTC time/exception code/sanitized module basename and only valid optional module-version/faulting-offset/process-creation-time values, and leaves the separate diagnostic status/evidence visible after **Clear** without adding Event Log data to chronological entries. Confirm this remains read-only: it must not create dumps or modify Windows Error Reporting or registry settings.
+- Smoke a new rule with descendant management off and an upgraded pre-`v10` rule with it preserved on. Verify the intended root is managed in both cases and only the opted-in rule applies settings to verified descendants.
+- Verify an interrupted save leaves either the complete prior `state.json` or the complete new state readable; recovery and migration backups must preserve their source before publishing a replacement.
 - Check Inter rendering at 100%, 125%, 150%, and 200% Windows display scaling, including Latin, Cyrillic, digits, punctuation, long group/app names, and fallback glyphs.
 - Check compact layout and clipping at the minimum supported window size and at a typical 1920x1080 work area.
 - Reorder groups with both pointer drag-and-drop and the keyboard-accessible reorder path, restart, and verify order plus saved-rule shortcut identity.
@@ -61,4 +69,5 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 
 - Confirm the tag format is a stable tag: `vX.Y.Z`.
 - Confirm `changelogs/vX.Y.Z.txt` is up to date because `.github/workflows/release.yml` uses it as the published GitHub Release body.
+- Confirm the stable GitHub Release contains both `cpu-affinity-tool.exe` and its matching `cpu_affinity_tool.pdb`.
 - Confirm installer packaging, code signing, winget, choco, AppImage, Flatpak, and Linux stable release artifacts are still absent from the stable release contract, or update docs/workflows in the same change if that contract changed.

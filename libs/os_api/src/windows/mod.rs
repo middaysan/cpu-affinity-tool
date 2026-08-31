@@ -1,11 +1,14 @@
 mod common;
 mod cpu;
+mod event_log;
 mod ipc;
 mod launch;
 mod processes;
 mod scheduling;
 mod shell;
 mod window;
+
+pub use event_log::WindowsApplicationFailure;
 
 pub use ipc::{
     LocalIpcClientError, LocalIpcEndpoint, LocalIpcGuard, LocalIpcRequest, LocalIpcServer,

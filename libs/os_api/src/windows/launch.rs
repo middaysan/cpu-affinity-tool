@@ -1,5 +1,5 @@
 use std::os::windows::io::AsRawHandle;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::ptr::null_mut;
 
@@ -9,7 +9,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Threading::{
     CREATE_SUSPENDED, CreateProcessW, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW,
-    SetPriorityClass, SetProcessAffinityMask,
+    SetPriorityClass, SetProcessAffinityMask, TerminateProcess,
 };
 use windows::Win32::UI::Shell::{ApplicationActivationManager, IApplicationActivationManager};
 use windows::core::{PCWSTR, PWSTR};
@@ -56,7 +56,7 @@ pub(super) fn quote_arg_windows(arg: &str) -> String {
     out
 }
 
-pub(super) fn build_command_line(exe: &PathBuf, args: &[String]) -> String {
+pub(super) fn build_command_line(exe: &Path, args: &[String]) -> String {
     let exe_s = exe.to_string_lossy();
     let mut parts = Vec::with_capacity(1 + args.len());
     parts.push(quote_arg_windows(&exe_s));
@@ -90,6 +90,67 @@ fn set_priority(child: &Child, priority: PriorityClass) -> Result<(), String> {
     let handle = HANDLE(child.as_raw_handle());
     unsafe { SetPriorityClass(handle, transform_to_win_priority(priority)) }
         .map_err(|e| format!("SetPriorityClass failed: {}", e))
+}
+
+fn resume_thread_succeeded(previous_suspend_count: u32) -> Result<(), String> {
+    if previous_suspend_count == u32::MAX {
+        return Err("ResumeThread returned its u32::MAX failure sentinel".to_string());
+    }
+
+    Ok(())
+}
+
+fn report_failed_suspended_launch(
+    operation: &str,
+    error: String,
+    terminate_child: impl FnOnce() -> Result<(), String>,
+) -> String {
+    match terminate_child() {
+        Ok(()) => format!(
+            "{operation} failed: {error}; termination request succeeded for the created suspended process"
+        ),
+        Err(cleanup_error) => format!(
+            "{operation} failed: {error}; failed to request termination of the created suspended process: {cleanup_error}"
+        ),
+    }
+}
+
+fn complete_suspended_launch<SetAffinity, SetPriority, Resume, Terminate>(
+    set_affinity: SetAffinity,
+    set_priority: SetPriority,
+    resume_thread: Resume,
+    terminate_child: Terminate,
+) -> Result<(), String>
+where
+    SetAffinity: FnOnce() -> Result<(), String>,
+    SetPriority: FnOnce() -> Result<(), String>,
+    Resume: FnOnce() -> Result<u32, String>,
+    Terminate: FnOnce() -> Result<(), String>,
+{
+    if let Err(error) = set_affinity() {
+        return Err(report_failed_suspended_launch(
+            "SetProcessAffinityMask",
+            error,
+            terminate_child,
+        ));
+    }
+
+    if let Err(error) = set_priority() {
+        return Err(report_failed_suspended_launch(
+            "SetPriorityClass",
+            error,
+            terminate_child,
+        ));
+    }
+
+    match resume_thread().and_then(resume_thread_succeeded) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(report_failed_suspended_launch(
+            "ResumeThread",
+            error,
+            terminate_child,
+        )),
+    }
 }
 
 impl OS {
@@ -138,10 +199,21 @@ impl OS {
             let _pg = HandleGuard(process);
             let _tg = HandleGuard(thread);
 
-            SetProcessAffinityMask(process, mask)?;
-            SetPriorityClass(process, transform_to_win_priority(priority))?;
-
-            let _ = ResumeThread(thread);
+            complete_suspended_launch(
+                || SetProcessAffinityMask(process, mask).map_err(|error| error.to_string()),
+                || {
+                    SetPriorityClass(process, transform_to_win_priority(priority))
+                        .map_err(|error| error.to_string())
+                },
+                || {
+                    let result = ResumeThread(thread);
+                    resume_thread_succeeded(result)
+                        .map(|()| result)
+                        .map_err(|_| windows::core::Error::from_thread().to_string())
+                },
+                || TerminateProcess(process, 1).map_err(|error| error.to_string()),
+            )
+            .map_err(OsError::Msg)?;
 
             Ok(pi.dwProcessId)
         })()
@@ -174,9 +246,12 @@ impl OS {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::path::PathBuf;
 
-    use super::{build_command_line, quote_arg_windows};
+    use super::{
+        build_command_line, complete_suspended_launch, quote_arg_windows, resume_thread_succeeded,
+    };
     use crate::windows::shell::split_windows_args;
 
     #[test]
@@ -208,5 +283,102 @@ mod tests {
         let mut expected = vec![exe.to_string_lossy().to_string()];
         expected.extend(args);
         assert_eq!(split, expected);
+    }
+
+    #[test]
+    fn resume_thread_rejects_the_windows_failure_sentinel() {
+        assert!(resume_thread_succeeded(0).is_ok());
+        assert!(resume_thread_succeeded(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn suspended_launch_requests_child_termination_after_affinity_failure() {
+        let calls = RefCell::new(Vec::new());
+
+        let err = complete_suspended_launch(
+            || {
+                calls.borrow_mut().push("affinity");
+                Err("access denied".to_string())
+            },
+            || {
+                calls.borrow_mut().push("priority");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("resume");
+                Ok(0)
+            },
+            || {
+                calls.borrow_mut().push("terminate");
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(*calls.borrow(), vec!["affinity", "terminate"]);
+        assert!(err.contains("SetProcessAffinityMask failed: access denied"));
+        assert!(err.contains("termination request succeeded"));
+    }
+
+    #[test]
+    fn suspended_launch_requests_child_termination_after_priority_failure() {
+        let calls = RefCell::new(Vec::new());
+
+        let err = complete_suspended_launch(
+            || {
+                calls.borrow_mut().push("affinity");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("priority");
+                Err("access denied".to_string())
+            },
+            || {
+                calls.borrow_mut().push("resume");
+                Ok(0)
+            },
+            || {
+                calls.borrow_mut().push("terminate");
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(*calls.borrow(), vec!["affinity", "priority", "terminate"]);
+        assert!(err.contains("SetPriorityClass failed: access denied"));
+        assert!(err.contains("termination request succeeded"));
+    }
+
+    #[test]
+    fn suspended_launch_reports_cleanup_failure_after_resume_failure() {
+        let calls = RefCell::new(Vec::new());
+
+        let err = complete_suspended_launch(
+            || {
+                calls.borrow_mut().push("affinity");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("priority");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("resume");
+                Ok(u32::MAX)
+            },
+            || {
+                calls.borrow_mut().push("terminate");
+                Err("access denied".to_string())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            *calls.borrow(),
+            vec!["affinity", "priority", "resume", "terminate"]
+        );
+        assert!(err.contains("ResumeThread failed"));
+        assert!(err.contains("failed to request termination"));
+        assert!(err.contains("access denied"));
     }
 }

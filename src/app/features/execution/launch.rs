@@ -1,12 +1,14 @@
-use crate::app::features::execution::store::{RunningAppPidsLookup, RunningAppSettingsUpdate};
+use crate::app::features::execution::store::{RunningAppInstancesLookup, RunningAppSettingsUpdate};
 use crate::app::features::execution::{
     ensure_package_owner_claim, is_excluded_installed_auto_process, InstalledPackageTrackingState,
     RuntimeRegistry,
 };
 use crate::app::features::rules::RulesContext;
-use crate::app::models::{AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, LogManager};
+use crate::app::models::{
+    AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, LogManager, ProcessInstanceToken,
+};
 use crate::app::shared::ids::{GroupId, RuleId};
-use os_api::{InstalledPackageRuntimeInfo, PriorityClass, OS};
+use os_api::{InstalledPackageRuntimeInfo, PriorityClass, ProcessSettingsApplyOutcome, OS};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -26,6 +28,7 @@ struct PostLaunchCorrectionOutcome {
     no_identity_package_pids: Vec<u32>,
     new_managed_pids_added: usize,
     saw_identity_seed: bool,
+    instance_tokens: HashMap<u32, ProcessInstanceToken>,
 }
 
 struct PostLaunchCorrectionRequest {
@@ -40,6 +43,7 @@ struct PostLaunchCorrectionRequest {
     expected_aumid: String,
     installed_package_info: Option<InstalledPackageRuntimeInfo>,
     prelaunch_package_pids: HashSet<u32>,
+    manage_descendants: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,8 +67,14 @@ pub(crate) struct AppRowActionRequest {
 }
 
 trait LaunchOs {
-    fn set_process_affinity_by_pid(&self, pid: u32, mask: usize) -> Result<(), String>;
-    fn set_process_priority_by_pid(&self, pid: u32, priority: PriorityClass) -> Result<(), String>;
+    fn get_process_instance_token(&self, pid: u32) -> Result<ProcessInstanceToken, String>;
+    fn apply_process_settings_if_instance(
+        &self,
+        pid: u32,
+        expected_instance_token: ProcessInstanceToken,
+        mask: usize,
+        priority: PriorityClass,
+    ) -> Result<ProcessSettingsApplyOutcome, String>;
     fn focus_window_by_pid(&self, pid: u32) -> bool;
     fn run(
         &self,
@@ -86,12 +96,18 @@ trait LaunchOs {
 struct RealLaunchOs;
 
 impl LaunchOs for RealLaunchOs {
-    fn set_process_affinity_by_pid(&self, pid: u32, mask: usize) -> Result<(), String> {
-        OS::set_process_affinity_by_pid(pid, mask)
+    fn get_process_instance_token(&self, pid: u32) -> Result<ProcessInstanceToken, String> {
+        OS::get_process_instance_token(pid)
     }
 
-    fn set_process_priority_by_pid(&self, pid: u32, priority: PriorityClass) -> Result<(), String> {
-        OS::set_process_priority_by_pid(pid, priority)
+    fn apply_process_settings_if_instance(
+        &self,
+        pid: u32,
+        expected_instance_token: ProcessInstanceToken,
+        mask: usize,
+        priority: PriorityClass,
+    ) -> Result<ProcessSettingsApplyOutcome, String> {
+        OS::apply_process_settings_if_instance(pid, expected_instance_token, mask, priority, true)
     }
 
     fn focus_window_by_pid(&self, pid: u32) -> bool {
@@ -253,6 +269,23 @@ fn run_app_row_action_with_os<O: LaunchOs>(
     }
 }
 
+fn affinity_mask_from_cores(cores: &[usize]) -> Result<usize, String> {
+    if cores.is_empty() {
+        return Err("CPU affinity has no selected logical processors".to_string());
+    }
+
+    cores.iter().try_fold(0usize, |mask, &core| {
+        if core >= usize::BITS as usize {
+            return Err(format!(
+                "logical processor index {core} exceeds the supported affinity-mask width ({})",
+                usize::BITS
+            ));
+        }
+        let bit = 1usize << core;
+        Ok(mask | bit)
+    })
+}
+
 fn reapply_existing_app_settings<O: LaunchOs>(
     runtime: &mut RuntimeRegistry,
     log_manager: &mut LogManager,
@@ -261,9 +294,9 @@ fn reapply_existing_app_settings<O: LaunchOs>(
     os: &O,
 ) -> LaunchDispatchOutcome {
     let app_key = app_to_run.get_key();
-    let pids = match runtime.lookup_running_app_pids(&app_key) {
-        RunningAppPidsLookup::Found(pids) if !pids.is_empty() => pids,
-        RunningAppPidsLookup::Found(_) | RunningAppPidsLookup::NotFound => {
+    let instances = match runtime.lookup_running_app_instances(&app_key) {
+        RunningAppInstancesLookup::Found(instances) if !instances.is_empty() => instances,
+        RunningAppInstancesLookup::Found(_) | RunningAppInstancesLookup::NotFound => {
             let message = format!(
                 "Cannot fix {}: the app is not running",
                 app_to_run.display()
@@ -271,7 +304,7 @@ fn reapply_existing_app_settings<O: LaunchOs>(
             log_manager.add_important_entry(message.clone());
             return LaunchDispatchOutcome::Rejected(message);
         }
-        RunningAppPidsLookup::Busy => {
+        RunningAppInstancesLookup::Busy => {
             let message = format!(
                 "Cannot fix {}: running app state is temporarily busy; try again",
                 app_to_run.display()
@@ -280,15 +313,21 @@ fn reapply_existing_app_settings<O: LaunchOs>(
             return LaunchDispatchOutcome::Rejected(message);
         }
     };
-    let mask = group_cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
+    let mask = match affinity_mask_from_cores(group_cores) {
+        Ok(mask) => mask,
+        Err(error) => {
+            let message = format!("Cannot fix {}: {error}", app_to_run.display());
+            log_manager.add_important_entry(message.clone());
+            return LaunchDispatchOutcome::Rejected(message);
+        }
+    };
     let mut failures = Vec::new();
 
-    for &pid in &pids {
-        if let Err(error) = os.set_process_affinity_by_pid(pid, mask) {
-            failures.push(format!("affinity PID {pid}: {error}"));
-        }
-        if let Err(error) = os.set_process_priority_by_pid(pid, app_to_run.priority) {
-            failures.push(format!("priority PID {pid}: {error}"));
+    for &(pid, instance_token) in &instances {
+        if let Err(error) =
+            os.apply_process_settings_if_instance(pid, instance_token, mask, app_to_run.priority)
+        {
+            failures.push(format!("PID {pid}: {error}"));
         }
     }
 
@@ -333,9 +372,9 @@ fn focus_existing_app<O: LaunchOs>(
     app_to_run: AppToRun,
     os: &O,
 ) -> LaunchDispatchOutcome {
-    let pids = match runtime.lookup_running_app_pids(&app_to_run.get_key()) {
-        RunningAppPidsLookup::Found(pids) if !pids.is_empty() => pids,
-        RunningAppPidsLookup::Found(_) | RunningAppPidsLookup::NotFound => {
+    let instances = match runtime.lookup_running_app_instances(&app_to_run.get_key()) {
+        RunningAppInstancesLookup::Found(instances) if !instances.is_empty() => instances,
+        RunningAppInstancesLookup::Found(_) | RunningAppInstancesLookup::NotFound => {
             let message = format!(
                 "Cannot focus {}: the app is not running",
                 app_to_run.display()
@@ -343,7 +382,7 @@ fn focus_existing_app<O: LaunchOs>(
             log_manager.add_important_entry(message.clone());
             return LaunchDispatchOutcome::Rejected(message);
         }
-        RunningAppPidsLookup::Busy => {
+        RunningAppInstancesLookup::Busy => {
             let message = format!(
                 "Cannot focus {}: running app state is temporarily busy; try again",
                 app_to_run.display()
@@ -353,7 +392,11 @@ fn focus_existing_app<O: LaunchOs>(
         }
     };
 
-    if pids.iter().any(|&pid| os.focus_window_by_pid(pid)) {
+    if instances.iter().any(|&(pid, expected_token)| {
+        os.get_process_instance_token(pid)
+            .is_ok_and(|current_token| current_token == expected_token)
+            && os.focus_window_by_pid(pid)
+    }) {
         log_manager.add_entry(format!("App window focused: {}", app_to_run.display()));
         LaunchDispatchOutcome::Accepted
     } else {
@@ -426,16 +469,31 @@ fn run_launch_decision<O: LaunchOs>(
     os: &O,
 ) -> LaunchDispatchOutcome {
     let app_key = app_to_run.get_key();
-    let mask = group_cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
+    let mask = match affinity_mask_from_cores(&group_cores) {
+        Ok(mask) => mask,
+        Err(error) => {
+            let message = format!("Launch skipped for {}: {error}", app_to_run.display());
+            log_manager.add_important_entry(message.clone());
+            return LaunchDispatchOutcome::Rejected(message);
+        }
+    };
 
-    match runtime.lookup_running_app_pids(&app_key) {
-        RunningAppPidsLookup::Found(pids) => {
-            for &pid in &pids {
-                let _ = os.set_process_affinity_by_pid(pid, mask);
-                let _ = os.set_process_priority_by_pid(pid, app_to_run.priority);
+    match runtime.lookup_running_app_instances(&app_key) {
+        RunningAppInstancesLookup::Found(instances) if !instances.is_empty() => {
+            for &(pid, instance_token) in &instances {
+                let _ = os.apply_process_settings_if_instance(
+                    pid,
+                    instance_token,
+                    mask,
+                    app_to_run.priority,
+                );
             }
 
-            let was_focused = pids.iter().any(|&pid| os.focus_window_by_pid(pid));
+            let was_focused = instances.iter().any(|&(pid, expected_token)| {
+                os.get_process_instance_token(pid)
+                    .is_ok_and(|current_token| current_token == expected_token)
+                    && os.focus_window_by_pid(pid)
+            });
             if was_focused {
                 log_manager.add_entry(format!(
                     "App already running: {}, settings reapplied and window focused",
@@ -450,8 +508,16 @@ fn run_launch_decision<O: LaunchOs>(
             ));
             return LaunchDispatchOutcome::Accepted;
         }
-        RunningAppPidsLookup::NotFound => {}
-        RunningAppPidsLookup::Busy => {
+        RunningAppInstancesLookup::Found(_) => {
+            let message = format!(
+                "Launch skipped for {}: tracked process identity is not available yet; try again",
+                app_to_run.display()
+            );
+            log_manager.add_important_entry(message.clone());
+            return LaunchDispatchOutcome::Rejected(message);
+        }
+        RunningAppInstancesLookup::NotFound => {}
+        RunningAppInstancesLookup::Busy => {
             let message = format!(
                 "Launch skipped for {}: running app state is temporarily busy; try again",
                 app_to_run.display()
@@ -506,21 +572,31 @@ fn run_launch_decision<O: LaunchOs>(
             let is_installed = matches!(app_to_run.launch_target, LaunchTarget::Installed { .. });
             let launch_pid_auto_managed =
                 !is_installed || installed_launch_pid_auto_managed(os, pid);
+            let launch_instance_token = os.get_process_instance_token(pid).ok();
 
             if is_installed && launch_pid_auto_managed {
-                let _ = os.set_process_affinity_by_pid(pid, mask);
-                let _ = os.set_process_priority_by_pid(pid, priority);
+                if let Some(instance_token) = launch_instance_token {
+                    let _ =
+                        os.apply_process_settings_if_instance(pid, instance_token, mask, priority);
+                }
             }
 
             if launch_pid_auto_managed {
-                record_started_pid(
-                    runtime,
-                    log_manager,
-                    &app_key,
-                    pid,
-                    group_id.clone(),
-                    rule_id.clone(),
-                );
+                if let Some(instance_token) = launch_instance_token {
+                    record_started_pid(
+                        runtime,
+                        log_manager,
+                        &app_key,
+                        pid,
+                        instance_token,
+                        group_id.clone(),
+                        rule_id.clone(),
+                    );
+                } else {
+                    log_manager.add_important_entry(format!(
+                        "App started with PID {pid}, but its process identity could not be verified; waiting for rediscovery"
+                    ));
+                }
             } else {
                 log_manager.add_entry(format!(
                     "Installed app activation PID {pid} is a Windows background host; waiting for app processes"
@@ -540,6 +616,7 @@ fn run_launch_decision<O: LaunchOs>(
                     expected_aumid: aumid.clone(),
                     installed_package_info,
                     prelaunch_package_pids,
+                    manage_descendants: app_to_run.manage_descendants,
                 });
             }
             LaunchDispatchOutcome::Accepted
@@ -556,13 +633,15 @@ fn record_started_pid(
     log_manager: &mut LogManager,
     app_key: &AppRuntimeKey,
     pid: u32,
+    instance_token: ProcessInstanceToken,
     group_id: GroupId,
     rule_id: RuleId,
 ) {
     let is_new_app = !runtime.contains_app(app_key);
 
     if is_new_app {
-        let added = runtime.add_running_app(app_key, pid, group_id, rule_id);
+        let added =
+            runtime.add_running_app_with_token(app_key, pid, instance_token, group_id, rule_id);
         if added {
             log_manager.add_entry(format!("App started with PID: {pid}"));
         } else {
@@ -571,7 +650,7 @@ fn record_started_pid(
             ));
         }
     } else {
-        let _ = runtime.add_pid_to_existing_app(app_key, pid);
+        let _ = runtime.add_pid_to_existing_app_with_token(app_key, pid, instance_token);
         log_manager.add_entry(format!(
             "New instance of existing app started with PID: {pid}"
         ));
@@ -602,6 +681,7 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                 request.priority,
                 request.installed_package_info.as_ref(),
                 &request.prelaunch_package_pids,
+                request.manage_descendants,
             );
 
             if let Ok(outcome) = outcome {
@@ -620,6 +700,14 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                             request.group_id.clone(),
                             request.rule_id.clone(),
                         );
+                        if let Some(app) = apps.apps.get_mut(&request.app_key) {
+                            if let Some(&token) =
+                                outcome.instance_tokens.get(&outcome.managed_pids[0])
+                            {
+                                app.pid_instance_tokens
+                                    .insert(outcome.managed_pids[0], token);
+                            }
+                        }
                     }
 
                     if let Some(app) = apps.apps.get_mut(&request.app_key) {
@@ -631,6 +719,9 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                         if let Some(app) = apps.apps.get_mut(&request.app_key) {
                             if !app.pids.contains(&pid) {
                                 app.pids.push(pid);
+                            }
+                            if let Some(&token) = outcome.instance_tokens.get(&pid) {
+                                app.pid_instance_tokens.insert(pid, token);
                             }
                         }
                     }
@@ -650,16 +741,25 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                                 for &pid in &outcome.no_identity_package_pids {
                                     if let Some(app) = apps.apps.get_mut(&request.app_key) {
                                         if !app.pids.contains(&pid) {
+                                            let Some(&instance_token) =
+                                                outcome.instance_tokens.get(&pid)
+                                            else {
+                                                continue;
+                                            };
                                             app.pids.push(pid);
+                                            app.pid_instance_tokens.insert(pid, instance_token);
                                             attached_no_identity_pids.push(pid);
-                                            let mask = request
-                                                .group_cores
-                                                .iter()
-                                                .fold(0usize, |acc, &i| acc | (1 << i));
-                                            let _ = os.set_process_affinity_by_pid(pid, mask);
-                                            let _ = os
-                                                .set_process_priority_by_pid(pid, request.priority);
-                                            newly_attached_package_pids += 1;
+                                            if let Ok(mask) =
+                                                affinity_mask_from_cores(&request.group_cores)
+                                            {
+                                                let _ = os.apply_process_settings_if_instance(
+                                                    pid,
+                                                    instance_token,
+                                                    mask,
+                                                    request.priority,
+                                                );
+                                                newly_attached_package_pids += 1;
+                                            }
                                         }
                                     }
                                 }
@@ -685,6 +785,7 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
     });
 }
 
+#[allow(clippy::too_many_arguments)] // The test seam mirrors the bounded post-launch request.
 fn post_launch_correction_poll_with_os<O: LaunchOs>(
     os: &O,
     expected_aumid: &str,
@@ -693,11 +794,14 @@ fn post_launch_correction_poll_with_os<O: LaunchOs>(
     priority: PriorityClass,
     installed_package_info: Option<&InstalledPackageRuntimeInfo>,
     prelaunch_package_pids: &HashSet<u32>,
+    manage_descendants: bool,
 ) -> Result<PostLaunchCorrectionOutcome, String> {
     let snapshot = os.snapshot_process_tree()?;
     let before: HashSet<u32> = seed_pids.iter().copied().collect();
 
-    extend_with_descendants(&snapshot, seed_pids);
+    if manage_descendants {
+        extend_with_descendants(&snapshot, seed_pids);
+    }
     let mut no_identity_package_pids = Vec::new();
 
     if let Some(package_info) = installed_package_info {
@@ -719,15 +823,33 @@ fn post_launch_correction_poll_with_os<O: LaunchOs>(
         retain_auto_managed_installed_pids(&snapshot, &mut no_identity_package_pids);
     }
 
-    let mask = group_cores.iter().fold(0usize, |acc, &i| acc | (1 << i));
+    let mask = affinity_mask_from_cores(group_cores)?;
     let mut saw_identity_seed = false;
     let mut managed_pids = seed_pids.clone();
     retain_auto_managed_installed_pids(&snapshot, &mut managed_pids);
+    let mut instance_tokens = HashMap::new();
 
-    for &pid in managed_pids.iter() {
-        let _ = os.set_process_affinity_by_pid(pid, mask);
-        let _ = os.set_process_priority_by_pid(pid, priority);
-    }
+    managed_pids.retain(|&pid| {
+        let Ok(instance_token) = os.get_process_instance_token(pid) else {
+            return false;
+        };
+        if os
+            .apply_process_settings_if_instance(pid, instance_token, mask, priority)
+            .is_err()
+        {
+            return false;
+        }
+        instance_tokens.insert(pid, instance_token);
+        true
+    });
+
+    no_identity_package_pids.retain(|&pid| {
+        let Ok(instance_token) = os.get_process_instance_token(pid) else {
+            return false;
+        };
+        instance_tokens.insert(pid, instance_token);
+        true
+    });
 
     for &pid in seed_pids.iter() {
         if !saw_identity_seed
@@ -750,6 +872,7 @@ fn post_launch_correction_poll_with_os<O: LaunchOs>(
         no_identity_package_pids,
         new_managed_pids_added,
         saw_identity_seed,
+        instance_tokens,
     })
 }
 
@@ -872,11 +995,12 @@ mod tests {
     use crate::app::features::execution::RuntimeRegistry;
     use crate::app::models::{
         AppStateStorage, AppStatus, AppToRun, CoreGroup, CpuSchema, LogManager,
+        ProcessInstanceToken,
     };
     use crate::app::shared::ids::{GroupId, RuleId};
-    use os_api::{InstalledPackageRuntimeInfo, PriorityClass};
+    use os_api::{InstalledPackageRuntimeInfo, PriorityClass, ProcessSettingsApplyOutcome};
     use std::cell::RefCell;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
 
@@ -885,6 +1009,7 @@ mod tests {
         affinity_results: HashMap<u32, Result<(), String>>,
         priority_calls: RefCell<Vec<(u32, PriorityClass)>>,
         priority_results: HashMap<u32, Result<(), String>>,
+        instance_tokens: HashMap<u32, ProcessInstanceToken>,
         focus_calls: RefCell<Vec<u32>>,
         focus_results: HashMap<u32, bool>,
         run_calls: RefCell<Vec<(PathBuf, Vec<String>, Vec<usize>, PriorityClass)>>,
@@ -904,6 +1029,7 @@ mod tests {
                 affinity_results: HashMap::new(),
                 priority_calls: RefCell::new(Vec::new()),
                 priority_results: HashMap::new(),
+                instance_tokens: HashMap::new(),
                 focus_calls: RefCell::new(Vec::new()),
                 focus_results: HashMap::new(),
                 run_calls: RefCell::new(Vec::new()),
@@ -919,18 +1045,34 @@ mod tests {
     }
 
     impl LaunchOs for FakeLaunchOs {
-        fn set_process_affinity_by_pid(&self, pid: u32, mask: usize) -> Result<(), String> {
-            self.affinity_calls.borrow_mut().push((pid, mask));
-            self.affinity_results.get(&pid).cloned().unwrap_or(Ok(()))
+        fn get_process_instance_token(&self, pid: u32) -> Result<ProcessInstanceToken, String> {
+            Ok(self
+                .instance_tokens
+                .get(&pid)
+                .copied()
+                .unwrap_or(pid as u64 + 1_000))
         }
 
-        fn set_process_priority_by_pid(
+        fn apply_process_settings_if_instance(
             &self,
             pid: u32,
+            expected_instance_token: ProcessInstanceToken,
+            mask: usize,
             priority: PriorityClass,
-        ) -> Result<(), String> {
+        ) -> Result<ProcessSettingsApplyOutcome, String> {
+            if self.get_process_instance_token(pid)? != expected_instance_token {
+                return Err("process instance no longer matches the tracked PID".to_string());
+            }
+            self.affinity_calls.borrow_mut().push((pid, mask));
+            self.affinity_results.get(&pid).cloned().unwrap_or(Ok(()))?;
             self.priority_calls.borrow_mut().push((pid, priority));
-            self.priority_results.get(&pid).cloned().unwrap_or(Ok(()))
+            self.priority_results.get(&pid).cloned().unwrap_or(Ok(()))?;
+            Ok(ProcessSettingsApplyOutcome {
+                previous_affinity: mask,
+                previous_priority: priority,
+                affinity_changed: false,
+                priority_changed: false,
+            })
         }
 
         fn focus_window_by_pid(&self, pid: u32) -> bool {
@@ -1010,6 +1152,7 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            windows_event_log_diagnostics_enabled: true,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,
@@ -1080,8 +1223,8 @@ mod tests {
         let runtime = RuntimeRegistry::new();
         let app = sample_app();
         let app_key = app.get_key();
-        assert!(runtime.add_running_app(&app_key, 41, group_id(3), rule_id(4)));
-        assert!(runtime.add_pid_to_existing_app(&app_key, 42));
+        assert!(runtime.add_running_app_with_token(&app_key, 41, 1041, group_id(3), rule_id(4)));
+        assert!(runtime.add_pid_to_existing_app_with_token(&app_key, 42, 1042));
         let mut log_manager = LogManager::default();
         let os = FakeLaunchOs {
             focus_results: HashMap::from([(41, false), (42, true)]),
@@ -1116,7 +1259,7 @@ mod tests {
         let runtime = RuntimeRegistry::new();
         let app = sample_app();
         let app_key = app.get_key();
-        assert!(runtime.add_running_app(&app_key, 77, group_id(0), rule_id(0)));
+        assert!(runtime.add_running_app_with_token(&app_key, 77, 1077, group_id(0), rule_id(0)));
         let mut log_manager = LogManager::default();
         let os = FakeLaunchOs {
             run_result: RefCell::new(Ok(555)),
@@ -1146,8 +1289,8 @@ mod tests {
         let mut runtime = RuntimeRegistry::new();
         let app = sample_app();
         let app_key = app.get_key();
-        assert!(runtime.add_running_app(&app_key, 41, group_id(0), rule_id(0)));
-        assert!(runtime.add_pid_to_existing_app(&app_key, 42));
+        assert!(runtime.add_running_app_with_token(&app_key, 41, 1041, group_id(0), rule_id(0)));
+        assert!(runtime.add_pid_to_existing_app_with_token(&app_key, 42, 1042));
         set_settings_matched(&runtime, &app, false);
         let mut log_manager = LogManager::default();
         let os = FakeLaunchOs {
@@ -1181,7 +1324,7 @@ mod tests {
         let mut runtime = RuntimeRegistry::new();
         let app = sample_app();
         let app_key = app.get_key();
-        assert!(runtime.add_running_app(&app_key, 77, group_id(0), rule_id(0)));
+        assert!(runtime.add_running_app_with_token(&app_key, 77, 1077, group_id(0), rule_id(0)));
         let mut log_manager = LogManager::default();
         let os = FakeLaunchOs {
             affinity_results: HashMap::from([(77, Err("access denied".to_string()))]),
@@ -1215,7 +1358,13 @@ mod tests {
         let state = sample_state();
         let mut runtime = RuntimeRegistry::new();
         let app = sample_app();
-        assert!(runtime.add_running_app(&app.get_key(), 77, group_id(0), rule_id(0)));
+        assert!(runtime.add_running_app_with_token(
+            &app.get_key(),
+            77,
+            1077,
+            group_id(0),
+            rule_id(0)
+        ));
         let running_apps = runtime.running_apps_handle();
         let _write_guard = running_apps.try_write().unwrap();
         let mut log_manager = LogManager::default();
@@ -1243,7 +1392,7 @@ mod tests {
         let mut runtime = RuntimeRegistry::new();
         let app = sample_app();
         let app_key = app.get_key();
-        assert!(runtime.add_running_app(&app_key, 77, group_id(0), rule_id(0)));
+        assert!(runtime.add_running_app_with_token(&app_key, 77, 1077, group_id(0), rule_id(0)));
         runtime
             .running_apps_handle()
             .try_write()
@@ -1274,7 +1423,7 @@ mod tests {
         let mut runtime = RuntimeRegistry::new();
         let app = sample_app();
         let app_key = app.get_key();
-        assert!(runtime.add_running_app(&app_key, 91, group_id(0), rule_id(0)));
+        assert!(runtime.add_running_app_with_token(&app_key, 91, 1091, group_id(0), rule_id(0)));
         let mut log_manager = LogManager::default();
         let os = FakeLaunchOs {
             focus_results: HashMap::from([(91, true)]),
@@ -1298,11 +1447,43 @@ mod tests {
     }
 
     #[test]
+    fn test_row_focus_rejects_reused_pid_without_focusing() {
+        let state = sample_state();
+        let mut runtime = RuntimeRegistry::new();
+        let app = sample_app();
+        let app_key = app.get_key();
+        assert!(runtime.add_running_app_with_token(&app_key, 91, 500, group_id(0), rule_id(0)));
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs {
+            instance_tokens: HashMap::from([(91, 501)]),
+            focus_results: HashMap::from([(91, true)]),
+            ..Default::default()
+        };
+
+        let outcome = run_app_row_action_with_os(
+            &state,
+            &mut runtime,
+            &mut log_manager,
+            row_request(app, AppRowAction::Focus),
+            &os,
+        );
+
+        assert!(matches!(outcome, super::LaunchDispatchOutcome::Rejected(_)));
+        assert!(os.focus_calls.borrow().is_empty());
+    }
+
+    #[test]
     fn test_row_focus_busy_fails_closed_without_os_calls() {
         let state = sample_state();
         let mut runtime = RuntimeRegistry::new();
         let app = sample_app();
-        assert!(runtime.add_running_app(&app.get_key(), 91, group_id(0), rule_id(0)));
+        assert!(runtime.add_running_app_with_token(
+            &app.get_key(),
+            91,
+            1091,
+            group_id(0),
+            rule_id(0)
+        ));
         let running_apps = runtime.running_apps_handle();
         let _write_guard = running_apps.try_write().unwrap();
         let mut log_manager = LogManager::default();
@@ -1330,7 +1511,7 @@ mod tests {
         let mut runtime = RuntimeRegistry::new();
         let app = sample_app();
         let app_key = app.get_key();
-        assert!(runtime.add_running_app(&app_key, 91, group_id(0), rule_id(0)));
+        assert!(runtime.add_running_app_with_token(&app_key, 91, 1091, group_id(0), rule_id(0)));
         runtime
             .running_apps_handle()
             .try_write()
@@ -1384,7 +1565,7 @@ mod tests {
         let runtime = RuntimeRegistry::new();
         let app = sample_app();
         let app_key = app.get_key();
-        assert!(runtime.add_running_app(&app_key, 77, group_id(0), rule_id(0)));
+        assert!(runtime.add_running_app_with_token(&app_key, 77, 1077, group_id(0), rule_id(0)));
         let running_apps = runtime.running_apps_handle();
         let _write_guard = running_apps.try_write().unwrap();
         let mut log_manager = LogManager::default();
@@ -1421,7 +1602,7 @@ mod tests {
             false,
         );
         let app_key = app.get_key();
-        assert!(runtime.add_running_app(&app_key, 88, group_id(0), rule_id(0)));
+        assert!(runtime.add_running_app_with_token(&app_key, 88, 1088, group_id(0), rule_id(0)));
         let running_apps = runtime.running_apps_handle();
         let _write_guard = running_apps.try_write().unwrap();
         let mut log_manager = LogManager::default();
@@ -1446,6 +1627,26 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.message.contains("temporarily busy")));
+    }
+
+    #[test]
+    fn test_invalid_affinity_core_rejects_launch_without_os_calls() {
+        let runtime = RuntimeRegistry::new();
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs::default();
+
+        let outcome = run_launch_decision(
+            &runtime,
+            &mut log_manager,
+            group_id(0),
+            rule_id(0),
+            sample_app(),
+            vec![usize::BITS as usize],
+            &os,
+        );
+
+        assert!(matches!(outcome, super::LaunchDispatchOutcome::Rejected(_)));
+        assert_no_row_action_os_calls(&os);
     }
 
     #[test]
@@ -1502,13 +1703,14 @@ mod tests {
         let runtime = RuntimeRegistry::new();
         let mut log_manager = LogManager::default();
         let key = sample_app().get_key();
-        assert!(runtime.add_running_app(&key, 41, group_id(1), rule_id(2)));
+        assert!(runtime.add_running_app_with_token(&key, 41, 1041, group_id(1), rule_id(2)));
 
         record_started_pid(
             &runtime,
             &mut log_manager,
             &key,
             5150,
+            6150,
             group_id(1),
             rule_id(2),
         );
@@ -1517,6 +1719,7 @@ mod tests {
             &mut log_manager,
             &key,
             5150,
+            6150,
             group_id(1),
             rule_id(2),
         );
@@ -1665,6 +1868,7 @@ mod tests {
             PriorityClass::AboveNormal,
             None,
             &std::collections::HashSet::new(),
+            true,
         )
         .unwrap();
 
@@ -1684,6 +1888,45 @@ mod tests {
                 (51, PriorityClass::AboveNormal),
                 (52, PriorityClass::AboveNormal),
             ]
+        );
+    }
+
+    #[test]
+    fn test_post_launch_correction_does_not_walk_descendants_when_disabled() {
+        let os = FakeLaunchOs {
+            snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                children_of: HashMap::from([(50, vec![51])]),
+                names: HashMap::from([
+                    (50, "Spotify.exe".to_string()),
+                    (51, "SpotifyHelper.exe".to_string()),
+                ]),
+            })),
+            process_aumids: HashMap::from([(
+                50,
+                "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".to_string(),
+            )]),
+            ..Default::default()
+        };
+        let mut seed_pids = vec![50];
+
+        let outcome = post_launch_correction_poll_with_os(
+            &os,
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
+            &mut seed_pids,
+            &[1, 3],
+            PriorityClass::AboveNormal,
+            None,
+            &HashSet::new(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.seed_pids, vec![50]);
+        assert_eq!(outcome.managed_pids, vec![50]);
+        assert_eq!(os.affinity_calls.borrow().as_slice(), &[(50, 10)]);
+        assert_eq!(
+            os.priority_calls.borrow().as_slice(),
+            &[(50, PriorityClass::AboveNormal)]
         );
     }
 
@@ -1719,6 +1962,7 @@ mod tests {
             PriorityClass::AboveNormal,
             None,
             &std::collections::HashSet::new(),
+            true,
         )
         .unwrap();
 
@@ -1798,6 +2042,7 @@ mod tests {
             PriorityClass::High,
             Some(&package_info),
             &prelaunch,
+            true,
         )
         .unwrap();
 

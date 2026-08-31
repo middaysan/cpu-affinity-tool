@@ -1,6 +1,6 @@
 use crate::app::features::diagnostics;
 use crate::app::features::execution;
-use crate::app::features::execution::InstalledPackageTrackingState;
+use crate::app::features::execution::{InstalledPackageTrackingState, MonitorEventReceiver};
 #[cfg(test)]
 use crate::app::instance_forwarding::ForwardedIpcCommand;
 #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
@@ -10,7 +10,8 @@ use crate::app::instance_forwarding::{
 };
 use crate::app::models::RunningApps;
 use crate::app::runtime::{AppState, RunRuleOutcome};
-use crate::app::shell::events::ShellEvent;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+use crate::app::shell::presenters::crash_reports;
 use crate::app::shell::presenters::{
     central, footer, group_editor, header, installed_app_picker, logs, run_settings,
 };
@@ -18,9 +19,10 @@ use crate::app::shell::presenters::{
 use crate::app::shell::sessions::ShortcutCreationRole;
 use crate::app::shell::{GroupRoute, WindowRoute};
 use crate::app::startup::StartupIntent;
-use crate::tray::{init_tray, TrayCmd};
+use crate::tray::{init_tray, TrayCmd, TrayRuntime};
 use eframe::egui;
 use std::path::PathBuf;
+#[cfg(test)]
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -28,16 +30,63 @@ use tokio::sync::RwLock as TokioRwLock;
 
 pub struct App {
     pub state: AppState,
-    tray_rx: Option<Receiver<TrayCmd>>,
+    tray_runtime: Option<TrayRuntime>,
     #[cfg(test)]
     forwarded_command_rx: Option<Receiver<ForwardedIpcCommand>>,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     forwarding_runtime: Option<AppForwardingRuntime>,
     #[cfg(target_os = "windows")]
-    _tray_icon_guard: Option<tray_icon::TrayIcon>,
-    #[cfg(target_os = "windows")]
     hwnd: Option<windows::Win32::Foundation::HWND>,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    crash_report_viewport_focused: Option<bool>,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    windows_event_log_first_frame_rendered: bool,
+    closing_requested: bool,
     is_hidden: bool,
+}
+
+const MONITOR_EVENT_GUI_DRAIN_LIMIT: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayCommandAction {
+    None,
+    Show,
+    Quit,
+}
+
+fn reduce_tray_commands(
+    closing_requested: bool,
+    commands: impl IntoIterator<Item = TrayCmd>,
+) -> TrayCommandAction {
+    if closing_requested {
+        return TrayCommandAction::Quit;
+    }
+
+    let mut action = TrayCommandAction::None;
+    for command in commands {
+        match command {
+            TrayCmd::Show => {
+                if action != TrayCommandAction::Quit {
+                    action = TrayCommandAction::Show;
+                }
+            }
+            TrayCmd::Quit => action = TrayCommandAction::Quit,
+        }
+    }
+    action
+}
+
+fn should_hide_to_tray(
+    platform_supports_hide_to_tray: bool,
+    has_tray_runtime: bool,
+    minimized: Option<bool>,
+) -> bool {
+    platform_supports_hide_to_tray && has_tray_runtime && minimized == Some(true)
+}
+
+#[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+fn viewport_gained_focus(previous: Option<bool>, current: Option<bool>) -> bool {
+    matches!((previous, current), (Some(false), Some(true)))
 }
 
 fn theme_preference_for_index(theme_index: usize) -> egui::ThemePreference {
@@ -49,24 +98,41 @@ fn theme_preference_for_index(theme_index: usize) -> egui::ThemePreference {
 }
 
 #[cfg(all(target_os = "windows", feature = "windows"))]
+struct ForwardingServerLifetime<Guard, Server> {
+    guard: Option<Guard>,
+    server: Option<Server>,
+}
+
+#[cfg(all(target_os = "windows", feature = "windows"))]
+impl<Guard, Server> Drop for ForwardingServerLifetime<Guard, Server> {
+    fn drop(&mut self) {
+        // A pending runtime still owns its guard. Once started, LocalIpcServer transfers that
+        // guard to its worker so an unfinished cancellation cannot admit a replacement owner.
+        drop(self.server.take());
+        drop(self.guard.take());
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "windows"))]
 pub struct AppForwardingRuntime {
-    _guard: os_api::LocalIpcGuard,
     endpoint: os_api::LocalIpcEndpoint,
-    server: Option<os_api::LocalIpcServer>,
+    lifetime: ForwardingServerLifetime<os_api::LocalIpcGuard, os_api::LocalIpcServer>,
 }
 
 #[cfg(all(target_os = "windows", feature = "windows"))]
 impl AppForwardingRuntime {
     pub fn pending(guard: os_api::LocalIpcGuard, endpoint: os_api::LocalIpcEndpoint) -> Self {
         Self {
-            _guard: guard,
             endpoint,
-            server: None,
+            lifetime: ForwardingServerLifetime {
+                guard: Some(guard),
+                server: None,
+            },
         }
     }
 
     fn start_server(&mut self, ctx: &egui::Context) -> Result<(), String> {
-        if self.server.is_some() {
+        if self.lifetime.server.is_some() {
             return Ok(());
         }
 
@@ -74,14 +140,27 @@ impl AppForwardingRuntime {
         let wake: os_api::LocalIpcWake = Arc::new(move || {
             repaint_ctx.request_repaint();
         });
-        let server = os_api::OS::start_local_ipc_server_with_wake(&self.endpoint, Some(wake))?;
-        self.server = Some(server);
+        let guard = self
+            .lifetime
+            .guard
+            .take()
+            .expect("pending forwarding runtime must retain its primary guard");
+        let server = os_api::OS::start_local_ipc_server_with_wake_and_primary_guard(
+            &self.endpoint,
+            guard,
+            Some(wake),
+        )?;
+        self.lifetime.server = Some(server);
         Ok(())
+    }
+
+    fn server(&self) -> Option<&os_api::LocalIpcServer> {
+        self.lifetime.server.as_ref()
     }
 
     #[cfg(test)]
     fn server_started(&self) -> bool {
-        self.server.is_some()
+        self.server().is_some()
     }
 }
 
@@ -122,7 +201,18 @@ impl App {
             .set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
 
         let mut state = AppState::new();
-        Self::bootstrap_runtime_without_startup(&mut state, execution::spawn_monitors);
+        let monitor_ctx = cc.egui_ctx.clone();
+        Self::bootstrap_runtime_without_startup(
+            &mut state,
+            move |running_apps, package_tracking, persistent_state| {
+                execution::spawn_monitors_with_wake(
+                    running_apps,
+                    package_tracking,
+                    persistent_state,
+                    Some(Arc::new(move || monitor_ctx.request_repaint())),
+                )
+            },
+        );
 
         #[cfg(target_os = "windows")]
         let mut hwnd = None;
@@ -147,51 +237,46 @@ impl App {
         }
 
         #[cfg(target_os = "windows")]
-        let tray_res = if let Some(hwnd_value) = hwnd {
-            init_tray(cc.egui_ctx.clone(), hwnd_value)
-        } else {
-            Err("HWND not found".to_string())
-        };
+        let tray_res = init_tray(cc.egui_ctx.clone());
 
         #[cfg(not(target_os = "windows"))]
         let tray_res = init_tray(cc.egui_ctx.clone());
 
         match tray_res {
-            Ok(handle) => {
-                let tray_rx = Some(handle.rx);
-
+            Ok(tray_runtime) => Self {
+                state,
+                tray_runtime: Some(tray_runtime),
+                #[cfg(test)]
+                forwarded_command_rx: None,
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                forwarding_runtime: None,
                 #[cfg(target_os = "windows")]
-                let tray_icon_guard = Some(handle.tray_icon);
-
-                Self {
-                    state,
-                    tray_rx,
-                    #[cfg(test)]
-                    forwarded_command_rx: None,
-                    #[cfg(all(target_os = "windows", feature = "windows"))]
-                    forwarding_runtime: None,
-                    #[cfg(target_os = "windows")]
-                    _tray_icon_guard: tray_icon_guard,
-                    #[cfg(target_os = "windows")]
-                    hwnd,
-                    is_hidden: false,
-                }
-            }
+                hwnd,
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                crash_report_viewport_focused: None,
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                windows_event_log_first_frame_rendered: false,
+                closing_requested: false,
+                is_hidden: false,
+            },
             Err(e) => {
                 state
                     .log_manager
                     .add_sticky_once(format!("Tray init failed: {e}"));
                 Self {
                     state,
-                    tray_rx: None,
+                    tray_runtime: None,
                     #[cfg(test)]
                     forwarded_command_rx: None,
                     #[cfg(all(target_os = "windows", feature = "windows"))]
                     forwarding_runtime: None,
                     #[cfg(target_os = "windows")]
-                    _tray_icon_guard: None,
-                    #[cfg(target_os = "windows")]
                     hwnd,
+                    #[cfg(all(target_os = "windows", feature = "windows"))]
+                    crash_report_viewport_focused: None,
+                    #[cfg(all(target_os = "windows", feature = "windows"))]
+                    windows_event_log_first_frame_rendered: false,
+                    closing_requested: false,
                     is_hidden: false,
                 }
             }
@@ -248,7 +333,7 @@ impl App {
             Arc<TokioRwLock<RunningApps>>,
             Arc<RwLock<InstalledPackageTrackingState>>,
             Arc<RwLock<crate::app::models::AppStateStorage>>,
-        ) -> Receiver<ShellEvent>,
+        ) -> MonitorEventReceiver,
     {
         Self::bootstrap_runtime_without_startup(state, spawn_monitors);
         Self::handle_startup_intent(state, startup_intent);
@@ -260,7 +345,7 @@ impl App {
             Arc<TokioRwLock<RunningApps>>,
             Arc<RwLock<InstalledPackageTrackingState>>,
             Arc<RwLock<crate::app::models::AppStateStorage>>,
-        ) -> Receiver<ShellEvent>,
+        ) -> MonitorEventReceiver,
     {
         diagnostics::log_startup(&mut state.log_manager, &state.persistent_state);
         state.runtime.monitor_rx = Some(spawn_monitors(
@@ -307,15 +392,18 @@ impl App {
     fn new_for_test(state: AppState) -> Self {
         Self {
             state,
-            tray_rx: None,
+            tray_runtime: None,
             #[cfg(test)]
             forwarded_command_rx: None,
             #[cfg(all(target_os = "windows", feature = "windows"))]
             forwarding_runtime: None,
             #[cfg(target_os = "windows")]
-            _tray_icon_guard: None,
-            #[cfg(target_os = "windows")]
             hwnd: None,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            crash_report_viewport_focused: None,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            windows_event_log_first_frame_rendered: false,
+            closing_requested: false,
             is_hidden: false,
         }
     }
@@ -323,13 +411,42 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.handle_tray_events(ctx);
+        if self.handle_tray_events(ctx) {
+            return;
+        }
         self.handle_monitor_events(ctx);
         #[cfg(all(target_os = "windows", feature = "windows"))]
         self.handle_local_ipc_requests(ctx);
         #[cfg(test)]
         self.handle_forwarded_commands(ctx);
         self.state.poll_installed_app_picker_refresh();
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        {
+            let viewport_focused = ctx.input(|input| input.viewport().focused);
+            if viewport_gained_focus(self.crash_report_viewport_focused, viewport_focused) {
+                self.state.request_crash_report_refresh();
+            }
+            if viewport_focused.is_some() {
+                self.crash_report_viewport_focused = viewport_focused;
+            }
+            if self.state.poll_crash_report_refresh() {
+                ctx.request_repaint();
+            }
+            if let Some(interval) = self.state.crash_report_worker_poll_interval() {
+                ctx.request_repaint_after(interval);
+            }
+            if self.windows_event_log_first_frame_rendered
+                && self.state.start_windows_event_log_scan_after_shell_gate()
+            {
+                ctx.request_repaint();
+            }
+            if self.state.poll_windows_event_log() {
+                ctx.request_repaint();
+            }
+            if let Some(interval) = self.state.windows_event_log_worker_poll_interval() {
+                ctx.request_repaint_after(interval);
+            }
+        }
 
         if !self.should_render(ctx) {
             return;
@@ -340,29 +457,46 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.is_hidden {
+        if self.closing_requested || self.is_hidden {
             return;
         }
 
         self.render_main_ui(ui);
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        {
+            self.windows_event_log_first_frame_rendered = true;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        reduce_tray_commands, theme_preference_for_index, viewport_gained_focus, App,
+        TrayCommandAction, MONITOR_EVENT_GUI_DRAIN_LIMIT,
+    };
     #[cfg(all(target_os = "windows", feature = "windows"))]
-    use super::AppForwardingRuntime;
-    use super::{theme_preference_for_index, App};
+    use super::{AppForwardingRuntime, ForwardingServerLifetime};
+    use crate::app::features::execution;
     use crate::app::instance_forwarding::{
         parse_ipc_response_frame, serialize_ipc_command_frame, ForwardedIpcCommand, IpcCommand,
         IpcResponseCode,
     };
+
+    #[test]
+    fn crash_report_refresh_only_triggers_on_a_real_focus_gain() {
+        assert!(viewport_gained_focus(Some(false), Some(true)));
+        assert!(!viewport_gained_focus(None, Some(true)));
+        assert!(!viewport_gained_focus(Some(true), Some(true)));
+        assert!(!viewport_gained_focus(Some(false), None));
+    }
     use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema};
     use crate::app::runtime::AppState;
     use crate::app::shell::events::ShellEvent;
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use crate::app::shell::sessions::ShortcutCreationRole;
     use crate::app::startup::StartupIntent;
+    use crate::tray::TrayCmd;
     use eframe::egui;
     use os_api::PriorityClass;
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -373,12 +507,96 @@ mod tests {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use std::time::SystemTime;
 
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn test_forwarding_server_lifetime_drops_server_before_guard() {
+        use std::sync::Mutex;
+
+        struct DropProbe {
+            name: &'static str,
+            events: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.events.lock().unwrap().push(self.name);
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let lifetime = ForwardingServerLifetime {
+            guard: Some(DropProbe {
+                name: "guard",
+                events: events.clone(),
+            }),
+            server: Some(DropProbe {
+                name: "server",
+                events: events.clone(),
+            }),
+        };
+
+        drop(lifetime);
+
+        assert_eq!(*events.lock().unwrap(), vec!["server", "guard"]);
+    }
+
     #[test]
     fn test_theme_index_maps_to_native_egui_preference() {
         assert_eq!(theme_preference_for_index(0), egui::ThemePreference::System);
         assert_eq!(theme_preference_for_index(1), egui::ThemePreference::Light);
         assert_eq!(theme_preference_for_index(2), egui::ThemePreference::Dark);
         assert_eq!(theme_preference_for_index(99), egui::ThemePreference::Dark);
+    }
+
+    #[test]
+    fn tray_command_reducer_coalesces_show_requests() {
+        assert_eq!(
+            reduce_tray_commands(false, [TrayCmd::Show, TrayCmd::Show]),
+            TrayCommandAction::Show
+        );
+    }
+
+    #[test]
+    fn tray_command_reducer_makes_quit_terminal_regardless_of_order() {
+        assert_eq!(
+            reduce_tray_commands(false, [TrayCmd::Show, TrayCmd::Quit, TrayCmd::Show]),
+            TrayCommandAction::Quit
+        );
+        assert_eq!(
+            reduce_tray_commands(false, [TrayCmd::Quit, TrayCmd::Show]),
+            TrayCommandAction::Quit
+        );
+    }
+
+    #[test]
+    fn tray_command_reducer_ignores_later_show_after_quit_is_latched() {
+        assert_eq!(
+            reduce_tray_commands(true, [TrayCmd::Show]),
+            TrayCommandAction::Quit
+        );
+        assert_eq!(reduce_tray_commands(false, []), TrayCommandAction::None);
+    }
+
+    #[test]
+    fn hide_to_tray_requires_a_live_tray_runtime() {
+        assert!(super::should_hide_to_tray(true, true, Some(true)));
+        assert!(!super::should_hide_to_tray(true, false, Some(true)));
+        assert!(!super::should_hide_to_tray(false, true, Some(true)));
+        assert!(!super::should_hide_to_tray(true, true, Some(false)));
+        assert!(!super::should_hide_to_tray(true, true, None));
+    }
+
+    #[test]
+    fn tray_quit_latch_ignores_show_in_a_later_logic_tick() {
+        let mut app = App::new_for_test(sample_state());
+        let ctx = egui::Context::default();
+        app.is_hidden = true;
+
+        assert!(app.handle_tray_commands(&ctx, [TrayCmd::Quit]));
+        assert!(app.closing_requested);
+
+        assert!(app.handle_tray_commands(&ctx, [TrayCmd::Show]));
+        assert!(app.is_hidden);
     }
 
     fn sample_state() -> AppState {
@@ -392,6 +610,7 @@ mod tests {
                 },
                 theme_index: 0,
                 process_monitoring_enabled: false,
+                windows_event_log_diagnostics_enabled: true,
                 rule_identities: None,
                 loaded_version: 5,
                 pending_pre_v6_backup: false,
@@ -542,6 +761,7 @@ mod tests {
                 },
                 theme_index: 0,
                 process_monitoring_enabled: false,
+                windows_event_log_diagnostics_enabled: true,
                 rule_identities: None,
                 loaded_version: 5,
                 pending_pre_v6_backup: false,
@@ -553,7 +773,7 @@ mod tests {
     #[test]
     fn test_bootstrap_runtime_logs_startup_and_drains_monitor_notifications() {
         let ctx = egui::Context::default();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = execution::monitor_event_channel();
         let mut state = sample_state();
 
         App::bootstrap_runtime(
@@ -576,10 +796,8 @@ mod tests {
             .any(|entry| entry.message.starts_with("Detected CPU:")));
 
         let mut app = App::new_for_test(state);
-        tx.send(ShellEvent::Warning("WARNING: monitor warning".to_string()))
-            .unwrap();
-        tx.send(ShellEvent::Monitor("MONITOR: corrected".to_string()))
-            .unwrap();
+        tx.try_send(ShellEvent::Warning("WARNING: monitor warning".to_string()));
+        tx.try_send(ShellEvent::Monitor("MONITOR: corrected".to_string()));
 
         app.handle_monitor_events(&ctx);
 
@@ -604,9 +822,33 @@ mod tests {
     }
 
     #[test]
-    fn test_bootstrap_runtime_normal_gui_runs_autorun() {
+    fn monitor_event_handling_drains_a_bounded_batch_then_continues() {
         let ctx = egui::Context::default();
-        let (_tx, rx) = mpsc::channel();
+        let (tx, rx) = execution::monitor_event_channel();
+        let mut app = App::new_for_test(sample_state());
+        app.state.runtime.monitor_rx = Some(rx);
+
+        for index in 0..(MONITOR_EVENT_GUI_DRAIN_LIMIT + 1) {
+            tx.try_send(ShellEvent::Monitor(format!("MONITOR: event-{index}")));
+        }
+
+        app.handle_monitor_events(&ctx);
+        assert_eq!(
+            app.state.log_manager.entries.len(),
+            MONITOR_EVENT_GUI_DRAIN_LIMIT
+        );
+
+        app.handle_monitor_events(&ctx);
+        assert_eq!(
+            app.state.log_manager.entries.len(),
+            MONITOR_EVENT_GUI_DRAIN_LIMIT + 1
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_runtime_normal_gui_rejects_unverified_existing_autorun() {
+        let ctx = egui::Context::default();
+        let (_tx, rx) = execution::monitor_event_channel();
         let mut state = sample_state_with_programs(vec![
             app_to_run("AutorunApp", true),
             app_to_run("ManualApp", false),
@@ -631,18 +873,17 @@ mod tests {
             .iter()
             .map(|entry| entry.message.as_str())
             .collect::<Vec<_>>();
-        assert!(messages
-            .iter()
-            .any(|message| message.contains("AutorunApp") && message.contains("already running")));
+        assert!(messages.iter().any(|message| message.contains("AutorunApp")
+            && message.contains("tracked process identity is not available")));
         assert!(!messages
             .iter()
             .any(|message| message.contains("ManualApp") || message.contains("ManualApp.exe")));
     }
 
     #[test]
-    fn test_bootstrap_runtime_run_rule_skips_autorun_and_runs_requested_rule() {
+    fn test_bootstrap_runtime_run_rule_rejects_unverified_existing_target() {
         let ctx = egui::Context::default();
-        let (_tx, rx) = mpsc::channel();
+        let (_tx, rx) = execution::monitor_event_channel();
         let mut state = sample_state_with_programs(vec![
             app_to_run("AutorunApp", true),
             app_to_run("ShortcutApp", false),
@@ -675,7 +916,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(messages
             .iter()
-            .any(|message| message.contains("ShortcutApp") && message.contains("already running")));
+            .any(|message| message.contains("ShortcutApp")
+                && message.contains("tracked process identity is not available")));
         assert!(!messages
             .iter()
             .any(|message| message.contains("AutorunApp") || message.contains("AutorunApp.exe")));
@@ -713,7 +955,7 @@ mod tests {
         app.handle_forwarded_commands(&ctx);
 
         let response = response_rx.try_recv().unwrap();
-        assert_eq!(response.code, IpcResponseCode::Accepted);
+        assert_eq!(response.code, IpcResponseCode::LaunchRejected);
         let messages = app
             .state
             .log_manager
@@ -723,7 +965,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(messages
             .iter()
-            .any(|message| message.contains("ShortcutApp") && message.contains("already running")));
+            .any(|message| message.contains("ShortcutApp")
+                && message.contains("tracked process identity is not available")));
         assert!(!messages
             .iter()
             .any(|message| message.contains("AutorunApp") || message.contains("AutorunApp.exe")));
@@ -769,7 +1012,7 @@ mod tests {
         let response_frame = app.handle_local_ipc_request_frame(&request);
 
         let response = parse_ipc_response_frame(&response_frame).unwrap();
-        assert_eq!(response.code, IpcResponseCode::Accepted);
+        assert_eq!(response.code, IpcResponseCode::LaunchRejected);
     }
 
     #[test]
@@ -784,27 +1027,46 @@ mod tests {
 }
 
 impl App {
-    fn handle_tray_events(&mut self, ctx: &egui::Context) {
-        let mut show_requested = false;
+    fn handle_tray_events(&mut self, ctx: &egui::Context) -> bool {
+        let commands = self
+            .tray_runtime
+            .as_ref()
+            .map(TrayRuntime::drain_commands)
+            .unwrap_or_default();
 
-        if let Some(rx) = &self.tray_rx {
-            while let Ok(cmd) = rx.try_recv() {
-                match cmd {
-                    TrayCmd::Show => show_requested = true,
-                }
+        self.handle_tray_commands(ctx, commands)
+    }
+
+    fn handle_tray_commands(
+        &mut self,
+        ctx: &egui::Context,
+        commands: impl IntoIterator<Item = TrayCmd>,
+    ) -> bool {
+        match reduce_tray_commands(self.closing_requested, commands) {
+            TrayCommandAction::None => false,
+            TrayCommandAction::Show => {
+                self.show_from_tray(ctx);
+                false
             }
-        }
-
-        if show_requested {
-            self.show_from_tray(ctx);
+            TrayCommandAction::Quit => {
+                self.closing_requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                true
+            }
         }
     }
 
     fn handle_monitor_events(&mut self, ctx: &egui::Context) {
         let mut repaint_requested = false;
+        let mut drained = 0usize;
+        let mut drain_status = execution::MonitorDrainStatus::default();
 
         if let Some(rx) = &self.state.runtime.monitor_rx {
-            while let Ok(event) = rx.try_recv() {
+            while drained < MONITOR_EVENT_GUI_DRAIN_LIMIT {
+                let Ok(event) = rx.try_recv() else {
+                    break;
+                };
+                drained += 1;
                 if let Some((message, sticky)) = event.legacy_log_message() {
                     if sticky {
                         self.state.log_manager.add_sticky_once(message.to_string());
@@ -815,10 +1077,22 @@ impl App {
 
                 repaint_requested |= event.needs_repaint();
             }
+
+            drain_status = rx.finish_drain();
         }
 
-        if repaint_requested {
+        if drain_status.dropped_monitor_messages > 0 || drain_status.dropped_warnings > 0 {
+            self.state.log_manager.add_important_entry(format!(
+                "WARNING: Monitoring notification queue was saturated; skipped {} routine message(s) and {} warning(s). The current runtime state was refreshed.",
+                drain_status.dropped_monitor_messages, drain_status.dropped_warnings
+            ));
+        }
+
+        if repaint_requested || drain_status.needs_repaint {
             ctx.request_repaint();
+        }
+        if drain_status.has_more_work || drained == MONITOR_EVENT_GUI_DRAIN_LIMIT {
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
 
@@ -847,7 +1121,7 @@ impl App {
     fn handle_local_ipc_requests(&mut self, ctx: &egui::Context) {
         let mut requests = Vec::new();
         if let Some(runtime) = &self.forwarding_runtime {
-            if let Some(server) = &runtime.server {
+            if let Some(server) = runtime.server() {
                 while let Ok(request) = server.try_recv() {
                     requests.push(request);
                 }
@@ -895,9 +1169,11 @@ impl App {
             return false;
         }
 
-        if crate::app::adapters::os::supports_hide_to_tray()
-            && ctx.input(|i| i.viewport().minimized == Some(true))
-        {
+        if should_hide_to_tray(
+            crate::app::adapters::os::supports_hide_to_tray(),
+            self.tray_runtime.is_some(),
+            ctx.input(|i| i.viewport().minimized),
+        ) {
             self.hide_to_tray(ctx);
             return false;
         }
@@ -922,6 +1198,8 @@ impl App {
 
     fn show_from_tray(&mut self, ctx: &egui::Context) {
         self.is_hidden = false;
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        self.state.request_crash_report_refresh();
 
         #[cfg(target_os = "windows")]
         if let Some(hwnd) = self.hwnd {
@@ -981,6 +1259,8 @@ impl App {
                 GroupRoute::Edit => group_editor::edit_group_window(app_state, ui),
             },
             WindowRoute::Logs => logs::draw_logs_window(app_state, ui),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            WindowRoute::CrashReports => crash_reports::draw_crash_reports_window(app_state, ui),
             WindowRoute::AppRunSettings => run_settings::draw_app_run_settings(app_state, ui),
             WindowRoute::InstalledAppPicker => {
                 installed_app_picker::draw_installed_app_picker(app_state, ui)

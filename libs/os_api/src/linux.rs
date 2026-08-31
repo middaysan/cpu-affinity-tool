@@ -17,11 +17,11 @@ use libc::{
 use nix::sched::{CpuSet, sched_getaffinity, sched_setaffinity};
 use nix::unistd::Pid;
 
-use crate::PriorityClass;
 use crate::{
     InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
     InstalledPackageRuntimeInfo, ShortcutSpec,
 };
+use crate::{PriorityClass, ProcessSettingsApplyOutcome};
 
 pub struct OS;
 
@@ -420,7 +420,7 @@ impl OS {
         PathBuf::from("/proc").join(pid.to_string()).join(entry)
     }
 
-    fn read_proc_stat(pid: u32) -> Result<(u32, String), String> {
+    fn read_proc_stat(pid: u32) -> Result<(u32, String, u64), String> {
         let stat = fs::read_to_string(Self::proc_path(pid, "stat"))
             .map_err(|e| format!("failed to read /proc/{pid}/stat: {e}"))?;
         let open = stat
@@ -432,15 +432,21 @@ impl OS {
 
         let comm = stat[open + 1..close].to_string();
         let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
-        if rest.len() < 3 {
-            return Err(format!("failed to parse parent pid for /proc/{pid}/stat"));
+        if rest.len() < 20 {
+            return Err(format!(
+                "failed to parse process metadata for /proc/{pid}/stat"
+            ));
         }
 
         let parent_pid = rest[1]
             .parse::<u32>()
             .map_err(|e| format!("failed to parse parent pid for /proc/{pid}: {e}"))?;
 
-        Ok((parent_pid, comm))
+        let start_time_ticks = rest[19]
+            .parse::<u64>()
+            .map_err(|e| format!("failed to parse start time for /proc/{pid}: {e}"))?;
+
+        Ok((parent_pid, comm, start_time_ticks))
     }
 
     fn process_name_from_pid(pid: u32) -> String {
@@ -732,6 +738,39 @@ impl OS {
         Self::set_priority_for_pid(pid as pid_t, priority)
     }
 
+    /// Linux has no retained process-handle equivalent here. The token check rejects a PID
+    /// that was already reused before this call, but cannot close the later PID-reuse race.
+    pub fn apply_process_settings_if_instance(
+        pid: u32,
+        expected_instance_token: u64,
+        mask: usize,
+        priority: PriorityClass,
+        apply_changes: bool,
+    ) -> Result<ProcessSettingsApplyOutcome, String> {
+        if mask == 0 {
+            return Err("affinity mask is empty".to_string());
+        }
+        if Self::get_process_instance_token(pid)? != expected_instance_token {
+            return Err("process instance no longer matches the tracked PID".to_string());
+        }
+        let previous_affinity = Self::get_process_affinity(pid)?;
+        let previous_priority = Self::get_process_priority(pid)?;
+        let affinity_changed = previous_affinity != mask;
+        let priority_changed = previous_priority != priority;
+        if apply_changes && affinity_changed {
+            Self::set_process_affinity_by_pid(pid, mask)?;
+        }
+        if apply_changes && priority_changed {
+            Self::set_process_priority_by_pid(pid, priority)?;
+        }
+        Ok(ProcessSettingsApplyOutcome {
+            previous_affinity,
+            previous_priority,
+            affinity_changed,
+            priority_changed,
+        })
+    }
+
     pub fn set_current_process_priority(priority: PriorityClass) -> Result<(), String> {
         Self::set_priority_for_pid(0, priority)
     }
@@ -782,7 +821,7 @@ impl OS {
         let mut names = HashMap::new();
 
         for pid in Self::get_all_pids() {
-            let Ok((parent_pid, _comm)) = Self::read_proc_stat(pid) else {
+            let Ok((parent_pid, _comm, _instance_token)) = Self::read_proc_stat(pid) else {
                 continue;
             };
 
@@ -801,7 +840,7 @@ impl OS {
     pub fn get_parent_pid(pid: u32) -> Option<u32> {
         Self::read_proc_stat(pid)
             .ok()
-            .map(|(parent_pid, _)| parent_pid)
+            .map(|(parent_pid, _, _)| parent_pid)
     }
 
     pub fn get_all_pids() -> Vec<u32> {
@@ -882,9 +921,27 @@ impl OS {
         Self::proc_path(pid, "").is_dir()
     }
 
+    pub fn get_process_instance_token(pid: u32) -> Result<u64, String> {
+        Self::read_proc_stat(pid).map(|(_, _, token)| token)
+    }
+
     pub fn get_process_image_path(pid: u32) -> Result<PathBuf, String> {
         fs::read_link(Self::proc_path(pid, "exe"))
             .map_err(|e| format!("failed to read /proc/{pid}/exe: {e}"))
+    }
+
+    pub fn get_process_image_path_and_instance_token(pid: u32) -> Result<(PathBuf, u64), String> {
+        let token_before = Self::get_process_instance_token(pid)?;
+        let path = Self::get_process_image_path(pid)?;
+        let token_after = Self::get_process_instance_token(pid)?;
+        if token_before != token_after {
+            return Err(format!("process {pid} changed while it was inspected"));
+        }
+        Ok((path, token_before))
+    }
+
+    pub fn get_process_parent_pid(pid: u32) -> Result<Option<u32>, String> {
+        Self::read_proc_stat(pid).map(|(parent_pid, _, _)| Some(parent_pid))
     }
 
     pub fn focus_window_by_pid(_pid: u32) -> bool {
@@ -944,6 +1001,13 @@ impl OS {
         Ok(None)
     }
 
+    pub fn get_process_app_user_model_id_and_instance_token(
+        pid: u32,
+    ) -> Result<(Option<String>, u64), String> {
+        let token = Self::get_process_instance_token(pid)?;
+        Ok((None, token))
+    }
+
     pub fn resolve_installed_package_runtime_info(
         _aumid: &str,
     ) -> Result<InstalledPackageRuntimeInfo, String> {
@@ -956,6 +1020,17 @@ impl OS {
             .spawn()
             .map(|_| ())
             .map_err(|e| format!("Failed to open directory '{}': {e}", path.display()))
+    }
+
+    pub fn show_file_in_directory(path: &Path) -> Result<(), String> {
+        let directory = path
+            .parent()
+            .ok_or_else(|| format!("Path '{}' has no parent directory", path.display()))?;
+        Self::open_directory(directory)
+    }
+
+    pub fn open_directory_via_shell_broker(_path: &Path) -> Result<(), String> {
+        Err("the Explorer shell broker is available only on Windows".to_string())
     }
 }
 

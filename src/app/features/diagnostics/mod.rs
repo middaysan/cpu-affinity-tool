@@ -4,6 +4,14 @@ use crate::app::models::{
 use regex::Regex;
 use std::sync::{Arc, RwLock};
 
+#[cfg(all(test, not(all(target_os = "windows", feature = "windows"))))]
+#[allow(dead_code)]
+pub mod crash_reports;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub mod crash_reports;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub mod windows_event_log;
+
 pub type DiagnosticEvent = crate::app::shell::events::ShellEvent;
 
 pub fn log_startup(log_manager: &mut LogManager, persistent_state: &Arc<RwLock<AppStateStorage>>) {

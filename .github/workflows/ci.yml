@@ -49,8 +49,20 @@ jobs:
       - name: Run tests
         run: cargo test --features windows --bin cpu-affinity-tool
 
-      - name: Build
-        run: cargo build --release --features windows --bin cpu-affinity-tool
+      - name: Build Windows release binary
+        shell: pwsh
+        run: ./scripts/build-windows-release.ps1
+
+      - name: Verify Windows debug symbols
+        shell: pwsh
+        run: |
+          ./scripts/test-windows-pdb-verifier.ps1 `
+            -ExePath target/release/cpu-affinity-tool.exe `
+            -PdbPath target/release/cpu_affinity_tool.pdb
+
+      - name: Run Windows crash report probes
+        shell: pwsh
+        run: ./scripts/test-windows-crash-reports.ps1
 
       - name: Verify Windows release manifest
         shell: pwsh

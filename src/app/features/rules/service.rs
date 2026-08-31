@@ -281,6 +281,7 @@ mod tests {
                     },
                     args: vec![],
                     additional_processes: vec![],
+                    manage_descendants: false,
                     autorun: false,
                     priority: PriorityClass::Normal,
                 }],
@@ -293,6 +294,7 @@ mod tests {
             },
             theme_index: 0,
             process_monitoring_enabled: false,
+            windows_event_log_diagnostics_enabled: true,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,
@@ -432,6 +434,7 @@ mod tests {
             },
             args: vec!["--debug".to_string()],
             additional_processes: vec!["helper.exe".to_string()],
+            manage_descendants: false,
             autorun: true,
             priority: PriorityClass::High,
         };

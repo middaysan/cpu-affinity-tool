@@ -44,6 +44,7 @@ impl LogEntry {
 pub struct LogManager {
     /// Chronological log entries with bounded retention for non-sticky classes.
     pub entries: VecDeque<LogEntry>,
+    local_crash_context: Option<String>,
 }
 
 impl LogManager {
@@ -119,6 +120,16 @@ impl LogManager {
     pub(crate) fn add_important_sticky_once(&mut self, message: String) {
         self.add_important_entry(message.clone());
         self.add_sticky_once(message);
+    }
+
+    /// Replaces the local crash-report context shown independently in Activity.
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    pub(crate) fn replace_local_crash_context(&mut self, message: Option<String>) {
+        self.local_crash_context = message;
+    }
+
+    pub(crate) fn local_crash_context(&self) -> Option<&str> {
+        self.local_crash_context.as_deref()
     }
 
     pub fn clear(&mut self) {
@@ -211,6 +222,22 @@ mod tests {
         manager.clear();
 
         assert!(manager.entries.is_empty());
+    }
+
+    #[test]
+    fn local_crash_context_replaces_the_previous_report_and_survives_clear() {
+        let mut manager = LogManager::default();
+        manager.add_entry("transient activity".into());
+        manager.replace_local_crash_context(Some("previous crash one".into()));
+        manager.replace_local_crash_context(Some("previous crash two".into()));
+
+        manager.clear();
+
+        assert!(manager.entries.is_empty());
+        assert_eq!(manager.local_crash_context(), Some("previous crash two"));
+
+        manager.replace_local_crash_context(None);
+        assert!(manager.local_crash_context().is_none());
     }
 
     #[test]

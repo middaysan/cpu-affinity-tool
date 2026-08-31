@@ -1,9 +1,8 @@
-use crate::app::models::{AppRuntimeKey, AppStatus, RunningApps};
+use crate::app::features::execution::MonitorEventReceiver;
+use crate::app::models::{AppRuntimeKey, AppStatus, ProcessInstanceToken, RunningApps};
 use crate::app::shared::ids::{GroupId, RuleId};
-use crate::app::shell::events::ShellEvent;
 use os_api::InstalledPackageRuntimeInfo;
 use std::collections::HashMap;
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 
@@ -22,12 +21,12 @@ pub(crate) struct InstalledPackageTrackingState {
 
 pub struct RuntimeRegistry {
     pub(crate) store: ExecutionStore,
-    pub(crate) monitor_rx: Option<Receiver<ShellEvent>>,
+    pub(crate) monitor_rx: Option<MonitorEventReceiver>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RunningAppPidsLookup {
-    Found(Vec<u32>),
+pub(crate) enum RunningAppInstancesLookup {
+    Found(Vec<(u32, ProcessInstanceToken)>),
     NotFound,
     Busy,
 }
@@ -87,6 +86,7 @@ impl ExecutionStore {
         )
     }
 
+    #[cfg(test)]
     pub fn add_running_app(
         &self,
         app_key: &AppRuntimeKey,
@@ -103,6 +103,26 @@ impl ExecutionStore {
         }
     }
 
+    pub fn add_running_app_with_token(
+        &self,
+        app_key: &AppRuntimeKey,
+        pid: u32,
+        instance_token: ProcessInstanceToken,
+        group_id: GroupId,
+        rule_id: RuleId,
+    ) -> bool {
+        match self.running_apps.try_write() {
+            Ok(mut apps) => {
+                apps.add_app(app_key, pid, group_id, rule_id);
+                if let Some(app) = apps.apps.get_mut(app_key) {
+                    app.pid_instance_tokens.insert(pid, instance_token);
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     pub fn contains_app(&self, app_key: &AppRuntimeKey) -> bool {
         self.running_apps
             .try_read()
@@ -110,13 +130,19 @@ impl ExecutionStore {
             .unwrap_or(false)
     }
 
-    pub fn add_pid_to_existing_app(&self, app_key: &AppRuntimeKey, pid: u32) -> bool {
+    pub fn add_pid_to_existing_app_with_token(
+        &self,
+        app_key: &AppRuntimeKey,
+        pid: u32,
+        instance_token: ProcessInstanceToken,
+    ) -> bool {
         match self.running_apps.try_write() {
             Ok(mut apps) => {
                 if let Some(app) = apps.apps.get_mut(app_key) {
                     if !app.pids.contains(&pid) {
                         app.pids.push(pid);
                     }
+                    app.pid_instance_tokens.insert(pid, instance_token);
                     true
                 } else {
                     false
@@ -147,23 +173,36 @@ impl ExecutionStore {
         }
     }
 
-    pub(crate) fn lookup_running_app_pids(&self, app_key: &AppRuntimeKey) -> RunningAppPidsLookup {
+    pub(crate) fn lookup_running_app_instances(
+        &self,
+        app_key: &AppRuntimeKey,
+    ) -> RunningAppInstancesLookup {
         match self.running_apps.try_read() {
             Ok(apps) => apps
                 .apps
                 .get(app_key)
-                .map_or(RunningAppPidsLookup::NotFound, |app| {
-                    RunningAppPidsLookup::Found(app.pids.clone())
+                .map_or(RunningAppInstancesLookup::NotFound, |app| {
+                    RunningAppInstancesLookup::Found(
+                        app.pids
+                            .iter()
+                            .filter_map(|&pid| {
+                                app.pid_instance_tokens
+                                    .get(&pid)
+                                    .copied()
+                                    .map(|token| (pid, token))
+                            })
+                            .collect(),
+                    )
                 }),
-            Err(_) => RunningAppPidsLookup::Busy,
+            Err(_) => RunningAppInstancesLookup::Busy,
         }
     }
 
     pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
-        match self.lookup_running_app_pids(app_key) {
-            RunningAppPidsLookup::Found(pids) => Some(pids),
-            RunningAppPidsLookup::NotFound | RunningAppPidsLookup::Busy => None,
-        }
+        self.running_apps
+            .try_read()
+            .ok()
+            .and_then(|apps| apps.apps.get(app_key).map(|app| app.pids.clone()))
     }
 
     pub(crate) fn mark_running_app_settings_matched(
@@ -238,6 +277,7 @@ impl RuntimeRegistry {
             .resolve_installed_package_runtime_info_with(aumid, resolver)
     }
 
+    #[cfg(test)]
     pub fn add_running_app(
         &self,
         app_key: &AppRuntimeKey,
@@ -248,12 +288,30 @@ impl RuntimeRegistry {
         self.store.add_running_app(app_key, pid, group_id, rule_id)
     }
 
+    pub fn add_running_app_with_token(
+        &self,
+        app_key: &AppRuntimeKey,
+        pid: u32,
+        instance_token: ProcessInstanceToken,
+        group_id: GroupId,
+        rule_id: RuleId,
+    ) -> bool {
+        self.store
+            .add_running_app_with_token(app_key, pid, instance_token, group_id, rule_id)
+    }
+
     pub fn contains_app(&self, app_key: &AppRuntimeKey) -> bool {
         self.store.contains_app(app_key)
     }
 
-    pub fn add_pid_to_existing_app(&self, app_key: &AppRuntimeKey, pid: u32) -> bool {
-        self.store.add_pid_to_existing_app(app_key, pid)
+    pub fn add_pid_to_existing_app_with_token(
+        &self,
+        app_key: &AppRuntimeKey,
+        pid: u32,
+        instance_token: ProcessInstanceToken,
+    ) -> bool {
+        self.store
+            .add_pid_to_existing_app_with_token(app_key, pid, instance_token)
     }
 
     pub fn get_app_status_sync(&mut self, app_key: &AppRuntimeKey) -> AppStatus {
@@ -264,8 +322,11 @@ impl RuntimeRegistry {
         self.store.get_running_app_pids(app_key)
     }
 
-    pub(crate) fn lookup_running_app_pids(&self, app_key: &AppRuntimeKey) -> RunningAppPidsLookup {
-        self.store.lookup_running_app_pids(app_key)
+    pub(crate) fn lookup_running_app_instances(
+        &self,
+        app_key: &AppRuntimeKey,
+    ) -> RunningAppInstancesLookup {
+        self.store.lookup_running_app_instances(app_key)
     }
 
     pub(crate) fn mark_running_app_settings_matched(

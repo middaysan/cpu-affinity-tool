@@ -11,12 +11,14 @@ Use this checklist with `docs/release-process.md`.
 - Confirm the CI contract still matches reality: `.github/workflows/ci.yml` runs separate Windows and Linux beta jobs, and the Linux beta job still verifies formatting, Linux clippy, `libs/os_api` tests, Linux binary tests, and the Linux release build on `ubuntu-24.04`.
 - Confirm no project docs claim full cross-platform support, Linux stable parity, AppImage support, or Flatpak support.
 - Confirm no docs or release notes claim saved-rule desktop shortcut, quick shortcut launch, or `.desktop` launcher parity for Linux beta; the Windows shortcut button remains hidden on non-Windows.
+- Confirm Linux beta does not expose or start Windows Event Log diagnostics; the schema v9 preference field remains unused on Linux and v8/older state adopts the enabled default without eager rewrite.
 - Confirm `README.md` and `AGENTS.md` describe Linux as a desktop beta path with prerelease artifacts under `linux-beta-v*` tags.
 - Confirm the base version in `Cargo.toml` matches the `X.Y.Z` segment of the Linux beta tag you plan to push.
 - Confirm the beta changelog exists at `changelogs/linux-beta-vX.Y.Z-N.txt`.
-- Confirm the prerelease notes call out the schema `v7` save boundary when applicable:
+- Confirm the prerelease notes call out the schema `v10` save boundary when applicable:
   - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
-  - `v6` to `v7` saves do not write `state.json.pre-v6*`
+  - `v6`, `v7`, `v8`, or `v9` to `v10` saves do not write `state.json.pre-v6*`
+  - missing `manage_descendants` in pre-`v10` rules preserves existing automatic descendant management; missing values in `v10` and newly created rules default it to off
   - downgrade to older binaries is unsupported after that first current-schema save
 - Review release-impacting files if they changed: `assets/cpu_presets.json`, `.github/workflows/ci.yml`, `.github/workflows/release-linux-beta.yml`, `README.md`, `docs/release-process.md`, and `AGENTS.md`.
 
