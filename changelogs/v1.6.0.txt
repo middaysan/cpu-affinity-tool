@@ -1,0 +1,58 @@
+## [1.6.0] - 2026-09-01
+
+### Summary
+- Improves Windows stability around process tracking, monitoring, tray handling, named-pipe forwarding, state persistence, and shutdown.
+- Adds local crash reports and read-only Windows Event Log evidence so users can provide better diagnostics after an unexpected exit.
+- Publishes matching Windows debug symbols for future native crash investigation.
+
+### Added
+- **Local Windows crash reports**:
+  - Main-thread Rust panics and native UI-loop errors can write a bounded local report before exit.
+  - The new **Activity → Crash reports** page lists validated reports, keeps the newest 20 complete reports, and supports confirmed deletion.
+  - After the next completed startup scan, Activity retains a summary of the newest validated report even after normal activity is cleared.
+  - Reports are stored only on the local machine and are never uploaded automatically. Review them before sharing because they can contain local paths or system details.
+- **Windows Event Log diagnostics**:
+  - Activity performs a bounded, read-only lookup for a recent matching Windows `Application Error` record after startup.
+  - Only sanitized fields are shown: record ID, UTC time, exception code, module basename, and valid optional module version, faulting offset, and process creation time.
+  - The lookup is enabled by default, can be disabled from Activity, uploads nothing, and does not modify Windows Error Reporting or the registry.
+- **Native crash investigation support**:
+  - Stable Windows releases now include `cpu_affinity_tool.pdb` matching the published executable.
+  - The repository includes a manual, opt-in LocalDumps guide for native failures that do not create an in-app report.
+- **Descendant process control**:
+  - Rules can explicitly opt in to managing verified descendant processes.
+  - New rules default to managing only their verified root process.
+
+### Changed
+- Returned the Windows application and Linux beta binary to the platform system allocator instead of installing `mimalloc` globally.
+- Bound tracked processes to verified identity and creation time so affinity, priority, focus, and monitoring actions do not trust a reused PID alone.
+- Routed tray commands through the GUI thread and kept the window reachable if tray initialization fails.
+- Replaced unbounded monitor event delivery with bounded delivery and explicit GUI wakeups.
+- Stable Windows builds now retain line-table debug information and must pass EXE/PDB identity validation before publication.
+- Persisted state schema is now v10:
+  - existing pre-v10 rules with no descendant-management field preserve the previously enabled behavior;
+  - newly created rules and missing v10 values default descendant management to off;
+  - the first explicit save upgrades older state to v10;
+  - pre-v6 state receives an additional `state.json.pre-v6*` backup before that save, while v6-v9 state does not;
+  - downgrade to an older binary is unsupported after the first v10 save.
+
+### Fixed
+- Kept Windows overlapped named-pipe state, event handles, and I/O buffers alive until Windows reports terminal completion, including cancellation and `ERROR_IO_INCOMPLETE` paths.
+- Kept the saved-rule primary guard held until the forwarding server and its workers have stopped.
+- Prevented PID reuse and unverified process identity from redirecting Run, Fix, Focus, affinity, or priority actions to a different process instance.
+- Required verified ancestry and creation ordering before a process can be managed as a descendant.
+- Cleaned up suspended child processes when Windows launch setup fails before resume.
+- Made state persistence crash-safe through validated temporary replacement and source-preserving recovery backups.
+- Prevented stale Event Log worker results from returning after diagnostics are disabled or restarted.
+- Avoided UI-thread sleeping in the hidden-window path and bounded monitor/IPC worker shutdown.
+- Updated `webbrowser` to 1.2.2 and `event-listener` to 5.4.2 to resolve the advisories identified during the release audit.
+
+### Known issues
+- The exact root cause of the native `0xc0000005` failure reported in issue #14 was not conclusively reproduced. This release mitigates multiple credible failure paths and adds diagnostics for further investigation.
+- A forced termination, native access violation, out-of-memory termination, stack overflow, power loss, background task panic, or anti-cheat/security action may stop the process before an in-app crash report can be written. Activity's Event Log evidence or the opt-in LocalDumps guide can help in those cases.
+- Stable release artifacts remain Windows-only. Linux continues as a separate desktop beta path without Windows tray, focus, installed-app activation, or saved-rule shortcut parity.
+- The release is not code signed and does not include an installer, winget, Chocolatey, AppImage, or Flatpak package.
+- Generated Windows shortcuts target the executable path used at creation time and should be recreated after moving the portable application folder.
+
+### Download
+- Download `cpu-affinity-tool.exe` from the GitHub Release assets for `v1.6.0`.
+- `cpu_affinity_tool.pdb` is provided for crash symbolization and is not required to run the application.
