@@ -204,9 +204,10 @@ impl App {
         let monitor_ctx = cc.egui_ctx.clone();
         Self::bootstrap_runtime_without_startup(
             &mut state,
-            move |running_apps, package_tracking, persistent_state| {
+            move |running_apps, running_app_statuses, package_tracking, persistent_state| {
                 execution::spawn_monitors_with_wake(
                     running_apps,
+                    running_app_statuses,
                     package_tracking,
                     persistent_state,
                     Some(Arc::new(move || monitor_ctx.request_repaint())),
@@ -331,6 +332,7 @@ impl App {
     ) where
         F: FnOnce(
             Arc<TokioRwLock<RunningApps>>,
+            execution::RunningAppStatusCache,
             Arc<RwLock<InstalledPackageTrackingState>>,
             Arc<RwLock<crate::app::models::AppStateStorage>>,
         ) -> MonitorEventReceiver,
@@ -343,6 +345,7 @@ impl App {
     where
         F: FnOnce(
             Arc<TokioRwLock<RunningApps>>,
+            execution::RunningAppStatusCache,
             Arc<RwLock<InstalledPackageTrackingState>>,
             Arc<RwLock<crate::app::models::AppStateStorage>>,
         ) -> MonitorEventReceiver,
@@ -350,6 +353,7 @@ impl App {
         diagnostics::log_startup(&mut state.log_manager, &state.persistent_state);
         state.runtime.monitor_rx = Some(spawn_monitors(
             state.runtime.running_apps_handle(),
+            state.runtime.running_app_statuses_handle(),
             state.runtime.installed_package_tracking_handle(),
             state.persistent_state.clone(),
         ));
@@ -780,7 +784,7 @@ mod tests {
             &mut state,
             &ctx,
             StartupIntent::NormalGui,
-            move |_, _, _| rx,
+            move |_, _, _, _| rx,
         );
 
         assert!(state.runtime.monitor_rx.is_some());
@@ -864,7 +868,7 @@ mod tests {
             &mut state,
             &ctx,
             StartupIntent::NormalGui,
-            move |_, _, _| rx,
+            move |_, _, _, _| rx,
         );
 
         let messages = state
@@ -905,7 +909,7 @@ mod tests {
                 group_id,
                 rule_id: requested_rule_id,
             },
-            move |_, _, _| rx,
+            move |_, _, _, _| rx,
         );
 
         let messages = state

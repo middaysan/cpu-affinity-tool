@@ -147,7 +147,7 @@ Current runtime split:
   - `running_apps`
   - runtime-only installed-package metadata cache for Windows installed targets
   - package-owner claims for shared package-local helper processes
-  - cached app statuses
+  - cached app statuses; a contention-time settings mismatch remains visible until a manual or monitor-confirmed successful settings application clears it
   - `monitor_rx`
 - runtime process identity stays keyed by opaque `AppRuntimeKey`, but tracked app ownership now also stores logical `GroupId` / `RuleId`
 - shell presenters are owned under `shell::presenters`; their source files still live under `src/app/views/` via path-based module ownership
@@ -296,6 +296,7 @@ Data source separation:
 - opening crash-report directories and selecting report files through an Explorer shell process whose token is verified non-elevated and below high integrity; the pre-existing Activity data-folder action retains its direct Explorer launch contract
 - bounded read-only lookup of matching local Windows Application Event Log records for enabled-by-default diagnostics
 - process-instance token lookup used to prevent retained/reused PIDs from being managed as a different process instance
+- Windows affinity/priority application labels the failed Win32 operation and, after an access-denied settings open, may read `ProcessProtectionLevelInfo` through a query-limited handle to explain a confirmed protected-process denial; it never changes protection or privileges
 - resolving the current elevated token's per-user Desktop directory for Windows shortcut creation
 - Windows shortcut creation for saved-rule launch shortcuts
 - affinity read and set

@@ -1,6 +1,7 @@
 use crate::app::features::execution::MonitorEventSender;
+use crate::app::features::execution::RunningAppStatusCache;
 use crate::app::features::rules::RulesContext;
-use crate::app::models::{AppRuntimeKey, AppStateStorage, RunningApps};
+use crate::app::models::{AppRuntimeKey, AppStateStorage, AppStatus, RunningApps};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::events::ShellEvent;
 use os_api::{PriorityClass, ProcessSettingsApplyOutcome, OS};
@@ -57,6 +58,7 @@ impl ProcessSettingsOs for RealProcessSettingsOs {
 
 pub async fn run_process_settings_monitor(
     running_apps: Arc<TokioRwLock<RunningApps>>,
+    running_app_statuses: RunningAppStatusCache,
     app_state: Arc<RwLock<AppStateStorage>>,
     monitor_tx: MonitorEventSender,
 ) {
@@ -87,6 +89,8 @@ pub async fn run_process_settings_monitor(
                 monitoring_enabled,
                 &mut os,
             );
+            let status_cache_changed =
+                record_confirmed_match_statuses(&apps, &running_app_statuses);
 
             if !outcome.notifications.is_empty() {
                 for message in outcome.notifications {
@@ -96,11 +100,23 @@ pub async fn run_process_settings_monitor(
                 }
             }
 
-            if outcome.changed {
+            if outcome.changed || status_cache_changed {
                 monitor_tx.try_send(ShellEvent::RuntimeStateChanged);
             }
         }
     }
+}
+
+fn record_confirmed_match_statuses(apps: &RunningApps, statuses: &RunningAppStatusCache) -> bool {
+    let mut statuses = statuses.write().unwrap();
+    let mut changed = false;
+    for (app_key, app) in &apps.apps {
+        if app.settings_matched && statuses.get(app_key) == Some(&AppStatus::SettingsMismatch) {
+            statuses.insert(app_key.clone(), AppStatus::Running);
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn collect_program_settings(
@@ -215,12 +231,18 @@ fn process_settings_iteration_with_os<O: ProcessSettingsOs>(
 
 #[cfg(test)]
 mod tests {
-    use super::{affinity_mask_from_cores, process_settings_iteration_with_os, ProcessSettingsOs};
-    use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, RunningApps};
+    use super::{
+        affinity_mask_from_cores, process_settings_iteration_with_os,
+        record_confirmed_match_statuses, ProcessSettingsOs,
+    };
+    use crate::app::models::{
+        AppStateStorage, AppStatus, AppToRun, CoreGroup, CpuSchema, RunningApps,
+    };
     use crate::app::shared::ids::{GroupId, RuleId};
     use os_api::{PriorityClass, ProcessSettingsApplyOutcome};
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::{Arc, RwLock};
 
     struct FakeProcessSettingsOs {
         affinity: HashMap<u32, usize>,
@@ -444,6 +466,63 @@ mod tests {
         assert!(second.changed);
         assert!(second.notifications.is_empty());
         assert!(apps.apps.get(&key).unwrap().settings_matched);
+    }
+
+    #[test]
+    fn test_confirmed_monitor_correction_clears_a_pessimistic_mismatch_hint() {
+        let state = sample_state();
+        let key = state.groups[1].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        apps.add_app(&key, 90, group_id(1), rule_id(0));
+        let statuses = Arc::new(RwLock::new(HashMap::from([(
+            key.clone(),
+            AppStatus::SettingsMismatch,
+        )])));
+        let mut os = FakeProcessSettingsOs::new(
+            HashMap::from([(90, 0b001)]),
+            HashMap::from([(90, PriorityClass::Normal)]),
+        );
+        seed_tracked_instance(&mut apps, &key, 90, &mut os);
+
+        process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
+        assert!(!record_confirmed_match_statuses(&apps, &statuses));
+        assert_eq!(
+            statuses.read().unwrap().get(&key),
+            Some(&AppStatus::SettingsMismatch)
+        );
+
+        process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
+        assert!(record_confirmed_match_statuses(&apps, &statuses));
+        assert_eq!(
+            statuses.read().unwrap().get(&key),
+            Some(&AppStatus::Running)
+        );
+    }
+
+    #[test]
+    fn test_confirmed_match_cache_transition_is_reported_without_a_process_state_change() {
+        let state = sample_state();
+        let key = state.groups[0].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        apps.add_app(&key, 91, group_id(0), rule_id(0));
+        let statuses = Arc::new(RwLock::new(HashMap::from([(
+            key.clone(),
+            AppStatus::SettingsMismatch,
+        )])));
+        let mut os = FakeProcessSettingsOs::new(
+            HashMap::from([(91, 0b001)]),
+            HashMap::from([(91, PriorityClass::Normal)]),
+        );
+        seed_tracked_instance(&mut apps, &key, 91, &mut os);
+
+        let outcome = process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
+
+        assert!(!outcome.changed);
+        assert!(record_confirmed_match_statuses(&apps, &statuses));
+        assert_eq!(
+            statuses.read().unwrap().get(&key),
+            Some(&AppStatus::Running)
+        );
     }
 
     #[test]

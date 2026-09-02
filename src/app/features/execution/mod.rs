@@ -23,6 +23,7 @@ pub use store::RuntimeRegistry;
 pub(crate) use store::{
     cleanup_orphaned_package_owners, ensure_package_owner_claim,
     resolve_installed_package_runtime_info_cached, InstalledPackageTrackingState,
+    RunningAppStatusCache,
 };
 pub use tracking::run_running_app_monitor;
 
@@ -35,6 +36,7 @@ pub(crate) fn is_excluded_installed_auto_process(process_name: &str) -> bool {
 
 pub(crate) fn spawn_monitors_with_wake(
     running_apps: Arc<TokioRwLock<RunningApps>>,
+    running_app_statuses: RunningAppStatusCache,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     persistent_state: Arc<RwLock<AppStateStorage>>,
     wake: Option<MonitorWake>,
@@ -49,6 +51,7 @@ pub(crate) fn spawn_monitors_with_wake(
     ));
     tokio::spawn(run_process_settings_monitor(
         running_apps,
+        running_app_statuses,
         persistent_state,
         monitor_tx,
     ));
