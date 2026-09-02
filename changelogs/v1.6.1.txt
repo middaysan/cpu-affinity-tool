@@ -1,0 +1,23 @@
+## [1.6.1] - 2026-09-02
+
+### Summary
+- Makes failures to reapply affinity and priority to already running processes accurate and actionable.
+
+### Added
+- Windows errors now identify the failed process operation, such as opening the process, reading its current affinity or priority, or applying affinity or priority.
+
+### Changed
+- Reapplying settings now rejects the action if any managed process instance fails. The affected rule remains marked as mismatched until settings are confirmed to match again.
+
+### Fixed
+- Prevented a false `settings reapplied` result after a settings failure for an already running process.
+- Added a clear explanation when Windows confirms that a process is protected: affinity and priority changes are not permitted.
+
+### Known issues
+- Windows-protected processes, including protected audio contexts such as `audiodg.exe`, cannot have hard affinity or priority changed by this application, even when it is elevated. This release does not bypass Windows process protection.
+- Stable release artifacts remain Windows-only. Linux continues as a separate desktop beta path without Windows tray, focus, installed-app activation, or saved-rule shortcut parity.
+- The release is not code signed and does not include an installer, winget, Chocolatey, AppImage, or Flatpak package.
+
+### Download
+- Download `cpu-affinity-tool.exe` from the GitHub Release assets for `v1.6.1`.
+- `cpu_affinity_tool.pdb` is provided for crash symbolization and is not required to run the application.

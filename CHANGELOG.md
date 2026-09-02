@@ -6,6 +6,20 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-09-02
+
+### Fixed
+
+- Reject reapplying affinity or priority to an already running process when any managed PID cannot accept the settings. The runtime now retains a mismatch state and records the affected PID and Windows failure instead of reporting a false success.
+- Identify the Win32 operation that failed while reading or applying process settings. For confirmed protected processes, explain that Windows does not permit affinity or priority changes.
+- Keep mismatch status accurate across monitor contention and clear it once the monitor confirms that settings match again.
+
+### Known issues
+
+- Windows-protected processes, including protected audio contexts such as `audiodg.exe`, cannot have hard affinity or priority changed by this application, even when it is elevated. The application does not bypass Windows process protection.
+- Stable release artifacts remain Windows-only. Linux continues as a separate desktop beta path without Windows tray, focus, installed-app activation, or saved-rule shortcut parity.
+- The release is not code signed and does not include an installer, winget, Chocolatey, AppImage, or Flatpak package.
+
 ## [1.6.0] - 2026-09-01
 
 ### Added
