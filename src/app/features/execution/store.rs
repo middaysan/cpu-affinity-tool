@@ -6,11 +6,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 
+pub(crate) type RunningAppStatusCache = Arc<RwLock<HashMap<AppRuntimeKey, AppStatus>>>;
+
 #[derive(Default)]
 pub struct ExecutionStore {
     running_apps: Arc<TokioRwLock<RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
-    running_apps_statuses: Arc<RwLock<HashMap<AppRuntimeKey, AppStatus>>>,
+    running_apps_statuses: RunningAppStatusCache,
 }
 
 #[derive(Debug, Default)]
@@ -65,6 +67,10 @@ impl ExecutionStore {
 
     pub fn running_apps_handle(&self) -> Arc<TokioRwLock<RunningApps>> {
         self.running_apps.clone()
+    }
+
+    pub(crate) fn running_app_statuses_handle(&self) -> RunningAppStatusCache {
+        self.running_apps_statuses.clone()
     }
 
     pub fn installed_package_tracking_handle(&self) -> Arc<RwLock<InstalledPackageTrackingState>> {
@@ -300,6 +306,10 @@ impl RuntimeRegistry {
 
     pub fn running_apps_handle(&self) -> Arc<TokioRwLock<RunningApps>> {
         self.store.running_apps_handle()
+    }
+
+    pub(crate) fn running_app_statuses_handle(&self) -> RunningAppStatusCache {
+        self.store.running_app_statuses_handle()
     }
 
     pub fn installed_package_tracking_handle(&self) -> Arc<RwLock<InstalledPackageTrackingState>> {

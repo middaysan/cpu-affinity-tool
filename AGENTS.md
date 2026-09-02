@@ -147,7 +147,7 @@ Current runtime split:
   - `running_apps`
   - runtime-only installed-package metadata cache for Windows installed targets
   - package-owner claims for shared package-local helper processes
-  - cached app statuses
+  - cached app statuses; a contention-time settings mismatch remains visible until a manual or monitor-confirmed successful settings application clears it
   - `monitor_rx`
 - runtime process identity stays keyed by opaque `AppRuntimeKey`, but tracked app ownership now also stores logical `GroupId` / `RuleId`
 - shell presenters are owned under `shell::presenters`; their source files still live under `src/app/views/` via path-based module ownership
