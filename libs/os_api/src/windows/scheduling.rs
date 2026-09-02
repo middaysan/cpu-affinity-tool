@@ -39,8 +39,7 @@ impl OS {
             GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user).map_err(
                 |error| OsError::Msg(format!("GetProcessTimes failed for PID {pid}: {error}")),
             )?;
-            let instance_token =
-                ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
+            let instance_token = process_instance_token(&created);
             if instance_token != expected_instance_token {
                 return Err(OsError::Msg(
                     "process instance no longer matches the tracked PID".into(),
@@ -212,10 +211,7 @@ fn process_has_protection_level(pid: u32, expected_instance_token: u64) -> bool 
         if GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user).is_err() {
             return false;
         }
-        let instance_token = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
-        if instance_token != expected_instance_token {
-            return false;
-        }
+        let instance_token = process_instance_token(&created);
         let mut info = PROCESS_PROTECTION_LEVEL_INFORMATION::default();
 
         GetProcessInformation(
@@ -225,8 +221,24 @@ fn process_has_protection_level(pid: u32, expected_instance_token: u64) -> bool 
             std::mem::size_of::<PROCESS_PROTECTION_LEVEL_INFORMATION>() as u32,
         )
         .is_ok()
-            && is_protected_level(info.ProtectionLevel)
+            && is_confirmed_protected_process(
+                expected_instance_token,
+                instance_token,
+                info.ProtectionLevel,
+            )
     }
+}
+
+fn process_instance_token(created: &FILETIME) -> u64 {
+    ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64
+}
+
+fn is_confirmed_protected_process(
+    expected_instance_token: u64,
+    observed_instance_token: u64,
+    protection_level: windows::Win32::System::Threading::PROCESS_PROTECTION_LEVEL,
+) -> bool {
+    expected_instance_token == observed_instance_token && is_protected_level(protection_level)
 }
 
 fn is_protected_level(level: windows::Win32::System::Threading::PROCESS_PROTECTION_LEVEL) -> bool {
@@ -235,7 +247,7 @@ fn is_protected_level(level: windows::Win32::System::Threading::PROCESS_PROTECTI
 
 #[cfg(test)]
 mod tests {
-    use super::{OsError, is_access_denied, is_protected_level};
+    use super::{OsError, is_access_denied, is_confirmed_protected_process, is_protected_level};
     use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
     use windows::Win32::System::Threading::{PROTECTION_LEVEL_NONE, PROTECTION_LEVEL_WINTCB_LIGHT};
     use windows::core::{Error, HRESULT};
@@ -256,5 +268,24 @@ mod tests {
     fn protection_level_none_is_not_protected_but_wintcb_light_is() {
         assert!(!is_protected_level(PROTECTION_LEVEL_NONE));
         assert!(is_protected_level(PROTECTION_LEVEL_WINTCB_LIGHT));
+    }
+
+    #[test]
+    fn protection_diagnostic_rejects_a_reused_pid_instance() {
+        assert!(!is_confirmed_protected_process(
+            100,
+            101,
+            PROTECTION_LEVEL_WINTCB_LIGHT
+        ));
+        assert!(!is_confirmed_protected_process(
+            100,
+            100,
+            PROTECTION_LEVEL_NONE
+        ));
+        assert!(is_confirmed_protected_process(
+            100,
+            100,
+            PROTECTION_LEVEL_WINTCB_LIGHT
+        ));
     }
 }

@@ -154,7 +154,7 @@ impl ExecutionStore {
 
     pub fn get_app_status_sync(&mut self, app_key: &AppRuntimeKey) -> AppStatus {
         if let Ok(apps) = self.running_apps.try_read() {
-            let status = if let Some(app) = apps.apps.get(app_key) {
+            let canonical_status = if let Some(app) = apps.apps.get(app_key) {
                 if app.settings_matched {
                     AppStatus::Running
                 } else {
@@ -163,10 +163,17 @@ impl ExecutionStore {
             } else {
                 AppStatus::NotRunning
             };
-            self.running_apps_statuses
-                .write()
-                .unwrap()
-                .insert(app_key.clone(), status);
+            let mut statuses = self.running_apps_statuses.write().unwrap();
+            let status = if canonical_status == AppStatus::Running
+                && statuses.get(app_key) == Some(&AppStatus::SettingsMismatch)
+            {
+                // A failed reapply can race a monitor writer. Keep the pessimistic result until
+                // a later successful settings application explicitly confirms a match.
+                AppStatus::SettingsMismatch
+            } else {
+                canonical_status
+            };
+            statuses.insert(app_key.clone(), status);
             status
         } else {
             self.running_apps_statuses
@@ -606,6 +613,7 @@ mod tests {
             store.try_mark_running_app_settings_mismatched(&key),
             RunningAppSettingsUpdate::Busy
         );
+        drop(_write_guard);
         assert_eq!(store.get_app_status_sync(&key), AppStatus::SettingsMismatch);
     }
 }
