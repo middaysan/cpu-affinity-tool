@@ -16,6 +16,11 @@ use crate::PriorityClass;
 #[derive(Debug)]
 pub(super) enum OsError {
     Win(windows::core::Error),
+    Operation {
+        operation: &'static str,
+        pid: u32,
+        source: windows::core::Error,
+    },
     Msg(String),
 }
 
@@ -23,6 +28,11 @@ impl std::fmt::Display for OsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OsError::Win(e) => write!(f, "{e}"),
+            OsError::Operation {
+                operation,
+                pid,
+                source,
+            } => write!(f, "{operation} failed for PID {pid}: {source}"),
             OsError::Msg(s) => write!(f, "{s}"),
         }
     }
@@ -55,7 +65,13 @@ impl Drop for ComGuard {
 }
 
 pub(super) fn open_process(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> Result<HANDLE, OsError> {
-    unsafe { Ok(OpenProcess(access, false, pid)?) }
+    unsafe {
+        OpenProcess(access, false, pid).map_err(|source| OsError::Operation {
+            operation: "OpenProcess",
+            pid,
+            source,
+        })
+    }
 }
 
 pub(super) fn transform_to_win_priority(p: PriorityClass) -> PROCESS_CREATION_FLAGS {

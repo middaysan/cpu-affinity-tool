@@ -321,15 +321,7 @@ fn reapply_existing_app_settings<O: LaunchOs>(
             return LaunchDispatchOutcome::Rejected(message);
         }
     };
-    let mut failures = Vec::new();
-
-    for &(pid, instance_token) in &instances {
-        if let Err(error) =
-            os.apply_process_settings_if_instance(pid, instance_token, mask, app_to_run.priority)
-        {
-            failures.push(format!("PID {pid}: {error}"));
-        }
-    }
+    let failures = apply_settings_for_instances(os, &instances, mask, app_to_run.priority);
 
     if !failures.is_empty() {
         let _ = runtime.mark_running_app_settings_mismatched(&app_key);
@@ -364,6 +356,25 @@ fn reapply_existing_app_settings<O: LaunchOs>(
             LaunchDispatchOutcome::Rejected(message)
         }
     }
+}
+
+fn apply_settings_for_instances<O: LaunchOs>(
+    os: &O,
+    instances: &[(u32, ProcessInstanceToken)],
+    mask: usize,
+    priority: PriorityClass,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+
+    for &(pid, instance_token) in instances {
+        if let Err(error) =
+            os.apply_process_settings_if_instance(pid, instance_token, mask, priority)
+        {
+            failures.push(format!("PID {pid}: {error}"));
+        }
+    }
+
+    failures
 }
 
 fn focus_existing_app<O: LaunchOs>(
@@ -480,13 +491,27 @@ fn run_launch_decision<O: LaunchOs>(
 
     match runtime.lookup_running_app_instances(&app_key) {
         RunningAppInstancesLookup::Found(instances) if !instances.is_empty() => {
-            for &(pid, instance_token) in &instances {
-                let _ = os.apply_process_settings_if_instance(
-                    pid,
-                    instance_token,
-                    mask,
-                    app_to_run.priority,
+            let failures = apply_settings_for_instances(os, &instances, mask, app_to_run.priority);
+            if !failures.is_empty() {
+                match runtime.try_mark_running_app_settings_mismatched(&app_key) {
+                    RunningAppSettingsUpdate::Updated => {}
+                    RunningAppSettingsUpdate::NotFound => log_manager.add_important_entry(format!(
+                        "Failed to record settings mismatch for {} because its tracked entry disappeared",
+                        app_to_run.display()
+                    )),
+                    RunningAppSettingsUpdate::Busy => log_manager.add_important_entry(format!(
+                        "Failed to record settings mismatch for {} because running app state is temporarily busy",
+                        app_to_run.display()
+                    )),
+                }
+
+                let message = format!(
+                    "Failed to reapply settings for {}: {}",
+                    app_to_run.display(),
+                    failures.join("; ")
                 );
+                log_manager.add_important_entry(message.clone());
+                return LaunchDispatchOutcome::Rejected(message);
             }
 
             let was_focused = instances.iter().any(|&(pid, expected_token)| {
@@ -1281,6 +1306,54 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.message.contains("no window found to focus")));
+    }
+
+    #[test]
+    fn test_already_running_apply_failure_is_rejected_mismatched_and_never_logs_reapplied() {
+        let mut runtime = RuntimeRegistry::new();
+        let app = sample_app();
+        let app_key = app.get_key();
+        assert!(runtime.add_running_app_with_token(&app_key, 77, 1077, group_id(0), rule_id(0)));
+        assert!(runtime.add_pid_to_existing_app_with_token(&app_key, 78, 1078));
+        let mut log_manager = LogManager::default();
+        let os = FakeLaunchOs {
+            affinity_results: HashMap::from([(
+                77,
+                Err("SetProcessAffinityMask: Windows protects this process; affinity and priority changes are not permitted".to_string()),
+            )]),
+            focus_results: HashMap::from([(77, true)]),
+            ..Default::default()
+        };
+
+        let outcome = run_launch_decision(
+            &runtime,
+            &mut log_manager,
+            group_id(0),
+            rule_id(0),
+            app,
+            vec![0, 1],
+            &os,
+        );
+
+        assert!(
+            matches!(outcome, super::LaunchDispatchOutcome::Rejected(message)
+            if message.contains("PID 77")
+                && message.contains("Windows protects this process"))
+        );
+        assert_eq!(
+            runtime.get_app_status_sync(&app_key),
+            AppStatus::SettingsMismatch
+        );
+        assert_eq!(os.affinity_calls.borrow().as_slice(), &[(77, 3), (78, 3)]);
+        assert!(os.focus_calls.borrow().is_empty());
+        assert!(log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("PID 77")));
+        assert!(!log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("settings reapplied")));
     }
 
     #[test]

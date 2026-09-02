@@ -10,7 +10,7 @@ use tokio::sync::RwLock as TokioRwLock;
 pub struct ExecutionStore {
     running_apps: Arc<TokioRwLock<RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
-    running_apps_statuses: HashMap<AppRuntimeKey, AppStatus>,
+    running_apps_statuses: Arc<RwLock<HashMap<AppRuntimeKey, AppStatus>>>,
 }
 
 #[derive(Debug, Default)]
@@ -59,7 +59,7 @@ impl ExecutionStore {
             installed_package_tracking: Arc::new(RwLock::new(
                 InstalledPackageTrackingState::default(),
             )),
-            running_apps_statuses: HashMap::new(),
+            running_apps_statuses: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -163,10 +163,15 @@ impl ExecutionStore {
             } else {
                 AppStatus::NotRunning
             };
-            self.running_apps_statuses.insert(app_key.clone(), status);
+            self.running_apps_statuses
+                .write()
+                .unwrap()
+                .insert(app_key.clone(), status);
             status
         } else {
             self.running_apps_statuses
+                .read()
+                .unwrap()
                 .get(app_key)
                 .copied()
                 .unwrap_or(AppStatus::NotRunning)
@@ -219,6 +224,32 @@ impl ExecutionStore {
         self.set_running_app_settings_state(app_key, RunningAppSettingsState::Mismatched)
     }
 
+    pub(crate) fn try_mark_running_app_settings_mismatched(
+        &self,
+        app_key: &AppRuntimeKey,
+    ) -> RunningAppSettingsUpdate {
+        let outcome = match self.running_apps.try_write() {
+            Ok(mut apps) => match apps.apps.get_mut(app_key) {
+                Some(app) => {
+                    app.settings_matched = false;
+                    RunningAppSettingsUpdate::Updated
+                }
+                None => RunningAppSettingsUpdate::NotFound,
+            },
+            Err(_) => RunningAppSettingsUpdate::Busy,
+        };
+
+        if outcome == RunningAppSettingsUpdate::Updated || outcome == RunningAppSettingsUpdate::Busy
+        {
+            self.running_apps_statuses
+                .write()
+                .unwrap()
+                .insert(app_key.clone(), AppStatus::SettingsMismatch);
+        }
+
+        outcome
+    }
+
     fn set_running_app_settings_state(
         &mut self,
         app_key: &AppRuntimeKey,
@@ -243,7 +274,10 @@ impl ExecutionStore {
             || (outcome == RunningAppSettingsUpdate::Busy
                 && state == RunningAppSettingsState::Mismatched)
         {
-            self.running_apps_statuses.insert(app_key.clone(), status);
+            self.running_apps_statuses
+                .write()
+                .unwrap()
+                .insert(app_key.clone(), status);
         }
         outcome
     }
@@ -341,6 +375,13 @@ impl RuntimeRegistry {
         app_key: &AppRuntimeKey,
     ) -> RunningAppSettingsUpdate {
         self.store.mark_running_app_settings_mismatched(app_key)
+    }
+
+    pub(crate) fn try_mark_running_app_settings_mismatched(
+        &self,
+        app_key: &AppRuntimeKey,
+    ) -> RunningAppSettingsUpdate {
+        self.store.try_mark_running_app_settings_mismatched(app_key)
     }
 }
 
@@ -548,6 +589,21 @@ mod tests {
         let _write_guard = running_apps.try_write().unwrap();
         assert_eq!(
             store.mark_running_app_settings_matched(&key),
+            RunningAppSettingsUpdate::Busy
+        );
+        assert_eq!(store.get_app_status_sync(&key), AppStatus::SettingsMismatch);
+    }
+
+    #[test]
+    fn test_busy_try_mismatch_marks_the_cached_status() {
+        let mut store = ExecutionStore::new();
+        let key = installed_app("Sample", "Pkg!App", PriorityClass::Normal).get_key();
+        assert!(store.add_running_app(&key, 42, group_id(0), rule_id(0)));
+
+        let running_apps = store.running_apps_handle();
+        let _write_guard = running_apps.try_write().unwrap();
+        assert_eq!(
+            store.try_mark_running_app_settings_mismatched(&key),
             RunningAppSettingsUpdate::Busy
         );
         assert_eq!(store.get_app_status_sync(&key), AppStatus::SettingsMismatch);
