@@ -189,11 +189,17 @@ PowerShell-based AppsFolder and uncached package metadata lookups in [windows/sh
 
 ## Measurement and acceptance plan
 
-Use the same Windows machine, power plan, GPU driver, compiler, lockfile and test fixtures for baseline and candidate. Record the commit SHA, `rustc -Vv`, process count, logical CPU count and relevant environment overrides. Rebuild the baseline with the candidate compiler; a new build compared only to the published EXE confounds compiler changes with code changes.
+Use the same Windows machine, power plan, GPU driver, compiler and test fixtures for baseline and candidate. Keep both committed lockfiles identical for runtime and release-profile experiments. For dependency-trimming experiments, preserve the baseline lockfiles and allow only the intended dependency/feature-related lockfile changes; review the diff and reject unrelated version upgrades. Do not delete lockfiles or run a blanket dependency update to regenerate them. Save both feature graphs and the precise manifest/lockfile diff with the measurements.
+
+Record the commit SHA, `rustc -Vv`, process count, logical CPU count and relevant environment overrides. Rebuild the baseline with the candidate compiler; a new build compared only to the published EXE confounds compiler changes with code changes.
+
+For isolated data, place a known valid `state.json` fixture next to each benchmark EXE before launch: the existing sidecar resolver then selects that directory instead of the user's normal application data. Restore equivalent state, backup and crash-report fixtures between paired trials; do not assume changing the working directory isolates storage. Run one GUI instance at a time and keep the executable paths and Event Log fixture/match conditions consistent across repeats.
+
+The launch scenario below means a fresh application process, not a cold Windows filesystem cache. Run warmup trials first, exclude them from the reported repetitions, and use the same warmed OS-cache policy for both builds. Record the privilege context and use the same elevated benchmark launcher to avoid varying human UAC response time. Measure process start to the same explicitly instrumented first-usable-frame point in both builds; keep that small measurement hook identical. Any OS-cold experiment must be reported separately with its cache/reset procedure.
 
 | Scenario | Setup | Capture |
 | --- | --- | --- |
-| Cold launch | No existing GUI instance; isolated data directory; repeat 10 times | Time to first usable frame, peak Private Bytes, threads, handles |
+| Fresh-process launch, warmed OS cache | No existing GUI instance; equivalent sidecar fixtures; repeat 10 times after warmup | Process-start to first usable frame, peak Private Bytes, threads, handles |
 | Hidden idle | No rules, then configured-but-stopped rules; let startup workers finish | Five-minute CPU-time delta, Private Bytes, private working set, GUI wake count |
 | Normal monitoring | Known live path rules, correction on and off | Iteration duration, allocations, snapshot count, detection and correction delay |
 | Descendant stress | Controlled process tree with descendants enabled; repeat with disabled | Whole-system snapshot count, CPU per iteration, stale-PID rejection |
