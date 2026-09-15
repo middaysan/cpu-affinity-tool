@@ -2,6 +2,7 @@
 
 Status: proposed; no runtime or dependency changes are implemented by this document.
 Reviewed on 2026-09-15.
+Independently reviewed by an Astra subagent on 2026-09-15; readiness conditions from that review are incorporated below.
 
 ## Baseline and decision
 
@@ -21,7 +22,7 @@ Priority is implementation order, considering risk as well as potential benefit.
 | --- | --- | --- | --- | --- |
 | 1 | Narrow `image` and Tokio features; remove unused direct dependencies | Generic image decoding and broad dependency activation | Smaller build graph and likely smaller EXE; RAM effect unmeasured | Low; both platform builds, icon decode and tray smoke |
 | 2 | Explicit small Tokio worker pool | Both binaries use `Runtime::new()` for two permanent monitor tasks plus temporary corrections | Fewer worker threads and associated overhead on many-core machines | Medium; blocking OS calls can delay timers |
-| 3 | Remove unconditional hidden-window repaint timer | Hidden shell requests another repaint after 250 ms | Fewer idle GUI wakeups | Medium; preserve all worker completion and IPC wake paths |
+| 3 | Complete state publication/wake coverage before reconsidering the hidden timer | Hidden shell requests another repaint after 250 ms | Potentially fewer idle GUI wakeups | High readiness bar; retain timer until end-to-end status and completion tests pass |
 | 4 | Narrow monitor snapshots and skip empty discovery | Full storage/rule copies and unconditional process enumeration | Less periodic allocation and idle OS work | Medium; preserve cleanup and configuration changes |
 | 5 | Eliminate repeated whole-system parent scans | A full Toolhelp snapshot per descendant parent query | Lower monitoring CPU with descendant-heavy workloads | High; process identity and parent validation must stay correct |
 | 6 | Reduce Activity and picker work per frame | Whole-list formatting, filtering and layout | Lower allocation rate and faster interaction with long lists | Medium; wrapped rows and keyboard selection |
@@ -89,17 +90,40 @@ Tests must establish that a spawned timer progresses while the GUI/main test thr
 
 ## 3. Make the hidden shell event-driven
 
-Evidence: `App::should_render` and `App::logic` in [shell/app.rs](../src/app/shell/app.rs), [monitor wake callbacks](../src/app/features/execution/monitor_events.rs), [tray events](../src/tray.rs), [picker refresh](../src/app/runtime/state.rs).
+Evidence: `App::should_render` and `App::logic` in [shell/app.rs](../src/app/shell/app.rs), [monitor wake callbacks](../src/app/features/execution/monitor_events.rs), [runtime status reads](../src/app/features/execution/store.rs), [post-launch correction](../src/app/features/execution/launch.rs), [tray events](../src/tray.rs), [picker refresh](../src/app/runtime/state.rs).
 
 The hidden path unconditionally calls `request_repaint_after(250 ms)`. This schedules another GUI pass even when nothing changes: nominally four requested passes per second while hidden. It is not evidence of four full rendered frames or a measured CPU percentage; hidden UI rendering already returns early.
 
-Tray events, monitor changes and local IPC already have explicit GUI wake callbacks. Remove the unconditional timer only after accounting for every asynchronous completion:
+**Retain the 250 ms timer until the replacement proves that background state remains current and the GUI observes it reliably.** Removing this timer is conditional, not a standalone cleanup. Keep the discovery/settings monitors running independently of visibility, preserve current monitoring cadence, and require the restored interface to display current statuses. Lower wake counts never justify stale statuses.
 
-- Preserve crash-report and Event Log pending-work deadlines and their timeout behavior.
-- Add a completion wake for installed-app catalog refresh, whose worker currently only sends into a channel. Otherwise hiding the window while refresh is in flight can leave completion unobserved until another event.
-- Preserve delayed Event Log retry scheduling, monitor queue draining and terminal Quit behavior.
+Tray events, monitor changes and local IPC already have GUI wake callbacks, but a callback alone does not establish that the GUI reads the newly published state. The independent review identified the following publication/completion paths to cover:
 
-Test restore, quit, shortcut forwarding and refresh completion from an otherwise idle hidden window; include completion racing with hide/restore and a full monitor queue. The acceptance condition is no periodic shell deadline when hidden with no pending work, while actual events still wake the GUI promptly. Simply increasing 250 ms to several seconds hides unnecessary work and can introduce latency.
+| Producer / operation | Current behavior | Required condition before removing fallback polling |
+| --- | --- | --- |
+| Discovery and settings monitors | Send notifications while holding the `running_apps` write-lock | Publish state before notifying; guarantee a later successful observation if GUI reading contends |
+| Post-launch correction | Directly adds apps, PIDs and instance tokens; its request has no notification sender or wake callback | Notify after actual runtime changes are published; do not rely on a later monitor detecting the same change again |
+| Installed-app catalog refresh | Worker sends a result into a channel without a completion wake | Wake after completion, including failure/disconnection handling |
+| Crash-report and Event Log workers | Pending workers use 100 ms polling initially, then two-second polling | Preserve effective completion responsiveness through completion wakes or pending-work polling; retain timeout, late-result and retry semantics |
+| Tray and local shortcut IPC | Explicit wake callbacks already exist | Verify restore, terminal Quit and forwarded launches from a completely idle hidden window |
+| Monitor notification queue | Coalescing and bounded drain use shared flags and prior wakeups | The final state must be observed even with saturation and producer/drain races |
+
+There are two concrete state-observation risks to resolve:
+
+1. `spawn_post_launch_correction` can modify the runtime without a wake. The next tracking iteration can see an already current PID set and report no change, so it is not a reliable substitute notification source.
+2. Both monitor loops can notify while still holding the write-lock. `get_app_status_sync` uses `try_read` and returns a cached status if the lock is busy, without scheduling its own retry. Even the shell's extra repaint after draining a notification does not prove that a successful read occurs after lock release. Notify after releasing the writer guard, and additionally ensure contention cannot consume the final update: use a bounded retry while a fresh observation is pending, or a separately published coherent status snapshot. Preserve the v1.6.1 pessimistic mismatch semantics until an explicit successful application confirms recovery.
+
+These are source-observed gaps in the existing reactive design, not demonstrated regressions caused by timer removal. The hidden `App::ui` already skips rendering and status reads; its timer does not itself guarantee that visible cached statuses recover. Do not describe the timer as a complete fix for this race, or remove it on the assumption that existing callbacks cover every state producer.
+
+Diagnostics have a separate latency issue: after a worker has run for two seconds, its own poll interval becomes two seconds. The current 250 ms hidden timer also causes shell polling. Removing it without a completion wake can therefore increase completion-observation delay from roughly 250 ms to nearly two seconds, excluding scheduler delays. Preserve the current effective responsiveness in the replacement; do not silently accept a larger latency budget. Cover successful completion, errors/disconnection, completion after timeout and delayed Event Log retry.
+
+Add deterministic end-to-end tests that control the writer lock and notification timing, rather than merely count callback invocations:
+
+- Deliver a status notification while the writer is held, force GUI fallback to its old cache, then release the writer without any new external event. Require eventual observation of the current status.
+- Cover `NotRunning -> Running`, `Running -> SettingsMismatch`, confirmed recovery after a protected-process failure, process exit, and post-launch app/PID changes, with no mouse movement or unrelated process changes to trigger repaint.
+- Saturate the queue and race the final state change with GUI drain. Require the final state to become visible without periodic fallback. Existing callback-count and drain-flag tests alone do not prove this. In particular, `Full(RuntimeStateChanged)` relies on existing queue/wake state rather than issuing its own wake; test that reliance without declaring it a proven bug in advance.
+- Exercise changes while hidden and during restore, plus tray Quit, forwarding, catalog completion, diagnostic completion and retry deadlines. Keep GUI-owned `HWND` operations on the GUI thread.
+
+Only after these tests and Windows smoke checks pass may the idle shell stop scheduling periodic deadlines when no work is pending. Pending work may still use bounded polling/retry. Simply increasing 250 ms to several seconds hides unnecessary work and can introduce latency.
 
 ## 4. Narrow periodic snapshots and avoid empty work
 
@@ -186,9 +210,15 @@ Acceptance requires a demonstrated improvement in the metric targeted by that ba
 ## Suggested implementation sequence
 
 1. Capture reproducible baselines and feature graphs; narrow dependency declarations and the icon decoder.
-2. Test an explicit small runtime pool, isolate slow blocking operations as needed, and remove unnecessary hidden wakeups with completion coverage.
+2. Test an explicit small runtime pool and isolate slow blocking operations as needed. Complete state publication, wake and retry coverage; retain the hidden timer until end-to-end tests establish equivalent status/completion responsiveness.
 3. Introduce narrow projections and empty-work paths; then tackle descendant parent-scan batching with identity/race tests.
 4. Optimize long-list presentation; evaluate release-profile settings independently.
 5. Re-profile. Only then decide whether replacing PowerShell discovery or deeper framework changes has enough measurable benefit.
 
 These are implementation batches, not modifications made by this proposal PR. Keeping them independently reviewable makes regressions attributable and allows a risky batch to be reverted without discarding verified improvements.
+
+## Independent review disposition
+
+Astra's source review confirmed the main dependency, snapshot, process-enumeration and list-rendering findings. It found two P1 readiness gaps (post-launch changes without notification, and notification/read contention) and two P2 gaps (diagnostic completion latency and insufficient end-to-end queue/wake tests). Section 3 now records all four as prerequisites. These priorities describe omissions in the proposed implementation plan; they do not establish four reproduced production bugs.
+
+The dependency-trimming and measurement batch can proceed independently. Removing the hidden timer is not ready for implementation as an isolated edit. No runtime code changed during the review, and no Rust tests or Windows performance measurements were run by the reviewer.
