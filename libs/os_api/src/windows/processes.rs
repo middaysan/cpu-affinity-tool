@@ -406,7 +406,10 @@ mod tests {
     fn targeted_parent_lookup_matches_process_tree_for_current_process() {
         let pid = std::process::id();
         let tree = OS::snapshot_process_tree().unwrap();
-        assert_eq!(OS::get_process_parent_pid(pid).unwrap(), tree.parent_of.get(&pid).copied());
+        assert_eq!(
+            OS::get_process_parent_pid(pid).unwrap(),
+            tree.parent_of.get(&pid).copied()
+        );
         assert_eq!(OS::get_process_parent_pid(0).unwrap(), None);
     }
 

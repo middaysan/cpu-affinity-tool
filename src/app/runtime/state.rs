@@ -305,7 +305,10 @@ impl AppState {
                     .iter()
                     .enumerate()
                     .map(|(group_index, group)| CentralGroupSnapshot {
-                        group_id: self.rules.group_id_for_index(group_index).expect("group identity"),
+                        group_id: self
+                            .rules
+                            .group_id_for_index(group_index)
+                            .expect("group identity"),
                         name: group.name.clone(),
                         cores: group.cores.clone(),
                         is_hidden: group.is_hidden,
@@ -315,7 +318,10 @@ impl AppState {
                             .iter()
                             .enumerate()
                             .map(|(rule_index, app)| CentralProgramSnapshot {
-                                rule_id: self.rules.rule_id_for_index(group_index, rule_index).expect("rule identity"),
+                                rule_id: self
+                                    .rules
+                                    .rule_id_for_index(group_index, rule_index)
+                                    .expect("rule identity"),
                                 name: app.name.clone(),
                                 launch_target_detail: app.launch_target_detail(),
                                 app_key: app.get_key(),
@@ -1173,8 +1179,12 @@ impl AppState {
         self.ui.installed_app_picker.last_error = None;
         self.ui.installed_app_picker.refresh_rx = Some(rx);
 
+        let wake = self.runtime.wake_handle();
         std::thread::spawn(move || {
             let _ = tx.send(crate::app::adapters::discovery::list_supported_start_apps());
+            if let Some(wake) = wake {
+                wake();
+            }
         });
     }
 

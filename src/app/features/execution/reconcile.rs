@@ -79,16 +79,15 @@ pub async fn run_process_settings_monitor(
                     continue;
                 }
             };
-            (collect_program_settings(&state), state.process_monitoring_enabled)
+            (
+                collect_program_settings(&state),
+                state.process_monitoring_enabled,
+            )
         };
 
         if let Ok(mut apps) = running_apps.try_write() {
-            let outcome = reconcile_settings_with_os(
-                &mut apps,
-                &state_snapshot,
-                monitoring_enabled,
-                &mut os,
-            );
+            let outcome =
+                reconcile_settings_with_os(&mut apps, &state_snapshot, monitoring_enabled, &mut os);
             let status_cache_changed =
                 record_confirmed_match_statuses(&apps, &running_app_statuses);
 
@@ -131,7 +130,9 @@ fn collect_program_settings(
             continue;
         };
 
-        let group_id = rules.group_id_for_index(group_index).expect("group identity");
+        let group_id = rules
+            .group_id_for_index(group_index)
+            .expect("group identity");
         for (rule_index, app) in group.programs.iter().enumerate() {
             let rule_id = rules
                 .rule_id_for_index(group_index, rule_index)
@@ -141,7 +142,7 @@ fn collect_program_settings(
                 ProgramRuntimeSettings {
                     name: app.name.clone(),
                     group_id: group_id.clone(),
-                    rule_id: rule_id,
+                    rule_id,
                     expected_mask,
                     expected_priority: app.priority,
                 },
@@ -173,7 +174,12 @@ fn process_settings_iteration_with_os<O: ProcessSettingsOs>(
     monitoring_enabled: bool,
     os: &mut O,
 ) -> ProcessSettingsIterationOutcome {
-    reconcile_settings_with_os(apps, &collect_program_settings(state), monitoring_enabled, os)
+    reconcile_settings_with_os(
+        apps,
+        &collect_program_settings(state),
+        monitoring_enabled,
+        os,
+    )
 }
 
 fn reconcile_settings_with_os<O: ProcessSettingsOs>(

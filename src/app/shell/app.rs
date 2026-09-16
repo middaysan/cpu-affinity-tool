@@ -202,6 +202,8 @@ impl App {
 
         let mut state = AppState::new();
         let monitor_ctx = cc.egui_ctx.clone();
+        let wake: execution::MonitorWake = Arc::new(move || monitor_ctx.request_repaint());
+        state.runtime.set_wake(wake.clone());
         Self::bootstrap_runtime_without_startup(
             &mut state,
             move |running_apps, running_app_statuses, package_tracking, persistent_state| {
@@ -210,7 +212,7 @@ impl App {
                     running_app_statuses,
                     package_tracking,
                     persistent_state,
-                    Some(Arc::new(move || monitor_ctx.request_repaint())),
+                    Some(wake),
                 )
             },
         );
@@ -466,6 +468,10 @@ impl eframe::App for App {
         }
 
         self.render_main_ui(ui);
+        if self.state.runtime.take_status_read_pending() {
+            // A cached status read must not consume the only runtime notification.
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+        }
         #[cfg(all(target_os = "windows", feature = "windows"))]
         {
             self.windows_event_log_first_frame_rendered = true;

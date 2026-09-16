@@ -41,8 +41,8 @@ jobs:
         shell: pwsh
         run: |
           cargo fmt --all
-          cargo metadata --format-version 1 --no-deps > $null
-          cargo metadata --manifest-path libs/os_api/Cargo.toml --format-version 1 --no-deps > $null
+          cargo metadata --format-version 1 > $null
+          cargo metadata --manifest-path libs/os_api/Cargo.toml --format-version 1 > $null
           git diff --no-ext-diff
 
       - name: Check formatting

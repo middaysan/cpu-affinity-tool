@@ -202,7 +202,9 @@ fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgram
     let mut programs = Vec::new();
     let rules = RulesContext::from_storage(state);
     for (group_index, group) in state.groups.iter().enumerate() {
-        let group_id = rules.group_id_for_index(group_index).expect("group identity");
+        let group_id = rules
+            .group_id_for_index(group_index)
+            .expect("group identity");
         for (rule_index, app) in group.programs.iter().enumerate() {
             let rule_id = rules
                 .rule_id_for_index(group_index, rule_index)
@@ -238,7 +240,7 @@ fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgram
                 additional_processes_normalized: tracked_names,
                 matcher,
                 group_id: group_id.clone(),
-                rule_id: rule_id,
+                rule_id,
                 manage_descendants: app.manage_descendants,
             });
         }
