@@ -54,9 +54,11 @@ jobs:
 
       - name: Build Windows release binary
         shell: pwsh
-        run: |
-          ./scripts/build-windows-release.ps1
-          Get-Item target/release/cpu-affinity-tool.exe, target/release/cpu_affinity_tool.pdb | Select-Object Name, Length
+        run: ./scripts/build-windows-release.ps1
+
+      - name: Report Windows artifact sizes
+        shell: pwsh
+        run: Get-Item target/release/cpu-affinity-tool.exe, target/release/cpu_affinity_tool.pdb | Select-Object Name, Length
 
       - name: Verify Windows debug symbols
         shell: pwsh
