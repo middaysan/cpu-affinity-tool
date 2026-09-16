@@ -37,14 +37,6 @@ jobs:
             . -> target
             libs/os_api -> target
 
-      - name: Export generated normalization diff
-        shell: pwsh
-        run: |
-          cargo fmt --all
-          cargo metadata --format-version 1 > $null
-          cargo metadata --manifest-path libs/os_api/Cargo.toml --format-version 1 > $null
-          git diff --no-ext-diff
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -57,9 +49,14 @@ jobs:
       - name: Run tests
         run: cargo test --features windows --bin cpu-affinity-tool
 
+      - name: Verify committed lockfiles
+        run: git diff --exit-code -- Cargo.lock libs/os_api/Cargo.lock
+
       - name: Build Windows release binary
         shell: pwsh
-        run: ./scripts/build-windows-release.ps1
+        run: |
+          ./scripts/build-windows-release.ps1
+          Get-Item target/release/cpu-affinity-tool.exe, target/release/cpu_affinity_tool.pdb | Select-Object Name, Length
 
       - name: Verify Windows debug symbols
         shell: pwsh
@@ -119,6 +116,9 @@ jobs:
 
       - name: Run Linux binary tests
         run: cargo test --features linux --bin cpu-affinity-tool-linux
+
+      - name: Verify committed lockfiles
+        run: git diff --exit-code -- Cargo.lock libs/os_api/Cargo.lock
 
       - name: Build Linux binary
         run: cargo build --release --features linux --bin cpu-affinity-tool-linux

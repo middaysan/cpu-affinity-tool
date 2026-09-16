@@ -740,8 +740,8 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                     }
 
                     if let Some(app) = apps.apps.get_mut(&request.app_key) {
-                        runtime_changed |= app.group_id != request.group_id
-                            || app.rule_id != request.rule_id;
+                        runtime_changed |=
+                            app.group_id != request.group_id || app.rule_id != request.rule_id;
                         app.group_id = request.group_id.clone();
                         app.rule_id = request.rule_id.clone();
                     }
@@ -753,7 +753,8 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                                 runtime_changed = true;
                             }
                             if let Some(&token) = outcome.instance_tokens.get(&pid) {
-                                runtime_changed |= app.pid_instance_tokens.insert(pid, token) != Some(token);
+                                runtime_changed |=
+                                    app.pid_instance_tokens.insert(pid, token) != Some(token);
                             }
                         }
                     }

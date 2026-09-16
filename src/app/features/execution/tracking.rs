@@ -1045,7 +1045,7 @@ mod tests {
     ) -> super::RunningAppsIterationOutcome {
         let installed_package_tracking =
             Arc::new(RwLock::new(InstalledPackageTrackingState::default()));
-        let snapshot = os.snapshot.clone().unwrap();
+        let snapshot = super::snapshot_for_configuration(&configured, os).unwrap();
         let name_to_pids = build_name_to_pids(&snapshot);
         let aumid_to_seed_pids = if configured
             .iter()
@@ -1690,10 +1690,7 @@ mod tests {
         let key = state.groups[0].programs[0].get_key();
         apps.add_app(&key, 10, group_id(0), rule_id(0));
         let os = FakeRunningAppsOs {
-            snapshot: Ok(ProcessSnapshot {
-                children_of: HashMap::new(),
-                names: HashMap::new(),
-            }),
+            snapshot: Err("empty configuration must not enumerate processes".into()),
             image_paths: HashMap::new(),
             live_pids: HashSet::new(),
             ..Default::default()

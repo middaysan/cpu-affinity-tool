@@ -1,6 +1,6 @@
 # v1.6.1 performance and footprint proposal
 
-Status: proposed; no runtime or dependency changes are implemented by this document.
+Status: audit plus a bounded first implementation in PR #19. The findings below describe the v1.6.1 baseline; the implementation disposition identifies what has changed.
 Reviewed on 2026-09-15.
 Independently reviewed by an Astra subagent on 2026-09-15; readiness conditions from that review are incorporated below.
 
@@ -13,6 +13,22 @@ The published EXE is **18,274,816 bytes (17.43 MiB)**. The separate PDB is **54,
 **Recommendation: keep egui/eframe and the OS boundary. Trim enabled dependency features first, then remove repeated background and rendering work.** Forking the GUI framework or replacing it with custom Win32 UI is not justified by the evidence collected here.
 
 Evidence consists of the release metadata, manifests and lockfiles, both entrypoints, execution monitors, process backend, GUI lifecycle/presenters, font setup, diagnostics and repository contracts. A binary inspection of the embedded ICO was also performed. No Windows runtime profile, Rust build, or before/after performance measurement was run in this audit environment: it has neither a Windows desktop nor an installed Rust toolchain. Findings below distinguish source-observed work from expected benefits that still require measurement.
+
+## Implementation disposition (2026-09-16)
+
+PR #19 implements the low-risk dependency and allocation reductions from this audit:
+
+- Narrow Tokio/image features, explicitly decode the bundled ICO, transfer its RGBA buffer, replace direct winit access with raw-window-handle, and remove unused direct Windows dependencies.
+- Build narrow monitor and central-panel projections directly from borrowed rules instead of cloning complete storage/rule snapshots. Skip discovery snapshots only when no eligible rules exist, while retaining tracking and owner cleanup.
+- Read a single Windows parent relationship from a fresh Toolhelp snapshot without building three whole-system maps or decoding executable names. This still takes a new snapshot per query; it does not batch or cache identity checks.
+- Render Activity entries without an intermediate formatted-history vector or a cloned retained crash context. Wrapped rows and retention semantics are unchanged; rows are not virtualized.
+- Release monitor writers before notifying the GUI, wake after installed-catalog completion and post-launch tracking publication, and schedule a 50 ms retry after contended UI status reads. The hidden-window 250 ms fallback remains in place.
+
+Cargo-generated lockfiles remove 76 package/version entries from the application lockfile (537 to 461) and four from the separate os_api lockfile (36 to 32), with no added packages or version upgrades. These counts describe lockfile footprint across targets, not runtime memory or the number linked into a Windows EXE.
+
+Deferred experiments: reducing Tokio workers, removing the hidden timer, batching parent snapshots, picker caching/row virtualization, LTO/codegen tuning, and replacing PowerShell discovery. These require the measurements and safety gates below and are not represented as completed optimizations.
+
+Validation includes the existing Windows/Linux CI gates plus regressions for bundled ICO decoding, parent lookup, empty discovery and stale cleanup, log formatting, and contended status retry. CI results and final independent code-review status are recorded in the PR. Manual Windows smoke checks still need to exercise tray restore/quit, live status changes while hidden, installed-app discovery/launch, and wrapped Activity entries. No working-set, private-bytes, idle-CPU, or latency improvement is claimed without a before/after runtime measurement.
 
 ## Prioritized work
 
@@ -221,10 +237,10 @@ Acceptance requires a demonstrated improvement in the metric targeted by that ba
 4. Optimize long-list presentation; evaluate release-profile settings independently.
 5. Re-profile. Only then decide whether replacing PowerShell discovery or deeper framework changes has enough measurable benefit.
 
-These are implementation batches, not modifications made by this proposal PR. Keeping them independently reviewable makes regressions attributable and allows a risky batch to be reverted without discarding verified improvements.
+This sequence remains the roadmap for the wider audit. Only the bounded changes listed in Implementation disposition are included in PR #19; deferred experiments remain separate batches.
 
-## Independent review disposition
+## Original proposal review disposition (before implementation)
 
 Astra's source review confirmed the main dependency, snapshot, process-enumeration and list-rendering findings. It found two P1 readiness gaps (post-launch changes without notification, and notification/read contention) and two P2 gaps (diagnostic completion latency and insufficient end-to-end queue/wake tests). Section 3 now records all four as prerequisites. These priorities describe omissions in the proposed implementation plan; they do not establish four reproduced production bugs.
 
-The dependency-trimming and measurement batch can proceed independently. Removing the hidden timer is not ready for implementation as an isolated edit. No runtime code changed during the review, and no Rust tests or Windows performance measurements were run by the reviewer.
+The dependency-trimming and measurement batch can proceed independently. Removing the hidden timer is not ready for implementation as an isolated edit. That review covered the original proposal, before implementation. No Rust tests or Windows performance measurements were run by that reviewer; subsequent code review and CI results are recorded in PR #19.

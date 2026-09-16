@@ -182,7 +182,9 @@ Linux entrypoint now reaches the shared `shell::App` shell, startup logging, aut
 - tray callbacks only enqueue typed commands and wake egui; `tray_rx` is owned and drained by `shell::App` on the GUI thread, which exclusively owns `HWND` operations and the terminal Quit transition
 - Windows local shortcut-forwarding requests flow through a shell-owned named-pipe server thread into `shell::App`, with per-request reply channels; request enqueue wakes the `egui` context for prompt draining
 - `AppForwardingRuntime` clears the GUI wake callback and requests server shutdown during drop. It joins promptly when the worker reaches a terminal I/O completion; otherwise the detached reaper retains the pipe listener, in-flight `OVERLAPPED` buffers, and primary guard until it can safely release them. A replacement process therefore cannot claim the endpoint while that worker still owns it.
-- monitor notifications flow through typed `ShellEvent` messages in `monitor_rx` owned by `RuntimeRegistry`
+- monitor notifications flow through typed `ShellEvent` messages in `monitor_rx` owned by `RuntimeRegistry`; runtime writer guards are released before emitting notifications
+- `RuntimeRegistry` also carries an optional GUI wake callback for installed-catalog completion and post-launch tracking changes; callbacks run after publishing results and releasing runtime writers
+- a contended UI status read retains its cached value and requests another repaint after 50 ms
 - persisted state uses `Arc<RwLock<AppStateStorage>>`
 - running-process tracking uses `Arc<TokioRwLock<RunningApps>>`
 - installed-package runtime metadata cache and ownership state use in-memory `Arc<RwLock<...>>`
@@ -190,14 +192,14 @@ Linux entrypoint now reaches the shared `shell::App` shell, startup logging, aut
 - crash-report capture uses immutable precomputed context, a thread-local recursion guard, and a non-blocking process-wide writer guard; the hook does not take app-state or GUI locks
 
 Background loops:
-- running-process rediscovery and retracking loop
-- affinity and priority verification and optional correction loop
+- running-process rediscovery and retracking loop: narrow borrowed-state projections avoid cloning whole rules; an empty eligible configuration skips process enumeration while still reconciling stale tracking and package-owner claims
+- affinity and priority verification and optional correction loop: copies only rule identity, name, affinity, and priority needed by the iteration
 - bounded Windows crash-report discovery/retention worker with no overlapping replacement worker after timeout; completion is polled briefly after explicit refresh, while a timed-out worker does not force perpetual high-frequency repaint
 - separate bounded Windows Event Log worker with no overlapping replacement after timeout; disabling diagnostics cancels the delayed retry and uses a generation token to discard an in-flight result
 
 Hidden-window flow:
 - forwarded shortcut commands are drained in `App::logic` before the hidden-window render skip
-- when the window is hidden, `shell::App::logic` schedules repaint with `ctx.request_repaint_after(...)` and `App::ui` skips rendering
+- when the window is hidden, `shell::App::logic` preserves the 250 ms `ctx.request_repaint_after(...)` fallback and `App::ui` skips rendering
 - the hidden-window path no longer sleeps on the UI thread
 
 ## State and data contracts
@@ -301,7 +303,7 @@ Data source separation:
 - Windows shortcut creation for saved-rule launch shortcuts
 - affinity read and set
 - priority read and set
-- process inspection and process-tree logic
+- process inspection and process-tree logic; Windows single-PID parent checks use a fresh Toolhelp snapshot and an early-exit scan without allocating whole-system maps, preserving process-instance validation
 - process AppUserModelID lookup on Windows
 - window focus and visibility helpers
 - URI and shortcut resolution
@@ -361,7 +363,7 @@ Only list materially relevant dependencies by actual role.
 
 Primary runtime and build dependencies:
 - `eframe` / `egui` - desktop GUI
-- `tokio` - background runtime
+- `tokio` - background runtime with `rt-multi-thread`, `time`, and `sync`; worker count remains the runtime default
 - `windows` - Win32 bindings for shell integration, process/runtime operations, local IPC, security descriptors, and manifest/resource-adjacent Windows APIs
 - `tray-icon` - Windows tray integration
 - `rfd` - file dialogs
@@ -369,7 +371,8 @@ Primary runtime and build dependencies:
 - `regex` - CPU preset matching and related helpers
 - `once_cell` - lazy initialization
 - `num_cpus` - logical thread-count detection
-- `image` - tray and resource image decoding
+- `image` - explicitly selected ICO tray decoding with only the `ico` feature; the decoded RGBA buffer is moved into the tray icon
+- `raw-window-handle` - direct Windows native-window handle access (winit remains a transitive GUI dependency)
 - `winres` - Windows resource embedding at build time
 - `libs/os_api` - local platform abstraction crate
 
@@ -407,7 +410,7 @@ Current CI facts:
   - `windows-latest` for the Windows release-path job
   - `ubuntu-24.04` for the Linux desktop beta job
 - `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, runs feature-gated real-binary crash probes, reproduces the stable line-table release build, verifies the built EXE/PDB identity and manifest resource, and verifies the Linux beta binary on `ubuntu-24.04`
-- tests are part of the committed CI contract for `ci.yml`
+- tests are part of the committed CI contract for `ci.yml`; both jobs require committed lockfiles to remain unchanged after compilation/tests, and the Windows release build reports EXE/PDB byte sizes
 - the Windows CI job validates the feature-gated Windows binary path explicitly with `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --features windows --bin cpu-affinity-tool`, `scripts/build-windows-release.ps1`, `scripts/test-windows-pdb-verifier.ps1`, and `scripts/assert-windows-release-manifest.ps1` against the built release EXE/PDB pair
 
 Current release facts:
