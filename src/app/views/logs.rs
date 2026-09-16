@@ -16,18 +16,17 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
         data_dir.display()
     );
 
-    let entries = app
-        .log_manager
-        .formatted_entries()
-        .rev()
-        .collect::<Vec<_>>();
-    let local_crash_context = app.log_manager.local_crash_context().map(str::to_owned);
     #[cfg(all(target_os = "windows", feature = "windows"))]
     let windows_event_snapshot = app.windows_event_log_snapshot();
     #[cfg(all(target_os = "windows", feature = "windows"))]
     let mut event_log_choice = None;
     #[cfg(all(target_os = "windows", feature = "windows"))]
     let windows_event_action_message = app.ui.windows_event_log_action_error.clone();
+
+    let entries = &app.log_manager.entries;
+    let local_crash_context = app.log_manager.local_crash_context();
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    let diagnostics_enabled = app.windows_event_log_diagnostics_enabled();
 
     CentralPanel::default()
         .frame(
@@ -64,7 +63,7 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                     }
                     #[cfg(all(target_os = "windows", feature = "windows"))]
                     {
-                        let mut enabled = app.windows_event_log_diagnostics_enabled();
+                        let mut enabled = diagnostics_enabled;
                         if ui
                             .checkbox(&mut enabled, "Event Log diagnostics")
                             .on_hover_text("Read a bounded, local Application Error record lookup")
@@ -85,7 +84,7 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
             }
 
             if let Some(local_crash_context) = local_crash_context {
-                diagnostic_card(ui, "Saved local crash report", &local_crash_context, false);
+                diagnostic_card(ui, "Saved local crash report", local_crash_context, false);
                 ui.add_space(5.0);
             }
 
@@ -99,12 +98,12 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                         if entries.is_empty() {
                             ui.label(RichText::new("No activity yet").small().weak().italics());
                         }
-                        for (index, log_string) in entries.iter().enumerate() {
+                        for (index, entry) in entries.iter().rev().enumerate() {
                             egui::Frame::NONE
                                 .inner_margin(egui::Margin::symmetric(5, 3))
                                 .show(ui, |ui| {
                                     ui.label(
-                                        RichText::new(log_string)
+                                        RichText::new(entry.format())
                                             .size(10.0)
                                             .color(palette(ui).text_secondary),
                                     );

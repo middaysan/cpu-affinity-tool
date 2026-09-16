@@ -26,14 +26,13 @@ impl LogEntry {
             .unwrap_or_default();
 
         let secs = duration.as_secs();
-        let ts = format!(
-            "[{:02}:{:02}:{:02}]",
-            (secs % 86400) / 3600, // hours
-            (secs % 3600) / 60,    // minutes
-            secs % 60              // seconds
-        );
-
-        format!("{ts} :: {}", self.message)
+        format!(
+            "[{:02}:{:02}:{:02}] :: {}",
+            (secs % 86400) / 3600,
+            (secs % 3600) / 60,
+            secs % 60,
+            self.message
+        )
     }
 }
 
@@ -136,15 +135,21 @@ impl LogManager {
         self.entries.clear();
     }
 
-    /// Returns an iterator that yields formatted log strings.
-    pub fn formatted_entries(&self) -> impl DoubleEndedIterator<Item = String> + '_ {
-        self.entries.iter().map(|entry| entry.format())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{LogManager, LogRetention, IMPORTANT_LOG_CAP, REGULAR_LOG_CAP};
+
+    #[test]
+    fn formatting_preserves_time_and_multiline_unicode_message() {
+        let entry = super::LogEntry {
+            message: "Ошибка\nsecond line".into(),
+            timestamp: std::time::UNIX_EPOCH + std::time::Duration::from_secs(90_061),
+            retention: LogRetention::Regular,
+        };
+        assert_eq!(entry.format(), "[01:01:01] :: Ошибка\nsecond line");
+    }
 
     #[test]
     fn test_regular_retention_is_capped() {

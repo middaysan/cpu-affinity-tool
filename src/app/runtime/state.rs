@@ -300,25 +300,25 @@ impl AppState {
         self.reconcile_rules();
         match self.persistent_state.read() {
             Ok(state) => CentralPanelSnapshot {
-                groups: self
-                    .rules
-                    .snapshot(&state)
+                groups: state
                     .groups
-                    .into_iter()
-                    .map(|group| CentralGroupSnapshot {
-                        group_id: group.id,
-                        name: group.name,
-                        cores: group.cores,
+                    .iter()
+                    .enumerate()
+                    .map(|(group_index, group)| CentralGroupSnapshot {
+                        group_id: self.rules.group_id_for_index(group_index).expect("group identity"),
+                        name: group.name.clone(),
+                        cores: group.cores.clone(),
                         is_hidden: group.is_hidden,
-                        run_all_button: group.run_all_enabled,
+                        run_all_button: group.run_all_button,
                         programs: group
-                            .rules
+                            .programs
                             .iter()
-                            .map(|program| CentralProgramSnapshot {
-                                rule_id: program.id.clone(),
-                                name: program.app.name.clone(),
-                                launch_target_detail: program.app.launch_target_detail(),
-                                app_key: program.app.get_key(),
+                            .enumerate()
+                            .map(|(rule_index, app)| CentralProgramSnapshot {
+                                rule_id: self.rules.rule_id_for_index(group_index, rule_index).expect("rule identity"),
+                                name: app.name.clone(),
+                                launch_target_detail: app.launch_target_detail(),
+                                app_key: app.get_key(),
                             })
                             .collect(),
                     })

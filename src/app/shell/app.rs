@@ -220,7 +220,7 @@ impl App {
 
         #[cfg(target_os = "windows")]
         {
-            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let Ok(handle) = cc.window_handle() {
                 let raw = handle.as_raw();
                 match raw {

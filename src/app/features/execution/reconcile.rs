@@ -79,11 +79,11 @@ pub async fn run_process_settings_monitor(
                     continue;
                 }
             };
-            (state.clone(), state.process_monitoring_enabled)
+            (collect_program_settings(&state), state.process_monitoring_enabled)
         };
 
         if let Ok(mut apps) = running_apps.try_write() {
-            let outcome = process_settings_iteration_with_os(
+            let outcome = reconcile_settings_with_os(
                 &mut apps,
                 &state_snapshot,
                 monitoring_enabled,
@@ -91,6 +91,8 @@ pub async fn run_process_settings_monitor(
             );
             let status_cache_changed =
                 record_confirmed_match_statuses(&apps, &running_app_statuses);
+
+            drop(apps);
 
             if !outcome.notifications.is_empty() {
                 for message in outcome.notifications {
@@ -124,22 +126,24 @@ fn collect_program_settings(
 ) -> HashMap<AppRuntimeKey, ProgramRuntimeSettings> {
     let mut settings = HashMap::new();
     let rules = RulesContext::from_storage(state);
-    let snapshot = rules.snapshot(state);
-
-    for group in snapshot.groups {
+    for (group_index, group) in state.groups.iter().enumerate() {
         let Ok(expected_mask) = affinity_mask_from_cores(&group.cores) else {
             continue;
         };
 
-        for program in group.rules {
+        let group_id = rules.group_id_for_index(group_index).expect("group identity");
+        for (rule_index, app) in group.programs.iter().enumerate() {
+            let rule_id = rules
+                .rule_id_for_index(group_index, rule_index)
+                .expect("rule identity");
             settings.insert(
-                program.app.get_key(),
+                app.get_key(),
                 ProgramRuntimeSettings {
-                    name: program.app.name.clone(),
-                    group_id: group.id.clone(),
-                    rule_id: program.id,
+                    name: app.name.clone(),
+                    group_id: group_id.clone(),
+                    rule_id: rule_id,
                     expected_mask,
-                    expected_priority: program.app.priority,
+                    expected_priority: app.priority,
                 },
             );
         }
@@ -162,13 +166,22 @@ fn affinity_mask_from_cores(cores: &[usize]) -> Result<usize, String> {
     Ok(mask)
 }
 
+#[cfg(test)]
 fn process_settings_iteration_with_os<O: ProcessSettingsOs>(
     apps: &mut RunningApps,
     state: &AppStateStorage,
     monitoring_enabled: bool,
     os: &mut O,
 ) -> ProcessSettingsIterationOutcome {
-    let key_to_settings = collect_program_settings(state);
+    reconcile_settings_with_os(apps, &collect_program_settings(state), monitoring_enabled, os)
+}
+
+fn reconcile_settings_with_os<O: ProcessSettingsOs>(
+    apps: &mut RunningApps,
+    key_to_settings: &HashMap<AppRuntimeKey, ProgramRuntimeSettings>,
+    monitoring_enabled: bool,
+    os: &mut O,
+) -> ProcessSettingsIterationOutcome {
     let mut outcome = ProcessSettingsIterationOutcome::default();
 
     for (app_key, app) in apps.apps.iter_mut() {
