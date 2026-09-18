@@ -3,7 +3,7 @@ use crate::app::features::diagnostics::crash_reports::{
 };
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    glass_frame, palette, toned_button, ToneRole, BUTTON_FONT_SIZE,
+    content_frame, glass_frame, palette, toned_button, ToneRole, BUTTON_FONT_SIZE,
 };
 use crate::app::shell::WindowRoute;
 use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
@@ -18,11 +18,7 @@ pub fn draw_crash_reports_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     let mut copy_path: Option<String> = None;
 
     CentralPanel::default()
-        .frame(
-            egui::Frame::NONE
-                .fill(root_ui.visuals().panel_fill)
-                .inner_margin(egui::Margin::symmetric(6, 4)),
-        )
+        .frame(content_frame(root_ui))
         .show(root_ui, |ui| {
             if ui.small_button("← Back to Activity").clicked() {
                 app.set_current_window(WindowRoute::Logs);
@@ -35,6 +31,7 @@ pub fn draw_crash_reports_window(app: &mut AppState, root_ui: &mut egui::Ui) {
             );
             ui.add_space(3.0);
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
                 if ui
                     .button(RichText::new("Open folder").size(BUTTON_FONT_SIZE))
                     .on_hover_text(report_directory.display().to_string())
@@ -71,6 +68,7 @@ pub fn draw_crash_reports_window(app: &mut AppState, root_ui: &mut egui::Ui) {
 
             ui.add_space(5.0);
             glass_frame(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 ui.label(
                     RichText::new(
                         "The app does not upload these files. Reports may contain local paths \

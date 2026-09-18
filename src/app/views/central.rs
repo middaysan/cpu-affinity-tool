@@ -3,9 +3,9 @@ use crate::app::models::{AppRuntimeKey, AppStatus};
 use crate::app::runtime::{AppState, CentralPanelSnapshot};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::presenters::shared_elements::{
-    drag_grip, ghost_button, group_frame, inset_frame, inter_medium_family, inter_semibold_family,
-    palette, row_fill, success_color, toned_sized_button, warning_color, ToneRole,
-    BUTTON_FONT_SIZE,
+    content_frame, drag_grip, ghost_button, group_frame, inset_frame, inter_medium_family,
+    inter_semibold_family, palette, row_fill, success_color, toned_sized_button, warning_color,
+    ToneRole, BUTTON_FONT_SIZE,
 };
 use eframe::egui::{self, Align, CentralPanel, Color32, Layout, RichText, ScrollArea, Vec2};
 use std::path::PathBuf;
@@ -93,15 +93,10 @@ enum GroupMoveDirection {
 
 pub fn draw_central_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
     let ctx = root_ui.ctx().clone();
-    let panel_fill = root_ui.visuals().panel_fill;
     let snapshot = app.build_central_panel_snapshot();
     let group_count = snapshot.groups.len();
     CentralPanel::default()
-        .frame(
-            egui::Frame::NONE
-                .fill(panel_fill)
-                .inner_margin(egui::Margin::symmetric(6, 4)),
-        )
+        .frame(content_frame(root_ui))
         .show(root_ui, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -120,13 +115,15 @@ pub fn draw_central_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                     );
                 });
             });
-            ui.add_space(3.0);
-            ScrollArea::vertical().show(ui, |ui| {
-                ui.vertical(|ui| {
-                    let actions = render_groups(app, ui, &ctx, &snapshot);
-                    execute_actions(app, actions);
+            ui.add_space(5.0);
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        let actions = render_groups(app, ui, &ctx, &snapshot);
+                        execute_actions(app, actions);
+                    });
                 });
-            });
         });
     render_rule_drag_preview(&ctx);
     render_group_drag_preview(&ctx);
@@ -321,6 +318,7 @@ fn render_groups(
         let mut rejected_rule_drop = None;
 
         let group_response = group_frame(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
             let colors = palette(ui);
             ui.horizontal(|ui| {
                 let group_grip_response = ui
@@ -405,9 +403,9 @@ fn render_groups(
                 });
             });
 
-            ui.add_space(2.0);
+            ui.add_space(4.0);
             ui.separator();
-            ui.add_space(2.0);
+            ui.add_space(4.0);
 
             ui.horizontal(|ui| {
                 if group.run_all_button
@@ -465,7 +463,7 @@ fn render_groups(
                 });
             });
 
-            ui.add_space(2.0);
+            ui.add_space(4.0);
 
             if !group.is_hidden && group.programs.is_empty() {
                 inset_frame(ui).show(ui, |ui| {
@@ -546,6 +544,7 @@ fn render_groups(
                                             .family(inter_medium_family())
                                             .strong(),
                                     )
+                                    .halign(Align::Min)
                                     .truncate(),
                                 );
                                 name_response.on_hover_text(program.launch_target_detail.clone());

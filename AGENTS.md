@@ -142,6 +142,7 @@ Current runtime split:
   - installed app picker session and cached catalog
   - crash-report delete confirmations and the last report action message
   - Windows Event Log preference action error state
+  - application Settings menu startup action error state
 - `features::rules::RulesContext` owns logical `GroupId` / `RuleId` allocation, index projection, and persisted `rule_identities`
 - `features::execution::RuntimeRegistry` owns runtime process tracking:
   - `running_apps`
@@ -154,6 +155,8 @@ Current runtime split:
 - workers emit typed `shell::events::ShellEvent` messages and do not hold `egui::Context`
 - Windows crash-report discovery uses an initial/on-demand single-flight standard thread plus at most one coalesced follow-up refresh; egui rendering reads only the last completed snapshot and synchronizes its newest validated report into the retained Activity context; the Linux beta does not start this worker or expose the Crash reports route
 - Windows Event Log diagnostics uses a separate single-flight worker. It is never started by construction, focus gain, tray restore, or periodic refresh: after the first rendered UI frame it can run one bounded lookup when the persisted enabled-by-default preference allows it, with at most one delayed retry after a successful empty result.
+- Settings offers a persisted `start_minimized` preference: the next Windows GUI launch hides to the tray only when a usable tray runtime exists. It defaults to false when absent; this additive field remains in schema v10. Changing the preference does not hide the current window. The app does not register Windows login startup or accept `--start-in-tray`.
+- The footer's bounded, scrollable tracked-process popup inspects only token-bearing runtime instances and verifies the current image path and creation token together before displaying the executable filename, PID, and group. Failed inspection or a reused PID is omitted; the popup never enumerates all system processes.
 
 Windows runtime flow:
 1. Entry point parses startup arguments into a narrow startup intent; normal GUI startup remains the default, while `--run-rule <group-id> <rule-id>` is accepted as a saved-rule startup intent.

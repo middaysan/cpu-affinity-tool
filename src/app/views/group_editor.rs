@@ -1,14 +1,15 @@
 use crate::app::models::{CoreInfo, CoreType, CpuSchema};
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    ghost_button, glass_frame, inset_frame, inter_semibold_family, paint_focus_ring,
-    paint_selected_tone_feedback, palette, toned_button, ToneRole, ToneTokens, UiPalette,
-    BUTTON_FONT_SIZE,
+    content_frame, form_text_edit, ghost_button, glass_frame, inset_frame, inter_semibold_family,
+    paint_focus_ring, paint_selected_tone_feedback, palette, toned_button, ToneRole, ToneTokens,
+    UiPalette, BUTTON_FONT_SIZE, FORM_INPUT_HEIGHT,
 };
 use crate::app::shell::GroupFormSession;
 use eframe::egui::{self, CentralPanel, RichText};
 
 const CORE_TILE_WIDTH: f32 = 56.0;
+const CORE_TILE_HEIGHT: f32 = 34.0;
 
 /// Form for creating/editing a group: divided into rendering the name and the section with cores and clusters.
 fn draw_group_form_ui(
@@ -21,13 +22,11 @@ fn draw_group_form_ui(
     on_delete: Option<&mut dyn FnMut()>,
 ) {
     glass_frame(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
         ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
             ui.label(RichText::new("Group name").strong());
-            ui.add_sized(
-                [ui.available_width().min(520.0), 25.0],
-                egui::TextEdit::singleline(&mut groups.group_name),
-            )
-            .request_focus();
+            group_name_input(ui, &mut groups.group_name).request_focus();
         });
 
         ui.add_space(6.0);
@@ -43,7 +42,7 @@ fn draw_group_form_ui(
 
         draw_cpu_cores_ui(ui, groups, cpu_schema);
 
-        ui.add_space(9.0);
+        ui.add_space(6.0);
         ui.separator();
         ui.add_space(6.0);
 
@@ -91,6 +90,13 @@ fn draw_group_form_ui(
     });
 }
 
+fn group_name_input(ui: &mut egui::Ui, name: &mut String) -> egui::Response {
+    ui.add_sized(
+        [ui.available_width(), FORM_INPUT_HEIGHT],
+        form_text_edit(name),
+    )
+}
+
 /// Rendering the CPU cores section: a list of already created clusters and a panel of free cores.
 fn draw_cpu_cores_ui(ui: &mut egui::Ui, groups: &mut GroupFormSession, cpu_schema: &mut CpuSchema) {
     let model_display = if cpu_schema.clusters.is_empty() {
@@ -123,15 +129,20 @@ fn draw_cpu_cores_ui(ui: &mut egui::Ui, groups: &mut GroupFormSession, cpu_schem
 
     for cluster in cpu_schema.clusters.iter_mut() {
         inset_frame(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 4.0;
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&cluster.name).strong());
             });
             draw_core_buttons(ui, groups, &mut cluster.cores);
         });
+        ui.add_space(3.0);
     }
 
     if !free_core_indexes.is_empty() {
         inset_frame(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 4.0;
             ui.label(RichText::new("Free Cores").strong());
 
             // Temporary CoreInfo for drawing buttons of free cores
@@ -266,7 +277,7 @@ fn draw_core_buttons_impl(
 ) {
     let colors = palette(ui);
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
         let all_selected = cores.iter().all(|c| groups.core_selection[c.index]);
         let all_tokens = core_tile_tokens(CoreType::Other, all_selected, colors);
         let mut all_label =
@@ -279,7 +290,7 @@ fn draw_core_buttons_impl(
             .truncate();
         let mut all_response = if let Some(tokens) = all_tokens {
             let response = ui.add_sized(
-                egui::vec2(46.0, 30.0),
+                egui::vec2(46.0, CORE_TILE_HEIGHT),
                 all_button
                     .fill(tokens.fill)
                     .stroke(egui::Stroke::new(1.0, tokens.border)),
@@ -288,7 +299,7 @@ fn draw_core_buttons_impl(
             paint_selected_tone_feedback(ui, &response, tokens);
             response
         } else {
-            let response = ui.add_sized(egui::vec2(46.0, 30.0), all_button);
+            let response = ui.add_sized(egui::vec2(46.0, CORE_TILE_HEIGHT), all_button);
             paint_focus_ring(ui, &response);
             response
         };
@@ -310,10 +321,7 @@ fn draw_core_buttons_impl(
 
         for core in cores.iter() {
             let is_selected = groups.core_selection[core.index];
-            let size = match core.core_type {
-                CoreType::Performance => egui::vec2(CORE_TILE_WIDTH, 36.0),
-                _ => egui::vec2(CORE_TILE_WIDTH, 30.0),
-            };
+            let size = egui::vec2(CORE_TILE_WIDTH, CORE_TILE_HEIGHT);
 
             let mut response = core_tile_button(
                 ui,
@@ -368,43 +376,44 @@ pub fn create_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     let mut create_clicked = false;
     let mut cancel_clicked = false;
 
-    CentralPanel::default().show(root_ui, |ui| {
-        ui.add_space(3.0);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.heading(RichText::new("Create affinity group").strong());
-                ui.label(
-                    RichText::new("Choose a name and the CPU threads this group may use")
-                        .small()
-                        .weak(),
-                );
+    CentralPanel::default()
+        .frame(content_frame(root_ui))
+        .show(root_ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.heading(RichText::new("Create affinity group").strong());
+                    ui.label(
+                        RichText::new("Choose a name and the CPU threads this group may use")
+                            .small()
+                            .weak(),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    if ghost_button(ui, egui::Button::new("Close"))
+                        .on_hover_text("Close")
+                        .clicked()
+                    {
+                        cancel_clicked = true;
+                    }
+                });
             });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                if ghost_button(ui, egui::Button::new("Close"))
-                    .on_hover_text("Close")
-                    .clicked()
-                {
-                    cancel_clicked = true;
-                }
-            });
-        });
-        ui.add_space(6.0);
+            ui.add_space(6.0);
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let mut schema = app.get_cpu_schema();
-                draw_group_form_ui(
-                    ui,
-                    &mut app.ui.group_form,
-                    &mut schema,
-                    false,
-                    &mut || create_clicked = true,
-                    &mut || cancel_clicked = true,
-                    None,
-                );
-            });
-    });
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let mut schema = app.get_cpu_schema();
+                    draw_group_form_ui(
+                        ui,
+                        &mut app.ui.group_form,
+                        &mut schema,
+                        false,
+                        &mut || create_clicked = true,
+                        &mut || cancel_clicked = true,
+                        None,
+                    );
+                });
+        });
 
     if create_clicked || cancel_clicked {
         if create_clicked {
@@ -417,66 +426,67 @@ pub fn create_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
 
 /// Group editing window.
 pub fn edit_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
-    CentralPanel::default().show(root_ui, |ui| {
-        let mut save_clicked = false;
-        let mut delete_clicked = false;
-        let mut cancel_clicked = false;
+    CentralPanel::default()
+        .frame(content_frame(root_ui))
+        .show(root_ui, |ui| {
+            let mut save_clicked = false;
+            let mut delete_clicked = false;
+            let mut cancel_clicked = false;
 
-        ui.add_space(3.0);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.heading(RichText::new("Edit affinity group").strong());
-                ui.label(
-                    RichText::new("Update group identity, actions, and CPU topology")
-                        .small()
-                        .weak(),
-                );
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.heading(RichText::new("Edit affinity group").strong());
+                    ui.label(
+                        RichText::new("Update group identity, actions, and CPU topology")
+                            .small()
+                            .weak(),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    if ghost_button(ui, egui::Button::new("Close"))
+                        .on_hover_text("Close")
+                        .clicked()
+                    {
+                        cancel_clicked = true;
+                    }
+                });
             });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                if ghost_button(ui, egui::Button::new("Close"))
-                    .on_hover_text("Close")
-                    .clicked()
-                {
-                    cancel_clicked = true;
-                }
-            });
+            ui.add_space(6.0);
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let mut schema = app.get_cpu_schema();
+                    draw_group_form_ui(
+                        ui,
+                        &mut app.ui.group_form,
+                        &mut schema,
+                        true,
+                        &mut || save_clicked = true,
+                        &mut || cancel_clicked = true,
+                        Some(&mut || delete_clicked = true),
+                    );
+                });
+
+            if save_clicked {
+                app.commit_group_form_session();
+            }
+
+            if delete_clicked {
+                app.delete_current_group_form_target();
+            }
+
+            if cancel_clicked {
+                app.cancel_group_form_session();
+            }
         });
-        ui.add_space(6.0);
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let mut schema = app.get_cpu_schema();
-                draw_group_form_ui(
-                    ui,
-                    &mut app.ui.group_form,
-                    &mut schema,
-                    true,
-                    &mut || save_clicked = true,
-                    &mut || cancel_clicked = true,
-                    Some(&mut || delete_clicked = true),
-                );
-            });
-
-        if save_clicked {
-            app.commit_group_form_session();
-        }
-
-        if delete_clicked {
-            app.delete_current_group_form_target();
-        }
-
-        if cancel_clicked {
-            app.cancel_group_form_session();
-        }
-    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         core_tile_text, core_tile_tokens, core_tile_widget_info, draw_core_buttons_for_test,
-        selected_core_tile_fill, CORE_TILE_WIDTH,
+        group_name_input, selected_core_tile_fill, CORE_TILE_WIDTH,
     };
     use crate::app::models::{CoreInfo, CoreType};
     use crate::app::shell::presenters::shared_elements::{
@@ -484,6 +494,39 @@ mod tests {
     };
     use crate::app::shell::GroupFormSession;
     use eframe::egui::{self, Pos2, RawInput, Rect, WidgetType};
+
+    #[test]
+    fn group_name_input_has_readable_centered_text() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(ui_font_definitions());
+        let mut name = String::from("New group");
+        let mut input_rect = Rect::NOTHING;
+        let output = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(470.0, 600.0))),
+                ..Default::default()
+            },
+            |ui| {
+                crate::app::shell::presenters::shared_elements::apply_widget_style(ui.style_mut());
+                input_rect = group_name_input(ui, &mut name).rect;
+            },
+        );
+        let text = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == name => Some(text),
+                _ => None,
+            })
+            .expect("group name text must be painted");
+        assert!(text.galley.job.sections[0].format.font_id.size >= 11.5);
+        let text_center = text.pos.y + text.galley.rect.center().y;
+        assert!(
+            (text_center - input_rect.center().y).abs() <= 1.0,
+            "text must have balanced vertical padding"
+        );
+        assert!(input_rect.right() <= 470.0);
+    }
 
     fn render_narrow_core_tiles(is_selected: bool) -> Vec<Rect> {
         let ctx = egui::Context::default();
@@ -632,11 +675,9 @@ mod tests {
             }
             assert_eq!(selected_rect, unselected_rect);
             let expected_size = if control_index == 0 {
-                egui::vec2(46.0, 30.0)
-            } else if (control_index - 1) % 4 == 0 {
-                egui::vec2(CORE_TILE_WIDTH, 36.0)
+                egui::vec2(46.0, 34.0)
             } else {
-                egui::vec2(CORE_TILE_WIDTH, 30.0)
+                egui::vec2(CORE_TILE_WIDTH, 34.0)
             };
             assert_eq!(unselected_rect.size(), expected_size);
         }

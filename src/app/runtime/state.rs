@@ -127,6 +127,14 @@ pub(crate) struct InstalledAppPickerSnapshot {
     pub rows: Vec<InstalledAppPickerRowSnapshot>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrackedProcessSnapshot {
+    pub group_name: String,
+    /// Executable filename reported by the OS, including its extension.
+    pub process_name: String,
+    pub pid: u32,
+}
+
 /// Facade combining persisted, transient UI, and runtime tracking state.
 pub struct AppState {
     pub(crate) persistent_state: Arc<RwLock<AppStateStorage>>,
@@ -634,9 +642,10 @@ impl AppState {
         );
     }
 
-    pub fn toggle_theme(&mut self) {
-        preferences::toggle_theme(&self.persistent_state);
-        let _ = self.persist_state();
+    pub fn set_theme_index(&mut self, theme_index: usize) {
+        if preferences::set_theme_index(&self.persistent_state, theme_index) {
+            let _ = self.persist_state();
+        }
     }
 
     pub fn toggle_process_monitoring(&mut self) {
@@ -1078,6 +1087,82 @@ impl AppState {
 
     pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
         self.runtime.get_running_app_pids(app_key)
+    }
+
+    pub fn start_minimized(&self) -> bool {
+        self.persistent_state
+            .read()
+            .map(|state| state.start_minimized)
+            .unwrap_or(false)
+    }
+
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    pub fn set_start_minimized(&mut self, enabled: bool) -> Result<(), String> {
+        let previous = {
+            let mut state = self
+                .persistent_state
+                .write()
+                .map_err(|_| "Could not update the startup preference.".to_string())?;
+            let previous = state.start_minimized;
+            if previous == enabled {
+                return Ok(());
+            }
+            state.start_minimized = enabled;
+            previous
+        };
+        if !self.persist_state() {
+            if let Ok(mut state) = self.persistent_state.write() {
+                state.start_minimized = previous;
+            }
+            return Err("Could not save Start minimized. Please try again.".to_string());
+        }
+        Ok(())
+    }
+
+    /// Revalidates only tracked instances; never performs a full process enumeration.
+    pub(crate) fn tracked_processes_snapshot(&mut self) -> Vec<TrackedProcessSnapshot> {
+        self.tracked_processes_snapshot_with_inspector(
+            crate::app::adapters::os::get_process_image_path_and_instance_token,
+        )
+    }
+
+    fn tracked_processes_snapshot_with_inspector(
+        &mut self,
+        mut inspect: impl FnMut(u32) -> Result<(PathBuf, u64), String>,
+    ) -> Vec<TrackedProcessSnapshot> {
+        let central = self.build_central_panel_snapshot();
+        let mut tracked = Vec::new();
+
+        for group in central.groups {
+            for program in group.programs {
+                let execution::RunningAppInstancesLookup::Found(mut instances) =
+                    self.runtime.lookup_running_app_instances(&program.app_key)
+                else {
+                    continue;
+                };
+                instances.sort_unstable();
+                for (pid, tracked_token) in instances {
+                    // Inspect after releasing the runtime lock. The name and token must
+                    // describe the same instance, not an unrelated process reusing its PID.
+                    let Ok((path, current_token)) = inspect(pid) else {
+                        continue;
+                    };
+                    if current_token != tracked_token {
+                        continue;
+                    }
+                    let Some(process_name) = path.file_name() else {
+                        continue;
+                    };
+                    tracked.push(TrackedProcessSnapshot {
+                        group_name: group.name.clone(),
+                        process_name: process_name.to_string_lossy().into_owned(),
+                        pid,
+                    });
+                }
+            }
+        }
+
+        tracked
     }
 
     pub fn open_installed_app_picker(&mut self, group_id: GroupId) {
@@ -1639,7 +1724,7 @@ impl AppState {
 mod tests {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use super::RuleShortcutDisabledReason;
-    use super::{AppState, MoveRuleToGroupOutcome, RunRuleOutcome};
+    use super::{AppState, MoveRuleToGroupOutcome, RunRuleOutcome, TrackedProcessSnapshot};
     use crate::app::features::diagnostics::crash_reports::CrashReportManager;
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use crate::app::features::diagnostics::windows_event_log::WindowsEventLogManager;
@@ -1740,6 +1825,7 @@ mod tests {
             theme_index: 0,
             process_monitoring_enabled: false,
             windows_event_log_diagnostics_enabled: true,
+            start_minimized: false,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,
@@ -2336,15 +2422,46 @@ mod tests {
     }
 
     #[test]
-    fn test_toggle_theme_and_monitoring_save_once() {
+    fn test_select_theme_saves_only_valid_changes_and_monitoring_still_saves() {
         let mut app = sample_state();
 
-        app.toggle_theme();
-        assert_eq!(app.get_theme_index(), 1);
+        app.set_theme_index(2);
+        assert_eq!(app.get_theme_index(), 2);
         assert_eq!(app.save_count(), 1);
+        app.set_theme_index(2);
+        app.set_theme_index(99);
+        assert_eq!(app.get_theme_index(), 2);
+        assert_eq!(app.save_count(), 1);
+        app.set_theme_index(0);
+        assert_eq!(app.get_theme_index(), 0);
+        assert_eq!(app.save_count(), 2);
 
         app.toggle_process_monitoring();
         assert!(app.is_process_monitoring_enabled());
+        assert_eq!(app.save_count(), 3);
+    }
+
+    #[test]
+    fn start_minimized_is_saved_and_missing_preference_defaults_to_visible() {
+        let mut app = sample_state();
+        assert!(!app.start_minimized());
+        app.set_start_minimized(true).unwrap();
+        assert!(app.start_minimized());
+        assert_eq!(app.save_count(), 1);
+        app.set_start_minimized(true).unwrap();
+        assert_eq!(app.save_count(), 1);
+        let json = serde_json::to_string(&*app.persistent_state.read().unwrap()).unwrap();
+        let restored: AppStateStorage = serde_json::from_str(&json).unwrap();
+        assert!(restored.start_minimized);
+        let mut old: serde_json::Value = serde_json::from_str(&json).unwrap();
+        old.as_object_mut().unwrap().remove("start_minimized");
+        assert!(
+            !serde_json::from_value::<AppStateStorage>(old)
+                .unwrap()
+                .start_minimized
+        );
+        app.set_start_minimized(false).unwrap();
+        assert!(!app.start_minimized());
         assert_eq!(app.save_count(), 2);
     }
 
@@ -2590,6 +2707,76 @@ mod tests {
         assert_eq!(snapshot.groups[0].programs[0].rule_id, rule_id(&app, 0, 0));
         assert_eq!(snapshot.groups[1].group_id, group_id(&app, 1));
         assert!(snapshot.groups[1].is_hidden);
+    }
+
+    #[test]
+    fn tracked_process_snapshot_lists_only_runtime_confirmed_pids() {
+        let mut app = sample_state();
+        let central = app.build_central_panel_snapshot();
+        let group = &central.groups[0];
+        let program = &group.programs[0];
+        assert!(app.runtime.add_running_app_with_token(
+            &program.app_key,
+            701,
+            1001,
+            group.group_id.clone(),
+            program.rule_id.clone(),
+        ));
+        for (pid, token) in [(702, 1002), (703, 1003), (704, 1004)] {
+            assert!(app
+                .runtime
+                .add_pid_to_existing_app_with_token(&program.app_key, pid, token));
+        }
+
+        assert_eq!(
+            app.tracked_processes_snapshot_with_inspector(|pid| match pid {
+                701 => Ok((PathBuf::from("apps/sample.exe"), 1001)),
+                // A live PID reused by an unrelated process is not a tracked instance.
+                702 => Ok((PathBuf::from("apps/unrelated.exe"), 9002)),
+                703 => Err("exited or inaccessible".to_string()),
+                704 => Ok((PathBuf::from("apps/helper.exe"), 1004)),
+                _ => panic!("must not inspect untracked processes"),
+            }),
+            vec![
+                TrackedProcessSnapshot {
+                    group_name: "Games".to_string(),
+                    process_name: "sample.exe".to_string(),
+                    pid: 701,
+                },
+                TrackedProcessSnapshot {
+                    group_name: "Games".to_string(),
+                    process_name: "helper.exe".to_string(),
+                    pid: 704,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn tracked_process_snapshot_skips_unverified_and_busy_runtime_entries() {
+        let mut app = sample_state();
+        let central = app.build_central_panel_snapshot();
+        let group = &central.groups[0];
+        let program = &group.programs[0];
+        assert!(app.runtime.add_running_app(
+            &program.app_key,
+            701,
+            group.group_id.clone(),
+            program.rule_id.clone(),
+        ));
+        assert!(app
+            .tracked_processes_snapshot_with_inspector(|_| {
+                panic!("a PID without an instance token must not be inspected")
+            })
+            .is_empty());
+
+        let handle = app.runtime.running_apps_handle();
+        let _writer = handle.try_write().unwrap();
+        assert!(app
+            .tracked_processes_snapshot_with_inspector(|_| {
+                panic!("a busy runtime must not fall back to unverified PIDs")
+            })
+            .is_empty());
     }
 
     #[test]

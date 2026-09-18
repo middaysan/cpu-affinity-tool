@@ -1,9 +1,16 @@
 use crate::app::models::AppStateStorage;
 use std::sync::{Arc, RwLock};
 
-pub fn toggle_theme(persistent_state: &Arc<RwLock<AppStateStorage>>) {
+pub fn set_theme_index(
+    persistent_state: &Arc<RwLock<AppStateStorage>>,
+    theme_index: usize,
+) -> bool {
     let mut state = persistent_state.write().unwrap();
-    state.theme_index = (state.theme_index + 1) % 3;
+    if theme_index > 2 || state.theme_index == theme_index {
+        return false;
+    }
+    state.theme_index = theme_index;
+    true
 }
 
 pub fn toggle_process_monitoring(persistent_state: &Arc<RwLock<AppStateStorage>>) {
@@ -27,7 +34,7 @@ pub fn set_windows_event_log_diagnostics(
 mod tests {
     #[cfg(any(target_os = "windows", feature = "windows"))]
     use super::set_windows_event_log_diagnostics;
-    use super::{toggle_process_monitoring, toggle_theme};
+    use super::{set_theme_index, toggle_process_monitoring};
     use crate::app::models::{AppStateStorage, CpuSchema};
     use std::sync::{Arc, RwLock};
 
@@ -42,6 +49,7 @@ mod tests {
             theme_index: 0,
             process_monitoring_enabled: false,
             windows_event_log_diagnostics_enabled: true,
+            start_minimized: false,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,
@@ -49,12 +57,13 @@ mod tests {
     }
 
     #[test]
-    fn test_toggle_theme_cycles_theme_index() {
+    fn test_theme_selection_preserves_index_contract() {
         let state = sample_state();
-        toggle_theme(&state);
+        assert!(set_theme_index(&state, 1));
         assert_eq!(state.read().unwrap().theme_index, 1);
-        toggle_theme(&state);
-        toggle_theme(&state);
+        assert!(set_theme_index(&state, 2));
+        assert_eq!(state.read().unwrap().theme_index, 2);
+        assert!(set_theme_index(&state, 0));
         assert_eq!(state.read().unwrap().theme_index, 0);
     }
 

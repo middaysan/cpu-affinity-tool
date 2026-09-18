@@ -14,6 +14,10 @@ pub fn get_cpu_model() -> String {
     os_api::OS::get_cpu_model()
 }
 
+pub fn get_process_image_path_and_instance_token(pid: u32) -> Result<(PathBuf, u64), String> {
+    os_api::OS::get_process_image_path_and_instance_token(pid)
+}
+
 pub fn supports_hide_to_tray() -> bool {
     os_api::OS::supports_hide_to_tray()
 }

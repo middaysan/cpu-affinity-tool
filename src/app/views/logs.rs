@@ -2,13 +2,15 @@
 use crate::app::features::diagnostics::windows_event_log::WindowsEventLogState;
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    glass_frame, palette, toned_button, ToneRole, BUTTON_FONT_SIZE,
+    content_frame, glass_frame, inset_frame, palette, toned_button, ToneRole, BUTTON_FONT_SIZE,
 };
 use eframe::egui::{self, CentralPanel, RichText, ScrollArea};
 
 pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     let mut clear_logs = false;
     let mut open_data_folder = false;
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    let mut open_crash_reports = false;
     let data_dir = app.active_data_dir();
     let hover = format!(
         "Open {} folder\n{}",
@@ -29,50 +31,52 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     let diagnostics_enabled = app.windows_event_log_diagnostics_enabled();
 
     CentralPanel::default()
-        .frame(
-            egui::Frame::NONE
-                .fill(root_ui.visuals().panel_fill)
-                .inner_margin(egui::Margin::symmetric(6, 4)),
-        )
+        .frame(content_frame(root_ui))
         .show(root_ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.heading(RichText::new("Activity").strong());
-                    ui.label(
-                        RichText::new("Recent launches, corrections, and monitoring events")
-                            .small()
-                            .weak(),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if toned_button(
-                        ui,
-                        egui::Button::new(RichText::new("Clear").size(BUTTON_FONT_SIZE)),
-                        ToneRole::Danger,
-                    )
-                    .clicked()
-                    {
-                        clear_logs = true;
-                    }
+            ui.heading(RichText::new("Activity").strong());
+            ui.label(
+                RichText::new("Recent launches, corrections, and monitoring events")
+                    .small()
+                    .weak(),
+            );
+            ui.add_space(5.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                {
+                    let mut enabled = diagnostics_enabled;
                     if ui
-                        .button(RichText::new("Data folder").size(BUTTON_FONT_SIZE))
-                        .on_hover_text(hover)
-                        .clicked()
+                        .checkbox(&mut enabled, "Event Log diagnostics")
+                        .on_hover_text("Read a bounded, local Application Error record lookup")
+                        .changed()
                     {
-                        open_data_folder = true;
+                        event_log_choice = Some(enabled);
                     }
-                    #[cfg(all(target_os = "windows", feature = "windows"))]
-                    {
-                        let mut enabled = diagnostics_enabled;
-                        if ui
-                            .checkbox(&mut enabled, "Event Log diagnostics")
-                            .on_hover_text("Read a bounded, local Application Error record lookup")
-                            .changed()
-                        {
-                            event_log_choice = Some(enabled);
-                        }
-                    }
-                });
+                }
+                if ui
+                    .button(RichText::new("Data folder").size(BUTTON_FONT_SIZE))
+                    .on_hover_text(hover)
+                    .clicked()
+                {
+                    open_data_folder = true;
+                }
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                if ui
+                    .button(RichText::new("Crash reports").size(BUTTON_FONT_SIZE))
+                    .on_hover_text(app.crash_report_state().indicator().label)
+                    .clicked()
+                {
+                    open_crash_reports = true;
+                }
+                if toned_button(
+                    ui,
+                    egui::Button::new(RichText::new("Clear").size(BUTTON_FONT_SIZE)),
+                    ToneRole::Danger,
+                )
+                .clicked()
+                {
+                    clear_logs = true;
+                }
             });
 
             ui.add_space(5.0);
@@ -92,6 +96,7 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
             draw_windows_event_log_status(ui, &windows_event_snapshot);
 
             glass_frame(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -122,6 +127,11 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
 
     if open_data_folder {
         app.open_active_data_dir();
+    }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    if open_crash_reports {
+        app.set_current_window(crate::app::shell::WindowRoute::CrashReports);
+        app.request_crash_report_refresh();
     }
     #[cfg(all(target_os = "windows", feature = "windows"))]
     if let Some(enabled) = event_log_choice {
@@ -196,14 +206,18 @@ fn diagnostic_card(ui: &mut egui::Ui, title: &str, detail: &str, stale: bool) {
     } else {
         palette(ui).text_primary
     };
-    egui::Frame::group(ui.style())
+    inset_frame(ui)
         .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
-            ui.label(RichText::new(title).strong().color(title_color));
-            ui.label(
-                RichText::new(detail)
-                    .small()
-                    .color(palette(ui).text_secondary),
+            ui.set_width(ui.available_width());
+            ui.add(egui::Label::new(RichText::new(title).strong().color(title_color)).wrap());
+            ui.add(
+                egui::Label::new(
+                    RichText::new(detail)
+                        .small()
+                        .color(palette(ui).text_secondary),
+                )
+                .wrap(),
             );
         });
 }
