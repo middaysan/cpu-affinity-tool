@@ -25,6 +25,8 @@ pub struct UiSession {
     pub crash_report_action_message: Option<String>,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     pub windows_event_log_action_error: Option<String>,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub startup_setting_error: Option<String>,
 }
 
 impl UiSession {
@@ -59,6 +61,8 @@ impl UiSession {
             crash_report_action_message: None,
             #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log_action_error: None,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            startup_setting_error: None,
         }
     }
 

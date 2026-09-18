@@ -1,4 +1,4 @@
-use crate::app::features::execution::MonitorEventReceiver;
+use crate::app::features::execution::{MonitorEventReceiver, MonitorWake};
 use crate::app::models::{AppRuntimeKey, AppStatus, ProcessInstanceToken, RunningApps};
 use crate::app::shared::ids::{GroupId, RuleId};
 use os_api::InstalledPackageRuntimeInfo;
@@ -13,6 +13,7 @@ pub struct ExecutionStore {
     running_apps: Arc<TokioRwLock<RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     running_apps_statuses: RunningAppStatusCache,
+    status_read_pending: bool,
 }
 
 #[derive(Debug, Default)]
@@ -24,6 +25,7 @@ pub(crate) struct InstalledPackageTrackingState {
 pub struct RuntimeRegistry {
     pub(crate) store: ExecutionStore,
     pub(crate) monitor_rx: Option<MonitorEventReceiver>,
+    wake: Option<MonitorWake>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +64,7 @@ impl ExecutionStore {
                 InstalledPackageTrackingState::default(),
             )),
             running_apps_statuses: Arc::new(RwLock::new(HashMap::new())),
+            status_read_pending: false,
         }
     }
 
@@ -182,6 +185,7 @@ impl ExecutionStore {
             statuses.insert(app_key.clone(), status);
             status
         } else {
+            self.status_read_pending = true;
             self.running_apps_statuses
                 .read()
                 .unwrap()
@@ -189,6 +193,10 @@ impl ExecutionStore {
                 .copied()
                 .unwrap_or(AppStatus::NotRunning)
         }
+    }
+
+    fn take_status_read_pending(&mut self) -> bool {
+        std::mem::take(&mut self.status_read_pending)
     }
 
     pub(crate) fn lookup_running_app_instances(
@@ -301,7 +309,20 @@ impl RuntimeRegistry {
         Self {
             store: ExecutionStore::new(),
             monitor_rx: None,
+            wake: None,
         }
+    }
+
+    pub(crate) fn set_wake(&mut self, wake: MonitorWake) {
+        self.wake = Some(wake);
+    }
+
+    pub(crate) fn wake_handle(&self) -> Option<MonitorWake> {
+        self.wake.clone()
+    }
+
+    pub(crate) fn take_status_read_pending(&mut self) -> bool {
+        self.store.take_status_read_pending()
     }
 
     pub fn running_apps_handle(&self) -> Arc<TokioRwLock<RunningApps>> {
@@ -491,6 +512,22 @@ mod tests {
 
     fn rule_id(value: usize) -> RuleId {
         RuleId(format!("rule-{value}"))
+    }
+
+    #[test]
+    fn contended_status_read_requests_retry_until_fresh_state_is_observed() {
+        let mut store = ExecutionStore::new();
+        let key = installed_app("App", "Pkg!App", PriorityClass::Normal).get_key();
+        assert_eq!(store.get_app_status_sync(&key), AppStatus::NotRunning);
+        let handle = store.running_apps_handle();
+        let mut writer = handle.try_write().unwrap();
+        writer.add_app(&key, 42, group_id(0), rule_id(0));
+        writer.apps.get_mut(&key).unwrap().settings_matched = true;
+        assert_eq!(store.get_app_status_sync(&key), AppStatus::NotRunning);
+        assert!(store.take_status_read_pending());
+        drop(writer);
+        assert_eq!(store.get_app_status_sync(&key), AppStatus::Running);
+        assert!(!store.take_status_read_pending());
     }
 
     #[test]

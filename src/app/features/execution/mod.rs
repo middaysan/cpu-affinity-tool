@@ -23,7 +23,7 @@ pub use store::RuntimeRegistry;
 pub(crate) use store::{
     cleanup_orphaned_package_owners, ensure_package_owner_claim,
     resolve_installed_package_runtime_info_cached, InstalledPackageTrackingState,
-    RunningAppStatusCache,
+    RunningAppInstancesLookup, RunningAppStatusCache,
 };
 pub use tracking::run_running_app_monitor;
 

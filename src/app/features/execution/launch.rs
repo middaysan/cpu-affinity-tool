@@ -1,7 +1,7 @@
 use crate::app::features::execution::store::{RunningAppInstancesLookup, RunningAppSettingsUpdate};
 use crate::app::features::execution::{
     ensure_package_owner_claim, is_excluded_installed_auto_process, InstalledPackageTrackingState,
-    RuntimeRegistry,
+    MonitorWake, RuntimeRegistry,
 };
 use crate::app::features::rules::RulesContext;
 use crate::app::models::{
@@ -32,6 +32,7 @@ struct PostLaunchCorrectionOutcome {
 }
 
 struct PostLaunchCorrectionRequest {
+    wake: Option<MonitorWake>,
     running_apps: Arc<TokioRwLock<crate::app::models::RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     app_key: AppRuntimeKey,
@@ -630,6 +631,7 @@ fn run_launch_decision<O: LaunchOs>(
 
             if let LaunchTarget::Installed { aumid } = &app_to_run.launch_target {
                 spawn_post_launch_correction(PostLaunchCorrectionRequest {
+                    wake: runtime.wake_handle(),
                     running_apps: runtime.running_apps_handle(),
                     installed_package_tracking: runtime.installed_package_tracking_handle(),
                     app_key,
@@ -714,11 +716,13 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                     saw_identity_seed = true;
                 }
 
+                let mut runtime_changed = false;
                 let mut attached_no_identity_pids = Vec::new();
                 let mut newly_attached_package_pids = 0usize;
                 if let Ok(mut apps) = request.running_apps.try_write() {
                     if !outcome.managed_pids.is_empty() && !apps.apps.contains_key(&request.app_key)
                     {
+                        runtime_changed = true;
                         apps.add_app(
                             &request.app_key,
                             outcome.managed_pids[0],
@@ -736,6 +740,8 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                     }
 
                     if let Some(app) = apps.apps.get_mut(&request.app_key) {
+                        runtime_changed |=
+                            app.group_id != request.group_id || app.rule_id != request.rule_id;
                         app.group_id = request.group_id.clone();
                         app.rule_id = request.rule_id.clone();
                     }
@@ -744,9 +750,11 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                         if let Some(app) = apps.apps.get_mut(&request.app_key) {
                             if !app.pids.contains(&pid) {
                                 app.pids.push(pid);
+                                runtime_changed = true;
                             }
                             if let Some(&token) = outcome.instance_tokens.get(&pid) {
-                                app.pid_instance_tokens.insert(pid, token);
+                                runtime_changed |=
+                                    app.pid_instance_tokens.insert(pid, token) != Some(token);
                             }
                         }
                     }
@@ -774,6 +782,7 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                                             app.pids.push(pid);
                                             app.pid_instance_tokens.insert(pid, instance_token);
                                             attached_no_identity_pids.push(pid);
+                                            runtime_changed = true;
                                             if let Ok(mask) =
                                                 affinity_mask_from_cores(&request.group_cores)
                                             {
@@ -790,6 +799,13 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                                 }
                             }
                         }
+                    }
+                }
+
+                // The writer guard is gone before the UI is woken.
+                if runtime_changed {
+                    if let Some(wake) = &request.wake {
+                        wake();
                     }
                 }
 
@@ -1178,6 +1194,7 @@ mod tests {
             theme_index: 0,
             process_monitoring_enabled: false,
             windows_event_log_diagnostics_enabled: true,
+            start_minimized: false,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,

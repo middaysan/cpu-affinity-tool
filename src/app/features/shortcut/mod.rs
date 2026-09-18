@@ -333,6 +333,7 @@ mod tests {
             theme_index: 0,
             process_monitoring_enabled: false,
             windows_event_log_diagnostics_enabled: true,
+            start_minimized: false,
             rule_identities: None,
             loaded_version: 7,
             pending_pre_v6_backup: false,

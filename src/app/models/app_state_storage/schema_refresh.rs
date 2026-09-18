@@ -16,8 +16,11 @@ pub(super) fn build_default_state() -> AppStateStorage {
         groups: Vec::new(),
         cpu_schema,
         theme_index: 0,
-        process_monitoring_enabled: false,
+        // A newly created state must begin protecting any rules the user adds.
+        // Existing state keeps its persisted preference during normal loading.
+        process_monitoring_enabled: true,
         windows_event_log_diagnostics_enabled: true,
+        start_minimized: false,
         rule_identities: None,
         loaded_version: CURRENT_APP_STATE_VERSION,
         pending_pre_v6_backup: false,
@@ -64,5 +67,15 @@ pub(super) fn refresh_migrated_schema(state: &mut AppStateStorage) {
         state.cpu_schema = preset;
     } else if state.cpu_schema.clusters.is_empty() || state.cpu_schema.model == "Generic CPU" {
         state.cpu_schema.model = cpu_model;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_default_state;
+
+    #[test]
+    fn default_state_enables_process_monitoring_for_a_first_run() {
+        assert!(build_default_state().process_monitoring_enabled);
     }
 }

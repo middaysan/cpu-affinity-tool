@@ -43,9 +43,22 @@ pub struct App {
     windows_event_log_first_frame_rendered: bool,
     closing_requested: bool,
     is_hidden: bool,
+    start_hidden_pending: bool,
 }
 
 const MONITOR_EVENT_GUI_DRAIN_LIMIT: usize = 64;
+
+fn should_start_minimized(enabled: bool, supported: bool, tray_available: bool) -> bool {
+    enabled && supported && tray_available
+}
+
+#[test]
+fn start_minimized_requires_a_reachable_tray() {
+    assert!(should_start_minimized(true, true, true));
+    assert!(!should_start_minimized(false, true, true));
+    assert!(!should_start_minimized(true, true, false));
+    assert!(!should_start_minimized(true, false, true));
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayCommandAction {
@@ -202,6 +215,8 @@ impl App {
 
         let mut state = AppState::new();
         let monitor_ctx = cc.egui_ctx.clone();
+        let wake: execution::MonitorWake = Arc::new(move || monitor_ctx.request_repaint());
+        state.runtime.set_wake(wake.clone());
         Self::bootstrap_runtime_without_startup(
             &mut state,
             move |running_apps, running_app_statuses, package_tracking, persistent_state| {
@@ -210,7 +225,7 @@ impl App {
                     running_app_statuses,
                     package_tracking,
                     persistent_state,
-                    Some(Arc::new(move || monitor_ctx.request_repaint())),
+                    Some(wake),
                 )
             },
         );
@@ -220,7 +235,7 @@ impl App {
 
         #[cfg(target_os = "windows")]
         {
-            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let Ok(handle) = cc.window_handle() {
                 let raw = handle.as_raw();
                 match raw {
@@ -259,6 +274,7 @@ impl App {
                 windows_event_log_first_frame_rendered: false,
                 closing_requested: false,
                 is_hidden: false,
+                start_hidden_pending: false,
             },
             Err(e) => {
                 state
@@ -279,6 +295,7 @@ impl App {
                     windows_event_log_first_frame_rendered: false,
                     closing_requested: false,
                     is_hidden: false,
+                    start_hidden_pending: false,
                 }
             }
         }
@@ -372,6 +389,11 @@ impl App {
             return;
         }
 
+        self.start_hidden_pending = should_start_minimized(
+            self.state.start_minimized(),
+            crate::app::adapters::os::supports_hide_to_tray(),
+            self.tray_runtime.is_some(),
+        );
         Self::handle_startup_intent(&mut self.state, startup_intent);
     }
 
@@ -409,6 +431,7 @@ impl App {
             windows_event_log_first_frame_rendered: false,
             closing_requested: false,
             is_hidden: false,
+            start_hidden_pending: false,
         }
     }
 }
@@ -466,6 +489,10 @@ impl eframe::App for App {
         }
 
         self.render_main_ui(ui);
+        if self.state.runtime.take_status_read_pending() {
+            // A cached status read must not consume the only runtime notification.
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+        }
         #[cfg(all(target_os = "windows", feature = "windows"))]
         {
             self.windows_event_log_first_frame_rendered = true;
@@ -615,6 +642,7 @@ mod tests {
                 theme_index: 0,
                 process_monitoring_enabled: false,
                 windows_event_log_diagnostics_enabled: true,
+                start_minimized: false,
                 rule_identities: None,
                 loaded_version: 5,
                 pending_pre_v6_backup: false,
@@ -766,6 +794,7 @@ mod tests {
                 theme_index: 0,
                 process_monitoring_enabled: false,
                 windows_event_log_diagnostics_enabled: true,
+                start_minimized: false,
                 rule_identities: None,
                 loaded_version: 5,
                 pending_pre_v6_backup: false,
@@ -1168,6 +1197,11 @@ impl App {
     }
 
     fn should_render(&mut self, ctx: &egui::Context) -> bool {
+        if self.start_hidden_pending {
+            self.start_hidden_pending = false;
+            self.hide_to_tray(ctx);
+            return false;
+        }
         if self.is_hidden {
             ctx.request_repaint_after(Duration::from_millis(250));
             return false;
@@ -1201,6 +1235,7 @@ impl App {
     }
 
     fn show_from_tray(&mut self, ctx: &egui::Context) {
+        self.start_hidden_pending = false;
         self.is_hidden = false;
         #[cfg(all(target_os = "windows", feature = "windows"))]
         self.state.request_crash_report_refresh();

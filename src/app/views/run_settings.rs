@@ -1,10 +1,14 @@
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    danger_color, ghost_button, glass_frame, success_color, toned_button, ToneRole,
+    content_frame, danger_color, form_text_edit, ghost_button, glass_frame, success_color,
+    toned_button, ToneRole,
 };
 use crate::app::shell::sessions::RuleShortcutResult;
 use crate::app::shell::{GroupRoute, WindowRoute};
-use eframe::egui::{self, Align, CentralPanel, ComboBox, Layout, RichText, Vec2};
+use eframe::egui::text::LayoutJob;
+use eframe::egui::{
+    self, Align, CentralPanel, ComboBox, FontId, Label, Layout, RichText, TextFormat, Vec2,
+};
 use os_api::PriorityClass;
 use std::path::PathBuf;
 
@@ -46,6 +50,22 @@ fn shortcut_message_for_current_frame(
     }
 }
 
+fn aumid_layout_job(aumid: &str, max_width: f32, color: egui::Color32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = max_width;
+    job.wrap.break_anywhere = true;
+    job.append(
+        aumid,
+        0.0,
+        TextFormat {
+            font_id: FontId::monospace(10.0),
+            color,
+            ..Default::default()
+        },
+    );
+    job
+}
+
 pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     if app.ui.app_edit_state.target.is_none() {
         app.set_current_window(WindowRoute::Groups(GroupRoute::List));
@@ -64,8 +84,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     let shortcut_status = app.current_app_edit_shortcut_status();
     let shortcut_result = app.ui.app_edit_state.shortcut_result.clone();
 
-    CentralPanel::default().show(root_ui, |ui| {
-        ui.add_space(3.0);
+    CentralPanel::default().frame(content_frame(root_ui)).show(root_ui, |ui| {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.heading(RichText::new("Application rule").strong());
@@ -86,20 +105,23 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
         });
         ui.add_space(6.0);
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             glass_frame(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().text_edit_width = (ui.available_width() - 120.0).clamp(80.0, 360.0);
                 let selected_app = app
                     .ui
                     .app_edit_state
                     .current_edit
                     .as_mut()
                     .expect("edit_app_clone must be initialized");
+                let installed_aumid = selected_app.installed_aumid().map(str::to_owned);
 
                 egui::Grid::new("app_settings_grid")
                     .spacing(Vec2::new(8.0, 6.0))
                     .show(ui, |ui| {
                         ui.label(RichText::new("App Name:").strong());
-                        if ui.text_edit_singleline(&mut selected_app.name).changed() {
+                        if ui.add(form_text_edit(&mut selected_app.name)).changed() {
                             draft_changed = true;
                         }
                         ui.end_row();
@@ -111,7 +133,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                                     .bin_path()
                                     .map(|path| path.to_string_lossy().to_string())
                                     .unwrap_or_default();
-                                if ui.text_edit_singleline(&mut bin_path_str).changed() {
+                                if ui.add(form_text_edit(&mut bin_path_str).desired_width((ui.available_width() - 58.0).max(60.0))).changed() {
                                     if let Some(bin_path) = selected_app.bin_path_mut() {
                                         *bin_path = PathBuf::from(bin_path_str);
                                         draft_changed = true;
@@ -135,18 +157,6 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                         } else {
                             ui.label(RichText::new("Installed App:").strong());
                             ui.label(&selected_app.name);
-                            ui.end_row();
-
-                            ui.label(RichText::new("AUMID:").strong());
-                            ui.label(
-                                RichText::new(
-                                    selected_app
-                                        .installed_aumid()
-                                        .unwrap_or("Unknown installed app"),
-                                )
-                                .small()
-                                .monospace(),
-                            );
                             ui.end_row();
                         }
 
@@ -200,6 +210,16 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                         ui.end_row();
                     });
 
+                if let Some(aumid) = installed_aumid {
+                    ui.add_space(5.0);
+                    ui.label(RichText::new("AUMID:").strong());
+                    ui.add(Label::new(aumid_layout_job(
+                        &aumid,
+                        ui.available_width(),
+                        ui.visuals().text_color(),
+                    )));
+                }
+
                 ui.add_space(6.0);
                 if ui
                     .checkbox(
@@ -225,7 +245,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                         for (i, arg) in selected_app.args.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
                                 ui.label(format!("{}:", i + 1));
-                                if ui.text_edit_singleline(arg).changed() {
+                                if ui.add(form_text_edit(arg).desired_width((ui.available_width() - 65.0).clamp(60.0, 360.0))).changed() {
                                     draft_changed = true;
                                 }
                                 if ui.button("Remove").clicked() {
@@ -285,7 +305,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                     for (i, proc_name) in selected_app.additional_processes.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(format!("{}:", i + 1));
-                            if ui.text_edit_singleline(proc_name).changed() {
+                            if ui.add(form_text_edit(proc_name).desired_width((ui.available_width() - 65.0).clamp(60.0, 360.0))).changed() {
                                 draft_changed = true;
                             }
                             if ui.button("Remove").clicked() {
@@ -409,7 +429,11 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
 
 #[cfg(test)]
 mod tests {
-    use super::{shortcut_button_enabled_for_current_frame, shortcut_message_for_current_frame};
+    use super::{
+        aumid_layout_job, shortcut_button_enabled_for_current_frame,
+        shortcut_message_for_current_frame,
+    };
+    use eframe::egui::Color32;
 
     #[test]
     fn test_shortcut_status_for_current_frame_disables_same_frame_dirty_edit() {
@@ -424,5 +448,12 @@ mod tests {
     fn test_shortcut_status_for_current_frame_keeps_hidden_status_hidden() {
         assert!(!shortcut_button_enabled_for_current_frame(false, true));
         assert_eq!(shortcut_message_for_current_frame(None, false, true), None);
+    }
+
+    #[test]
+    fn long_aumid_layout_wraps_inside_its_value_column() {
+        let job = aumid_layout_job("Publisher.App_123!Main", 240.0, Color32::WHITE);
+        assert_eq!(job.wrap.max_width, 240.0);
+        assert!(job.wrap.break_anywhere);
     }
 }

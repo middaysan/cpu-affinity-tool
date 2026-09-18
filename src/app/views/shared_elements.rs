@@ -2,6 +2,7 @@ use eframe::egui::{self, Color32, Frame, Shadow, Stroke};
 use std::sync::Arc;
 
 pub const BUTTON_FONT_SIZE: f32 = 10.5;
+pub const FORM_INPUT_HEIGHT: f32 = 28.0;
 pub const INTER_REGULAR_FONT_NAME: &str = "Inter Regular";
 pub const INTER_MEDIUM_FONT_NAME: &str = "Inter Medium";
 pub const INTER_SEMIBOLD_FONT_NAME: &str = "Inter Semibold";
@@ -299,6 +300,20 @@ pub fn apply_widget_style(style: &mut egui::Style) {
     style.spacing.item_spacing = egui::vec2(4.0, 1.0);
     style.spacing.button_padding = egui::vec2(6.0, 2.0);
     style.spacing.interact_size.y = 21.0;
+}
+
+pub fn content_frame(ui: &egui::Ui) -> Frame {
+    Frame::NONE
+        .fill(ui.visuals().panel_fill)
+        .inner_margin(egui::Margin::symmetric(8, 6))
+}
+
+pub fn form_text_edit(text: &mut String) -> egui::TextEdit<'_> {
+    egui::TextEdit::singleline(text)
+        .font(egui::FontId::proportional(11.5))
+        .margin(egui::Margin::symmetric(6, 5))
+        .vertical_align(egui::Align::Center)
+        .min_size(egui::vec2(0.0, FORM_INPUT_HEIGHT))
 }
 
 pub fn apply_widget_visuals(visuals: &mut egui::Visuals) {

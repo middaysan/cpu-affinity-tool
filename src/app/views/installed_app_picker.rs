@@ -6,6 +6,7 @@ use eframe::egui::{
     self, Align, CentralPanel, Context, Key, Layout, RichText, ScrollArea, Stroke, TextEdit,
 };
 
+#[derive(Debug, PartialEq, Eq)]
 enum InstalledAppPickerAction {
     Close,
     SetQuery(String),
@@ -14,6 +15,13 @@ enum InstalledAppPickerAction {
     SelectNext,
     SelectPrevious,
     ConfirmSelection,
+}
+
+fn left_click_actions(entry_index: usize) -> [InstalledAppPickerAction; 2] {
+    [
+        InstalledAppPickerAction::SelectEntry(entry_index),
+        InstalledAppPickerAction::ConfirmSelection,
+    ]
 }
 
 #[cfg(target_os = "windows")]
@@ -164,11 +172,7 @@ pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
                     });
 
                     if response.clicked() {
-                        actions.push(InstalledAppPickerAction::SelectEntry(row.entry_index));
-                    }
-                    if response.double_clicked() {
-                        actions.push(InstalledAppPickerAction::SelectEntry(row.entry_index));
-                        actions.push(InstalledAppPickerAction::ConfirmSelection);
+                        actions.extend(left_click_actions(row.entry_index));
                     }
 
                     ui.add_space(1.0);
@@ -234,5 +238,21 @@ fn execute_actions(app: &mut AppState, actions: Vec<InstalledAppPickerAction>) {
                 let _ = app.confirm_selected_installed_app();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{left_click_actions, InstalledAppPickerAction};
+
+    #[test]
+    fn primary_click_selects_and_confirms_the_installed_app() {
+        assert_eq!(
+            left_click_actions(7),
+            [
+                InstalledAppPickerAction::SelectEntry(7),
+                InstalledAppPickerAction::ConfirmSelection,
+            ]
+        );
     }
 }

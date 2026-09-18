@@ -292,8 +292,8 @@ where
 {
     if let Err(err) = platform.resolve_endpoint() {
         return match startup_intent {
-            StartupIntent::NormalGui => PreparedStartupForwarding {
-                action: EntryAction::RunGui(StartupIntent::NormalGui),
+            intent @ StartupIntent::NormalGui => PreparedStartupForwarding {
+                action: EntryAction::RunGui(intent),
                 forwarding_runtime: None,
                 forwarding_warning: Some(err),
             },

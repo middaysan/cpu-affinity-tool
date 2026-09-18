@@ -1,6 +1,8 @@
 mod service;
 
-use crate::app::models::{AppStateStorage, AppToRun};
+use crate::app::models::AppStateStorage;
+#[cfg(test)]
+use crate::app::models::AppToRun;
 use crate::app::shared::ids::{GroupId, RuleId};
 use serde::{Deserialize, Serialize};
 
@@ -25,12 +27,14 @@ pub struct PersistedGroupIdentity {
     pub rule_ids: Vec<RuleId>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuleConfig {
     pub id: RuleId,
     pub app: AppToRun,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupConfig {
     pub id: GroupId,
@@ -41,6 +45,7 @@ pub struct GroupConfig {
     pub rules: Vec<RuleConfig>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RulesSnapshot {
     pub groups: Vec<GroupConfig>,
@@ -140,6 +145,7 @@ impl RulesContext {
         }
     }
 
+    #[cfg(test)]
     pub fn snapshot(&self, storage: &AppStateStorage) -> RulesSnapshot {
         let groups = storage
             .groups
@@ -370,6 +376,7 @@ mod tests {
             theme_index: 0,
             process_monitoring_enabled: false,
             windows_event_log_diagnostics_enabled: true,
+            start_minimized: false,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,

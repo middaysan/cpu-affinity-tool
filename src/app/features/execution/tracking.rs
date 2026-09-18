@@ -146,7 +146,7 @@ pub async fn run_running_app_monitor(
             collect_configured_programs(&state)
         };
 
-        let snapshot = match os.snapshot_process_tree() {
+        let snapshot = match snapshot_for_configuration(&configured_programs, &os) {
             Ok(snapshot) => snapshot,
             Err(_) => continue,
         };
@@ -173,6 +173,8 @@ pub async fn run_running_app_monitor(
                 &os,
             );
 
+            drop(apps);
+
             for message in outcome.notifications {
                 monitor_tx.try_send(ShellEvent::Monitor(message));
             }
@@ -184,20 +186,36 @@ pub async fn run_running_app_monitor(
     }
 }
 
+fn snapshot_for_configuration<O: RunningAppsOs>(
+    configured: &[ConfiguredProgramSnapshot],
+    os: &O,
+) -> Result<ProcessSnapshot, String> {
+    if configured.is_empty() {
+        // The normal reconciliation path must still remove stale tracking and owner claims.
+        Ok(ProcessSnapshot::default())
+    } else {
+        os.snapshot_process_tree()
+    }
+}
+
 fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgramSnapshot> {
     let mut programs = Vec::new();
     let rules = RulesContext::from_storage(state);
-    let snapshot = rules.snapshot(state);
-
-    for group in snapshot.groups {
-        for program in group.rules {
-            let matcher = match &program.app.launch_target {
+    for (group_index, group) in state.groups.iter().enumerate() {
+        let group_id = rules
+            .group_id_for_index(group_index)
+            .expect("group identity");
+        for (rule_index, app) in group.programs.iter().enumerate() {
+            let rule_id = rules
+                .rule_id_for_index(group_index, rule_index)
+                .expect("rule identity");
+            let tracked_names = collect_tracked_process_names(app);
+            let matcher = match &app.launch_target {
                 LaunchTarget::Path { bin_path, .. } => {
-                    let tracked_names = collect_tracked_process_names(&program.app);
                     if tracked_names.is_empty() {
                         continue;
                     }
-                    let primary_name = program.app.primary_process_name_normalized();
+                    let primary_name = app.primary_process_name_normalized();
                     let fallback_names = tracked_names
                         .iter()
                         .filter(|name| Some(*name) != primary_name.as_ref())
@@ -217,13 +235,13 @@ fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgram
             };
 
             programs.push(ConfiguredProgramSnapshot {
-                key: program.app.get_key(),
-                display_name: program.app.name.clone(),
-                additional_processes_normalized: collect_tracked_process_names(&program.app),
+                key: app.get_key(),
+                display_name: app.name.clone(),
+                additional_processes_normalized: tracked_names,
                 matcher,
-                group_id: group.id.clone(),
-                rule_id: program.id,
-                manage_descendants: program.app.manage_descendants,
+                group_id: group_id.clone(),
+                rule_id,
+                manage_descendants: app.manage_descendants,
             });
         }
     }
@@ -947,6 +965,7 @@ mod tests {
             theme_index: 0,
             process_monitoring_enabled: false,
             windows_event_log_diagnostics_enabled: true,
+            start_minimized: false,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,
@@ -978,6 +997,7 @@ mod tests {
             theme_index: 0,
             process_monitoring_enabled: false,
             windows_event_log_diagnostics_enabled: true,
+            start_minimized: false,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,
@@ -1014,6 +1034,7 @@ mod tests {
             theme_index: 0,
             process_monitoring_enabled: false,
             windows_event_log_diagnostics_enabled: true,
+            start_minimized: false,
             rule_identities: None,
             loaded_version: 5,
             pending_pre_v6_backup: false,
@@ -1027,7 +1048,7 @@ mod tests {
     ) -> super::RunningAppsIterationOutcome {
         let installed_package_tracking =
             Arc::new(RwLock::new(InstalledPackageTrackingState::default()));
-        let snapshot = os.snapshot.clone().unwrap();
+        let snapshot = super::snapshot_for_configuration(&configured, os).unwrap();
         let name_to_pids = build_name_to_pids(&snapshot);
         let aumid_to_seed_pids = if configured
             .iter()
@@ -1046,6 +1067,27 @@ mod tests {
             &installed_package_tracking,
             os,
         )
+    }
+
+    #[test]
+    fn empty_configuration_does_not_query_the_process_table() {
+        let os = FakeRunningAppsOs {
+            snapshot: Err("process enumeration must not run".into()),
+            ..Default::default()
+        };
+        let snapshot = super::snapshot_for_configuration(&[], &os).unwrap();
+        assert!(snapshot.names.is_empty());
+        assert!(snapshot.children_of.is_empty());
+    }
+
+    #[test]
+    fn configured_rules_still_require_a_fresh_process_table() {
+        let configured = collect_configured_programs(&sample_path_program_state());
+        let os = FakeRunningAppsOs {
+            snapshot: Err("enumeration failed".into()),
+            ..Default::default()
+        };
+        assert!(super::snapshot_for_configuration(&configured, &os).is_err());
     }
 
     fn group_id(value: usize) -> GroupId {
@@ -1651,10 +1693,7 @@ mod tests {
         let key = state.groups[0].programs[0].get_key();
         apps.add_app(&key, 10, group_id(0), rule_id(0));
         let os = FakeRunningAppsOs {
-            snapshot: Ok(ProcessSnapshot {
-                children_of: HashMap::new(),
-                names: HashMap::new(),
-            }),
+            snapshot: Err("empty configuration must not enumerate processes".into()),
             image_paths: HashMap::new(),
             live_pids: HashSet::new(),
             ..Default::default()
