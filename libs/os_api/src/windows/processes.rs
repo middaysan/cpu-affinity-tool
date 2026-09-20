@@ -369,9 +369,31 @@ impl OS {
 
     /// Reads the current Toolhelp parent relation for one PID.
     pub fn get_process_parent_pid(pid: u32) -> Result<Option<u32>, String> {
-        snapshot_process_tree_internal()
-            .map(|tree| tree.parent_of.get(&pid).copied())
-            .map_err(|error| format!("Failed to inspect parent process for {pid}: {error}"))
+        if pid == 0 {
+            return Ok(None);
+        }
+        // Keep a fresh snapshot for every identity validation, but avoid building
+        // three whole-system maps and decoding names for a single parent lookup.
+        (|| -> Result<Option<u32>, OsError> {
+            unsafe {
+                let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
+                let _guard = HandleGuard(snapshot);
+                let mut entry = PROCESSENTRY32W {
+                    dwSize: size_of::<PROCESSENTRY32W>() as u32,
+                    ..Default::default()
+                };
+                Process32FirstW(snapshot, &mut entry)?;
+                loop {
+                    if entry.th32ProcessID == pid {
+                        return Ok(Some(entry.th32ParentProcessID));
+                    }
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        return Ok(None);
+                    }
+                }
+            }
+        })()
+        .map_err(|error| format!("Failed to inspect parent process for {pid}: {error}"))
     }
 }
 
@@ -379,6 +401,17 @@ impl OS {
 mod tests {
     use super::{OS, ProcessTree};
     use std::collections::HashMap;
+
+    #[test]
+    fn targeted_parent_lookup_matches_process_tree_for_current_process() {
+        let pid = std::process::id();
+        let tree = OS::snapshot_process_tree().unwrap();
+        assert_eq!(
+            OS::get_process_parent_pid(pid).unwrap(),
+            tree.parent_of.get(&pid).copied()
+        );
+        assert_eq!(OS::get_process_parent_pid(0).unwrap(), None);
+    }
 
     #[test]
     fn test_find_all_descendants_with_tree_preserves_no_duplicate_semantics() {

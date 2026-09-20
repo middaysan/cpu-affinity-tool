@@ -50,6 +50,9 @@ pub struct AppStateStorage {
     /// Flag indicating whether process monitoring is enabled
     #[serde(default)]
     pub process_monitoring_enabled: bool,
+    /// Start in the tray on Windows when a usable tray icon is available.
+    #[serde(default)]
+    pub start_minimized: bool,
     /// Enables the Windows-only, read-only Application Event Log diagnostic lookup.
     #[serde(default = "default_windows_event_log_diagnostics_enabled")]
     pub windows_event_log_diagnostics_enabled: bool,
