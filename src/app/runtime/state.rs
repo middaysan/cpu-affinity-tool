@@ -1131,35 +1131,50 @@ impl AppState {
         mut inspect: impl FnMut(u32) -> Result<(PathBuf, u64), String>,
     ) -> Vec<TrackedProcessSnapshot> {
         let central = self.build_central_panel_snapshot();
-        let mut tracked = Vec::new();
-
-        for group in central.groups {
-            for program in group.programs {
-                let execution::RunningAppInstancesLookup::Found(mut instances) =
-                    self.runtime.lookup_running_app_instances(&program.app_key)
-                else {
-                    continue;
-                };
-                instances.sort_unstable();
-                for (pid, tracked_token) in instances {
-                    // Inspect after releasing the runtime lock. The name and token must
-                    // describe the same instance, not an unrelated process reusing its PID.
-                    let Ok((path, current_token)) = inspect(pid) else {
+        let handle = self.runtime.running_apps_handle();
+        let instances = {
+            let Ok(running) = handle.try_read() else {
+                return Vec::new();
+            };
+            let mut instances = Vec::new();
+            for group in central.groups {
+                for program in group.programs {
+                    let Some(app) = running.apps.get(&program.app_key) else {
                         continue;
                     };
-                    if current_token != tracked_token {
+                    if app.group_id != group.group_id || app.rule_id != program.rule_id {
                         continue;
                     }
-                    let Some(process_name) = path.file_name() else {
-                        continue;
-                    };
-                    tracked.push(TrackedProcessSnapshot {
-                        group_name: group.name.clone(),
-                        process_name: process_name.to_string_lossy().into_owned(),
-                        pid,
-                    });
+                    let mut pids = app.pids.clone();
+                    pids.sort_unstable();
+                    pids.dedup();
+                    for pid in pids {
+                        if let Some(&token) = app.pid_instance_tokens.get(&pid) {
+                            instances.push((group.name.clone(), pid, token));
+                        }
+                    }
                 }
             }
+            instances
+        };
+        let mut tracked = Vec::new();
+        for (group_name, pid, tracked_token) in instances {
+            // Inspect after releasing the runtime lock. The name and token must
+            // describe the same instance, not an unrelated process reusing its PID.
+            let Ok((path, current_token)) = inspect(pid) else {
+                continue;
+            };
+            if current_token != tracked_token {
+                continue;
+            }
+            let Some(process_name) = path.file_name() else {
+                continue;
+            };
+            tracked.push(TrackedProcessSnapshot {
+                group_name,
+                process_name: process_name.to_string_lossy().into_owned(),
+                pid,
+            });
         }
 
         tracked
@@ -2750,6 +2765,55 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn tracked_process_snapshot_uses_only_the_runtime_rule_owner() {
+        let mut app = sample_state();
+        {
+            let mut storage = app.persistent_state.write().unwrap();
+            let mut second = storage.groups[0].clone();
+            second.name = "Background".into();
+            let duplicate = second.programs[0].clone();
+            second.programs.push(duplicate);
+            storage.groups.push(second);
+        }
+        let central = app.build_central_panel_snapshot();
+        let owner_group = &central.groups[1];
+        // Own the second duplicate rule, not the first matching configured key.
+        let owner = &owner_group.programs[1];
+        assert!(app.runtime.add_running_app_with_token(
+            &owner.app_key,
+            701,
+            1001,
+            owner_group.group_id.clone(),
+            owner.rule_id.clone(),
+        ));
+        let mut inspections = 0;
+        let rows = app.tracked_processes_snapshot_with_inspector(|pid| {
+            inspections += 1;
+            assert_eq!(pid, 701);
+            Ok((PathBuf::from("sample.exe"), 1001))
+        });
+        assert_eq!(
+            rows,
+            vec![TrackedProcessSnapshot {
+                group_name: "Background".into(),
+                process_name: "sample.exe".into(),
+                pid: 701,
+            }]
+        );
+        assert_eq!(inspections, 1);
+
+        // A removed owner must not be relabeled as another rule with the same key.
+        app.persistent_state.write().unwrap().groups[1]
+            .programs
+            .pop();
+        assert!(app
+            .tracked_processes_snapshot_with_inspector(|_| {
+                panic!("stale runtime ownership must not be inspected")
+            })
+            .is_empty());
     }
 
     #[test]
