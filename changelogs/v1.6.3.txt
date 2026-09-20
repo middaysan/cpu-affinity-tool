@@ -1,0 +1,34 @@
+## [1.6.3] - 2026-09-20
+
+### Summary
+- A clearer monitoring footer, simpler application settings, first-run fixes, and reduced dependency and allocation overhead.
+
+### Added
+- Application Settings with explicit System, Light, and Dark theme selection.
+- **Start minimized** on Windows: the next launch starts in the tray when a tray icon is available. Disabled by default; the window remains accessible if tray initialization fails. This is not Windows login autostart.
+- Hover over the monitoring status to see verified process filenames (including `.exe`), PIDs, and their owning groups. The list supports scrolling and checks process creation tokens before showing a PID.
+
+### Changed
+- Place the pause/resume icon to the left of the monitoring status; remove the separate process-list button.
+- Move **Crash reports** access into **Activity**.
+- Enable monitoring for newly created configurations; preserve existing saved monitoring preferences.
+- Improve input typography, spacing, group editing, Activity controls, and long-value wrapping.
+- Remove unused dependency features and reduce cloning and temporary allocations in monitoring and rendering. Empty eligible configurations skip process enumeration; targeted Windows parent lookup avoids whole-system maps.
+- Preserve GUI wake notifications, process-instance validation, and the hidden-window repaint fallback. No measured RAM, CPU, or latency improvement is claimed.
+
+### Fixed
+- Confirm installed-app selection with a primary mouse click, not only Enter.
+- Keep long installed-app identifiers inside the fixed-width form without overlapping adjacent controls.
+- Keep tracked-process lists bounded and readable; omit inaccessible or reused PIDs and show each tracked rule only under its actual runtime owner, even when duplicate executable rules exist.
+
+### Compatibility and known issues
+- Existing configuration locations and schema v10 are unchanged. Start minimized is an additive preference and defaults to off when absent.
+- Windows administrator/UAC requirements remain unchanged, including when Start minimized is enabled. Windows login autostart is not included.
+- Windows-protected processes may reject affinity or priority changes even with administrator rights; no protection bypass is provided.
+- Stable artifacts are Windows x64 only. Linux remains a separate desktop beta track without Windows tray or focus parity.
+- The portable executable is unsigned. No installer or package-manager distribution is included.
+
+### Download
+- Download **cpu-affinity-tool.exe** from this release. Close the previous instance, including its tray icon, before replacing it.
+- **cpu_affinity_tool.pdb** contains matching debugging symbols for support and is not required for normal use.
+- [Full changes since v1.6.1](https://github.com/middaysan/cpu-affinity-tool/compare/v1.6.1...v1.6.3)

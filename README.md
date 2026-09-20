@@ -47,7 +47,9 @@ This is a control tool, not a promise of better FPS.
 - Inspect launches, corrections, and monitoring events in **Activity**
 - Review locally saved **Crash reports** after a main application panic or native UI-loop error; reports are never uploaded automatically
 - Open the active data folder directly from **Activity**
-- Switch between light, dark, and system theme modes
+- Choose light, dark, or system theme in **Settings**
+- Enable **Start minimized** in Settings to open the next Windows session in the tray (not Windows login autostart)
+- Hover the monitor status to inspect verified process filenames, PIDs, and owning groups
 
 ## When it helps
 
@@ -73,9 +75,9 @@ For a longer explanation, see [docs/why.md](docs/why.md).
 4. Add an app with **Add file...**, **Add installed...**, or drag and drop.
 5. Set the desired affinity and priority, then save the rule.
 6. On Windows, optionally open the saved rule settings and create a desktop shortcut for quick shortcut launch.
-7. Launch the app from the tool or shortcut and keep **Monitoring active** if you want settings re-applied automatically. New rules manage their verified root process by default; enable descendant management only when you intentionally want child processes to receive the same settings. Use **Pause monitor** when you want to suspend corrections.
+7. Launch the app from the tool or shortcut and keep **Monitoring active** if you want settings re-applied automatically. New rules manage their verified root process by default; enable descendant management only when you intentionally want child processes to receive the same settings. Use the pause/resume icon to the left of the status when you want to suspend or resume corrections. Monitoring is enabled for a new configuration; existing saved preferences are preserved.
 
-On Windows, if CPU Affinity Tool closes because of a main application panic or its native UI loop returns an error, use the small report button in the top-right header to open **Crash reports**. After the next completed background scan, **Activity** retains a summary of the newest validated report even if normal activity is cleared. The app normally keeps the newest 20 complete reports, up to 256 KiB each, under the active data directory. If repeated startup failures prevent normal background cleanup, each writer stops after it observes 64 managed files instead of adding synchronous cleanup to application startup; simultaneous GUI processes can exceed that safety ceiling slightly. **Show in Explorer** is available only through a verified non-elevated Windows shell; otherwise the path remains copyable and no editor is launched. Review a report before sharing it because it may contain local paths or system details; make and redact a copy if needed. Forced termination, native faults, out-of-memory termination, and background task panics may not produce a report. For a native crash that does not create one of these reports, see the manual, opt-in [Windows LocalDumps guide](docs/windows-native-crash-diagnostics.md).
+On Windows, if CPU Affinity Tool closes because of a main application panic or its native UI loop returns an error, open **Activity** and select **Crash reports**. After the next completed background scan, **Activity** retains a summary of the newest validated report even if normal activity is cleared. The app normally keeps the newest 20 complete reports, up to 256 KiB each, under the active data directory. If repeated startup failures prevent normal background cleanup, each writer stops after it observes 64 managed files instead of adding synchronous cleanup to application startup; simultaneous GUI processes can exceed that safety ceiling slightly. **Show in Explorer** is available only through a verified non-elevated Windows shell; otherwise the path remains copyable and no editor is launched. Review a report before sharing it because it may contain local paths or system details; make and redact a copy if needed. Forced termination, native faults, out-of-memory termination, and background task panics may not produce a report. For a native crash that does not create one of these reports, see the manual, opt-in [Windows LocalDumps guide](docs/windows-native-crash-diagnostics.md).
 
 ## Comparison
 

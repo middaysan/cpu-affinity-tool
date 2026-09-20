@@ -2,6 +2,13 @@
 
 This file records reviewed RustSec findings that remain in the lockfile so release checks do not silently normalize known advisories.
 
+## v1.6.3 recheck (2026-09-20)
+
+- Rechecked against RustSec database commit `d5c17953a895cf19e8d3ce66eaa42b6fcfe1fb16` (2026-09-19).
+- The unignored application audit reports only the two documented `quick-xml` advisories below; the existing build-time assessment remains applicable to the unchanged dependency versions.
+- The audit passes with only `RUSTSEC-2026-0194` and `RUSTSEC-2026-0195` ignored. Informational findings remain `proc-macro-error` (`RUSTSEC-2024-0370`, unmaintained) and `glib` (`RUSTSEC-2024-0429`, unsound); the latter remains absent from both supported target graphs.
+- The separate `libs/os_api/Cargo.lock` advisory scan reports no findings. Its yanked-package lookup was not requested; the successful application audit included that lookup after retrying an initial registry timeout.
+
 ## `quick-xml 0.39.4`
 
 Reviewed: 2026-09-01

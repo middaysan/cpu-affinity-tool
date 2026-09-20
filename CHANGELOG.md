@@ -6,6 +6,29 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-09-20
+
+### Added
+
+- Application Settings with System/Light/Dark theme selection and an optional Windows **Start minimized** preference. This does not register Windows login startup.
+- A scrollable tracked-process list on monitor-status hover, showing verified executable filenames, PIDs, and runtime-owning groups.
+
+### Changed
+
+- Enable monitoring for new configurations while preserving saved preferences; place pause/resume left of the status and move Crash reports access into Activity.
+- Polish compact forms, group editing, typography, and Activity controls.
+- Trim unused dependency features and reduce monitoring/UI cloning and allocations while preserving process identity checks and GUI wake behavior. No measured runtime performance gain is claimed.
+
+### Fixed
+
+- Support primary-click confirmation in the installed-app picker.
+- Wrap long installed-app identifiers without horizontal overflow or overlapping controls.
+- Prevent duplicate or incorrectly labeled monitored-process rows and omit inaccessible or reused process IDs.
+
+### Compatibility
+
+- Schema v10, configuration locations, and administrator/UAC requirements remain unchanged. Start minimized defaults to off when absent. Stable distribution remains an unsigned portable Windows x64 EXE plus matching PDB.
+
 ## [1.6.1] - 2026-09-02
 
 ### Fixed
