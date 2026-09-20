@@ -53,18 +53,43 @@ fn draw_tracked_process_list(
         })
 }
 
-fn tracked_processes_button(ui: &mut egui::Ui) -> egui::Response {
-    let response = ui.add_sized([28.0, 26.0], egui::Button::new(""));
-    let stroke = ui.style().visuals.widgets.inactive.fg_stroke;
-    let rect = response.rect.shrink2(Vec2::new(8.0, 8.0));
-    for offset in [0.0, 5.0, 10.0] {
-        let y = rect.top() + offset;
-        ui.painter().line_segment(
-            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-            stroke,
-        );
+fn show_tracked_process_tooltip<R>(
+    response: &egui::Response,
+    content: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<egui::InnerResponse<R>> {
+    let ctx = &response.ctx;
+    let id = response.id.with("tracked_process_hover");
+    let (mut rect, mut last_hover) = ctx.data(|data| {
+        data.get_temp::<(egui::Rect, f64)>(id)
+            .unwrap_or((egui::Rect::NOTHING, f64::NEG_INFINITY))
+    });
+    let now = ctx.input(|input| input.time);
+    let over_list = ctx.input(|input| {
+        input
+            .pointer
+            .hover_pos()
+            .is_some_and(|pos| rect.contains(pos))
+    });
+    if response.contains_pointer() || over_list {
+        last_hover = now;
     }
-    response
+    // Keep the list reachable across the small gap, including while scrolling it.
+    let open = now - last_hover < 0.2;
+    let shown = egui::Popup::from_response(response)
+        .id(id.with("popup"))
+        .kind(egui::PopupKind::Tooltip)
+        .layout(Layout::top_down(egui::Align::Min))
+        .width(300.0)
+        .open(open)
+        .show(content);
+    if let Some(shown) = &shown {
+        rect = shown.response.rect;
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    } else {
+        rect = egui::Rect::NOTHING;
+    }
+    ctx.data_mut(|data| data.insert_temp(id, (rect, last_hover)));
+    shown
 }
 
 fn footer_frame(colors: &UiPalette) -> egui::Frame {
@@ -91,6 +116,21 @@ pub fn draw_bottom_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
         .show(root_ui, |ui| {
             let monitoring_enabled = app.is_process_monitoring_enabled();
             ui.horizontal(|ui| {
+                    let (toggle_icon, toggle_label) = monitor_toggle_icon(monitoring_enabled);
+                    if ui
+                        .add_sized(
+                            [28.0, 26.0],
+                            egui::Button::new(RichText::new(toggle_icon).size(16.0)),
+                        )
+                        .on_hover_text(
+                            format!(
+                                "{toggle_label}. Keeps tracked processes on their assigned CPU cores and restores priority."
+                            ),
+                        )
+                        .clicked()
+                    {
+                        app.toggle_process_monitoring();
+                    }
                     let (label, detail, color) = if monitoring_enabled {
                         (
                             "Monitoring active",
@@ -105,19 +145,26 @@ pub fn draw_bottom_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                         )
                     };
 
-                    let (dot_rect, _) =
+                    let (dot_rect, dot_response) =
                         ui.allocate_exact_size(Vec2::splat(7.0), egui::Sense::hover());
                     ui.painter().circle_filled(dot_rect.center(), 3.5, color);
 
-                    ui.vertical(|ui| {
-                        ui.label(
+                    let status_response = ui.vertical(|ui| {
+                        let title = ui.label(
                             RichText::new(label)
                                 .size(BUTTON_FONT_SIZE)
                                 .family(inter_medium_family())
                                 .color(color)
                                 .strong(),
                         );
-                        ui.label(RichText::new(detail).size(8.5).color(colors.text_muted));
+                        let detail = ui.label(RichText::new(detail).size(8.5).color(colors.text_muted));
+                        title.union(detail)
+                    }).inner.union(dot_response);
+                    show_tracked_process_tooltip(&status_response, |ui| {
+                        let tracked_processes = app.tracked_processes_snapshot();
+                        ui.label(RichText::new("Tracked processes").strong());
+                        ui.add_space(2.0);
+                        draw_tracked_process_list(ui, &tracked_processes);
                     });
 
                     ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
@@ -126,31 +173,7 @@ pub fn draw_bottom_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                                 .size(8.5)
                                 .color(colors.text_muted),
                         );
-                        let (toggle_icon, toggle_label) = monitor_toggle_icon(monitoring_enabled);
-                        let process_list_button = tracked_processes_button(ui)
-                            .on_hover_text("Show processes currently tracked by the monitor");
-                        egui::Popup::menu(&process_list_button)
-                            .width(300.0)
-                            .show(|ui| {
-                                let tracked_processes = app.tracked_processes_snapshot();
-                                ui.label(RichText::new("Tracked processes").strong());
-                                ui.add_space(2.0);
-                                draw_tracked_process_list(ui, &tracked_processes);
-                            });
-                        if ui
-                            .add_sized(
-                                [28.0, 26.0],
-                                egui::Button::new(RichText::new(toggle_icon).size(16.0)),
-                            )
-                            .on_hover_text(
-                                format!(
-                                    "{toggle_label}. Keeps tracked processes on their assigned CPU cores and restores priority."
-                                ),
-                            )
-                            .clicked()
-                        {
-                            app.toggle_process_monitoring();
-                        }
+
                     });
             });
         });
@@ -174,6 +197,48 @@ mod tests {
     fn monitor_toggle_uses_pause_and_resume_icons() {
         assert_eq!(monitor_toggle_icon(true), ("⏸", "Pause monitor"));
         assert_eq!(monitor_toggle_icon(false), ("▶", "Resume monitor"));
+    }
+
+    #[test]
+    fn monitor_hover_opens_without_click_and_keeps_list_reachable() {
+        use eframe::egui::{self, Pos2, RawInput, Rect, Vec2};
+        let ctx = egui::Context::default();
+        let mut status = Rect::NOTHING;
+        let mut popup = Rect::NOTHING;
+        for (time, pointer, expected) in [
+            (0.0, None, false),
+            (1.0, Some(Pos2::new(20.0, 20.0)), true),
+            (1.05, Some(Pos2::new(300.0, 200.0)), true),
+            (1.5, None, true),
+            (2.0, Some(Pos2::new(300.0, 200.0)), false),
+        ] {
+            let pointer = if time == 1.5 {
+                Some(popup.center())
+            } else {
+                pointer
+            };
+            let _ = ctx.run_ui(
+                RawInput {
+                    time: Some(time),
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 400.0))),
+                    events: pointer.into_iter().map(egui::Event::PointerMoved).collect(),
+                    ..Default::default()
+                },
+                |ui| {
+                    let response =
+                        ui.allocate_response(Vec2::new(180.0, 30.0), egui::Sense::hover());
+                    status = response.rect;
+                    let shown = super::show_tracked_process_tooltip(&response, |ui| {
+                        ui.label("sample.exe · PID 701 · Games");
+                    });
+                    assert_eq!(shown.is_some(), expected, "time={time}, status={status:?}");
+                    if let Some(shown) = shown {
+                        popup = shown.response.rect;
+                    }
+                },
+            );
+        }
+        assert!(popup.is_positive());
     }
 
     #[test]
