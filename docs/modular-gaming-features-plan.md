@@ -1,8 +1,10 @@
 # Modular Gaming Features: Platform and Integration Plan
 
-Status: proposed design and implementation sequence; no runtime changes are implemented by this document.
+Status: platform-first staged implementation is in progress. This document owns design contracts and package dependencies, not canonical stage status. The dormant typed contract/catalog harness is present under `src/app/features/tuning/`; production setting modules and app integration remain later work.
 
 Reviewed against `main` at `4bc23a817ff2a21c94b405ac40e4f66498d5a7aa` on 2026-10-06. Root `AGENTS.md` remains the repository contract. Delivery IDs below identify packages in this proposal, not canonical local stages or completion status. When implementation starts, map the accepted packages into `.codex/ROADMAP.md` without replacing existing stage identities.
+
+The [2026-10-07 Windows 11 module research](windows11-gaming-module-research.md) supplies the safety audit, evidence-backed catalog recommendations, timer/audio distinctions, and the reasons to keep advanced mutations outside the initial safe-toggle catalog. The integration catalog below describes future gated work, not shipped settings or measured FPS gains. The [module contribution contract](../src/app/features/tuning/README.md) documents the current harness and its remaining ownership/recovery boundaries.
 
 ## Outcome and scope
 
@@ -107,9 +109,11 @@ Read/probe/prepare functions must not mutate Windows. Modules cannot bypass the 
 
 Use common typed values for `FeatureId`, `ProfileId`, `OwnerId`, `OperationId`, `ResourceKey`, `TargetIdentity`, capability results, errors, and activation modes. Do not treat a module ID as a resource key: two modules touching the same underlying setting must contend for the same resource.
 
-Target identities distinguish machine, user SID, interactive user session, process instance, PnP device, and GPU/display identity. A process target includes PID, creation token and verified provenance. Every mutating process operation revalidates the instance using the same opened handle, preserving the existing Windows contract.
+Target identities distinguish machine, user SID, interactive user session, process instance, PnP device, and GPU/display identity. Session-scoped records include a verified logon incarnation and lifetime/boot validation, not only a reusable numeric session ID; persistent user records have separate lifetime rules. A process target includes PID, creation token and verified provenance. Every mutating process operation revalidates the instance using the same opened handle, preserving the existing Windows contract.
 
 Resource granularity covers the fields the module actually owns. For example, active power scheme, process scheduling policy, process priority, and process execution-speed QoS are separate resources. Classic affinity and CPU Sets share a scheduling resource so they cannot become independent simultaneous writers.
+
+Modules that touch distinct fields of one OS structure use a coordinated serialized adapter. Execution-speed QoS and process timer-request policy, for example, preserve each other's `ProcessPowerThrottling` bits. Restore only the owned original bits merged with current unrelated fields; never replay a stale whole structure. Power Plan and Power Mode also require coordinated observations because shared power behavior can change independently of the requested user preference.
 
 ## Lifecycle, ownership, and reversible operations
 
@@ -122,6 +126,8 @@ Separate three concepts:
 Disabling a module's management removes its owners; it does not mean setting the Windows option to `false`. For boolean Windows settings, prefer an explicit `Unmanaged / On / Off` choice or a desired-value control plus `Restore previous`. Labels must describe the actual action.
 
 Supported activation modes are explicit manual management and a verified game/rule session. A module declares which modes it supports. Reboot-dependent settings are never advertised as temporary game-session switches.
+
+Automatic input conveniences additionally require verified interactive-user/logon and foreground eligibility. Their session owner is released on focus loss, uncertain eligibility, or game-session end; a still-running background game is insufficient. Skip shortcut changes for an accessibility feature already enabled. Manual persistent input changes are explicitly labeled and do not pretend to be temporary game-session changes.
 
 For a resource:
 
@@ -179,6 +185,8 @@ On orderly Quit, stop accepting activation requests and drain session-owner rele
 
 Per-user/session features must verify the intended interactive user's SID and session. The release EXE is elevated; credential-over-the-shoulder UAC can change HKCU/token ownership. The first implementation disables per-user mutations when it cannot prove the correct context, rather than modifying the other administrator account or introducing impersonation infrastructure.
 
+This gate also applies to the first Power Plan slice: `PowerSetActiveScheme` documents current-user behavior. Preserve conservative machine-wide contention protection while verifying caller/logon context and native multi-user behavior. Power settings must not be treated as context-free machine writes merely because they affect shared hardware.
+
 ## Profiles, persistence, and execution integration
 
 Use versioned tuning configuration containing profiles, module envelopes and associations to existing logical `GroupId`/`RuleId`. Default to no association and no active module. A module-specific schema upgrade is owned by that module; the central `AppStateStorage` migration handles the tuning envelope, not every future setting.
@@ -187,7 +195,11 @@ Keep existing group/rule identity allocation and `AppRuntimeKey` encoding intact
 
 Preserve unknown/disabled module configuration on a save; never treat it as an activation request. Disabling an available module still runs the restoration path for its existing owners. Unknown recovery snapshots require the recovery behavior above. Configuration is validated and saved before a new persistent/manual activation is accepted; a save failure is visible and does not produce an undisclosed persistent side effect.
 
+Removing a module's activation/editor must not silently remove the codec/restorer needed by outstanding journal entries. Keep backward recovery support or retain an explicit unresolved record and block affected resources; configuration reset and upgrades never discard that evidence.
+
 Execution supplies a complete, generation-tagged snapshot of verified rule owners/process instances to the tuning session bridge. Lifecycle correctness must converge from the latest authoritative snapshot rather than depend on every start/stop notification being delivered. UI repaint/log notifications may remain bounded/coalesced; mutation requests have explicit acceptance, backpressure and terminal results.
+
+Foreground-scoped input modules also consume authoritative OS foreground eligibility associated with those verified owners, not the utility window's own egui focus. Unknown/reused window or process identity cannot acquire an input owner; focus-loss release continues while the utility is hidden.
 
 Session activation follows verified tracking, including rediscovered games started outside this app. Do not activate from a launch click or filename alone. A launch failure creates no session owner. A session ends when its last eligible verified process instance disappears, according to the rule's existing descendant and installed-package policy. Helpers shared between installed targets must respect existing ownership claims.
 
@@ -251,24 +263,29 @@ Keep implementation PRs focused and mergeable. Each package may be split into sm
 | F2: safe runner and ownership | Serialized dispatch, baseline ownership, sharing/conflicts, step verification and structured statuses | F1 | TDD coverage for repeated requests, last release, drift and partial failure; no concrete tweak logic in the core. |
 | F3: durable recovery | Canonical journal store, native writer lease, versioned snapshots, recovery and bounded shutdown | F2 | Fault injection at every write boundary; multi-instance protection; forced-termination recovery demonstrated with fake/test targets. |
 | F4: app integration | Versioned profile/config persistence, verified execution snapshot bridge, common cards and rule associations, diagnostics | F3 | Old state loads with all tuning off; UI issues intents only; two fake modules work through the complete path; Linux checks pass. |
-| I1: power plan | First real module: choose an existing Windows power scheme for a session | F1-F4 gate | Two-game ownership, conflict, external change, failed activation and exact GUID restoration pass on Windows. |
-| I2: input conveniences | Separate mouse-acceleration and accessibility-hotkey modules, preferably one PR each | I1 validates the platform; verified user/session context | Each independently restores original fields; neither changes unrelated accessibility settings. |
+| D1: measurements and native guidance | Read-only benchmark CSV import, display/latency guidance, basic audio/device inventory; split into focused slices | F4 shared observation/UI path | Bounded parsing, metric availability and comparable captures; no Windows mutation or new required third-party executable. |
+| I1: power plan | First mutating module: choose an existing Windows power scheme for a session | F1-F4 gate | Verified caller/logon and multi-user scope; two-game ownership, conflict, external change, failed activation and exact GUID restoration pass on Windows. |
+| I1b: power mode | Separate Windows 11 user-configured AC/DC power preferences | I1; native API/capability/context matrix | Original GUIDs restored; plan/mode interaction and power-source transitions tested; requested/effective state distinguished. |
+| I2: input conveniences | Separate mouse-acceleration and accessibility-hotkey modules, preferably one PR each | I1 validates the platform; verified user/logon/foreground context | Exact restore on focus loss and release; skip already-enabled accessibility features; preserve unrelated fields. |
 | I3: process QoS | Per-process execution-speed throttling policy for explicitly selected rules | F4; process identity boundary | Original masks preserved; denial/reused-PID tests; no automatic management of all background processes. |
+| I3b: process timer policy experiment | Honor a verified process's existing timer-resolution requests | I3; native requesting/non-requesting and visible/occluded harness | Original owned mask bits restored without disturbing QoS; no new timer request, global resolution claim or assumed latency gain. |
 | I4: CPU Sets | Real topology/group enumeration, one scheduling mode per rule, CPU Sets module and reconcile-contract migration | F4; scheduling characterization tests | No competing hard-affinity writer; groups/SMT tested; CPU-set baseline and live-instance checks restored correctly. |
 | I5: optional priority sessions | Transfer session-managed priority to one owner while preserving existing rule defaults/behavior | F4; explicit ownership migration | Launch/manual/monitor paths agree on one writer; disabling tuning cannot be immediately undone by the legacy monitor. |
 | I6: Windows settings adapters | Separate Game Mode, background capture, windowed-game optimization and GPU-selection modules | Platform gate; supported-build smoke matrix per module | Unknown builds use native Settings; registry writes are not reported as universally effective. |
-| A1+: optional advanced modules | Parking profile, HAGS, IRQ, vendor GPU settings, measurements and display profile, each separately gated | Relevant identity, restart and recovery support | Per-module acceptance below; no requirement to ship these for the platform/MVP. |
+| A1+: optional advanced modules | Focused vendor GPU settings, parking profile, HAGS, IRQ mutation and display-mode switching, each separately gated | Relevant identity, restart and recovery support | Per-module acceptance below; device/boot-sensitive mutations are outside the initial safe-toggle catalog. |
 
-F1-F4 contain the universal foundation. I1 is the first production vertical slice and may refine a contract based on evidence; any refinement must keep both fake module shapes and shared tests valid. Freeze the small stable contract after that slice, and grow it only for demonstrated needs.
+F1-F4 contain the universal foundation. I1 is the first mutating production vertical slice and may refine a contract based on evidence; any refinement must keep both fake module shapes and shared tests valid. Freeze the small stable contract after that slice, and grow it only for demonstrated needs.
 
 ## Integration backlog and boundaries
 
 | Module directory | Mechanism and target | Restoration and shipping boundary |
 | --- | --- | --- |
-| `power_plan` | `PowerGetActiveScheme` / `PowerSetActiveScheme`; existing plan, machine scope | Exact original GUID; last-owner release. Do not equate Power Plan with Power Mode or manufacture Ultimate Performance. |
-| `mouse_acceleration` | `SystemParametersInfo`; verified interactive user/session | Snapshot the full mouse parameter tuple; restore owned fields. Describe pointer behavior, not FPS or a raw-input game fix. |
-| `accessibility_hotkeys` | Sticky/Filter Keys hotkey flags | Preserve accessibility state and unrelated flags. Do not disable accessibility features wholesale. |
+| `power_plan` | `PowerGetActiveScheme` / `PowerSetActiveScheme`; verified current-user context with conservative machine-wide coordination | Exact original GUID; last-owner release; multi-user/UAC smoke. Do not equate Power Plan with Power Mode or manufacture Ultimate Performance. |
+| `power_mode` | Documented Windows 11 `PowerGet/SetUserConfiguredACPowerMode` and DC counterparts | Separate original AC/DC GUIDs; capability and caller context; coordinate plan changes; user preference is not proof of effective mode or higher FPS. |
+| `mouse_acceleration` | `SystemParametersInfo`; verified interactive logon; foreground-scoped automatic mode | Snapshot the full mouse parameter tuple; restore owned fields on focus loss/release. Describe pointer behavior, not FPS or a raw-input game fix. |
+| `accessibility_hotkeys` | Sticky/Filter/Toggle Keys hotkey flags; foreground-scoped automatic mode | Skip a feature already enabled; preserve accessibility state, timings and unrelated flags; restore on focus loss/release. |
 | `process_qos` | `Get/SetProcessInformation`, `ProcessPowerThrottling` | OS-managed / EcoQoS / explicitly disable execution-speed throttling; preserve original masks and independent bits. No bypass of thermal limits. |
+| `process_timer_policy` | `ProcessPowerThrottling` ignore-timer-resolution policy for a verified process | Measured opt-in experiment; honor existing requests only; restore owned control/state bits merged with current unrelated bits, including QoS. |
 | `cpu_sets` | Real CPU Set topology and process default sets | Restore original list; hard affinity can constrain selection and thread-selected sets can differ. Do not infer P/E class from CPU index. |
 | `process_priority` | Existing `SetPriorityClass` boundary, with session ownership | Capture before the first relevant launch/monitor write or do not claim that the original is known. Default choices stay modest; no Realtime gaming preset. |
 | `game_mode` | Native Settings first; narrowly verified Windows adapter later | Build/context-gated state reads/writes and exact snapshot; deprecated UWP API is not the implementation. |
@@ -277,15 +294,20 @@ F1-F4 contain the universal foundation. I1 is the first production vertical slic
 | `gpu_preference` | Windows per-app preferred GPU on supported configurations | Preserve the complete original override and unrelated preference fields; distinguish requested adapter from observed renderer. |
 | `core_parking` | Dedicated cloned game power plan; documented AC/DC and heterogeneous-CPU parameters | Never edit an arbitrary user's base plan. Journal clone creation/ownership; restore the prior active plan and safely clean up only the app-owned unchanged clone. Optional measured experiment. |
 | `hags` | Driver-supported Windows hardware scheduling; build-verified adapter | Manual experiment only; stored/effective/reboot states separated for both apply and restore. No universal preferred value. |
-| `irq_affinity` | SetupAPI/PnP interrupt policy, real processor groups | Manual advanced module; exact value presence/type/bytes, no whole-key deletion; reboot. Explain USB-controller shared devices and that IRQ policy does not pin every DPC/audio thread. Gate unsupported group layouts; MSI starts read-only. |
+| `irq_affinity` | SetupAPI/PnP interrupt policy, real processor groups | Read-only inventory initially. Future mutation needs exact value presence/type/bytes, no whole-key deletion, reboot and independent recovery; IRQ policy does not pin every DPC/audio thread. |
+| `audio_diagnostics` | Read-only endpoint/session/driver observations and imported trace analysis | Distinguish client PID, shared audio engine and device ISR/DPC; no guessed endpoint-to-audiodg mapping, audio-content capture, service restart or automatic pinning. |
+| `usb_topology` | Read-only controller/hub/device relationships | Explain shared-controller scope for input/audio; no blanket selective-suspend disable or controller restart. |
 | `nvidia_profile` | Documented NVAPI DRS settings | Optional adapter; restore individual override/absence, not the whole profile. Driver/version capability checks. |
 | `amd_3d` | Documented AMD ADLX interfaces | Optional adapter; test support and true scope per API version. GPU-wide controls must not be presented as per-EXE profiles. |
-| `measurements` | Optional PresentMon or exported benchmark capture | Read-only collector with bounded lifecycle; compare frame times under reproducible conditions. No score that implies a predicted FPS gain. |
+| `measurements` | Exported benchmark/PresentMon CSV import first; optional later bounded collector | Comparable A/B conditions, metric availability and collector overhead; frame times alone do not prove end-to-end input latency. No predicted FPS score. |
+| `display_audit` / `latency_advisor` | Read-only display/refresh/DRR/VRR inventory and native game/driver guidance | Explain supported settings and render-queue/tearing tradeoffs; no blind maximum-Hz, global frame-cap or simulated Reflex/Anti-Lag 2 enablement. |
 | `display_profile` | Display enumeration, then optional documented mode switch | Diagnostics first. A mode-changing version needs a tested confirmation timeout and independent restoration when the UI cannot be seen. |
 
 For IRQ, start with inventory and observation in one PR; add mutation only after correct target/group identity and reboot recovery are proven. For vendor GPU support, start with support/read-only state and one documented setting rather than a full profile editor.
 
-Exclude mass service shutdown, package removal, security/VBS/Defender/UAC changes, Windows Update disable, HPET/BCD/timer hacks, RAM/standby cleaners, blanket networking tweaks, unused MMCSS `GPU Priority`, and a universal `SystemResponsiveness=0` preset. These do not meet this module catalog's clear, low-impact, precisely reversible scope. MPO remains an issue-specific diagnostic investigation, not a default gaming module. Engine-integrated Reflex/Anti-Lag 2 cannot be enabled for arbitrary games by this platform.
+Audio-engine placement is deferred until a reproducible trace identifies contention and the target can be verified, read and restored. Process affinity of `audiodg.exe` does not move the sound device's ISR/DPC, and its shared/protected scope may make mutation unavailable. Automatic core-number/High/Realtime recipes are outside the initial catalog.
+
+Exclude mass service shutdown, package removal, security/VBS/Defender/UAC changes, Windows Update disable, HPET/BCD/global timer-forcing hacks, RAM/standby cleaners, blanket networking or USB power-saving tweaks, unused MMCSS `GPU Priority`, and a universal `SystemResponsiveness=0` preset. These do not meet this module catalog's clear, low-impact, precisely reversible scope. The documented process timer policy above is a separate scoped experiment, not global timer forcing. MPO remains an issue-specific diagnostic investigation, not a default gaming module. Engine-integrated Reflex/Anti-Lag 2 cannot be enabled for arbitrary games by this platform.
 
 Reuse mechanisms and UI ideas from the research through independent implementations based on official APIs. Check any copied code's license per file; do not import incompatible/noncompete code or a whole tweak preset as the source of truth.
 
@@ -311,3 +333,4 @@ The October 2026 gaming-tweaks research supplies the candidate list; performance
 - Microsoft: [SystemParametersInfo](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-systemparametersinfoa), [Sticky Keys](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-stickykeys), and [native Settings URIs](https://learn.microsoft.com/en-us/windows/apps/develop/launch/launch-settings).
 - Microsoft: [interrupt affinity](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/interrupt-affinity-and-priority), [DPC target selection](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-kesettargetprocessordpcex), [core parking](https://learn.microsoft.com/en-us/windows-hardware/customize/power-settings/options-for-core-parking-cpmincores), and [MMCSS limitations](https://learn.microsoft.com/en-us/windows/win32/procthread/multimedia-class-scheduler-service).
 - Vendor APIs: [NVIDIA NVAPI DRS](https://docs.nvidia.com/nvapi/group__drsapi.html) and [AMD ADLX 3D settings services](https://gpuopen.com/manuals/adlx/adlx-sdk-references/adlx-interfaces/3d-graphics/iadlx3dsettingsservices/).
+- Research follow-up: [Windows 11 module evidence and reversible scope](windows11-gaming-module-research.md), including current Microsoft Power Mode/timer/audio documentation, native guidance, the complete original-module audit, exclusions, and the proposed admission/measurement gates.

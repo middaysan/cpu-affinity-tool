@@ -8,6 +8,8 @@ Confirm that the shipped Windows binary starts correctly, applies its core launc
 
 ## Smoke Scenarios
 
+The modular tuning foundation in source is currently dormant: it adds typed contracts, codecs and a catalog, with no production registrations, persisted tuning configuration, settings route or native mutation. Its two backend/module shapes are test-only. Existing smoke scenarios remain applicable. Future tuning integrations must add their own supported-build, target/caller scope, shared-owner, external-change, partial-failure and exact-restoration evidence before release; passing fake-backend tests alone does not establish native behavior.
+
 | Scenario | Expected result | Release-blocking if it fails |
 | --- | --- | --- |
 | Cold start with existing `state.json` | App starts, loads saved state, and shows the expected groups, apps, and theme without corruption prompts; an interrupted save must leave a complete prior or new file rather than a truncated state file | Yes |

@@ -4,3 +4,4 @@ pub mod preferences;
 pub mod rules;
 pub mod shortcut;
 pub mod topology;
+pub mod tuning;

@@ -67,7 +67,8 @@ Current platform reality:
 Key directories:
 - `src/` - application runtime code and entrypoints
 - `src/app/shell/` - the top-level `eframe::App` shell, route enums, transient UI sessions, typed shell events, and presenter module ownership
-- `src/app/features/` - bounded feature modules for `rules`, `execution`, `preferences`, `shortcut`, `topology`, and `diagnostics`
+- `src/app/features/` - bounded feature modules for `rules`, `execution`, `preferences`, `shortcut`, `topology`, `diagnostics`, and the dormant `tuning` foundation
+- `src/app/features/tuning/platform/` - platform-independent typed tuning contracts, bounded versioned codecs, and static heterogeneous module catalog; test-only backend/module shapes live under `tuning/testing/`
 - `src/app/adapters/` - seams for persisted state loading, OS helpers, and installed-app discovery
 - `src/app/runtime/` - thin composition-root state facade kept around `AppState`
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
@@ -113,6 +114,7 @@ Layers:
   - `preferences` owns theme and monitoring toggles
   - `topology` owns CPU model/thread detection helpers
   - `diagnostics` owns startup logging, typed diagnostic event shape, bounded local crash-report formatting/capture, safe report discovery/retention, report-list state, and the Windows-only read-only Event Log lookup
+  - `tuning` currently owns the dormant modular-settings facade, typed target/resource and module contracts, bounded configuration/snapshot codecs, and static catalog; it is not yet composed into `AppState`, persisted state, shell routes, or execution monitoring
 - `adapters` isolate storage loading, OS helper calls, and installed-app discovery
 - `models` hold persisted schema plus domain and runtime-adjacent value types
 - `runtime` is now a thin composition-root facade around `AppState`
@@ -178,6 +180,15 @@ Windows runtime flow:
 10. `App::logic` handles tray events, monitor notifications, local forwarded shortcut commands, initial/on-demand crash-report refresh polling, the gated Windows Event Log worker, focus-gain refresh, hidden-window flow, file drops, and theme application; tray callbacks only enqueue typed restore/quit commands and request repaint, while `App::logic` owns all `HWND` restore/focus/taskbar work and requests an orderly root-viewport close for Quit. Once Quit is latched, no further shell work or rendering occurs before eframe shutdown. `App::ui` renders the active view; the Event Log worker may be armed only after that first rendered frame.
 
 Linux entrypoint now reaches the shared `shell::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
+
+Tuning foundation status:
+- current production tuning composition registers no modules and performs no Windows mutations
+- two distinct tuning modules/backends are compiled only for tests: a machine scalar and a multi-step user setting with original absence and restart semantics
+- concrete configuration, observation, snapshot, and step values stay typed inside modules; JSON is confined to bounded versioned persistence envelopes
+- catalog validation covers descriptor/codec identity, target/resource projection, exact declared step writes, and target-bound snapshots; resource equality uses exact canonical desired-state tokens
+- prepared operations retain their originating typed adapter, first snapshot, and exact resource declarations; scoped restoration can preserve independently retained fields
+- module contribution rules are recorded in `src/app/features/tuning/README.md`; the specification remains `docs/modular-gaming-features-plan.md`
+- serialized ownership, durable journaling/native writer lease, profile/session/UI integration, and real Windows adapters remain later staged work; the dormant foundation does not claim recovery or safe native writes by itself
 
 ## Concurrency model
 - GUI runs on the main thread
