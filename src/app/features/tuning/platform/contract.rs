@@ -341,6 +341,19 @@ pub struct ResourceObservation {
     pub value: DesiredStateToken,
 }
 
+/// Orchestration-only exact evidence. Modules and the shell cannot construct it.
+pub(super) struct ExpectedCurrentProof {
+    states: Vec<ResourceObservation>,
+}
+impl ExpectedCurrentProof {
+    pub(super) fn new(states: Vec<ResourceObservation>) -> Self {
+        Self { states }
+    }
+    pub(super) fn states(&self) -> &[ResourceObservation] {
+        &self.states
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ActivationMode {
     Manual,
@@ -482,5 +495,8 @@ pub struct PlannedStep<Step> {
     /// side effects. The runner uses these for prewrite journaling before native
     /// execution; durable journaling arrives in F3.
     pub writes: Vec<ResourceKey>,
+    /// Exact states this instruction can establish, projected from its typed
+    /// native values. They are staged as possible evidence before execution.
+    pub after: Vec<ResourceObservation>,
     pub instruction: Step,
 }

@@ -42,6 +42,12 @@ pub trait Module: Send + Sync + 'static {
         target: &TargetIdentity,
         snapshot: &Self::Snapshot,
     ) -> Result<Vec<ResourceClaim>, ModuleError>;
+    fn baseline_states(
+        &self,
+        target: &TargetIdentity,
+        snapshot: &Self::Snapshot,
+        resources: &[ResourceKey],
+    ) -> Result<Vec<ResourceObservation>, ModuleError>;
     fn same_baseline(&self, left: &Self::Snapshot, right: &Self::Snapshot) -> bool;
     fn classify(
         &self,
@@ -249,6 +255,18 @@ fn check_plan<S, Step>(
         {
             return Err(CatalogError::InvalidPlan("step writes undeclared resource"));
         }
+        check_observations(&step.after, &step.writes)?;
+        if step.after.iter().any(|state| {
+            !plan.claims.iter().any(|claim| {
+                claim.key == state.key
+                    && claim.desired.semantics == state.value.semantics
+                    && claim.desired.version == state.value.version
+            })
+        }) {
+            return Err(CatalogError::InvalidPlan(
+                "step after-state semantics mismatch",
+            ));
+        }
     }
     Ok(())
 }
@@ -329,6 +347,7 @@ impl<M: Module> ModuleAdapter<M> {
             inner: Box::new(TypedOperation {
                 module: Arc::clone(&self.module),
                 descriptor: self.descriptor.clone(),
+                cleanup: config.is_none(),
                 config,
                 plan,
             }),
@@ -531,18 +550,35 @@ impl Catalog {
     }
 }
 
+pub(super) struct StepExecutionError {
+    pub error: CatalogError,
+    pub native_started: bool,
+}
+impl StepExecutionError {
+    fn not_started(error: CatalogError) -> Self {
+        Self {
+            error,
+            native_started: false,
+        }
+    }
+}
 trait ErasedOperation: Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn descriptor(&self) -> &ModuleDescriptor;
     fn target(&self) -> &TargetIdentity;
     fn claims(&self) -> &[ResourceClaim];
     fn effect(&self) -> Effect;
+    fn is_restoration(&self) -> bool;
+    fn restores_baseline(&self) -> bool;
+    fn mark_cleanup(&mut self);
     fn step_count(&self) -> usize;
     fn step_resources(&self, index: usize) -> Result<&[ResourceKey], CatalogError>;
     fn same_request(&self, other: &dyn ErasedOperation) -> bool;
     fn same_snapshot(&self, other: &dyn ErasedOperation) -> bool;
     fn same_baseline(&self, other: &dyn ErasedOperation) -> bool;
     fn snapshot_envelope(&self) -> Result<ModuleEnvelope, CatalogError>;
+    fn config_envelope(&self) -> Result<ModuleEnvelope, CatalogError>;
+    fn baseline_states(&self) -> Result<Vec<ResourceObservation>, CatalogError>;
     fn classify(&self, resources: &[ResourceKey]) -> Result<StateMatch, CatalogError>;
     fn observe_resources(
         &self,
@@ -550,16 +586,65 @@ trait ErasedOperation: Send + Sync {
     ) -> Result<Vec<ResourceObservation>, CatalogError>;
     fn execute_step(&self, index: usize) -> Result<Effect, CatalogError>;
     fn verify_step(&self, index: usize) -> Result<Verification, CatalogError>;
+    fn step_after(&self, index: usize) -> Result<&[ResourceObservation], CatalogError>;
+    fn verify_evidence(
+        &self,
+        index: usize,
+    ) -> Result<(Verification, Vec<ResourceObservation>), CatalogError>;
+    fn classified_evidence(
+        &self,
+        resources: &[ResourceKey],
+    ) -> Result<Vec<(ResourceObservation, StateMatch)>, CatalogError>;
     fn update(&self, config: &ModuleEnvelope) -> Result<PreparedOperation, CatalogError>;
     fn restore(&self, released: &[ResourceKey]) -> Result<PreparedOperation, CatalogError>;
+    fn restore_expected(
+        &self,
+        released: &[ResourceKey],
+        expected: &ExpectedCurrentProof,
+    ) -> Result<PreparedOperation, CatalogError>;
+    fn update_expected(
+        &self,
+        config: &ModuleEnvelope,
+        expected: &ExpectedCurrentProof,
+    ) -> Result<PreparedOperation, CatalogError>;
+    fn execute_expected(
+        &self,
+        step: usize,
+        expected: &ExpectedCurrentProof,
+    ) -> Result<Effect, StepExecutionError>;
 }
 struct TypedOperation<M: Module> {
     module: Arc<M>,
     descriptor: ModuleDescriptor,
     config: Option<M::Config>,
+    cleanup: bool,
     plan: Plan<M::Snapshot, M::Step>,
 }
 impl<M: Module> TypedOperation<M> {
+    fn prove_current(
+        &self,
+        current: &M::Observation,
+        resources: &[ResourceKey],
+        expected: &ExpectedCurrentProof,
+    ) -> Result<(), CatalogError> {
+        check_subset(&self.plan.claims, resources)?;
+        check_observations(expected.states(), resources)?;
+        let observed = self
+            .module
+            .observation_states(&self.plan.target, current, resources)?;
+        check_observations(&observed, resources)?;
+        if observed
+            .iter()
+            .any(|state| !expected.states().contains(state))
+        {
+            return Err(ModuleError::new(
+                ErrorKind::ExternalChange,
+                "stale expected-current proof",
+            )
+            .into());
+        }
+        Ok(())
+    }
     fn peer<'a>(&self, other: &'a dyn ErasedOperation) -> Option<&'a Self> {
         other.as_any().downcast_ref::<Self>().filter(|other| {
             Arc::ptr_eq(&self.module, &other.module) && self.plan.target == other.plan.target
@@ -591,6 +676,7 @@ impl<M: Module> TypedOperation<M> {
             inner: Box::new(Self {
                 module: Arc::clone(&self.module),
                 descriptor: self.descriptor.clone(),
+                cleanup: config.is_none(),
                 config,
                 plan,
             }),
@@ -612,6 +698,15 @@ impl<M: Module> ErasedOperation for TypedOperation<M> {
     }
     fn effect(&self) -> Effect {
         self.plan.effect
+    }
+    fn is_restoration(&self) -> bool {
+        self.cleanup
+    }
+    fn restores_baseline(&self) -> bool {
+        self.config.is_none()
+    }
+    fn mark_cleanup(&mut self) {
+        self.cleanup = true;
     }
     fn step_count(&self) -> usize {
         self.plan.steps.len()
@@ -642,6 +737,20 @@ impl<M: Module> ErasedOperation for TypedOperation<M> {
             .module
             .snapshot_codec()
             .encode(&self.plan.snapshot, Some(&self.plan.target))?)
+    }
+    fn config_envelope(&self) -> Result<ModuleEnvelope, CatalogError> {
+        self.module
+            .config_codec()
+            .encode(self.config.as_ref().ok_or(CatalogError::ReadOnly)?, None)
+            .map_err(Into::into)
+    }
+    fn baseline_states(&self) -> Result<Vec<ResourceObservation>, CatalogError> {
+        let resources = keys(&self.plan.claims);
+        let states =
+            self.module
+                .baseline_states(&self.plan.target, &self.plan.snapshot, &resources)?;
+        check_observations(&states, &resources)?;
+        Ok(states)
     }
     fn classify(&self, resources: &[ResourceKey]) -> Result<StateMatch, CatalogError> {
         check_subset(&self.plan.claims, resources)?;
@@ -685,6 +794,54 @@ impl<M: Module> ErasedOperation for TypedOperation<M> {
         Ok(self
             .module
             .verify_step(&self.plan.target, &step.instruction, &self.observation()?)?)
+    }
+    fn step_after(&self, index: usize) -> Result<&[ResourceObservation], CatalogError> {
+        self.plan
+            .steps
+            .get(index)
+            .map(|step| step.after.as_slice())
+            .ok_or(CatalogError::StepOutOfBounds)
+    }
+    fn verify_evidence(
+        &self,
+        index: usize,
+    ) -> Result<(Verification, Vec<ResourceObservation>), CatalogError> {
+        let step = self
+            .plan
+            .steps
+            .get(index)
+            .ok_or(CatalogError::StepOutOfBounds)?;
+        let current = self.observation()?;
+        let verification =
+            self.module
+                .verify_step(&self.plan.target, &step.instruction, &current)?;
+        let states = self
+            .module
+            .observation_states(&self.plan.target, &current, &step.writes)?;
+        check_observations(&states, &step.writes)?;
+        Ok((verification, states))
+    }
+    fn classified_evidence(
+        &self,
+        resources: &[ResourceKey],
+    ) -> Result<Vec<(ResourceObservation, StateMatch)>, CatalogError> {
+        check_subset(&self.plan.claims, resources)?;
+        let current = self.observation()?;
+        let states = self
+            .module
+            .observation_states(&self.plan.target, &current, resources)?;
+        check_observations(&states, resources)?;
+        states
+            .into_iter()
+            .map(|state| {
+                let classification = self.module.classify(
+                    &self.plan.snapshot,
+                    &current,
+                    std::slice::from_ref(&state.key),
+                )?;
+                Ok((state, classification))
+            })
+            .collect()
     }
     fn update(&self, config: &ModuleEnvelope) -> Result<PreparedOperation, CatalogError> {
         let config = self.module.config_codec().decode(config)?;
@@ -730,6 +887,69 @@ impl<M: Module> ErasedOperation for TypedOperation<M> {
         }
         self.bind(None, plan)
     }
+    fn restore_expected(
+        &self,
+        released: &[ResourceKey],
+        expected: &ExpectedCurrentProof,
+    ) -> Result<PreparedOperation, CatalogError> {
+        let current = self.observation()?;
+        self.prove_current(&current, released, expected)?;
+        let plan = self.module.prepare_restore(
+            &self.plan.target,
+            &self.plan.snapshot,
+            &current,
+            released,
+        )?;
+        if !same_keys(&plan.claims, released) {
+            return Err(CatalogError::InvalidPlan("restore changed resource subset"));
+        }
+        self.bind(None, plan)
+    }
+    fn update_expected(
+        &self,
+        config: &ModuleEnvelope,
+        expected: &ExpectedCurrentProof,
+    ) -> Result<PreparedOperation, CatalogError> {
+        let config = self.module.config_codec().decode(config)?;
+        self.module.validate_config(&config)?;
+        let current = self.observation()?;
+        self.prove_current(&current, &keys(&self.plan.claims), expected)?;
+        let plan = self.module.prepare_update(
+            &self.plan.target,
+            &config,
+            &self.plan.snapshot,
+            &current,
+        )?;
+        if !same_keys(&plan.claims, &keys(&self.plan.claims)) {
+            return Err(CatalogError::InvalidPlan("update changed resource set"));
+        }
+        let mut prepared = self.bind(Some(config), plan)?;
+        prepared.inner.mark_cleanup();
+        Ok(prepared)
+    }
+    fn execute_expected(
+        &self,
+        index: usize,
+        expected: &ExpectedCurrentProof,
+    ) -> Result<Effect, StepExecutionError> {
+        let step = self
+            .plan
+            .steps
+            .get(index)
+            .ok_or(CatalogError::StepOutOfBounds)
+            .map_err(StepExecutionError::not_started)?;
+        let observed = self
+            .observation()
+            .map_err(StepExecutionError::not_started)?;
+        self.prove_current(&observed, &step.writes, expected)
+            .map_err(StepExecutionError::not_started)?;
+        self.module
+            .execute_step(&self.plan.target, &step.instruction)
+            .map_err(|error| StepExecutionError {
+                error: error.into(),
+                native_started: true,
+            })
+    }
 }
 
 /// Executor identity and concrete state stay bound together. There is no API to
@@ -738,6 +958,58 @@ pub struct PreparedOperation {
     inner: Box<dyn ErasedOperation>,
 }
 impl PreparedOperation {
+    pub(super) fn restores_baseline(&self) -> bool {
+        self.inner.restores_baseline()
+    }
+    pub(super) fn step_after(&self, step: usize) -> Result<&[ResourceObservation], CatalogError> {
+        self.inner.step_after(step)
+    }
+    pub(super) fn verify_step_evidence(
+        &self,
+        step: usize,
+    ) -> Result<(Verification, Vec<ResourceObservation>), CatalogError> {
+        self.inner.verify_evidence(step)
+    }
+    pub(super) fn observe_classified(
+        &self,
+        resources: &[ResourceKey],
+    ) -> Result<Vec<(ResourceObservation, StateMatch)>, CatalogError> {
+        self.inner.classified_evidence(resources)
+    }
+    pub(in crate::app::features::tuning) fn config_envelope(
+        &self,
+    ) -> Result<ModuleEnvelope, CatalogError> {
+        self.inner.config_envelope()
+    }
+    pub(in crate::app::features::tuning) fn baseline_states(
+        &self,
+    ) -> Result<Vec<ResourceObservation>, CatalogError> {
+        self.inner.baseline_states()
+    }
+    pub(super) fn prepare_restore_expected(
+        &self,
+        resources: &[ResourceKey],
+        expected: &ExpectedCurrentProof,
+    ) -> Result<Self, CatalogError> {
+        self.inner.restore_expected(resources, expected)
+    }
+    pub(super) fn prepare_update_expected(
+        &self,
+        config: &ModuleEnvelope,
+        expected: &ExpectedCurrentProof,
+    ) -> Result<Self, CatalogError> {
+        self.inner.update_expected(config, expected)
+    }
+    pub(super) fn execute_step_expected(
+        &self,
+        step: usize,
+        expected: &ExpectedCurrentProof,
+    ) -> Result<Effect, StepExecutionError> {
+        self.inner.execute_expected(step, expected)
+    }
+    pub fn is_restoration(&self) -> bool {
+        self.inner.is_restoration()
+    }
     pub fn descriptor(&self) -> &ModuleDescriptor {
         self.inner.descriptor()
     }
@@ -783,6 +1055,7 @@ impl PreparedOperation {
     ) -> Result<Vec<ResourceObservation>, CatalogError> {
         self.inner.observe_resources(resources)
     }
+    #[cfg(test)]
     pub(in crate::app::features::tuning) fn execute_step(
         &self,
         index: usize,
@@ -795,12 +1068,14 @@ impl PreparedOperation {
     ) -> Result<Verification, CatalogError> {
         self.inner.verify_step(index)
     }
+    #[cfg(test)]
     pub(in crate::app::features::tuning) fn prepare_update(
         &self,
         config: &ModuleEnvelope,
     ) -> Result<Self, CatalogError> {
         self.inner.update(config)
     }
+    #[cfg(test)]
     pub(in crate::app::features::tuning) fn prepare_restore(
         &self,
         released: &[ResourceKey],

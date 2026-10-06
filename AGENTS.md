@@ -68,7 +68,7 @@ Key directories:
 - `src/` - application runtime code and entrypoints
 - `src/app/shell/` - the top-level `eframe::App` shell, route enums, transient UI sessions, typed shell events, and presenter module ownership
 - `src/app/features/` - bounded feature modules for `rules`, `execution`, `preferences`, `shortcut`, `topology`, `diagnostics`, and the dormant `tuning` foundation
-- `src/app/features/tuning/platform/` - platform-independent typed tuning contracts, bounded versioned codecs, and static heterogeneous module catalog; test-only backend/module shapes live under `tuning/testing/`
+- `src/app/features/tuning/platform/` - platform-independent typed tuning contracts, bounded versioned codecs, static heterogeneous module catalog, resource coordinator and bounded serial runner; test-only backend/module shapes live under `tuning/testing/`
 - `src/app/adapters/` - seams for persisted state loading, OS helpers, and installed-app discovery
 - `src/app/runtime/` - thin composition-root state facade kept around `AppState`
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
@@ -114,7 +114,7 @@ Layers:
   - `preferences` owns theme and monitoring toggles
   - `topology` owns CPU model/thread detection helpers
   - `diagnostics` owns startup logging, typed diagnostic event shape, bounded local crash-report formatting/capture, safe report discovery/retention, report-list state, and the Windows-only read-only Event Log lookup
-  - `tuning` currently owns the dormant modular-settings facade, typed target/resource and module contracts, bounded configuration/snapshot codecs, and static catalog; it is not yet composed into `AppState`, persisted state, shell routes, or execution monitoring
+  - `tuning` currently owns the dormant modular-settings facade, typed target/resource and module contracts, bounded configuration/snapshot codecs, static catalog, resource coordinator and serial operation runner; it is not yet composed into `AppState`, persisted state, shell routes, or execution monitoring
 - `adapters` isolate storage loading, OS helper calls, and installed-app discovery
 - `models` hold persisted schema plus domain and runtime-adjacent value types
 - `runtime` is now a thin composition-root facade around `AppState`
@@ -183,16 +183,20 @@ Linux entrypoint now reaches the shared `shell::App` shell, startup logging, aut
 
 Tuning foundation status:
 - current production tuning composition registers no modules and performs no Windows mutations
-- two distinct tuning modules/backends are compiled only for tests: a machine scalar and a multi-step user setting with original absence and restart semantics
+- test-only adapters cover two backend shapes: a machine scalar and a multi-step user setting with original absence and restart semantics; a second adapter over the user backend exercises cross-module shared-resource ownership
 - concrete configuration, observation, snapshot, and step values stay typed inside modules; JSON is confined to bounded versioned persistence envelopes
-- catalog validation covers descriptor/codec identity, target/resource projection, exact declared step writes, and target-bound snapshots; resource equality uses exact canonical desired-state tokens
+- catalog validation covers descriptor/codec identity, target/resource projection, exact declared step writes and their canonical resulting values, and target-bound snapshots; resource equality uses exact canonical desired-state tokens
 - prepared operations retain their originating typed adapter, first snapshot, and exact resource declarations; scoped restoration can preserve independently retained fields
+- the coordinator acquires complete resource claims atomically, shares equal requests, rejects conflicting requests, and retains the first baseline/restorer independently of later writers; private expected-current evidence guards execution and compensation
+- the serial runner owns the coordinator on one worker, bounds command/generation admission, exposes generation-tagged tickets and immutable snapshots, and retains the same worker through shutdown timeout; faulted or unresolved cleanup is visible rather than reported as successful shutdown
+- production runner write admission is closed; permissive simulator execution exists only under `cfg(test)`
 - module contribution rules are recorded in `src/app/features/tuning/README.md`; the specification remains `docs/modular-gaming-features-plan.md`
-- serialized ownership, durable journaling/native writer lease, profile/session/UI integration, and real Windows adapters remain later staged work; the dormant foundation does not claim recovery or safe native writes by itself
+- durable journaling/native writer lease, profile/session/UI integration, authoritative target lifetime producers, and real Windows adapters remain later staged work; in-memory ownership does not claim crash recovery or safe native writes by itself
 
 ## Concurrency model
 - GUI runs on the main thread
 - background tasks use `tokio`
+- the dormant tuning runner uses a dedicated standard thread and a bounded synchronous command queue; it publishes owned snapshots without holding GUI state, and does not start from the current application composition
 - tray callbacks only enqueue typed commands and wake egui; `tray_rx` is owned and drained by `shell::App` on the GUI thread, which exclusively owns `HWND` operations and the terminal Quit transition
 - Windows local shortcut-forwarding requests flow through a shell-owned named-pipe server thread into `shell::App`, with per-request reply channels; request enqueue wakes the `egui` context for prompt draining
 - `AppForwardingRuntime` clears the GUI wake callback and requests server shutdown during drop. It joins promptly when the worker reaches a terminal I/O completion; otherwise the detached reaper retains the pipe listener, in-flight `OVERLAPPED` buffers, and primary guard until it can safely release them. A replacement process therefore cannot claim the endpoint while that worker still owns it.

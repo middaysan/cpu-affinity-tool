@@ -4,7 +4,7 @@
 pub mod platform;
 
 /// Public feature facade. Concrete shipping registrations belong only in this
-/// composition function; F1 intentionally registers no fake or OS module.
+/// composition function; the staged foundation registers no fake or OS module.
 #[derive(Default)]
 pub struct Tuning {
     catalog: platform::catalog::Catalog,

@@ -8,7 +8,7 @@ Confirm that the shipped Windows binary starts correctly, applies its core launc
 
 ## Smoke Scenarios
 
-The modular tuning foundation in source is currently dormant: it adds typed contracts, codecs and a catalog, with no production registrations, persisted tuning configuration, settings route or native mutation. Its two backend/module shapes are test-only. Existing smoke scenarios remain applicable. Future tuning integrations must add their own supported-build, target/caller scope, shared-owner, external-change, partial-failure and exact-restoration evidence before release; passing fake-backend tests alone does not establish native behavior.
+The modular tuning foundation in source is currently dormant: it adds typed contracts, codecs, a catalog, an in-memory resource coordinator and a serial runner. Production write admission is closed; there are no production registrations, persisted tuning configuration, settings route or native mutations. Its two backend shapes and cross-adapter ownership tests are test-only. Existing smoke scenarios remain applicable. Future tuning integrations must add durable recovery and their own supported-build, target/caller scope, shared-owner, external-change, partial-failure and exact-restoration evidence before release; passing fake-backend tests alone does not establish native behavior.
 
 | Scenario | Expected result | Release-blocking if it fails |
 | --- | --- | --- |

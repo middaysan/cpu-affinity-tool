@@ -1,10 +1,12 @@
 # Tuning module contribution contract
 
-F1 supplies a dormant, platform-independent contract and catalog. The production
-catalog is empty. The two native-state simulators under `testing/` compile only
-with `cfg(test)` and perform no OS changes. This foundation does not yet provide
-ownership, cross-process coordination, crash recovery, app-state integration, or
-user controls. Those stages must pass before a writable module can ship.
+The dormant platform supplies typed contracts, a catalog, an in-memory resource
+coordinator and a bounded serial runner. The production catalog is empty and
+runner write admission is closed. The two backend shapes and cross-adapter
+simulators under `testing/` compile only with `cfg(test)` and perform no OS changes.
+Durable journaling, cross-process coordination, crash recovery, authoritative
+native identity/lifetime producers, app-state integration and user controls remain
+later work. Those stages must pass before a writable module can ship.
 
 The canonical specification is
 [`docs/modular-gaming-features-plan.md`](../../../../docs/modular-gaming-features-plan.md).
@@ -19,10 +21,16 @@ The Windows recommendations and exclusions are documented in
 - `platform/catalog.rs` contains `Module`, checked registration and preparation,
   and the opaque executor that retains its concrete module and typed state.
 - `platform/codec.rs` is the bounded, versioned serialization boundary.
+- `platform/coordinator.rs` owns atomic claims, equal-request sharing, conflicts,
+  first baselines, step verification, compensation and last-owner restoration.
+- `platform/runner.rs` owns bounded serial dispatch, generations, cancellation,
+  terminal tickets, immutable snapshots and bounded shutdown.
 - `testing/scalar.rs` demonstrates a scalar machine setting.
 - `testing/user_setting.rs` demonstrates two native fields, exact absent/present
   values with original type and raw bytes, partial application, subset restoration,
   and a restart-required stored effect.
+- `testing/value_setting.rs` uses the user backend through a separate typed
+  adapter to exercise sharing and edits across modules with different snapshots.
 
 The root `allow(dead_code)` is limited to this dormant staged foundation. Remove
 or narrow it when F4 integrates the public facade; do not add per-module lint
@@ -44,11 +52,14 @@ exceptions to hide unused integrations.
    describes the native setting independently of the feature ID. Tokens encode
    presence, native type, and value without lossy hashes; matching semantics,
    version, and bytes mean equal requests. `observation_states` uses the same
-   representation for native observations. Never encode unrelated fields in a
-   resource token.
+   representation for native observations and `baseline_states` projects the
+   immutable captured originals. Never encode unrelated fields in a resource token.
 5. Keep the first original baseline immutable. Preserve all known app-written
    partial/native states when preparing an update. Every step lists all resources
-   it can write. A zero-step plan still retains its real baseline and claims.
+   it can write and exact canonical `after` values for those fields. The coordinator
+   stages these values before admitting the call; a state merely mentioned in a
+   snapshot or a future step is not evidence that it was written. A zero-step plan
+   still retains its real baseline and claims.
 6. Classify and restore the exact released subset. Preserve current fields outside
    that subset, even when they changed externally or another owner still manages
    them. Restore original absence by deleting only the original managed field;
@@ -62,6 +73,8 @@ exceptions to hide unused integrations.
    executable-name matches. Capability checks short-circuit backend reads/writes.
 8. Verify native state after each write. Return `Verification::Mismatch` when it
    differs; a successful syscall or completed step count does not prove success.
+   Verification and canonical projection use the same typed observation, so a
+   separate read cannot silently promote a different value to confirmed evidence.
    Stored restart-required state is distinct from an effective running setting.
    Preserve bounded failure detail and native error domain/code.
 9. Add one explicit registration in the shipping catalog composition. Platform
@@ -118,22 +131,38 @@ it cannot interchange another module's instructions. `same_request` and
 `same_snapshot` are conveniences for the same adapter. Ownership sharing must
 compare each overlapping resource's canonical token independently.
 
-## Boundaries left for F2 and F3
+## Ownership and runner boundaries
 
-The coordinator must acquire complete resource claims before execution, serialize
-transactions, journal before each native write, verify results, and preserve the
-first restoration adapter/baseline through shared-owner changes. Preparation's
-read preflight cannot eliminate another actor's later race; native steps must
-check their expected current value and target again and fail explicitly.
+The coordinator acquires complete claims before execution and retains original
+baseline/restorer data independently of the current writer. Equal canonical
+requests can share a field across adapters; a different request requires a sole
+owner. Last-owner restoration uses the original adapter with private ledger-based
+expected-current evidence, rather than recapturing an app-modified baseline or
+decoding another module's snapshot with the wrong codec. External drift retains
+unresolved evidence and blocks blind restoration.
 
-When a later owner using another module adapter edits a shared field, F2 must
-retain the original adapter and use exact authorized-current-state evidence from
-the resource ledger. The F1 classification hook recognizes its own typed history;
-it does not yet authorize another adapter's new written value. Extend that seam
-with a failing cross-adapter ownership test rather than recapturing a baseline or
-decoding another module's snapshot with the wrong codec.
+Preparation's read preflight cannot eliminate another actor's later race. The
+platform checks expected-current evidence again immediately before dispatch, and
+native steps must conditionally check their current values and target on the same
+handle used for the write. Only the serial platform orchestration can dispatch
+prepared mutation hooks. Modules do not provide a permissive execution gate.
 
-No timer, watchdog, lock protocol, write-ahead journal, repair loop, recovery UI, or
-native rollback guarantee is implemented here. Windows native smoke validation
-and Linux CI remain gates for later adapter/integration stages; the deterministic
-F1 tests validate the shared contract on the current Windows host.
+The runner accepts at most 64 queued commands and 256 generation owners; the
+coordinator retains at most 256 owners and 4096 resources. Explicit retirement of
+an inactive generation owner leaves a permanent, bounded interval tombstone;
+capacity exhaustion rejects admission without dropping unresolved ownership.
+Terminal results belong to caller-held tickets rather than an unbounded result
+queue. Immutable snapshot envelopes are shared rather than cloned per resource.
+
+Cancellation or a newer generation suppresses activation, while compensation and
+restoration continue. Shutdown timeout retains the same worker and ownership;
+unresolved cleanup and worker panic have explicit results. Retiring Process or
+Session resources requires an authoritative lifetime producer, not rule deletion,
+read denial or an unchecked PID. F4 supplies that producer.
+
+The worker exposes prewrite/progress seams for F3. They do not yet persist a
+write-ahead journal or acquire a native lease: production admission rejects all
+writes. F3 must durably record intent before every native call and preserve the
+same worker-owned lease through uncertain completion. No native rollback or
+forced-termination recovery guarantee is implemented here. Windows native smoke
+validation and Linux CI remain gates for later adapter/integration stages.

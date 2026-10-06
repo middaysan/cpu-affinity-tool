@@ -1,5 +1,6 @@
-mod scalar;
-mod user_setting;
+pub(super) mod scalar;
+pub(super) mod user_setting;
+pub(super) mod value_setting;
 
 use super::platform::catalog::{Catalog, CatalogError};
 use super::platform::codec::{CodecError, EnvelopeKind, ModuleEnvelope};

@@ -22,7 +22,7 @@ pub struct NativeValue {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserObservation {
-    value: Option<NativeValue>,
+    pub(super) value: Option<NativeValue>,
     enabled: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,12 +47,14 @@ struct State {
     reads: usize,
     writes: usize,
     fail_enabled_step: bool,
+    fail_value_after_write: bool,
 }
 #[derive(Clone)]
 pub struct UserModule {
     state: Arc<Mutex<State>>,
     config_codec: Arc<JsonCodec<UserConfig>>,
     snapshot_codec: Arc<JsonCodec<UserSnapshot>>,
+    observe_hook: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 fn descriptor() -> ModuleDescriptor {
     ModuleDescriptor {
@@ -77,13 +79,15 @@ fn descriptor() -> ModuleDescriptor {
         effect: Effect::RestartRequired,
     }
 }
-fn value_native(value: i32) -> NativeValue {
+pub(in crate::app::features::tuning) fn value_native(value: i32) -> NativeValue {
     NativeValue {
         kind: 4,
         bytes: value.to_le_bytes().to_vec(),
     }
 }
-fn value_token(value: &Option<NativeValue>) -> DesiredStateToken {
+pub(in crate::app::features::tuning) fn value_token(
+    value: &Option<NativeValue>,
+) -> DesiredStateToken {
     let mut bytes = vec![0];
     if let Some(value) = value {
         bytes[0] = 1;
@@ -177,6 +181,7 @@ impl UserModule {
                 reads: 0,
                 writes: 0,
                 fail_enabled_step: false,
+                fail_value_after_write: false,
             })),
             config_codec: Arc::new(JsonCodec::new(
                 descriptor.id.clone(),
@@ -188,6 +193,7 @@ impl UserModule {
                 EnvelopeKind::Snapshot,
                 descriptor.snapshot_version,
             )),
+            observe_hook: Arc::new(Mutex::new(None)),
         }
     }
     pub fn config_envelope(&self, config: &UserConfig) -> Result<ModuleEnvelope, CodecError> {
@@ -218,6 +224,15 @@ impl UserModule {
     pub fn fail_next_enabled_step(&self) {
         self.state.lock().unwrap().fail_enabled_step = true;
     }
+    pub fn fail_next_value_after_write(&self) {
+        self.state.lock().unwrap().fail_value_after_write = true;
+    }
+    pub fn set_observe_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.observe_hook.lock().unwrap() = Some(hook);
+    }
+    pub fn clear_observe_hook(&self) {
+        *self.observe_hook.lock().unwrap() = None;
+    }
     fn plan(
         &self,
         target: &TargetIdentity,
@@ -231,6 +246,10 @@ impl UserModule {
         if resources.contains(&key(target, "user_value")) && current.value != desired.value {
             steps.push(PlannedStep {
                 writes: vec![key(target, "user_value")],
+                after: vec![ResourceObservation {
+                    key: key(target, "user_value"),
+                    value: value_token(&desired.value),
+                }],
                 instruction: UserStep::Value {
                     before: current.value.clone(),
                     after: desired.value.clone(),
@@ -242,6 +261,10 @@ impl UserModule {
         if resources.contains(&key(target, "user_enabled")) && current.enabled != desired.enabled {
             steps.push(PlannedStep {
                 writes: vec![key(target, "user_enabled")],
+                after: vec![ResourceObservation {
+                    key: key(target, "user_enabled"),
+                    value: enabled_token(desired.enabled),
+                }],
                 instruction: UserStep::Enabled {
                     before: current.enabled,
                     after: desired.enabled,
@@ -290,6 +313,10 @@ impl Module for UserModule {
         Capability::Available
     }
     fn observe(&self, _: &TargetIdentity) -> Result<UserObservation, ModuleError> {
+        let hook = self.observe_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
         let mut state = self.state.lock().unwrap();
         state.reads += 1;
         Ok(state.current.clone())
@@ -371,6 +398,21 @@ impl Module for UserModule {
     fn same_baseline(&self, left: &UserSnapshot, right: &UserSnapshot) -> bool {
         left.baseline == right.baseline
     }
+    fn baseline_states(
+        &self,
+        target: &TargetIdentity,
+        snapshot: &UserSnapshot,
+        resources: &[ResourceKey],
+    ) -> Result<Vec<ResourceObservation>, ModuleError> {
+        Ok(claims(target, &snapshot.baseline)
+            .into_iter()
+            .filter(|claim| resources.contains(&claim.key))
+            .map(|claim| ResourceObservation {
+                key: claim.key,
+                value: claim.desired,
+            })
+            .collect())
+    }
     fn classify(
         &self,
         snapshot: &UserSnapshot,
@@ -434,6 +476,14 @@ impl Module for UserModule {
                     ));
                 }
                 state.current.value = after.clone();
+                if state.fail_value_after_write {
+                    state.fail_value_after_write = false;
+                    state.writes += 1;
+                    return Err(ModuleError::new(
+                        ErrorKind::Write,
+                        "simulated error after native value write",
+                    ));
+                }
             }
             UserStep::Enabled { before, after } => {
                 if state.current.enabled != *before {

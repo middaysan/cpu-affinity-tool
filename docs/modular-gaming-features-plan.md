@@ -1,10 +1,10 @@
 # Modular Gaming Features: Platform and Integration Plan
 
-Status: platform-first staged implementation is in progress. This document owns design contracts and package dependencies, not canonical stage status. The dormant typed contract/catalog harness is present under `src/app/features/tuning/`; production setting modules and app integration remain later work.
+Status: platform-first staged implementation is in progress. This document owns design contracts and package dependencies, not canonical stage status. The dormant typed contract/catalog harness, resource coordinator and serial runner are present under `src/app/features/tuning/`; durable recovery, production setting modules and app integration remain later work. Production write admission is closed.
 
 Reviewed against `main` at `4bc23a817ff2a21c94b405ac40e4f66498d5a7aa` on 2026-10-06. Root `AGENTS.md` remains the repository contract. Delivery IDs below identify packages in this proposal, not canonical local stages or completion status. When implementation starts, map the accepted packages into `.codex/ROADMAP.md` without replacing existing stage identities.
 
-The [2026-10-07 Windows 11 module research](windows11-gaming-module-research.md) supplies the safety audit, evidence-backed catalog recommendations, timer/audio distinctions, and the reasons to keep advanced mutations outside the initial safe-toggle catalog. The integration catalog below describes future gated work, not shipped settings or measured FPS gains. The [module contribution contract](../src/app/features/tuning/README.md) documents the current harness and its remaining ownership/recovery boundaries.
+The [2026-10-07 Windows 11 module research](windows11-gaming-module-research.md) supplies the safety audit, evidence-backed catalog recommendations, timer/audio distinctions, and the reasons to keep advanced mutations outside the initial safe-toggle catalog. The integration catalog below describes future gated work, not shipped settings or measured FPS gains. The [module contribution contract](../src/app/features/tuning/README.md) documents the current harness, ownership/runner seams and remaining native recovery boundaries.
 
 ## Outcome and scope
 
