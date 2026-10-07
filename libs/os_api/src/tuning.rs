@@ -137,5 +137,10 @@ pub use crate::windows::tuning::{TuningProcessLifetimeGuard, TuningPublishPoint,
 pub use crate::windows::tuning::TuningTemporaryDirectory;
 #[cfg(all(windows, any(test, feature = "tuning-test-controls")))]
 pub use crate::windows::tuning::{
+    TuningCanonicalContinuityCandidate, TuningContinuityCandidateData,
+    TuningContinuityCandidateMode, TuningContinuityCandidateObservation,
+};
+#[cfg(all(windows, any(test, feature = "tuning-test-controls")))]
+pub use crate::windows::tuning::{
     TuningMarkerNonce, TuningVolatileMarkerFixture, TuningVolatilityEvidence,
 };

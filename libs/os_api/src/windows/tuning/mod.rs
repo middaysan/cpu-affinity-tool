@@ -1,6 +1,13 @@
 mod identity;
 pub use identity::TuningProcessLifetimeGuard;
 #[cfg(any(test, feature = "tuning-test-controls"))]
+mod canonical_marker;
+#[cfg(any(test, feature = "tuning-test-controls"))]
+pub use canonical_marker::{
+    TuningCanonicalContinuityCandidate, TuningContinuityCandidateData,
+    TuningContinuityCandidateMode, TuningContinuityCandidateObservation,
+};
+#[cfg(any(test, feature = "tuning-test-controls"))]
 mod marker;
 mod security;
 mod store;

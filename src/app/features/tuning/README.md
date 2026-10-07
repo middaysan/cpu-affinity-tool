@@ -226,6 +226,17 @@ journal format remains version 1, while legacy bare-array continuity identities
 are blocked with their exact raw bytes retained; there is no inferred upgrade.
 The canonical continuity producer remains unavailable pending its native matrix.
 
+The Windows `canonical_marker` candidate is separately gated by
+`tuning-test-controls` and is not composed into the application or the probe CLI.
+Its private codec, registry policy and operation traces cover bounded decisions;
+owned private-hive and current-token tests characterize the reusable native
+primitives. The candidate API borrows the retained canonical store/lease and
+revalidates actual retained token and exact machine context. It checks both
+retained keys and the reopened fixed namespace before and after its bounded
+volatility probe. No fixture or decoded nonce can supply that authority. Source
+review and isolated tests do not complete the canonical, elevated or
+power-transition acceptance gates; shipping recovery admission remains closed.
+
 The required-feature os_api `tuning-canonical-probe` example provides safe token
 preflight and explicitly selected elevated metadata observation/contention. Default
 preflight always skips canonical open. Lab commands may initialize missing

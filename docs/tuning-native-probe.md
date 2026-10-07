@@ -12,6 +12,23 @@ do not select it. It has no UAC launcher, path override, registry continuity
 writer or application startup integration. Run Cargo commands from the repository
 root. Use a prepared lab context for the commands in the lab section.
 
+The separate feature-gated `TuningStore::canonical_continuity_candidate` API is
+implemented in `os_api` for explicit native validation. It is not called by this
+example, including any `lab-*` command. It borrows the real canonical store/lease
+and retains actual token provenance; each guarded operation reobserves exact
+machine and token context. Private operation-trace and owned-hive tests do not
+certify the canonical registry namespace or elevated access policy.
+
+The candidate uses only the fixed native64 application metadata chain. Existing
+components are validated without repair. Initialization requires an actually
+absent canonical journal and permits one capsule write only to an actually new
+marker. Observation includes a bounded child-creation probe for volatility;
+unexpected metadata is retained and closes that guard's observation admission.
+This is an explicit metadata operation and must not be added to default token
+preflight or described as a read-only command. No actual canonical candidate
+execution is certified by this implementation checkpoint. Shipping continuity
+and tuning write admission remain unavailable until their native gates pass.
+
 ## Automated checks and safe preflight
 
 ```powershell
