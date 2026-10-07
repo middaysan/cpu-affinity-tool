@@ -53,6 +53,12 @@ impl TuningTemporaryDirectory {
     pub fn path(&self) -> &Path {
         &self.path
     }
+    /// Test-only shape of the ID captured at this root's actual creation.
+    /// This exposes no handle or native/canonical authority.
+    #[cfg(test)]
+    pub(super) fn original_identity(&self) -> (u32, u64) {
+        self.id
+    }
     #[cfg(test)]
     pub(super) fn unprotected() -> Result<Self, TuningNativeError> {
         let new = Self::new()?;

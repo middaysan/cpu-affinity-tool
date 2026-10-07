@@ -347,6 +347,7 @@ Internal backend structure:
   - `cpu`
   - `event_log`
   - `tuning` - dormant metadata store/security/identity primitives, same-handle process lifetime observations and nonshipping isolated boot-marker probes; canonical boot/recovery admission remains unavailable
+  - `tuning/relative_io.rs` and `tuning/relative_io/` - private `cfg(test)` handle-relative NTFS primitives and owned native characterization; production storage does not use them
 - crate-root public shape remains intentionally narrow: external callers still interact through `OS` plus small boundary value types such as `PriorityClass` and `ShortcutSpec`
 - Linux backend remains a single-file minimal backend and is not forced into parity with the Windows internal layout
 

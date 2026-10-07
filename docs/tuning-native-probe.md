@@ -196,6 +196,37 @@ These failed attempts establish neither canonical admission nor continuity.
 Shipping continuity and tuning writers remain unavailable. Further source and
 native validation must preserve refusal evidence and address namespace safety.
 
+## Isolated relative-operation characterization
+
+The private `cfg(test)` `relative_io` module characterizes operations rooted in
+an actual retained directory handle. Its fixtures own their temporary NTFS
+objects; they do not open ProgramData, invoke the canonical candidate, require
+UAC, or supply production authority. Fixed component names, native dispositions,
+bounded enumeration, exact source-handle deletion and no-replace rename are
+tested alongside namespace replacement, junctions, hard links and a conflicting
+child-process current directory. Setup failures remain distinct from missing or
+incorrect operation behavior.
+
+On 2026-10-07 the 28 module tests passed on the local Windows build: 16 owned
+native scenarios, one child helper and 11 pure/regression tests. Nested creation
+worked with the original directory access mask. The documented Win32 relative
+rename returned error `87` even after correcting the supplied buffer extent;
+the fixed no-replace implementation uses the generated `NtSetInformationFile`
+binding and `FILE_RENAME_INFORMATION` instead, with no pathname fallback. See
+[the native setter contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile).
+
+Unexpected pending output retention is covered by a pure ownership trace; no
+native asynchronous completion was observed. The private primitive retains its
+heap output, and the rename input, without inspection on `STATUS_PENDING`, then
+refuses the operation. Any delivered handle remains for process-exit cleanup;
+this is not production shutdown or cancellation evidence.
+
+Production storage still uses its existing implementation and ancestor policy.
+Adoption requires a complete migration of descendant operations, a separately
+reviewed publication/recovery protocol and starting-object eligibility. A
+successful temporary-fixture test does not authorize weaker ancestor checks or
+close the canonical, cross-account or power-transition gates.
+
 ## Remaining acceptance gates
 
 The probe supplies a concrete way to inspect canonical metadata and lease
