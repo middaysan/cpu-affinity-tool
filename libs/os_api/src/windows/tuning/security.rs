@@ -19,7 +19,11 @@ use windows::core::{PCWSTR, PWSTR};
 const SYSTEM: &str = "S-1-5-18";
 const ADMINISTRATORS: &str = "S-1-5-32-544";
 const TRUSTED_INSTALLER: &str = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
-const DANGEROUS_PARENT_RIGHTS: u32 = 0x000d_0150 | 0x1000_0000 | 0x4000_0000;
+const DANGEROUS_PARENT_RIGHTS: u32 = 0x000d_0152 | 0x1000_0000 | 0x4000_0000;
+
+fn untrusted_grant_is_unsafe(managed: bool, mask: u32) -> bool {
+    managed || mask & DANGEROUS_PARENT_RIGHTS != 0
+}
 
 pub(super) struct LocalAllocation(pub *mut c_void);
 impl Drop for LocalAllocation {
@@ -133,7 +137,7 @@ impl SecurityPolicy {
                 return Err(TuningNativeError::Unsupported("complex storage DACL"));
             }
             let trusted = self.trusted(&entry.sid, managed);
-            if (managed || entry.mask & DANGEROUS_PARENT_RIGHTS != 0) && !trusted {
+            if untrusted_grant_is_unsafe(managed, entry.mask) && !trusted {
                 return Err(TuningNativeError::UnsafeStore(
                     "untrusted storage mutation grant",
                 ));
@@ -227,6 +231,31 @@ pub(super) fn sid_string(sid: PSID) -> Result<String, TuningNativeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_ancestor_grants_that_can_set_reparse_data_are_refused() {
+        // Directory FILE_ADD_FILE has the same access bit as FILE_WRITE_DATA.
+        // The documented reparse access check admits either this bit or
+        // FILE_WRITE_ATTRIBUTES; sharing flags do not supply an alternative proof.
+        for mask in [0x0000_0002, 0x0000_0100, 0x0000_0116] {
+            assert!(untrusted_grant_is_unsafe(false, mask), "mask={mask:#x}");
+        }
+    }
+    #[test]
+    fn ancestor_read_and_subdirectory_create_grants_keep_their_prior_policy() {
+        for mask in [0x0000_0001, 0x0000_0004, 0x0012_00a9, 0x8000_0000] {
+            assert!(!untrusted_grant_is_unsafe(false, mask), "mask={mask:#x}");
+            assert!(untrusted_grant_is_unsafe(true, mask));
+        }
+        for mask in [
+            0x0001_0000,
+            0x0004_0000,
+            0x0008_0000,
+            0x1000_0000,
+            0x4000_0000,
+        ] {
+            assert!(untrusted_grant_is_unsafe(false, mask));
+        }
+    }
     #[test]
     fn inheritance_only_integrity_label_does_not_protect_this_object() {
         let label = |flags| Ace {

@@ -30,6 +30,11 @@ This is an explicit metadata operation and must not be added to default token
 preflight or described as a read-only command. No actual canonical candidate
 execution is certified by this implementation checkpoint. Shipping continuity
 and tuning write admission remain unavailable until their native gates pass.
+The path-based store refuses ordinary ancestor grants capable of namespace or
+security mutation, including `FILE_WRITE_DATA` (the directory `FILE_ADD_FILE`
+bit) and `FILE_WRITE_ATTRIBUTES`. Read and add-subdirectory grants retain their
+existing policy. The broader handle-relative compatibility work remains separate;
+this stricter check never repairs an existing system descriptor.
 
 ## Automated checks and safe preflight
 

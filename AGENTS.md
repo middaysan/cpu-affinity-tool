@@ -315,7 +315,7 @@ Data source separation:
 
 ## Platform boundary
 `libs/os_api` is the main boundary between the app and the OS. It covers:
-- dormant tuning metadata primitives: canonical Known Folder store with a worker-held file lease, bounded publication/validation, exact read-only machine/token/process identity and an opaque worker-only retained process lifetime guard; no gaming-setting writer is registered
+- dormant tuning metadata primitives: canonical Known Folder store with a worker-held file lease, bounded publication/validation, strict ancestor mutation-grant refusal including the directory add-file/write-data bit, exact read-only machine/token/process identity and an opaque worker-only retained process lifetime guard; no gaming-setting writer is registered
 - Windows local named-pipe and mutex transport for saved-rule shortcut forwarding
 - process launch
 - installed-app discovery and activation on Windows
