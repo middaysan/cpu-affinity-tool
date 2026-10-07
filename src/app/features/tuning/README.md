@@ -227,7 +227,8 @@ are blocked with their exact raw bytes retained; there is no inferred upgrade.
 The canonical continuity producer remains unavailable pending its native matrix.
 
 The Windows `canonical_marker` candidate is separately gated by
-`tuning-test-controls` and is not composed into the application or the probe CLI.
+`tuning-test-controls` and is not composed into the application. Only explicitly
+selected `lab-continuity-*` probe commands invoke it; existing commands do not.
 Its private codec, registry policy and operation traces cover bounded decisions;
 owned private-hive and current-token tests characterize the reusable native
 primitives. The candidate API borrows the retained canonical store/lease and
@@ -241,6 +242,10 @@ The required-feature os_api `tuning-canonical-probe` example provides safe token
 preflight and explicitly selected elevated metadata observation/contention. Default
 preflight always skips canonical open. Lab commands may initialize missing
 protected directories and lease metadata; they never publish journal data or
-change gaming settings. No lab command is an implicit test or release step.
+change gaming settings. The separate continuity commands validate or initialize
+fixed protected registry metadata and compare two observations on one retained
+guard; Unknown and incomplete results remain unsuccessful. These commands do not
+certify native acceptance merely by being compiled or fake-tested. No lab command
+is an implicit test or release step.
 See [the probe guide](../../../../docs/tuning-native-probe.md) for exact commands,
 worker timeout semantics and the remaining canonical native gates.

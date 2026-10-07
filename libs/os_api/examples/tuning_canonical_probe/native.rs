@@ -1,8 +1,10 @@
 use crate::logic::{
-    Backend, Elevation, Failure, Presence, ProbeStore, TokenContext, classify_integrity_sid,
+    Backend, ContinuityCheck, ContinuityMode, Elevation, Failure, Presence, ProbeStore,
+    TokenContext, classify_integrity_sid, continuity_check,
 };
 use os_api::tuning::{
-    MAX_TUNING_JOURNAL_BYTES, TuningNativeError, TuningStore, TuningStoreAuthority,
+    MAX_TUNING_JOURNAL_BYTES, TuningContinuityCandidateMode, TuningContinuityCandidateObservation,
+    TuningNativeError, TuningStore, TuningStoreAuthority,
 };
 use std::{mem::size_of, ptr};
 use windows::Win32::{
@@ -120,6 +122,13 @@ pub struct NativeBackend;
 pub struct NativeStore(TuningStore);
 impl Backend for NativeBackend {
     type Store = NativeStore;
+    fn continuity_supported_build(&self) -> bool {
+        cfg!(all(
+            windows,
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ))
+    }
     fn token_context(&mut self) -> Result<TokenContext, Failure> {
         token_context()
     }
@@ -143,5 +152,25 @@ impl ProbeStore for NativeStore {
             Err(TuningNativeError::Capacity { size, .. }) => Ok(Presence::Oversized(size)),
             Err(error) => Err(error.into()),
         }
+    }
+    fn continuity(&mut self, mode: ContinuityMode) -> Result<ContinuityCheck, Failure> {
+        let native_mode = match mode {
+            ContinuityMode::ObserveExisting => TuningContinuityCandidateMode::ObserveExisting,
+            ContinuityMode::InitializeWhenAbsent => {
+                TuningContinuityCandidateMode::InitializeOnlyWhenCanonicalJournalAbsent
+            }
+        };
+        let mut candidate = self
+            .0
+            .canonical_continuity_candidate(native_mode)
+            .map_err(Failure::from)?;
+        let first = candidate.observe().map_err(Failure::from)?;
+        let second = candidate.observe().map_err(Failure::from)?;
+        let check = continuity_check([first, second].map(|observation| match observation {
+            TuningContinuityCandidateObservation::Observed(data) => Some(data),
+            TuningContinuityCandidateObservation::Unknown => None,
+        }));
+        drop(candidate);
+        Ok(check)
     }
 }

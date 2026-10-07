@@ -4,17 +4,19 @@
 explicit Windows lab validation. Its default `preflight` only reads the current
 process token. It never opens the canonical store, including when already
 elevated. Explicit `lab-*` commands can initialize missing protected application
-directories and lease metadata. They do not publish, repair, delete or normalize
-journal data, change gaming settings, or enable production tuning admission.
+directories and lease metadata. The two `lab-continuity-*` commands additionally
+invoke the protected registry candidate described below. They do not publish,
+repair, delete or normalize journal data, change gaming settings, or enable
+production tuning admission.
 
 The example requires `tuning-test-controls`; stable release builds and uploads
-do not select it. It has no UAC launcher, path override, registry continuity
-writer or application startup integration. Run Cargo commands from the repository
+do not select it. It has no UAC launcher, path override or application startup
+integration. Run Cargo commands from the repository
 root. Use a prepared lab context for the commands in the lab section.
 
 The separate feature-gated `TuningStore::canonical_continuity_candidate` API is
-implemented in `os_api` for explicit native validation. It is not called by this
-example, including any `lab-*` command. It borrows the real canonical store/lease
+implemented in `os_api` for explicit native validation. Only this example's two
+explicit `lab-continuity-*` commands call it. It borrows the real canonical store/lease
 and retains actual token provenance; each guarded operation reobserves exact
 machine and token context. Private operation-trace and owned-hive tests do not
 certify the canonical registry namespace or elevated access policy.
@@ -105,6 +107,54 @@ that process. The invocation remains incomplete and exits nonzero even if the
 retained worker later finishes successfully. An incomplete report stream also
 prevents a successful exit. No replacement worker or claimed lease release follows a timeout.
 Any later automated controller must terminate and wait only its own Child handle.
+
+## Explicit continuity candidate checks
+
+These operations require a prepared elevated Windows lab context. Only Windows
+x86_64 with 64-bit pointers is admitted; the new commands reject other builds
+before token or store access. The actual candidate independently validates the
+retained lease, exact primary-token provenance, known High/System integrity and
+the full supported machine identity. A standard or unknown token stops before
+opening the store. Existing preflight/open/hold/contend commands never invoke it.
+
+To observe an existing candidate:
+
+```powershell
+cargo run --locked --manifest-path libs/os_api/Cargo.toml --features tuning-test-controls --example tuning-canonical-probe -- lab-continuity-observe
+```
+
+It opens the fixed native64 `HKLM\SOFTWARE\CpuAffinityTool\Tuning\ContinuityV1`
+chain without creating missing components. Each observation can request one
+bounded child-creation probe after authenticating the existing metadata. A
+missing, denied, malformed, redirected or unverified component fails without
+repair. Unexpected probe artifacts remain present and close further observation
+admission for that guard; the command never deletes them.
+
+Initial creation is separately selected:
+
+```powershell
+cargo run --locked --manifest-path libs/os_api/Cargo.toml --features tuning-test-controls --example tuning-canonical-probe -- lab-continuity-initialize
+```
+
+Both the command and actual factory require an absent canonical journal. Any
+Present journal, including zero bytes, blocks initialization. Missing app-owned
+registry components may be created with the fixed protected descriptor; SOFTWARE
+is existing-only. Only an actually new marker receives its capsule once. Existing
+incomplete or unsafe metadata is retained without overwrite or normalization.
+
+Both commands compare two observations through one retained guard and then drop
+the guard and store on the same worker before its terminal report. Reports add
+only an optional fixed `continuity` enum; old-command reports omit that field.
+`continuity_stable` with `continuity=stable` is successful only with a joined,
+terminal worker, complete report output and no controller timeout. Unknown,
+Changed, blocked initialization, unsupported build and native failures exit
+nonzero. They contain no nonce, hardware ID, SID, authentication ID or key path.
+
+Stable certifies that same-process comparison only. It does not establish
+cross-account equality, power-transition behavior, an OS boot UUID, publication
+or game recovery. Automated command tests use fakes and shape values, never the
+native candidate. Neither command runs implicitly in tests, CI or normal launch.
+The implementation checkpoint has not executed these native commands.
 
 ## Remaining acceptance gates
 

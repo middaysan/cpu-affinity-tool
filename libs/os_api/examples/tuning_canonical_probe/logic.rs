@@ -18,6 +18,8 @@ pub enum Mode {
     LabOpen,
     LabHold,
     LabContend,
+    LabContinuityObserve,
+    LabContinuityInitialize,
 }
 pub fn parse_mode(args: &[String]) -> Result<Mode, ()> {
     match args {
@@ -27,6 +29,8 @@ pub fn parse_mode(args: &[String]) -> Result<Mode, ()> {
             "lab-open" => Ok(Mode::LabOpen),
             "lab-hold" => Ok(Mode::LabHold),
             "lab-contend" => Ok(Mode::LabContend),
+            "lab-continuity-observe" => Ok(Mode::LabContinuityObserve),
+            "lab-continuity-initialize" => Ok(Mode::LabContinuityInitialize),
             _ => Err(()),
         },
         _ => Err(()),
@@ -68,6 +72,7 @@ pub enum Stage {
     Authority,
     Validate,
     Read,
+    Continuity,
     Hold,
     Closed,
     Controller,
@@ -93,6 +98,33 @@ pub enum Outcome {
     #[cfg(not(windows))]
     UnsupportedPlatform,
     WorkerPanicked,
+    UnsupportedBuild,
+    ContinuityStable,
+    ContinuityUnknown,
+    ContinuityChanged,
+    ContinuityInitializationBlocked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContinuityMode {
+    ObserveExisting,
+    InitializeWhenAbsent,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuityCheck {
+    Stable,
+    Unknown,
+    Changed,
+}
+
+/// Comparison of private full observations; shape fixtures issue no authority.
+pub fn continuity_check<T: Eq>(pair: [Option<T>; 2]) -> ContinuityCheck {
+    match pair {
+        [Some(first), Some(second)] if first == second => ContinuityCheck::Stable,
+        [Some(_), Some(_)] => ContinuityCheck::Changed,
+        _ => ContinuityCheck::Unknown,
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -152,6 +184,8 @@ pub struct Report {
     pub journal: Presence,
     pub failure: Option<Failure>,
     pub worker_terminal: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuity: Option<ContinuityCheck>,
 }
 impl Report {
     pub fn new(command: Mode, stage: Stage, outcome: Outcome) -> Self {
@@ -166,9 +200,17 @@ impl Report {
             journal: Presence::NotRead,
             failure: None,
             worker_terminal: false,
+            continuity: None,
         }
     }
     pub fn successful(&self) -> bool {
+        if matches!(
+            self.command,
+            Mode::LabContinuityObserve | Mode::LabContinuityInitialize
+        ) {
+            return self.outcome == Outcome::ContinuityStable
+                && self.continuity == Some(ContinuityCheck::Stable);
+        }
         matches!(
             self.outcome,
             Outcome::ReadOnlyStandard
@@ -205,14 +247,16 @@ pub fn terminal_exit_code(
     }
 }
 
-/// There is intentionally no publication/repair/deletion method in this seam.
+/// No journal publication, repair or deletion method is exposed.
 pub trait ProbeStore {
     fn canonical(&self) -> bool;
     fn validate(&mut self) -> Result<(), Failure>;
     fn presence(&mut self) -> Result<Presence, Failure>;
+    fn continuity(&mut self, mode: ContinuityMode) -> Result<ContinuityCheck, Failure>;
 }
 pub trait Backend {
     type Store: ProbeStore;
+    fn continuity_supported_build(&self) -> bool;
     fn token_context(&mut self) -> Result<TokenContext, Failure>;
     fn open_canonical(&mut self) -> Result<Self::Store, Failure>;
 }
@@ -299,6 +343,15 @@ fn run_probe<B: Backend>(
     hold_deadline: Duration,
 ) -> Report {
     let mut report = Report::new(mode, Stage::Preflight, Outcome::UnknownToken);
+    let continuity_mode = match mode {
+        Mode::LabContinuityObserve => Some(ContinuityMode::ObserveExisting),
+        Mode::LabContinuityInitialize => Some(ContinuityMode::InitializeWhenAbsent),
+        _ => None,
+    };
+    if continuity_mode.is_some() && !backend.continuity_supported_build() {
+        report.outcome = Outcome::UnsupportedBuild;
+        return report;
+    }
     report.token = match backend.token_context() {
         Ok(token) => token,
         Err(failure) => {
@@ -379,6 +432,30 @@ fn run_probe<B: Backend>(
             kind: FailureKind::Capacity,
             code: None,
         });
+        drop(store);
+        return report;
+    }
+    if let Some(intent) = continuity_mode {
+        if intent == ContinuityMode::InitializeWhenAbsent && report.journal != Presence::Absent {
+            report.outcome = Outcome::ContinuityInitializationBlocked;
+            drop(store);
+            return report;
+        }
+        report.stage = Stage::Continuity;
+        match store.continuity(intent) {
+            Ok(check) => {
+                report.continuity = Some(check);
+                report.outcome = match check {
+                    ContinuityCheck::Stable => Outcome::ContinuityStable,
+                    ContinuityCheck::Unknown => Outcome::ContinuityUnknown,
+                    ContinuityCheck::Changed => Outcome::ContinuityChanged,
+                };
+            }
+            Err(failure) => {
+                report.outcome = Outcome::NativeFailure;
+                report.failure = Some(failure);
+            }
+        }
         drop(store);
         return report;
     }
