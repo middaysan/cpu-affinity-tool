@@ -70,7 +70,22 @@ impl RecoveryPlan {
             || !self.unknown_owners.is_empty()
             || !self.unknown_resources.is_empty()
     }
+    #[cfg(test)]
     pub(super) fn resolve(document: &JournalDocument, resolver: &mut dyn RecoveryResolver) -> Self {
+        // Explicit legacy fixture policy. Production uses independent configured
+        // input through resolve_configured; recorded Manual shape is no authority.
+        Self::resolve_configured(document, resolver, &mut |_, _| {
+            super::configured_intent::IntentDecision::Enabled
+        })
+    }
+    pub(super) fn resolve_configured(
+        document: &JournalDocument,
+        resolver: &mut dyn RecoveryResolver,
+        manual: &mut dyn FnMut(
+            &JournalOwner,
+            &JournalSource,
+        ) -> super::configured_intent::IntentDecision,
+    ) -> Self {
         let mut plan = Self::default();
         if let Err(error) = document.validate() {
             plan.error = Some(error);
@@ -126,17 +141,27 @@ impl RecoveryPlan {
         let mut expired_actors = Vec::new();
         for owner in &document.owners {
             let source = &document.sources[owner.source.0 as usize];
-            if !document
-                .resources
-                .iter()
-                .any(|resource| resource.owners.contains(&owner.owner))
-            {
-                plan.release.push(owner.owner);
-                continue;
-            }
             let game = match &owner.binding {
                 ActivationBinding::Manual(_) => {
-                    plan.reattach.push(owner.owner);
+                    match manual(owner, source) {
+                        super::configured_intent::IntentDecision::Enabled => {
+                            if document
+                                .resources
+                                .iter()
+                                .any(|resource| resource.owners.contains(&owner.owner))
+                            {
+                                plan.reattach.push(owner.owner);
+                            } else {
+                                plan.release.push(owner.owner);
+                            }
+                        }
+                        super::configured_intent::IntentDecision::Disabled => {
+                            plan.release.push(owner.owner)
+                        }
+                        super::configured_intent::IntentDecision::Unknown => {
+                            plan.unknown_owners.push(owner.owner)
+                        }
+                    }
                     continue;
                 }
                 ActivationBinding::Game(game) => game,

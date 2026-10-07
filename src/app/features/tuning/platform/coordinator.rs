@@ -45,8 +45,17 @@ pub(super) struct WriteIntent<'a> {
     pub ownership: CoordinatorSnapshot,
 }
 pub(super) trait ExecutionControl {
+    fn before_command(&mut self, _: &Command, _: &CoordinatorSnapshot) -> Result<(), GateError> {
+        Ok(())
+    }
+    fn before_shutdown(&mut self, _: &CoordinatorSnapshot) -> Result<(), GateError> {
+        Ok(())
+    }
     fn cancellation_requested(&self) -> bool;
     fn before_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError>;
+    fn before_execute(&mut self, _: &WriteIntent<'_>) -> Result<(), GateError> {
+        Ok(())
+    }
     fn after_verified_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError>;
     fn publish(&mut self, snapshot: CoordinatorSnapshot);
     fn commit_transition(&mut self, snapshot: &CoordinatorSnapshot) -> Result<(), GateError>;
@@ -468,6 +477,13 @@ impl Coordinator {
         if matches!(command, Command::Observe { .. }) {
             return self.dispatch(command, control);
         }
+        if let Err(error) = control.before_command(&command, &self.snapshot()) {
+            return self.result(
+                Outcome::Rejected,
+                Some(CoordinatorError::Gate(error)),
+                control,
+            );
+        }
         if self.durability_failed {
             return self.result(
                 Outcome::RecoveryRequired,
@@ -507,6 +523,13 @@ impl Coordinator {
         }
     }
     pub(super) fn shutdown(&mut self, control: &mut dyn ExecutionControl) -> CommandResult {
+        if let Err(error) = control.before_shutdown(&self.snapshot()) {
+            return self.result(
+                Outcome::RecoveryRequired,
+                Some(CoordinatorError::Gate(error)),
+                control,
+            );
+        }
         if self.durability_failed {
             return self.result(
                 Outcome::RecoveryRequired,
@@ -571,7 +594,8 @@ impl Coordinator {
             || self.snapshot() != before_snapshot
         {
             if let Err(error) = control.commit_transition(&self.snapshot()) {
-                if self.command_native_started {
+                let retained_intent = self.durable_checkpoint.is_some();
+                if self.command_native_started || retained_intent {
                     let checkpoint = self.durable_checkpoint.take().unwrap_or(before);
                     self.restore_checkpoint(checkpoint);
                     for resource in self.resources.values_mut() {
@@ -585,7 +609,7 @@ impl Coordinator {
                 }
                 self.durability_failed = true;
                 return self.result(
-                    if self.command_native_started {
+                    if self.command_native_started || retained_intent {
                         Outcome::RecoveryRequired
                     } else {
                         Outcome::Rejected
@@ -909,6 +933,11 @@ impl Coordinator {
                     self.undo_provisional(&provisional);
                     return Err(CoordinatorError::Gate(GateError::Cancelled));
                 }
+                // Publication succeeded: retain that checkpoint even if current
+                // configured/native authority changes before the actual step.
+                control
+                    .before_execute(&intent)
+                    .map_err(CoordinatorError::Gate)?;
                 let previously_possible = *possible_write;
                 let previously_started = self.command_native_started;
                 *possible_write = true;

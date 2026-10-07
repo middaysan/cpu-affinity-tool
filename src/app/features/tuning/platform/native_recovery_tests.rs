@@ -3,6 +3,9 @@
 use super::{
     catalog::{Catalog, Module},
     codec::{ModuleEnvelope, VersionedCodec},
+    configured_intent::{
+        ConfiguredDecision, ConfiguredEntry, ConfiguredIntentSource, ConfiguredSnapshot,
+    },
     contract::*,
     coordinator::{
         Command, Coordinator, CoordinatorSnapshot, ExecutionControl, GateError, Outcome,
@@ -14,7 +17,7 @@ use super::{
     },
     recovery::{OwnerAttachment, RecoveryPlan, RecoveryResolver, ResourceLifetime},
     runner::{Runner, RunnerLimits, ShutdownResult},
-    writer::WorkerAuthority,
+    writer::{bootstrap_configured, ScopeEvidence, WorkerAuthority},
 };
 use crate::app::features::tuning::testing::scalar::{
     ScalarConfig, ScalarModule, ScalarSnapshot, ScalarStep,
@@ -24,11 +27,13 @@ use os_api::tuning::{
     TuningStore, TuningStoreAuthority, TuningTemporaryDirectory,
 };
 use std::{
+    cell::RefCell,
     fs::OpenOptions,
     io::{BufRead, BufReader, Read, Write},
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
+    rc::Rc,
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender},
@@ -51,6 +56,8 @@ const ROOT_ENV: &str = "CPU_AFFINITY_NATIVE_FIXTURE_ROOT";
 const TARGET_ENV: &str = "CPU_AFFINITY_NATIVE_FIXTURE_TARGET";
 const ROLE_ENV: &str = "CPU_AFFINITY_NATIVE_FIXTURE_ROLE";
 const ACTOR_ENV: &str = "CPU_AFFINITY_NATIVE_FIXTURE_ACTOR";
+const CONFIGURED_BINDING_ENV: &str = "CPU_AFFINITY_NATIVE_FIXTURE_CONFIGURED_BINDING";
+const MAX_CONFIGURED_BINDING_BYTES: usize = 8192;
 const PAUSED: &str = "NATIVE_FIXTURE_PAUSED";
 const TIMED_OUT: &str = "NATIVE_FIXTURE_TIMED_OUT";
 const RECOVERED: &str = "NATIVE_FIXTURE_RECOVERED";
@@ -108,6 +115,57 @@ fn fixture_binding(process: ProcessIdentity) -> ActivationBinding {
         )
         .unwrap(),
     )
+}
+fn fixture_process(pid: u32) -> ProcessIdentity {
+    ProcessIdentity::new(
+        SessionIdentity {
+            user: UserIdentity {
+                machine: machine(),
+                sid: UserSid::new("S-1-5-21-10-20-30-1000").unwrap(),
+            },
+            session_id: 1,
+            logon: LogonId::new(1).unwrap(),
+            boot: BootId::new([3; 16]).unwrap(),
+        },
+        pid,
+        1,
+        ImagePath::new("C:\\Fixture\\owned-child.exe").unwrap(),
+    )
+    .unwrap()
+}
+struct FixtureConfigured(ConfiguredSnapshot);
+impl ConfiguredIntentSource for FixtureConfigured {
+    fn snapshot(&self) -> ConfiguredSnapshot {
+        self.0.clone()
+    }
+}
+fn configured_fixture(
+    config: ModuleEnvelope,
+    binding: ActivationBinding,
+) -> Arc<dyn ConfiguredIntentSource> {
+    Arc::new(FixtureConfigured(
+        ConfiguredSnapshot::complete(
+            1,
+            vec![ConfiguredEntry {
+                owner: OwnerId::new(1).unwrap(),
+                binding,
+                config,
+                target: TargetIdentity::Machine(machine()),
+                mode: ActivationMode::Session,
+                decision: ConfiguredDecision::Enabled,
+            }],
+        )
+        .unwrap(),
+    ))
+}
+fn expected_binding() -> ActivationBinding {
+    let input = std::env::var(CONFIGURED_BINDING_ENV)
+        .expect("independent fixture configured input required");
+    assert!(
+        input.len() <= MAX_CONFIGURED_BINDING_BYTES,
+        "bounded private fixture configured input"
+    );
+    serde_json::from_str(&input).expect("valid fixture binding input")
 }
 fn fixture_native_process(actual: &TuningProcessIdentity) -> ProcessIdentity {
     // Only PID/creation/image/token are native observations. Machine and boot
@@ -251,18 +309,45 @@ impl ProbeChild {
         Self::spawn_actor(root, target, role, None)
     }
     fn spawn_actor(root: &Path, target: &Path, role: &str, actor: Option<u32>) -> Self {
+        Self::spawn_input(root, target, role, actor, None)
+    }
+    fn spawn_configured(
+        root: &Path,
+        target: &Path,
+        role: &str,
+        binding: &ActivationBinding,
+    ) -> Self {
+        Self::spawn_input(root, target, role, None, Some(binding))
+    }
+    fn spawn_input(
+        root: &Path,
+        target: &Path,
+        role: &str,
+        actor: Option<u32>,
+        configured: Option<&ActivationBinding>,
+    ) -> Self {
         let mut command = ProcessCommand::new(std::env::current_exe().unwrap());
         command
             .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
             .env(ROOT_ENV, root)
             .env(TARGET_ENV, target)
             .env(ROLE_ENV, role)
+            .env_remove(CONFIGURED_BINDING_ENV)
+            .env_remove(ACTOR_ENV)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .creation_flags(0x0800_0000);
         if let Some(actor) = actor {
             command.env(ACTOR_ENV, actor.to_string());
+        }
+        if let Some(binding) = configured {
+            let input = serde_json::to_string(binding).unwrap();
+            assert!(
+                input.len() <= MAX_CONFIGURED_BINDING_BYTES,
+                "bounded private fixture configured input"
+            );
+            command.env(CONFIGURED_BINDING_ENV, input);
         }
         let mut child = command.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -331,6 +416,7 @@ fn interruption(point: StopPoint) {
     let target = target_root.path().join("scalar-native-target.bin");
     std::fs::write(&target, 7i32.to_le_bytes()).unwrap();
     let mut writer = ProbeChild::spawn(journal_root.path(), &target, point.role());
+    let configured = fixture_binding(fixture_process(writer.child.id()));
     writer.wait_message(PAUSED);
     writer.wait_message(TIMED_OUT);
     assert!(
@@ -379,7 +465,12 @@ fn interruption(point: StopPoint) {
     }
     // Child::wait attests only this fixture actor's termination, never a game,
     // Windows logon or boot. The recovery resolver is explicitly test-only.
-    let mut recovery = ProbeChild::spawn(journal_root.path(), &target, "recover-fixture-expired");
+    let mut recovery = ProbeChild::spawn_configured(
+        journal_root.path(),
+        &target,
+        "recover-fixture-expired",
+        &configured,
+    );
     recovery.wait_message(RECOVERED);
     assert_eq!(read_target(&target), 7);
     assert!(matches!(
@@ -480,7 +571,9 @@ fn retained_actor_interruption(ended_before_guard: bool) {
     } else {
         "recover-native-live"
     };
-    let mut recovery = ProbeChild::spawn(journal_root.path(), &target, role);
+    let configured = fixture_binding(fixture_native_process(&expected));
+    let mut recovery =
+        ProbeChild::spawn_configured(journal_root.path(), &target, role, &configured);
     recovery.wait_message(if ended_before_guard {
         UNKNOWN
     } else {
@@ -824,14 +917,20 @@ impl RecoveryResolver for NativeFixtureActor {
         ResourceLifetime::VerifiedLive
     }
 }
+struct SharedNativeFixtureActor(Rc<RefCell<NativeFixtureActor>>);
+impl RecoveryResolver for SharedNativeFixtureActor {
+    fn owner(&mut self, owner: &JournalOwner, source: &JournalSource) -> OwnerAttachment {
+        self.0.borrow_mut().owner(owner, source)
+    }
+    fn resource(&mut self, key: &ResourceKey) -> ResourceLifetime {
+        self.0.borrow_mut().resource(key)
+    }
+}
 fn authority_document(authority: &WorkerAuthority) -> JournalDocument {
-    let WorkerAuthority::Durable(session) = authority else {
-        panic!("fixture durable authority");
-    };
-    let JournalLoad::Known(document) = session.load() else {
-        panic!("fixture known durable journal");
-    };
-    document.clone()
+    authority
+        .retained_document()
+        .expect("fixture retained durable document")
+        .clone()
 }
 fn native_actor_recovery_child(root: PathBuf, target: PathBuf, unknown: bool) {
     let (reached, boundary) = mpsc::sync_channel(1);
@@ -844,6 +943,11 @@ fn native_actor_recovery_child(root: PathBuf, target: PathBuf, unknown: bool) {
     let mut runner = Runner::start_test_writer(RunnerLimits::default(), move || {
         let native = TuningStore::open_test_directory(&root, MAX_JOURNAL_BYTES).unwrap();
         assert_eq!(native.authority(), TuningStoreAuthority::IsolatedTest);
+        let mut native = native;
+        let bytes = native.read().unwrap().expect("recorded fixture journal");
+        let JournalLoad::Known(original) = JournalDocument::load(bytes, &machine()) else {
+            panic!("recorded fixture journal");
+        };
         let writes = Arc::new(AtomicUsize::new(0));
         let module = FileScalarModule {
             scalar: ScalarModule::new(read_target(&target)),
@@ -852,49 +956,61 @@ fn native_actor_recovery_child(root: PathBuf, target: PathBuf, unknown: bool) {
             rehydrated: true,
             writes: Some(writes.clone()),
         };
+        let config = module
+            .scalar
+            .config_envelope(&ScalarConfig { value: 12 })
+            .unwrap();
+        // This input was captured independently by the parent before the
+        // interruption. The journal cannot authorize its own owner.
+        let binding = expected_binding();
+        let ActivationBinding::Game(game) = &binding else {
+            panic!("independent fixture binding");
+        };
+        assert_eq!(game.processes().len(), 1);
+        let resolver = Rc::new(RefCell::new(NativeFixtureActor::open(
+            game.processes()[0].clone(),
+        )));
+        if unknown {
+            assert!(
+                resolver.borrow().guard.is_err(),
+                "actual verify/open failure is required"
+            );
+        } else {
+            assert!(
+                resolver.borrow().guard.is_ok(),
+                "guard acquired while separate actor live"
+            );
+        }
         let mut catalog = Catalog::default();
         catalog.register(module).unwrap();
         let store: Box<dyn JournalStore> = Box::new(IsolatedStore {
             native,
             pause: None,
         });
-        let session = DurableSession::bootstrap(store, machine());
-        let JournalLoad::Known(original) = session.load().clone() else {
-            panic!("recorded fixture journal");
-        };
-        let mut authority = WorkerAuthority::Durable(Box::new(session));
-        let mut coordinator = Coordinator::recover(catalog, &original).unwrap();
-        let ActivationBinding::Game(game) = &original.owners[0].binding else {
-            panic!("recorded fixture binding");
-        };
-        assert_eq!(game.processes().len(), 1);
-        let mut resolver = NativeFixtureActor::open(game.processes()[0].clone());
-        if unknown {
-            assert!(
-                resolver.guard.is_err(),
-                "actual verify/open failure is required"
-            );
-        } else {
-            assert!(
-                resolver.guard.is_ok(),
-                "guard acquired while separate actor live"
-            );
-        }
-        let plan = RecoveryPlan::resolve(&original, &mut resolver);
+        let (mut coordinator, mut authority) = bootstrap_configured(
+            catalog,
+            machine(),
+            store,
+            configured_fixture(config, binding),
+            ScopeEvidence::fixture_lifetime(
+                || Ok(machine()),
+                Box::new(SharedNativeFixtureActor(resolver.clone())),
+            ),
+        );
+        let plan =
+            RecoveryPlan::resolve(&original, &mut SharedNativeFixtureActor(resolver.clone()));
         assert!(
             plan.retire.is_empty(),
             "actor lifetime cannot retire projected fixture resource"
         );
         if unknown {
             assert!(plan.blocked() && plan.release.is_empty() && plan.reattach.is_empty());
-            let result = coordinator.apply_recovery(
-                &plan,
-                &mut RecoveryControl {
-                    authority: &mut authority,
-                },
+            // The common bootstrap already resolves and applies the recovery
+            // decision; no permissive manual second bootstrap is available.
+            assert!(
+                matches!(authority.status(), super::writer::WriterStatus::Blocked(_)),
+                "failed guard acquisition must close the common durable worker admission"
             );
-            assert_eq!(result.outcome, Outcome::RecoveryRequired);
-            assert!(result.error.is_some());
             assert!(
                 authority_document(&authority) == original,
                 "Unknown retains exact durable input"
@@ -905,22 +1021,13 @@ fn native_actor_recovery_child(root: PathBuf, target: PathBuf, unknown: bool) {
         } else {
             assert!(!plan.blocked() && plan.release.is_empty());
             assert_eq!(plan.reattach, [OwnerId::new(1).unwrap()]);
-            let result = coordinator.apply_recovery(
-                &plan,
-                &mut RecoveryControl {
-                    authority: &mut authority,
-                },
-            );
-            assert_eq!(result.outcome, Outcome::Unchanged);
-            assert!(result.error.is_none());
-            assert_eq!(
-                result.snapshot.resources[0].baseline.bytes(),
-                7i32.to_le_bytes()
-            );
-            assert_eq!(
-                result.snapshot.resources[0].confirmed.bytes(),
-                12i32.to_le_bytes()
-            );
+            assert!(!matches!(
+                authority.status(),
+                super::writer::WriterStatus::Blocked(_)
+            ));
+            let snapshot = coordinator.snapshot();
+            assert_eq!(snapshot.resources[0].baseline.bytes(), 7i32.to_le_bytes());
+            assert_eq!(snapshot.resources[0].confirmed.bytes(), 12i32.to_le_bytes());
             let attached = authority_document(&authority);
             assert!(
                 attached.sources == original.sources
@@ -936,7 +1043,7 @@ fn native_actor_recovery_child(root: PathBuf, target: PathBuf, unknown: bool) {
             worker_pause.reached.send(()).unwrap();
             let deadline = Instant::now() + PROTOCOL_TIMEOUT;
             loop {
-                match resolver.poll() {
+                match resolver.borrow_mut().poll() {
                     Ok(TuningProcessLifetime::VerifiedLive) => (),
                     Ok(TuningProcessLifetime::PositivelyExited) => break,
                     Err(_) => {
@@ -950,7 +1057,8 @@ fn native_actor_recovery_child(root: PathBuf, target: PathBuf, unknown: bool) {
                 assert!(Instant::now() < deadline, "owned actor expiry deadline");
                 thread::yield_now();
             }
-            let expired = RecoveryPlan::resolve(&attached, &mut resolver);
+            let expired =
+                RecoveryPlan::resolve(&attached, &mut SharedNativeFixtureActor(resolver.clone()));
             assert!(!expired.blocked() && expired.reattach.is_empty() && expired.retire.is_empty());
             assert_eq!(expired.release, [OwnerId::new(1).unwrap()]);
             let result = coordinator.apply_recovery(
@@ -993,6 +1101,7 @@ impl ExecutionControl for RecoveryControl<'_> {
         false
     }
     fn before_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError> {
+        self.authority.check_write(intent)?;
         self.authority.commit(
             JournalStamp::Recovery,
             JournalPhase::BeforeWrite {
@@ -1001,6 +1110,9 @@ impl ExecutionControl for RecoveryControl<'_> {
             },
             &intent.ownership,
         )
+    }
+    fn before_execute(&mut self, _: &WriteIntent<'_>) -> Result<(), GateError> {
+        self.authority.after_intent()
     }
     fn after_verified_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError> {
         self.authority.commit(
@@ -1080,58 +1192,32 @@ fn isolated_native_child() {
             native,
             pause: point.map(|point| (point, worker_pause.clone())),
         });
-        let session = DurableSession::bootstrap(store, machine());
-        let document = session.load().clone();
-        let mut authority = WorkerAuthority::Durable(Box::new(session));
-        let mut coordinator = match document {
-            JournalLoad::Known(ref document) if recovering => {
-                Coordinator::recover(catalog, document).unwrap()
-            }
-            JournalLoad::Clean if !recovering => Coordinator::new(catalog),
-            _ => panic!("unexpected native fixture journal bootstrap"),
+        let binding = if recovering {
+            expected_binding()
+        } else if let Some(pid) = native_actor {
+            fixture_binding(fixture_native_process(
+                &os_api::OS::tuning_process_identity(pid).unwrap(),
+            ))
+        } else {
+            fixture_binding(fixture_process(std::process::id()))
         };
+        let (coordinator, authority) = bootstrap_configured(
+            catalog,
+            machine(),
+            store,
+            configured_fixture(config.clone(), binding.clone()),
+            ScopeEvidence::fixture_lifetime(|| Ok(machine()), Box::new(ExpiredFixtureActor)),
+        );
+        assert!(
+            !matches!(authority.status(), super::writer::WriterStatus::Blocked(_)),
+            "common fixture bootstrap must complete recovery"
+        );
         if recovering {
-            let JournalLoad::Known(document) = document else {
-                unreachable!();
-            };
-            let plan = RecoveryPlan::resolve(&document, &mut ExpiredFixtureActor);
-            assert!(!plan.blocked());
-            assert_eq!(plan.release.len(), 1);
-            let result = coordinator.apply_recovery(
-                &plan,
-                &mut RecoveryControl {
-                    authority: &mut authority,
-                },
-            );
-            assert_eq!(result.outcome, Outcome::Released);
-            assert!(result.error.is_none());
-            assert!(result.snapshot.owners.is_empty() && result.snapshot.resources.is_empty());
+            let snapshot = coordinator.snapshot();
+            assert!(snapshot.owners.is_empty() && snapshot.resources.is_empty());
+            assert!(authority_document(&authority).owners.is_empty());
             worker_pause.pause();
         } else {
-            // Explicit synthetic fixture provenance, never a native boot/game
-            // attestation. Parent Child::wait controls this fixture actor.
-            let session = SessionIdentity {
-                user: UserIdentity {
-                    machine: machine(),
-                    sid: UserSid::new("S-1-5-21-10-20-30-1000").unwrap(),
-                },
-                session_id: 1,
-                logon: LogonId::new(1).unwrap(),
-                boot: BootId::new([3; 16]).unwrap(),
-            };
-            let process = ProcessIdentity::new(
-                session.clone(),
-                std::process::id(),
-                1,
-                ImagePath::new("C:\\Fixture\\owned-child.exe").unwrap(),
-            )
-            .unwrap();
-            let process = if let Some(pid) = native_actor {
-                fixture_native_process(&os_api::OS::tuning_process_identity(pid).unwrap())
-            } else {
-                process
-            };
-            let binding = fixture_binding(process);
             ready.send((config, binding)).unwrap();
         }
         (coordinator, authority)

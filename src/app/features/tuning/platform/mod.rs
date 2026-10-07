@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod codec;
+pub(crate) mod configured_intent;
 pub mod contract;
 pub mod coordinator;
 pub mod journal;

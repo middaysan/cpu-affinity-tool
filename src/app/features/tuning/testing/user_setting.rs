@@ -69,10 +69,12 @@ fn descriptor() -> ModuleDescriptor {
             ResourceDeclaration {
                 field: ResourceId::new("user_value").unwrap(),
                 scope: TargetScope::Session,
+                lifetime: ResourceLifetimeRequirement::Unsupported,
             },
             ResourceDeclaration {
                 field: ResourceId::new("user_enabled").unwrap(),
                 scope: TargetScope::Session,
+                lifetime: ResourceLifetimeRequirement::Unsupported,
             },
         ],
         activation_modes: vec![ActivationMode::Manual],

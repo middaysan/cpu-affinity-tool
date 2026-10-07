@@ -1033,6 +1033,15 @@ impl ModuleError {
 pub struct ResourceDeclaration {
     pub field: ResourceId,
     pub scope: TargetScope,
+    pub lifetime: ResourceLifetimeRequirement,
+}
+/// Projection identifies a resource; it does not establish its lifetime. A
+/// Machine projection can still describe a user-context setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ResourceLifetimeRequirement {
+    #[default]
+    Unsupported,
+    PersistentMachine,
 }
 #[derive(Clone, Debug)]
 pub struct ModuleDescriptor {

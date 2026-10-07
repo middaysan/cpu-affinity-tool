@@ -60,6 +60,7 @@ pub fn descriptor() -> ModuleDescriptor {
         resources: vec![ResourceDeclaration {
             field: ResourceId::new("scalar_setting").unwrap(),
             scope: TargetScope::Machine,
+            lifetime: ResourceLifetimeRequirement::Unsupported,
         }],
         activation_modes: vec![ActivationMode::Manual, ActivationMode::Session],
         effect: Effect::Immediate,

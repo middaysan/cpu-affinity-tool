@@ -794,6 +794,45 @@ power-loss rollback, production bootstrap recovery/admission, another account,
 boot/logon/game attachment or a real gaming-setting writer. Existing isolated
 forced-process tests supply their separate bounded interruption evidence.
 
+## Common configured recovery machinery
+
+The dormant application platform now separates current configured intent from
+past journal evidence. Its consumer accepts an immutable complete snapshot of
+at most 256 owners and 4 MiB including all dynamic metadata, or Unavailable.
+Attachment requires exact owner, profile/generation binding, typed configuration,
+target and activation mode. Explicit disablement of that same tuple permits
+release; omission, a changed tuple and unavailable input remain Unknown. The
+consumer does not derive intent from a retained baseline or journal snapshot.
+
+Scoped bootstrap hydrates original sources and actually applies recovery under
+durable intent/progress/transition controls before readiness. A blocked plan or
+incomplete recovery retains evidence. Subsequent mutations, including equal
+zero-write sharing, require current configured and resource proof. Full input
+and machine evidence are rechecked after durable intent before the native step,
+and at publication; changed authority blocks further writes and blind compensation.
+Read-only observation remains available.
+
+Resource lifetime declarations default to Unsupported. The represented native
+path is explicit Manual intent over declared PersistentMachine resources, with
+exact full native machine equality and independent checks of the original
+restorer and current writer. A Machine address does not prove persistence or
+caller-user independence. Native scope is sealed inside the actual canonical
+opening pipeline; injectable fixture stores/sources cannot create it. Other
+user/logon/boot/process/game scopes remain Unknown in production.
+
+The existing three forced writer boundaries and two retained-actor cases use
+this common bootstrap/control path with independently supplied **fixture** intent.
+The actual retained process guard still determines actor lifetime. These cases
+exercise owned isolated scalar/metadata files, not canonical restart or shipping
+game authority. The same-worker host lab above has its separate frozen source
+and pending actual acceptance; it does not certify this later production packet.
+
+The production catalog remains empty and the dormant native factory supplies
+Unavailable configured input, so shipping writes remain closed. F4 supplies
+saved-config/session producers, qualified configuration origin and durable
+withdrawal intent. Boot, another-account and power-transition acceptance are
+separate scope gates; no current test promotes them to supported.
+
 ## Remaining acceptance gates
 
 The probe supplies a concrete way to inspect canonical metadata and lease

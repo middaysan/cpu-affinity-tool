@@ -127,7 +127,14 @@ fn check_descriptor<M: Module>(
     if descriptor.target_scopes.is_empty() || !distinct(descriptor.target_scopes.iter()) {
         return bad("invalid target scopes");
     }
-    if descriptor.resources.len() > MAX_RESOURCES || !distinct(descriptor.resources.iter()) {
+    if descriptor.resources.len() > MAX_RESOURCES
+        || !distinct(
+            descriptor
+                .resources
+                .iter()
+                .map(|resource| (&resource.field, resource.scope)),
+        )
+    {
         return bad("invalid resources");
     }
     if descriptor.resources.iter().any(|resource| {

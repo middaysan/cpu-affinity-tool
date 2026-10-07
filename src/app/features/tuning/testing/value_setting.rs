@@ -115,6 +115,7 @@ impl Module for ValueModule {
             resources: vec![ResourceDeclaration {
                 field: ResourceId::new("user_value").unwrap(),
                 scope: TargetScope::Session,
+                lifetime: ResourceLifetimeRequirement::Unsupported,
             }],
             activation_modes: vec![ActivationMode::Manual],
             effect: Effect::RestartRequired,

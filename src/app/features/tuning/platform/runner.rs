@@ -495,12 +495,23 @@ impl WorkerControl<'_> {
     }
 }
 impl ExecutionControl for WorkerControl<'_> {
+    fn before_command(
+        &mut self,
+        command: &Command,
+        snapshot: &CoordinatorSnapshot,
+    ) -> Result<(), GateError> {
+        self.authority.admit_command(command, snapshot)
+    }
+    fn before_shutdown(&mut self, snapshot: &CoordinatorSnapshot) -> Result<(), GateError> {
+        self.authority.begin_shutdown(snapshot)
+    }
     fn cancellation_requested(&self) -> bool {
         self.ticket
             .as_ref()
             .is_some_and(|ticket| ticket.cancellable && ticket.cancelled.load(Ordering::Acquire))
     }
     fn before_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError> {
+        self.authority.check_write(intent)?;
         // Cleanup is never abandoned because the initiating generation expired.
         if !intent.operation.is_restoration()
             && !self.possible_write
@@ -522,6 +533,9 @@ impl ExecutionControl for WorkerControl<'_> {
         runtime.possible_write = true;
         runtime.coordinator = intent.ownership.clone();
         Ok(())
+    }
+    fn before_execute(&mut self, _: &WriteIntent<'_>) -> Result<(), GateError> {
+        self.authority.after_intent()
     }
     fn after_verified_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError> {
         self.shared.runtime.lock().unwrap().coordinator = intent.ownership.clone();
@@ -854,9 +868,7 @@ fn worker_body(
                 result.snapshot = coordinator.snapshot();
                 // An unchanged manual ledger still needs an explicit shutdown
                 // stamp. Read-only runners have no durable lifecycle to publish.
-                if !control.transition_committed
-                    && matches!(control.authority, WorkerAuthority::Durable(_))
-                {
+                if !control.transition_committed && control.authority.has_durable_context() {
                     if let Err(error) = control.commit_transition(&result.snapshot) {
                         result.outcome = super::coordinator::Outcome::RecoveryRequired;
                         if result.error.is_none() {

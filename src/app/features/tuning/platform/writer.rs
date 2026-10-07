@@ -1,4 +1,10 @@
 //! Worker-local durable authority. Only its factory crosses the thread boundary.
+#[cfg(test)]
+#[path = "writer_configured_tests.rs"]
+mod configured_tests;
+#[path = "writer_scope.rs"]
+mod scope;
+use super::configured_intent::ConfiguredIntentSource;
 use super::{
     catalog::Catalog,
     contract::MachineIdentity,
@@ -6,58 +12,77 @@ use super::{
     coordinator::{CoordinatorSnapshot, GateError},
     journal::{DurableSession, JournalLoad, JournalPhase, JournalStamp, JournalStore},
 };
+use scope::ScopedWriter;
+use std::sync::Arc;
 
+pub(super) enum ScopeEvidence {
+    Unavailable,
+    #[cfg(windows)]
+    Native(NativeScope),
+    #[cfg(test)]
+    Fixture {
+        machine: Box<dyn FnMut() -> Result<MachineIdentity, GateError>>,
+        lifetime: Option<Box<dyn super::recovery::RecoveryResolver>>,
+    },
+}
+/// No sibling can construct, clone or extract this token. It is created only
+/// after the actual canonical lease and native machine query have succeeded.
+#[cfg(windows)]
+pub(super) struct NativeScope {
+    machine: MachineIdentity,
+}
+#[cfg(test)]
+impl ScopeEvidence {
+    pub(super) fn fixture(
+        machine: impl FnMut() -> Result<MachineIdentity, GateError> + 'static,
+    ) -> Self {
+        Self::Fixture {
+            machine: Box::new(machine),
+            lifetime: None,
+        }
+    }
+    pub(super) fn fixture_lifetime(
+        machine: impl FnMut() -> Result<MachineIdentity, GateError> + 'static,
+        lifetime: Box<dyn super::recovery::RecoveryResolver>,
+    ) -> Self {
+        Self::Fixture {
+            machine: Box::new(machine),
+            lifetime: Some(lifetime),
+        }
+    }
+}
+pub(super) fn bootstrap_configured(
+    catalog: Catalog,
+    machine: MachineIdentity,
+    store: Box<dyn JournalStore>,
+    configured: Arc<dyn ConfiguredIntentSource>,
+    scope: ScopeEvidence,
+) -> (Coordinator, WorkerAuthority) {
+    scope::bootstrap(catalog, machine, store, configured, scope)
+}
+
+#[cfg(test)]
 pub(super) fn bootstrap(
     catalog: Catalog,
     machine: MachineIdentity,
     store: Box<dyn JournalStore>,
 ) -> (Coordinator, WorkerAuthority) {
-    use super::{journal::JournalError, recovery::RecoveryPlan};
-    let mut session = DurableSession::bootstrap(store, machine);
-    let coordinator = match session.load().clone() {
-        JournalLoad::Known(document) => match Coordinator::recover(catalog.clone(), &document) {
-            Ok(coordinator) => {
-                let plan = RecoveryPlan::resolve(&document, &mut UnavailableLifetime);
-                if plan.blocked() {
-                    session.block(JournalError::InvalidEvidence(
-                        "recovery lifetime is unverified",
-                    ));
-                }
-                coordinator
-            }
-            Err(_) => {
-                // Keep the same catalog for read-only diagnostics. An unknown
-                // codec may not turn retained recovery evidence into Clean.
-                session.block(JournalError::InvalidEvidence(
-                    "journal source hydration failed",
-                ));
-                Coordinator::new(catalog)
-            }
-        },
-        JournalLoad::Clean | JournalLoad::Blocked(_) => Coordinator::new(catalog),
-    };
-    (coordinator, WorkerAuthority::Durable(Box::new(session)))
-}
-
-struct UnavailableLifetime;
-impl super::recovery::RecoveryResolver for UnavailableLifetime {
-    fn owner(
-        &mut self,
-        _: &super::journal::JournalOwner,
-        _: &super::journal::JournalSource,
-    ) -> super::recovery::OwnerAttachment {
-        super::recovery::OwnerAttachment::Unknown
-    }
-    fn resource(&mut self, _: &super::contract::ResourceKey) -> super::recovery::ResourceLifetime {
-        super::recovery::ResourceLifetime::Unknown
-    }
+    bootstrap_configured(
+        catalog,
+        machine,
+        store,
+        Arc::new(super::configured_intent::UnavailableConfiguredIntent),
+        ScopeEvidence::Unavailable,
+    )
 }
 
 pub(super) enum WorkerAuthority {
     ReadOnly,
     #[cfg(test)]
     Fake,
+    #[cfg(test)]
     Durable(Box<DurableSession<Box<dyn JournalStore>>>),
+    Scoped(Box<ScopedWriter>),
     Blocked(super::journal::JournalError),
 }
 
@@ -75,13 +100,57 @@ pub enum WriterStatus {
 }
 
 impl WorkerAuthority {
-    fn close_unverified_native(&mut self) {
-        if let Self::Durable(session) = self {
-            if !matches!(session.load(), JournalLoad::Blocked(_)) {
-                session.block(super::journal::JournalError::InvalidEvidence(
-                    "native lifetime and scope acceptance pending",
-                ));
-            }
+    pub(super) fn admit_command(
+        &mut self,
+        command: &super::coordinator::Command,
+        snapshot: &CoordinatorSnapshot,
+    ) -> Result<(), GateError> {
+        match self {
+            Self::Scoped(writer) => writer.admit_command(command, snapshot),
+            Self::ReadOnly => Err(GateError::MutationDisabled),
+            Self::Blocked(reason) => Err(GateError::Durability(reason.clone())),
+            #[cfg(test)]
+            Self::Fake | Self::Durable(_) => Ok(()),
+        }
+    }
+    pub(super) fn begin_shutdown(
+        &mut self,
+        snapshot: &CoordinatorSnapshot,
+    ) -> Result<(), GateError> {
+        match self {
+            Self::Scoped(writer) => writer.capture(snapshot),
+            _ => Ok(()),
+        }
+    }
+    pub(super) fn check_write(
+        &mut self,
+        intent: &super::coordinator::WriteIntent<'_>,
+    ) -> Result<(), GateError> {
+        match self {
+            Self::Scoped(writer) => writer.check_write(intent),
+            _ => Ok(()),
+        }
+    }
+    pub(super) fn after_intent(&mut self) -> Result<(), GateError> {
+        match self {
+            Self::Scoped(writer) => writer.check_current(),
+            _ => Ok(()),
+        }
+    }
+    pub(super) fn has_durable_context(&self) -> bool {
+        match self {
+            Self::Scoped(_) => true,
+            #[cfg(test)]
+            Self::Durable(_) => true,
+            _ => false,
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn retained_document(&self) -> Option<&super::journal::JournalDocument> {
+        match self {
+            Self::Scoped(writer) => writer.session.last_document(),
+            Self::Durable(session) => session.last_document(),
+            _ => None,
         }
     }
     pub(super) fn status(&self) -> WriterStatus {
@@ -89,14 +158,9 @@ impl WorkerAuthority {
             Self::ReadOnly => WriterStatus::ReadOnly,
             #[cfg(test)]
             Self::Fake => WriterStatus::Simulator,
-            Self::Durable(session) => match session.load() {
-                JournalLoad::Clean => WriterStatus::Clean,
-                JournalLoad::Known(document) => WriterStatus::Known {
-                    revision: document.revision,
-                    phase: document.phase.clone(),
-                },
-                JournalLoad::Blocked(block) => WriterStatus::Blocked(block.reason.clone()),
-            },
+            #[cfg(test)]
+            Self::Durable(session) => status(session),
+            Self::Scoped(writer) => status(&writer.session),
             Self::Blocked(reason) => WriterStatus::Blocked(reason.clone()),
         }
     }
@@ -111,11 +175,23 @@ impl WorkerAuthority {
             Self::ReadOnly => Err(GateError::MutationDisabled),
             #[cfg(test)]
             Self::Fake => Ok(()),
+            #[cfg(test)]
             Self::Durable(session) => session
                 .commit(stamp, phase, snapshot)
                 .map_err(GateError::Durability),
+            Self::Scoped(writer) => writer.commit(stamp, phase, snapshot),
             Self::Blocked(reason) => Err(GateError::Durability(reason.clone())),
         }
+    }
+}
+fn status(session: &DurableSession<Box<dyn JournalStore>>) -> WriterStatus {
+    match session.load() {
+        JournalLoad::Clean => WriterStatus::Clean,
+        JournalLoad::Known(document) => WriterStatus::Known {
+            revision: document.revision,
+            phase: document.phase.clone(),
+        },
+        JournalLoad::Blocked(block) => WriterStatus::Blocked(block.reason.clone()),
     }
 }
 
@@ -171,9 +247,16 @@ pub(super) fn open_native(catalog: Catalog) -> (Coordinator, WorkerAuthority) {
     })();
     match opened {
         Ok((machine, store)) => {
-            let (coordinator, mut authority) = bootstrap(catalog, machine, Box::new(store));
-            authority.close_unverified_native();
-            (coordinator, authority)
+            let scope = ScopeEvidence::Native(NativeScope {
+                machine: machine.clone(),
+            });
+            bootstrap_configured(
+                catalog,
+                machine,
+                Box::new(store),
+                Arc::new(super::configured_intent::UnavailableConfiguredIntent),
+                scope,
+            )
         }
         Err(reason) => (Coordinator::new(catalog), WorkerAuthority::Blocked(reason)),
     }
@@ -396,10 +479,10 @@ mod bootstrap_tests {
             authority.status(),
             WriterStatus::Blocked(JournalError::UnsupportedFormat(99))
         ));
-        let WorkerAuthority::Durable(session) = authority else {
+        let WorkerAuthority::Scoped(writer) = authority else {
             panic!("blocked session retains store/lease and raw evidence");
         };
-        let JournalLoad::Blocked(block) = session.load() else {
+        let JournalLoad::Blocked(block) = writer.session.load() else {
             panic!("unknown format must block");
         };
         assert_eq!(block.raw.as_ref().unwrap().as_ref(), raw);
@@ -461,14 +544,13 @@ mod bootstrap_tests {
         assert_eq!(memory.lock().unwrap().publishes, 0);
     }
     #[test]
-    fn native_preflight_closes_a_clean_store_until_lifetime_acceptance() {
+    fn clean_store_does_not_authorize_absent_configured_input() {
         let memory = Arc::new(Mutex::new(Memory::default()));
         let module = ScalarModule::new(7);
         let (_, mut authority) =
             bootstrap(catalog(&module), machine(), Box::new(Store(memory.clone())));
-        authority.close_unverified_native();
         assert!(
-            matches!(authority.status(), WriterStatus::Blocked(_)),
+            matches!(authority.status(), WriterStatus::Clean),
             "Clean is storage state, not native target/write admission"
         );
         assert!(authority
@@ -480,7 +562,7 @@ mod bootstrap_tests {
             .is_err());
         assert_eq!(memory.lock().unwrap().publishes, 0);
         assert!(
-            matches!(authority, WorkerAuthority::Durable(_)),
+            matches!(authority, WorkerAuthority::Scoped(_)),
             "closed native preflight still retains its context/lease"
         );
     }

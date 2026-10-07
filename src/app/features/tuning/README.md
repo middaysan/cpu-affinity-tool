@@ -1,10 +1,11 @@
 # Tuning module contribution contract
 
 The dormant platform supplies typed contracts, a catalog, a resource coordinator,
-a bounded serial runner, a bounded recovery journal and typed recovery decisions.
-The production catalog is empty and write admission is closed. The Windows
-boundary supplies store/lease and identity primitives; canonical native admission
-remains closed pending scope/lifetime validation. The two backend shapes and
+a bounded serial runner, an independent configured-intent consumer, a bounded
+recovery journal and scoped durable recovery. The production catalog is empty;
+the dormant native factory supplies Unavailable configured input, so write
+admission remains closed. The Windows boundary supplies store/lease and identity
+primitives. The two backend shapes and
 cross-adapter simulators under `testing/` compile only with `cfg(test)`.
 Isolated forced-process recovery is demonstrated at three durable boundaries.
 Canonical/elevated/boot validation, authoritative game attachment, app-state
@@ -32,8 +33,12 @@ The Windows recommendations and exclusions are documented in
   exact unknown input retention and durable intent/progress/ownership transitions.
 - `platform/recovery.rs` distinguishes verified attachment, positive expiry and
   Unknown for each actual resource lifetime.
-- `platform/writer.rs` creates worker-local storage authority, imports retained
-  typed sources and maps bounded native errors. Its canonical factory is dormant.
+- `platform/configured_intent.rs` consumes immutable complete current intent
+  independently of the journal; F4 supplies the saved-config/session producer.
+- `platform/writer.rs` creates worker-local storage authority, seals native scope
+  to canonical opening and maps bounded native errors. Its factory is dormant.
+- `platform/writer_scope.rs` applies durable bootstrap recovery and checks exact
+  configured and resource evidence throughout commands and publication.
 - `testing/scalar.rs` demonstrates a scalar machine setting.
 - `testing/user_setting.rs` demonstrates two native fields, exact absent/present
   values with original type and raw bytes, partial application, subset restoration,
@@ -57,6 +62,11 @@ exceptions to hide unused integrations.
    config/snapshot versions, supported targets, OS-setting resource fields, and
    activation modes. Read-only descriptors have no mutation resources or modes.
    Restart-required settings support only manual activation in this contract.
+   Each resource declares its lifetime requirement, defaulting to `Unsupported`.
+   Use `PersistentMachine` only for a resource whose native scope and persistence
+   are independent of caller user/logon context. A Machine target projection is
+   an address, not proof of that lifetime. Current-user power settings need their
+   own verified context; declaring a Machine field must not bypass that check.
    Implement the pure `snapshot_config_matches(snapshot, config)` hook: a decoded
    request must agree with its retained typed snapshot without a native read.
 4. Return exact `ResourceClaim` keys and canonical desired tokens. A resource field
@@ -208,10 +218,33 @@ Restart effects survive empty ledgers and unrelated later observations/transitio
 until a future explicit validated acknowledgement clears them.
 
 Hydration decodes original, current-writer and owner sources independently, without
-observing or recapturing native values. Recovery uses exact confirmed/attempted
-tokens, preserves external drift and rejects contradictory lifetime evidence.
-Production native admission remains closed even for an absent journal; a Clean
-store does not prove safe process/session provenance. Native scope, elevated
+observing or recapturing native values. Scoped bootstrap then applies recovery
+under durable controls, reobserves current values and requires a completed result
+before readiness. Recovery uses exact confirmed/attempted tokens, preserves
+external drift and rejects contradictory lifetime evidence.
+
+Current configured input is an immutable complete snapshot of at most 256 owners
+and 4 MiB including binding/target metadata, or Unavailable. Exact owner, binding,
+config, target and mode must match. Missing intent, a changed generation or an
+omitted owner is Unknown; release requires explicit disablement of the recorded
+tuple. F4 must retain independent withdrawal intent until durable release is
+verified. Numeric profile/owner identity also needs a qualified configuration
+origin before other-account admission; the machine-wide journal cannot provide
+that origin.
+
+Native scope is privately constructed from actual machine observation and
+canonical store opening. Only exact Manual bindings and declared PersistentMachine
+resources have a represented native lifetime path; both original restorer and
+current writer must satisfy it. User-context settings cannot enter by projecting
+their address to Machine. Unsupported scope remains Unknown. Commands and
+zero-write sharing/transitions require current evidence before preparation, after
+durable intent before execution, and at each publication. Changed authority
+retains original/proposed evidence rather than compensating blindly. Observe
+remains available when mutation is blocked.
+
+Production native admission remains closed even for an absent journal because
+its configured producer is Unavailable. A Clean store is insufficient authority.
+Native scope, elevated
 cross-user and power-transition evidence plus Linux integration checks remain
 explicit gates. The nonshipping Windows recovery script verifies
 three forced-process boundaries against isolated physical scalar targets and
