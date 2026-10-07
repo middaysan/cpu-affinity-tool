@@ -401,6 +401,60 @@ does not establish continuity initialization, HKLM progress, cross-account or
 power behavior. The broad failure category does not identify its exact cause.
 Shipping continuity and tuning write admission remain unavailable.
 
+## Fixed continuity refusal after canonical open
+
+A second authorized UAC attempt on 2026-10-07 used reviewed source `c524203`
+and example SHA256
+`39FC00E15A4638B58B2A95DD39C6302583EF1709C7E9A0E2458B3F40CDB27AAF`.
+It again reported elevated/High, canonical authority and an absent journal, then
+failed at continuity with `failure.kind=unsupported` and the fixed optional
+`continuity_refusal=unsafe_security`. The worker and retained elevated wrapper
+both terminated with exit `2`; observation was skipped.
+
+An independent read-only native64 SOFTWARE owner/DACL inspection found an
+Administrators owner and six ordinary allow ACEs, all with container-inherit
+flag `2`. The first full-access ACE used the exact well-known Creator Owner
+placeholder; the other full-access ACEs were SYSTEM and Administrators, with
+three read-only ACEs. No inherit-only ACE was observed. This inspection did not
+read the integrity label or identify the precise production failed handle.
+It therefore supplies a concrete parser/policy investigation, rather than proof
+of full continuity initialization or an unsafe ordinary-user grant. Microsoft
+describes [Creator Owner as an inheritance placeholder](https://learn.microsoft.com/en-us/windows/win32/secauthz/well-known-sids),
+distinct from the current-owner `OWNER_RIGHTS` identity. No system ACL repair
+or gaming-setting change was performed.
+
+## Exact registry inheritance placeholder
+
+The registry parser now distinguishes exact Creator Owner (`S-1-3-0`) from
+ordinary principals. Only its observed plain allow ACE with raw `KEY_ALL` and
+exact container-inherit flag `2` is accepted on the already trusted-owner
+SOFTWARE ancestor. It does not supply owner trust, SYSTEM/Administrators grants
+or any managed-key permission. Creator Group, Owner Rights, SID aliases, other
+flags or masks and ordinary mutation grants retain refusal. No general
+inherit-only exception is added.
+
+New managed keys still request and validate an actual protected DACL, exact
+SYSTEM/Administrators full access and High/no-write-up label. Protection excludes
+parent inheritance; existing keys are independently inspected rather than
+repaired. See [new-object DACL construction](https://learn.microsoft.com/en-us/windows/win32/secauthz/dacl-for-a-new-object).
+
+The regression tests first exposed the old rejection of the observed shape
+and the loss of its distinct semantics as an ordinary read-only principal.
+Two actual Windows API characterizations use only descriptors in memory:
+`AccessCheck` denies four concrete mutation rights for the Creator Owner
+placeholder while an identical Everyone positive control grants them, and
+`CreatePrivateObjectSecurity` excludes the parent placeholder from an explicitly
+protected child DACL. No descriptor is applied to a registry key, file or token.
+The child test uses token-default owner/group and makes no canonical-owner or
+integrity-label claim. These tests establish the scoped semantic correction;
+they do not prove canonical continuity or complete the native scope matrix.
+
+On 2026-10-07 all six focused tests, the full 266-test OS library suite,
+37 probe-example tests, 482 Windows application tests and four OS doctests
+passed. The OS all-target Clippy check uses its same five previously documented
+allowances; the shipping application Clippy check adds none. The corrected
+source still awaits a new canonical UAC initialization/observation attempt.
+
 ## Remaining acceptance gates
 
 The probe supplies a concrete way to inspect canonical metadata and lease

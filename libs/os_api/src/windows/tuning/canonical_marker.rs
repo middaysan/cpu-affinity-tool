@@ -187,6 +187,9 @@ mod capsule_tests;
 #[path = "canonical_marker/control_tests.rs"]
 mod control_tests;
 #[cfg(test)]
+#[path = "canonical_marker/creator_owner_native_tests.rs"]
+mod creator_owner_native_tests;
+#[cfg(test)]
 #[path = "canonical_marker/descriptor_tests.rs"]
 mod descriptor_tests;
 #[cfg(test)]

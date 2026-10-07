@@ -103,6 +103,8 @@ fn parse_sid(bytes: &[u8]) -> Result<(SidClass, usize), UnknownReason> {
         SidClass::TrustedInstaller
     } else if exact_sid(sid, 16, &[12288]) {
         SidClass::HighIntegrity
+    } else if exact_sid(sid, 3, &[0]) {
+        SidClass::CreatorOwner
     } else {
         SidClass::Other
     };

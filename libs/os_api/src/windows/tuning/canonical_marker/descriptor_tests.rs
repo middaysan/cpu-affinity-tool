@@ -314,3 +314,95 @@ fn descriptor_raw_ace_kind_mask_and_flags_survive_into_security_policy() {
     assert_eq!(facts.labels[0].flags, 8);
     assert!(validate(&facts, Scope::Managed).is_err());
 }
+
+fn creator_owner_ancestor(trustee: &[u8], flags: u8) -> Vec<u8> {
+    let mut placeholder = ace(0, KEY_ALL, trustee);
+    placeholder[1] = flags;
+    descriptor(
+        &administrators(),
+        &[
+            placeholder,
+            ace(0, KEY_ALL, &system()),
+            ace(0, KEY_ALL, &administrators()),
+        ],
+        None,
+        false,
+    )
+}
+
+#[test]
+fn creator_owner_observed_container_placeholder_is_ancestor_only() {
+    let bytes = creator_owner_ancestor(&sid(3, &[0]), 2);
+    let facts = parse_descriptor(&bytes, Scope::Ancestor).unwrap();
+    assert_eq!(facts.dacl[0].sid, SidClass::CreatorOwner);
+    assert_eq!(facts.dacl[0].flags, 2);
+    assert_eq!(facts.dacl[0].mask, KEY_ALL);
+    assert_eq!(validate(&facts, Scope::Ancestor), Ok(()));
+
+    let mut managed_facts = facts;
+    managed_facts.dacl_protected = true;
+    managed_facts.labels = parse_descriptor(&managed(), Scope::Managed).unwrap().labels;
+    assert!(validate(&managed_facts, Scope::Managed).is_err());
+}
+
+#[test]
+fn creator_owner_aliases_and_ordinary_mutation_are_not_placeholders() {
+    let mut different_authority = sid(3, &[0]);
+    different_authority[2] = 1;
+    for trustee in [
+        sid(3, &[1]),
+        sid(3, &[4]),
+        sid(3, &[0, 0]),
+        sid(5, &[0]),
+        sid(5, &[21, 1, 2, 3, 1001]),
+        different_authority,
+    ] {
+        let facts =
+            parse_descriptor(&creator_owner_ancestor(&trustee, 2), Scope::Ancestor).unwrap();
+        assert_eq!(facts.dacl[0].sid, SidClass::Other);
+        assert!(validate(&facts, Scope::Ancestor).is_err());
+    }
+}
+
+#[test]
+fn creator_owner_does_not_trust_an_owner_or_supply_managed_full_grants() {
+    let bytes = descriptor(&sid(3, &[0]), &[ace(0, KEY_ALL, &system())], None, false);
+    let facts = parse_descriptor(&bytes, Scope::Ancestor).unwrap();
+    assert!(validate(&facts, Scope::Ancestor).is_err());
+    for missing in [system(), administrators()] {
+        let bytes = descriptor(
+            &administrators(),
+            &[ace(0, KEY_ALL, &sid(3, &[0])), ace(0, KEY_ALL, &missing)],
+            Some(&[ace(17, 1, &high())]),
+            true,
+        );
+        let facts = parse_descriptor(&bytes, Scope::Managed).unwrap();
+        assert!(validate(&facts, Scope::Managed).is_err());
+    }
+}
+
+#[test]
+fn creator_owner_exception_requires_exact_observed_ace_shape() {
+    for flags in [0, 1, 4, 8, 10, 16, 18, 0x20, 0xff] {
+        let bytes = creator_owner_ancestor(&sid(3, &[0]), flags);
+        let facts = parse_descriptor(&bytes, Scope::Ancestor).unwrap();
+        assert!(validate(&facts, Scope::Ancestor).is_err(), "flags {flags}");
+    }
+    let valid = creator_owner_ancestor(&sid(3, &[0]), 2);
+    let first = dacl_offset(&valid) + 8;
+    for kind in [1, 5, 9] {
+        let mut bytes = valid.clone();
+        bytes[first] = kind;
+        assert!(
+            parse_descriptor(&bytes, Scope::Ancestor)
+                .and_then(|facts| validate(&facts, Scope::Ancestor))
+                .is_err()
+        );
+    }
+    for mask in [KEY_READ, KEY_WRITE, 0x1000_0000, 0x0010_0000, u32::MAX] {
+        let mut bytes = valid.clone();
+        bytes[first + 4..first + 8].copy_from_slice(&mask.to_le_bytes());
+        let facts = parse_descriptor(&bytes, Scope::Ancestor).unwrap();
+        assert!(validate(&facts, Scope::Ancestor).is_err(), "mask {mask}");
+    }
+}

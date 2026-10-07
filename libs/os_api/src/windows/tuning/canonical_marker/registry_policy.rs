@@ -17,6 +17,7 @@ pub(super) enum SidClass {
     Administrators,
     TrustedInstaller,
     HighIntegrity,
+    CreatorOwner,
     Other,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +60,14 @@ pub(super) fn validate(facts: &DescriptorFacts, scope: Scope) -> Result<(), Unkn
             return Err(UnknownReason::UnsafeSecurity);
         }
         let mask = registry_mask(ace.mask)?;
+        if ace.sid == SidClass::CreatorOwner {
+            // The exact observed inheritance template is not a token grant.
+            // Managed children must independently retain their protected DACL.
+            if scope != Scope::Ancestor || ace.flags != 2 || ace.mask != KEY_ALL {
+                return Err(UnknownReason::UnsafeSecurity);
+            }
+            continue;
+        }
         let trusted = matches!(ace.sid, SidClass::System | SidClass::Administrators)
             || (scope == Scope::Ancestor && ace.sid == SidClass::TrustedInstaller);
         if !trusted && (scope == Scope::Managed || mask & DANGEROUS_PARENT != 0) {
