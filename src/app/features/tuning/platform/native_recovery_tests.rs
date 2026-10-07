@@ -37,6 +37,13 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+#[path = "manual_recovery_lab_tests.rs"]
+mod manual_lab;
+#[test]
+#[ignore = "explicit canonical manual recovery lab; never selected by ordinary tests"]
+fn host_canonical_manual_recovery_lab() {
+    manual_lab::run_host();
+}
 
 const CHILD_TEST: &str =
     "app::features::tuning::platform::native_recovery_tests::isolated_native_child";
@@ -548,10 +555,40 @@ fn announce(message: &str) {
 /// the parent's physical fixture. Recovery never relies on cached target state.
 struct FileScalarModule {
     scalar: ScalarModule,
-    target: PathBuf,
+    target: PhysicalTarget,
     pause_after_write: Option<Arc<PauseGate>>,
     rehydrated: bool,
     writes: Option<Arc<AtomicUsize>>,
+}
+enum PhysicalTarget {
+    Fixture(PathBuf),
+    Native(Arc<os_api::tuning::TuningLabScalarIo>),
+}
+impl From<PathBuf> for PhysicalTarget {
+    fn from(path: PathBuf) -> Self {
+        Self::Fixture(path)
+    }
+}
+impl PhysicalTarget {
+    fn read(&self) -> Result<i32, ModuleError> {
+        match self {
+            Self::Fixture(path) => Ok(read_target(path)),
+            Self::Native(io) => io
+                .read()
+                .map_err(|_| ModuleError::new(ErrorKind::Read, "owned scalar read")),
+        }
+    }
+    fn write(&self, value: i32) -> Result<(), ModuleError> {
+        match self {
+            Self::Fixture(path) => {
+                write_target(path, value);
+                Ok(())
+            }
+            Self::Native(io) => io
+                .write(value)
+                .map_err(|_| ModuleError::new(ErrorKind::Write, "owned scalar write")),
+        }
+    }
 }
 impl Module for FileScalarModule {
     type Config = ScalarConfig;
@@ -577,7 +614,7 @@ impl Module for FileScalarModule {
         self.scalar.capability(target)
     }
     fn observe(&self, target: &TargetIdentity) -> Result<Self::Observation, ModuleError> {
-        self.scalar.external_change(read_target(&self.target));
+        self.scalar.external_change(self.target.read()?);
         self.scalar.observe(target)
     }
     fn observation_summary(&self, observation: &Self::Observation) -> ObservationSummary {
@@ -598,7 +635,12 @@ impl Module for FileScalarModule {
         config: &Self::Config,
         current: &Self::Observation,
     ) -> Result<Plan<Self::Snapshot, Self::Step>, ModuleError> {
-        assert!(!self.rehydrated, "recovery must not recapture a baseline");
+        if self.rehydrated {
+            return Err(ModuleError::new(
+                ErrorKind::InvalidPlan,
+                "recovery baseline recapture refused",
+            ));
+        }
         self.scalar.prepare(target, config, current)
     }
     fn snapshot_claims(
@@ -652,12 +694,12 @@ impl Module for FileScalarModule {
         target: &TargetIdentity,
         step: &Self::Step,
     ) -> Result<Effect, ModuleError> {
+        self.scalar.external_change(self.target.read()?);
+        let effect = self.scalar.execute_step(target, step)?;
+        self.target.write(self.scalar.value())?;
         if let Some(writes) = &self.writes {
             writes.fetch_add(1, Ordering::SeqCst);
         }
-        self.scalar.external_change(read_target(&self.target));
-        let effect = self.scalar.execute_step(target, step)?;
-        write_target(&self.target, self.scalar.value());
         if let Some(pause) = &self.pause_after_write {
             pause.pause();
         }
@@ -805,7 +847,7 @@ fn native_actor_recovery_child(root: PathBuf, target: PathBuf, unknown: bool) {
         let writes = Arc::new(AtomicUsize::new(0));
         let module = FileScalarModule {
             scalar: ScalarModule::new(read_target(&target)),
-            target: target.clone(),
+            target: target.clone().into(),
             pause_after_write: None,
             rehydrated: true,
             writes: Some(writes.clone()),
@@ -1023,7 +1065,7 @@ fn isolated_native_child() {
         assert_eq!(native.authority(), TuningStoreAuthority::IsolatedTest);
         let module = FileScalarModule {
             scalar: ScalarModule::new(read_target(&target)),
-            target,
+            target: target.into(),
             pause_after_write: (point == Some(StopPoint::Write)).then(|| worker_pause.clone()),
             rehydrated: recovering,
             writes: None,

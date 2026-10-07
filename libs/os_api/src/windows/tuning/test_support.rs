@@ -55,9 +55,40 @@ impl TuningTemporaryDirectory {
     }
     /// Test-only shape of the ID captured at this root's actual creation.
     /// This exposes no handle or native/canonical authority.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "tuning-test-controls"))]
     pub(super) fn original_identity(&self) -> (u32, u64) {
         self.id
+    }
+    /// Deliberately retain unresolved fixture evidence. No deletion from Drop.
+    pub(super) fn retain(mut self) {
+        self.path.clear();
+    }
+    /// Delete only this original empty root; never enumerate/delete children.
+    pub(super) fn cleanup_empty(&mut self) -> Result<(), TuningNativeError> {
+        if self.path.parent() != Some(std::env::temp_dir().as_path()) {
+            return Err(TuningNativeError::UnsafeStore(
+                "temporary cleanup boundary changed",
+            ));
+        }
+        let root = open(&self.path, true, true)?;
+        if object(&root, true)? != self.id {
+            return Err(TuningNativeError::UnsafeStore(
+                "temporary root identity changed",
+            ));
+        }
+        super::store::validate_volume(&root)?;
+        super::security::SecurityPolicy {
+            test_sid: Some(
+                crate::windows::OS::tuning_current_token_identity()?
+                    .sid()
+                    .to_owned(),
+            ),
+        }
+        .validate(raw(&root), true)?;
+        // The SDK refuses nonempty directories; no child is selected or deleted.
+        remove(root)?;
+        self.path.clear();
+        Ok(())
     }
     #[cfg(test)]
     pub(super) fn unprotected() -> Result<Self, TuningNativeError> {
@@ -162,6 +193,7 @@ impl Drop for TuningTemporaryDirectory {
         let _ = self.cleanup_inner();
     }
 }
+
 fn raw(file: &File) -> HANDLE {
     HANDLE(file.as_raw_handle())
 }
@@ -262,5 +294,30 @@ mod tests {
         );
         moved.cleanup().unwrap();
         replacement.cleanup().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod empty_cleanup_tests {
+    use super::*;
+    #[test]
+    fn exact_empty_root_cleanup_refuses_children_without_removing_them() {
+        let mut root = TuningTemporaryDirectory::new().unwrap();
+        let path = root.path().to_owned();
+        fs::write(path.join("fixture-foreign"), b"preserved").unwrap();
+        let refused = root.cleanup_empty();
+        assert_eq!(
+            fs::read(path.join("fixture-foreign")).unwrap(),
+            b"preserved"
+        );
+        fs::remove_file(path.join("fixture-foreign")).unwrap();
+        let cleaned = root.cleanup_empty();
+        let gone = !path.exists();
+        if cleaned.is_err() {
+            root.cleanup().unwrap();
+        }
+        assert!(refused.is_err());
+        assert_eq!(cleaned, Ok(()));
+        assert!(gone);
     }
 }

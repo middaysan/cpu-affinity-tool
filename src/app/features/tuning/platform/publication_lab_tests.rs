@@ -676,7 +676,7 @@ fn publication_lab_isolated_protocol_reuses_empty_codec_and_five_native_faults()
         assert_eq!(reopened_result, Ok(()));
     }
 }
-fn wait_worker<T: Send + 'static>(
+pub(super) fn wait_worker<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
     timeout: std::time::Duration,
     on_timeout: impl FnOnce(),

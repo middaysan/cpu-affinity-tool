@@ -133,7 +133,7 @@ pub enum TuningStoreAuthority {
 #[cfg(all(windows, any(test, feature = "tuning-test-controls")))]
 pub use crate::windows::tuning::{
     TuningLabArtifact, TuningLabArtifactKind, TuningLabCreation, TuningLabObjectId,
-    TuningLabSnapshot,
+    TuningLabScalarIo, TuningLabScalarTarget, TuningLabSnapshot,
 };
 #[cfg(windows)]
 pub use crate::windows::tuning::{TuningProcessLifetimeGuard, TuningPublishPoint, TuningStore};

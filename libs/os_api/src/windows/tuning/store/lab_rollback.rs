@@ -6,11 +6,25 @@ struct Receipt {
     name: &'static str,
     bytes: Vec<u8>,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Budget {
+    Publication,
+    ManualRecovery,
+}
+impl Budget {
+    fn limit(self) -> usize {
+        match self {
+            Self::Publication => 2,
+            Self::ManualRecovery => 7,
+        }
+    }
+}
 pub(super) struct LabRollback {
     root: ObjectId,
     lease: ObjectId,
     receipts: Vec<Receipt>,
     publications: usize,
+    budget: Budget,
     spent: bool,
     #[cfg(test)]
     fail_before_write: bool,
@@ -21,8 +35,27 @@ fn refusal() -> TuningNativeError {
     TuningNativeError::UnsafeStore("lab rollback ownership unproven")
 }
 impl TuningStore {
+    /// Separate fixed transcript budget; never selected by a caller number.
+    pub fn lab_arm_manual_recovery_rollback(&mut self) -> Result<(), TuningNativeError> {
+        self.lab_arm_budget(Budget::ManualRecovery)
+    }
+    /// Must precede each durable native write intent in the manual lab.
+    pub fn lab_require_manual_write_budget(&self) -> Result<(), TuningNativeError> {
+        let cap = self.lab_rollback.as_ref().ok_or_else(refusal)?;
+        if self.poisoned
+            || cap.spent
+            || cap.budget != Budget::ManualRecovery
+            || cap.budget.limit().saturating_sub(cap.publications) < 3
+        {
+            return Err(refusal());
+        }
+        self.lab_validate_owned_set()
+    }
     /// Arm only on opened metadata and an empty actual namespace.
     pub fn lab_arm_rollback(&mut self) -> Result<(), TuningNativeError> {
+        self.lab_arm_budget(Budget::Publication)
+    }
+    fn lab_arm_budget(&mut self, budget: Budget) -> Result<(), TuningNativeError> {
         if self.lab_rollback.is_some() || self.poisoned {
             return Err(refusal());
         }
@@ -50,8 +83,9 @@ impl TuningStore {
             root: self.root().id(),
             lease: self.lease.id(),
             // Reserve the complete fixed budget before any native CreateNew.
-            receipts: Vec::with_capacity(2),
+            receipts: Vec::with_capacity(budget.limit()),
             publications: 0,
+            budget,
             spent: false,
             #[cfg(test)]
             fail_before_write: false,
@@ -151,7 +185,7 @@ impl TuningStore {
         if self
             .lab_rollback
             .as_ref()
-            .is_some_and(|cap| cap.spent || cap.publications >= 2)
+            .is_some_and(|cap| cap.spent || cap.publications >= cap.budget.limit())
         {
             return Err(refusal());
         }
@@ -161,7 +195,7 @@ impl TuningStore {
         let Some(cap) = self.lab_rollback.as_mut() else {
             return Ok(stage);
         };
-        if cap.spent || cap.publications >= 2 {
+        if cap.spent || cap.publications >= cap.budget.limit() {
             return Err(refusal());
         }
         // Ownership is registered before duplicate-handle allocation, writes or
@@ -235,6 +269,42 @@ mod tests {
     fn opened(root: &TuningTemporaryDirectory) -> TuningStore {
         drop(TuningStore::open_test_directory(root.path(), 4096).unwrap());
         TuningStore::open_test_directory(root.path(), 4096).unwrap()
+    }
+    #[test]
+    fn manual_recovery_fixed_seven_budget_preserves_publication_two_limit() {
+        let root = TuningTemporaryDirectory::new().unwrap();
+        let mut store = opened(&root);
+        store.lab_arm_manual_recovery_rollback().unwrap();
+        let result = (0..7).try_for_each(|_| store.publish(b"bounded transcript"));
+        let eighth_refused = store.publish(b"eighth forbidden").is_err();
+        store.lab_rollback().unwrap();
+        drop(store);
+        root.cleanup().unwrap();
+        assert_eq!(result, Ok(()));
+        assert!(eighth_refused);
+    }
+    #[test]
+    fn manual_recovery_reserves_three_publications_before_target_mutation() {
+        let root = TuningTemporaryDirectory::new().unwrap();
+        let mut store = opened(&root);
+        let unarmed_refused = store.lab_require_manual_write_budget().is_err();
+        store.lab_arm_manual_recovery_rollback().unwrap();
+        store.publish(b"one").unwrap();
+        store.publish(b"two").unwrap();
+        let enough = store.lab_require_manual_write_budget();
+        // Five consumed publications leave fewer than the complete write's three.
+        let result = (2..5).try_for_each(|_| store.publish(b"fixed remaining transcript"));
+        let mut admitted_step_calls = 0;
+        if store.lab_require_manual_write_budget().is_ok() {
+            admitted_step_calls += 1;
+        }
+        store.lab_rollback().unwrap();
+        drop(store);
+        root.cleanup().unwrap();
+        assert!(unarmed_refused);
+        assert_eq!(enough, Ok(()));
+        assert_eq!(result, Ok(()));
+        assert_eq!(admitted_step_calls, 0, "reserve before the next step");
     }
     #[test]
     fn rollback_success_and_five_faults_preserve_original_metadata_and_absence() {

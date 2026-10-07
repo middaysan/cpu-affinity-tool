@@ -13,6 +13,8 @@ mod marker;
 mod relative_io;
 #[cfg(test)]
 mod relative_publication;
+#[cfg(any(test, feature = "tuning-test-controls"))]
+mod scalar_lab;
 mod security;
 mod store;
 mod store_io;
@@ -20,6 +22,8 @@ mod store_io;
 mod test_support;
 #[cfg(any(test, feature = "tuning-test-controls"))]
 pub use marker::{TuningMarkerNonce, TuningVolatileMarkerFixture, TuningVolatilityEvidence};
+#[cfg(any(test, feature = "tuning-test-controls"))]
+pub use scalar_lab::{TuningLabScalarIo, TuningLabScalarTarget};
 #[cfg(any(test, feature = "tuning-test-controls"))]
 pub use store::{
     TuningLabArtifact, TuningLabArtifactKind, TuningLabCreation, TuningLabObjectId,

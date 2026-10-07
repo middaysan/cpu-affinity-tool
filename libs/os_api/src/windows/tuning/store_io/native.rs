@@ -97,6 +97,74 @@ impl Node {
         node.verify()?;
         Ok(node)
     }
+    pub(in crate::windows::tuning) fn scalar_io(&self) -> Result<TuningLabScalarIo> {
+        self.verify()?;
+        if self.kind != Kind::File || self.scope != Some(true) {
+            return Err(TuningNativeError::UnsafeStore("owned scalar file required"));
+        }
+        Ok(TuningLabScalarIo {
+            file: std::sync::Mutex::new(
+                self.file
+                    .try_clone()
+                    .map_err(|e| io_error("owned scalar handle", e))?,
+            ),
+            id: self.id,
+            policy: (*self.policy).clone(),
+            creator: std::thread::current().id(),
+        })
+    }
+}
+/// Sealed IO for one actual created four-byte lab object. No raw/path constructor.
+#[cfg(any(test, feature = "tuning-test-controls"))]
+pub struct TuningLabScalarIo {
+    file: std::sync::Mutex<File>,
+    id: ObjectId,
+    policy: SecurityPolicy,
+    creator: std::thread::ThreadId,
+}
+#[cfg(any(test, feature = "tuning-test-controls"))]
+impl std::fmt::Debug for TuningLabScalarIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TuningLabScalarIo(redacted)")
+    }
+}
+#[cfg(any(test, feature = "tuning-test-controls"))]
+impl TuningLabScalarIo {
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, File>> {
+        if std::thread::current().id() != self.creator {
+            return Err(TuningNativeError::UnsafeStore("owned scalar worker"));
+        }
+        self.file
+            .lock()
+            .map_err(|_| TuningNativeError::UnsafeStore("owned scalar cursor"))
+    }
+    pub fn read(&self) -> Result<i32> {
+        let mut file = self.lock()?;
+        let bytes = read_file(&mut file, 4, |file| {
+            verify_file(file, self.id, &self.policy, Some(true))
+        })?;
+        Ok(i32::from_le_bytes(bytes.try_into().map_err(|_| {
+            TuningNativeError::UnsafeStore("owned scalar length")
+        })?))
+    }
+    pub fn write(&self, value: i32) -> Result<()> {
+        if !matches!(value, 7 | 12) {
+            return Err(TuningNativeError::UnsafeStore("owned scalar value"));
+        }
+        let mut file = self.lock()?;
+        verify_file(&file, self.id, &self.policy, Some(true))?;
+        if file
+            .metadata()
+            .map_err(|e| io_error("owned scalar length", e))?
+            .len()
+            != 4
+        {
+            return Err(TuningNativeError::UnsafeStore("owned scalar length"));
+        }
+        write_file(&mut file, &value.to_le_bytes(), 4, |file| {
+            verify_file(file, self.id, &self.policy, Some(true))
+        })
+    }
 }
 /// Borrowed proof of this exact retained relative ancestor. No raw constructor,
 /// cloning, or independent caller-selected handle can enter the security seam.
@@ -437,36 +505,12 @@ impl Node {
         if self.kind != Kind::File {
             return Err(TuningNativeError::UnsafeStore("store file kind"));
         }
-        let size = self
-            .file
-            .metadata()
-            .map_err(|e| io_error("store relative size", e))?
-            .len();
-        if size > limit as u64 {
-            return Err(TuningNativeError::Capacity { size, limit });
-        }
-        self.file
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| io_error("store relative read position", e))?;
-        let mut bytes = Vec::with_capacity(size as usize);
-        (&mut self.file)
-            .take(limit as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| io_error("store relative read", e))?;
-        self.verify()?;
-        if bytes.len() as u64 != size
-            || self
-                .file
-                .metadata()
-                .map_err(|e| io_error("store relative size", e))?
-                .len()
-                != size
-        {
-            return Err(TuningNativeError::UnsafeStore(
-                "store relative length changed",
-            ));
-        }
-        Ok(bytes)
+        let id = self.id;
+        let policy = self.policy.clone();
+        let scope = self.scope;
+        read_file(&mut self.file, limit, |file| {
+            verify_file(file, id, &policy, scope)
+        })
     }
     pub(in crate::windows::tuning) fn write_synced(
         &mut self,
@@ -483,21 +527,12 @@ impl Node {
         if self.kind != Kind::File {
             return Err(TuningNativeError::UnsafeStore("store file kind"));
         }
-        self.file
-            .set_len(0)
-            .map_err(|e| io_error("store relative truncate", e))?;
-        self.file
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| io_error("store relative write position", e))?;
-        self.verify()?;
-        self.file
-            .write_all(bytes)
-            .map_err(|e| io_error("store relative write", e))?;
-        self.verify()?;
-        self.file
-            .sync_all()
-            .map_err(|e| io_error("store relative sync", e))?;
-        self.verify()
+        let id = self.id;
+        let policy = self.policy.clone();
+        let scope = self.scope;
+        write_file(&mut self.file, bytes, limit, |file| {
+            verify_file(file, id, &policy, scope)
+        })
     }
     pub(in crate::windows::tuning) fn rename_no_replace(
         &self,
@@ -617,6 +652,81 @@ fn nt_error(operation: &'static str, status: i32) -> TuningNativeError {
 }
 fn io_error(operation: &'static str, error: std::io::Error) -> TuningNativeError {
     code_error(operation, error.raw_os_error().unwrap_or(-1) as u32)
+}
+
+fn verify_file(
+    file: &File,
+    id: ObjectId,
+    policy: &SecurityPolicy,
+    scope: Option<bool>,
+) -> Result<()> {
+    if identity(file, Kind::File)? != id {
+        return Err(TuningNativeError::UnsafeStore("store held object changed"));
+    }
+    if let Some(managed) = scope {
+        policy.validate(raw(file), managed)?;
+    }
+    Ok(())
+}
+fn read_file(
+    file: &mut File,
+    limit: usize,
+    verify: impl Fn(&File) -> Result<()>,
+) -> Result<Vec<u8>> {
+    verify(file)?;
+    let size = file
+        .metadata()
+        .map_err(|e| io_error("store relative size", e))?
+        .len();
+    if size > limit as u64 {
+        return Err(TuningNativeError::Capacity { size, limit });
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| io_error("store relative read position", e))?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    (&mut *file)
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_error("store relative read", e))?;
+    verify(file)?;
+    if bytes.len() as u64 != size
+        || file
+            .metadata()
+            .map_err(|e| io_error("store relative size", e))?
+            .len()
+            != size
+    {
+        return Err(TuningNativeError::UnsafeStore(
+            "store relative length changed",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn write_file(
+    file: &mut File,
+    bytes: &[u8],
+    limit: usize,
+    verify: impl Fn(&File) -> Result<()>,
+) -> Result<()> {
+    if bytes.len() > limit {
+        return Err(TuningNativeError::Capacity {
+            size: bytes.len() as u64,
+            limit,
+        });
+    }
+    verify(file)?;
+    file.set_len(0)
+        .map_err(|e| io_error("store relative truncate", e))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| io_error("store relative write position", e))?;
+    verify(file)?;
+    file.write_all(bytes)
+        .map_err(|e| io_error("store relative write", e))?;
+    verify(file)?;
+    file.sync_all()
+        .map_err(|e| io_error("store relative sync", e))?;
+    verify(file)
 }
 
 #[cfg(test)]

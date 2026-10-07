@@ -731,6 +731,69 @@ forced host-process interruption, power-loss durability, boot/logon/game
 attachment or another account. Original root/lease identities and ACLs were
 preserved; gaming settings were unchanged. Shipping writer admission remains closed.
 
+## Opt-in same-worker canonical manual recovery helper
+
+This source helper is prepared for independent review and explicit host
+acceptance. It has **not** been run canonically. Ordinary tests exercise the same
+codec/coordinator/rehydration path on isolated fixtures without promoting them to
+Canonical. The previously accepted publication helper and its fixed two-record
+limit remain unchanged.
+
+The exact ignored test is
+`app::features::tuning::platform::native_recovery_tests::host_canonical_manual_recovery_lab`.
+Only the exact marker selects it; there are no caller paths or target settings:
+
+```powershell
+$env:CPU_AFFINITY_MANUAL_RECOVERY_HOST_LAB = 'owned-target-restore-only'
+cargo test --locked --features 'windows tuning-test-controls' --bin cpu-affinity-tool app::features::tuning::platform::native_recovery_tests::host_canonical_manual_recovery_lab -- --ignored --exact --nocapture --test-threads=1
+```
+
+Actual host execution belongs to the explicitly authorized reviewed lab wrapper.
+The worker opens only existing canonical metadata through the Known Folder,
+security and exclusive-lease pipeline; missing metadata is refused without
+bootstrap. Journal, stage and previous must all be absent, both managed
+directories and the lease must have Opened provenance, and the complete native
+machine source/bytes are reobserved before durable operations.
+
+The sole physical target is a newly created four-byte file in an owned temporary
+root. Its original native Node retains identity, security and cleanup authority.
+A sealed duplicated File lets the typed adapter perform only 7/12 IO on its
+creator worker, under a shared-cursor mutex and the same native validation; it
+has no raw-handle or path constructor. Acquire writes 12 while recording original
+baseline 7 and an exact explicit manual lab binding. Only the in-memory
+coordinator/session are dropped. Fresh hydration rereads actual disk through the
+same native store/lease, checks the complete configured manual intent before
+RecoveryPlan (Manual bypasses its owner resolver), and reattaches with zero
+physical writes. Explicit Release restores 7 and persists empty ownership.
+
+The fixed transcript has seven publications: acquire intent/verification/
+transition, zero-write reattachment, and release intent/verification/transition.
+A separate internal ManualRecovery budget reserves seven before CreateNew;
+each physical step requires at least three remaining before its durable intent.
+It accepts no caller-selected budget. Wrong machine/resource/manual intent,
+unknown journal or insufficient budget refuses recovery writes and retains
+evidence; recovery never prepares a replacement baseline from physical 12.
+
+Every terminal protocol result reaches independent target restoration first.
+Confirmed 7 is required before exact target cleanup and owned journal receipt
+rollback. Unproven/substituted objects or unknown entries are retained, and
+target Drop never deletes unresolved evidence. Artifact handles close before an
+existing-only canonical reopen proves Absent with the original root/lease IDs,
+Opened provenance and actual security. Initial directories/lease/ACLs are kept.
+
+The fresh-line report contains exactly `schema`, `result`, `worker_terminal`,
+`verified` and `rollback_verified`. Only `verified_rolled_back`, all three
+booleans true and process exit 0 pass. Failure labels are `pending`, `refused`,
+`failed`, `timed_out`, `worker_failed` and `rollback_unresolved`. A ten-second
+timeout retains the same worker until real completion/join; a late rollback
+still fails. Reports contain no raw paths, native tuples or journal bytes.
+
+This proves only the intended **same-worker native canonical rehydration** when
+the explicit host run passes. It is not process restart, forced host exit,
+power-loss rollback, production bootstrap recovery/admission, another account,
+boot/logon/game attachment or a real gaming-setting writer. Existing isolated
+forced-process tests supply their separate bounded interruption evidence.
+
 ## Remaining acceptance gates
 
 The probe supplies a concrete way to inspect canonical metadata and lease
