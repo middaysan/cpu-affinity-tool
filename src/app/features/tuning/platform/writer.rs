@@ -200,7 +200,7 @@ fn native_error(error: os_api::tuning::TuningNativeError) -> super::journal::Jou
 }
 
 #[cfg(windows)]
-fn native_machine(
+pub(super) fn native_machine(
     source: os_api::tuning::TuningMachineSource,
     bytes: &[u8],
 ) -> Result<super::contract::MachineIdentity, super::journal::JournalError> {

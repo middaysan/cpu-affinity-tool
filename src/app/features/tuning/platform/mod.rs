@@ -9,3 +9,5 @@ pub mod writer;
 
 #[cfg(all(test, windows, feature = "tuning-test-controls"))]
 mod native_recovery_tests;
+#[cfg(all(test, windows, feature = "tuning-test-controls"))]
+mod publication_lab_tests;

@@ -494,6 +494,7 @@ Privilege model:
 - Windows CI and the stable release workflow verify the built release exe's embedded manifest resource after `cargo build --release --features windows --bin cpu-affinity-tool`
 - local test/debug binaries do not embed the administrator manifest so CI and local `cargo test` can run without elevation
 - `tuning-test-controls` is an explicit nonshipping root/os_api feature for development and lab tuning probes; isolated fixtures and default preflight do not certify canonical ProgramData, elevated cross-user or reboot behavior
+- The Windows application test `canonical_publication_lab` is explicitly ignored and requires `tuning-test-controls` plus finite disposable-snapshot selection. It is source preparation for an independently selected fresh Windows VM, not a default CI or GUI operation. It accepts only actual newly created canonical managed directories/lease, first Absent and empty current JournalDocument records bound to the actual native machine. Read-only feature-gated store evidence observes fixed artifacts and native Created/Open dispositions without issuing authority. Publication uses the existing verified handle-relative two-no-replace-rename protocol; faults retain poisoned evidence and timeout retains the same actual worker. The helper never repairs or cleans canonical metadata; instructions and unexecuted VM gates are in `docs/tuning-native-probe.md`.
 
 ## AGENTS.md maintenance rules
 Update `AGENTS.md` in the same change when you alter:

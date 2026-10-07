@@ -20,6 +20,11 @@ mod store_io;
 mod test_support;
 #[cfg(any(test, feature = "tuning-test-controls"))]
 pub use marker::{TuningMarkerNonce, TuningVolatileMarkerFixture, TuningVolatilityEvidence};
+#[cfg(any(test, feature = "tuning-test-controls"))]
+pub use store::{
+    TuningLabArtifact, TuningLabArtifactKind, TuningLabCreation, TuningLabObjectId,
+    TuningLabSnapshot,
+};
 pub use store::{TuningPublishPoint, TuningStore};
 #[cfg(any(test, feature = "tuning-test-controls"))]
 pub use test_support::TuningTemporaryDirectory;

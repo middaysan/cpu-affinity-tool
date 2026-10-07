@@ -543,6 +543,66 @@ lease across those same-account processes and executable locations. The sequence
 does not call the continuity candidate, publish a journal or certify exact
 cross-process identities, other accounts, power transitions or recovery.
 
+## Disposable-VM canonical publication helper
+
+The application test `canonical_publication_lab` is compiled only for Windows
+with `tuning-test-controls` and is explicitly ignored. Its source and isolated
+fixtures prepare a separate publication acceptance packet; canonical execution
+has not been performed. Select a fresh disposable Windows VM snapshot before
+running it. Do not run it against this PC's existing canonical metadata or recovery
+journal. The selection marker below is an operator assertion, not hypervisor
+attestation. A usable native TPM/UEFI machine source is also required; an
+unsupported VM stops without a fixture identity fallback.
+
+The helper requires actual native `Created` dispositions for both managed
+directories and the lease, canonical authority and a first `Absent` read.
+Unknown, present (including empty or corrupt), nonfresh or noncanonical input
+cannot reach journal publication. Opening can create protected directory/lease
+metadata before a later refusal; the helper retains that metadata and never
+repairs or deletes it. A previous probe run in the same snapshot therefore
+disqualifies that snapshot for this helper.
+
+Only in the selected VM, from an elevated PowerShell at this reviewed repository
+checkpoint, invoke the exact ignored test:
+
+```powershell
+$env:CPU_AFFINITY_PUBLICATION_LAB_SNAPSHOT = 'fresh-disposable-windows-snapshot'
+$env:CPU_AFFINITY_PUBLICATION_LAB_CASE = 'success'
+cargo test --locked --features 'windows tuning-test-controls' --bin cpu-affinity-tool app::features::tuning::platform::publication_lab_tests::canonical_publication_lab -- --ignored --exact --nocapture --test-threads=1
+```
+
+The finite case may instead be one of `fault-stage`, `fault-old-move`,
+`fault-publish`, `fault-before-cleanup` or `fault-after-cleanup`. Choose one case
+per fresh snapshot; prepare/reset the disposable VM outside this helper before
+another case. There is no path override or cleanup command.
+
+The worker creates two valid current-format **empty** `JournalDocument` records
+(revisions 1 and 2) from the actual native machine and default coordinator
+snapshot. There are no modules, owners, resources or setting writes. Full native
+machine source/bytes are rechecked before each publication. The production store
+syncs and verifies staging, then uses two verified handle-relative no-replace
+renames for replacement. The read-only lab evidence checks fixed artifact
+security, complete bytes and opaque native IDs, including the actual synced-stage
+ID becoming the journal ID. It also requires Busy while the original lease lives.
+
+Success compares the complete reopened record and native IDs. A selected injected
+fault must retain the exact phase artifacts and poison the original writer.
+Their bytes/IDs are verified **before** original-owner Drop. Incomplete artifact
+cases then require the actual fresh constructor's refusal; they do not claim
+post-Drop artifact reinspection. The after-cleanup fault may reopen the fully
+verified new record. No automatic restoration or deletion follows either case.
+
+The helper emits only fixed JSON fields `schema`, `result`, `worker_terminal` and
+`verified`. Successful selected cases report `verified` or `fault_retained`,
+`verified=true`, a terminal worker and process exit 0. Refusal, worker failure,
+missing report or any timeout is unsuccessful. A ten-second timeout first reports
+`pending` with `worker_terminal=false`; it retains and waits for the **same** worker
+and lease, then remains unsuccessful even after late completion. Wait for actual
+terminal completion; do not replace the worker or treat a timeout as release.
+Raw machine data, journal bytes, IDs, paths and arbitrary native error text are
+not emitted by the helper. Normal GUI composition and shipping write admission
+remain unchanged; ordinary tests and CI leave this canonical test ignored.
+
 ## Remaining acceptance gates
 
 The probe supplies a concrete way to inspect canonical metadata and lease

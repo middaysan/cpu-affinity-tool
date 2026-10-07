@@ -21,6 +21,14 @@ use windows::Win32::{
     UI::Shell::{FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
 };
 pub const JOURNAL_NAME: &str = "journal-v1.json";
+#[cfg(any(test, feature = "tuning-test-controls"))]
+#[path = "store/lab_evidence.rs"]
+mod lab_evidence;
+#[cfg(any(test, feature = "tuning-test-controls"))]
+pub use lab_evidence::{
+    TuningLabArtifact, TuningLabArtifactKind, TuningLabCreation, TuningLabObjectId,
+    TuningLabSnapshot,
+};
 const STAGING_NAME: &str = "journal-v1.staging";
 const BACKUP_NAME: &str = "journal-v1.previous";
 const LEASE_NAME: &str = "writer-v1.lock";
@@ -38,6 +46,8 @@ struct PinnedDirectory {
     name: Option<Vec<u16>>,
     directory: Directory,
     scope: Option<bool>,
+    #[cfg(any(test, feature = "tuning-test-controls"))]
+    creation: Option<Disposition>,
 }
 /// Opening locals are the actual authority frame while descendant native IO
 /// runs. A nonterminal request parks the same worker without unwinding this
@@ -48,6 +58,8 @@ struct OpeningContext {
     directories: Vec<PinnedDirectory>,
     policy: Rc<SecurityPolicy>,
     max_bytes: usize,
+    #[cfg(any(test, feature = "tuning-test-controls"))]
+    lease_creation: Disposition,
 }
 /// Native authority is opened, retained and dropped by one worker.
 /// All descendant operations use the retained root. An unresolved request
@@ -58,7 +70,11 @@ pub struct TuningStore {
     directories: Vec<PinnedDirectory>,
     _policy: Rc<SecurityPolicy>,
     max_bytes: usize,
+    #[cfg(any(test, feature = "tuning-test-controls"))]
+    lease_creation: Disposition,
     poisoned: bool,
+    #[cfg(any(test, feature = "tuning-test-controls"))]
+    last_synced_stage: Option<super::store_io::native::ObjectId>,
     #[cfg(any(test, feature = "tuning-test-controls"))]
     fault: Option<TuningPublishPoint>,
     #[cfg(test)]
@@ -226,7 +242,11 @@ impl TuningStore {
             directories: opening.directories,
             _policy: opening.policy,
             max_bytes: opening.max_bytes,
+            #[cfg(any(test, feature = "tuning-test-controls"))]
+            lease_creation: opening.lease_creation,
             poisoned: false,
+            #[cfg(any(test, feature = "tuning-test-controls"))]
+            last_synced_stage: None,
             #[cfg(any(test, feature = "tuning-test-controls"))]
             fault: None,
             #[cfg(test)]
@@ -284,6 +304,8 @@ impl TuningStore {
             name: None,
             directory: anchor,
             scope: root_scope,
+            #[cfg(any(test, feature = "tuning-test-controls"))]
+            creation: None,
         }];
         for part in parts {
             let Component::Normal(value) = part else {
@@ -301,7 +323,7 @@ impl TuningStore {
                 None
             };
             let parent = &directories.last().expect("retained volume root").directory;
-            let (node, _) = parent.open(
+            let (node, _creation) = parent.open(
                 &name,
                 Kind::Directory,
                 if managed {
@@ -317,13 +339,15 @@ impl TuningStore {
                 name: Some(name),
                 directory: node.into_directory()?,
                 scope,
+                #[cfg(any(test, feature = "tuning-test-controls"))]
+                creation: Some(_creation),
             });
         }
         let final_root = &directories
             .last()
             .ok_or(TuningNativeError::UnsafeStore("store root missing"))?
             .directory;
-        let (lease, _) = final_root.open(
+        let (lease, _lease_creation) = final_root.open(
             &units(LEASE_NAME),
             Kind::File,
             OpenMode::OpenOrCreate,
@@ -337,6 +361,8 @@ impl TuningStore {
             directories,
             policy,
             max_bytes,
+            #[cfg(any(test, feature = "tuning-test-controls"))]
+            lease_creation: _lease_creation,
         })
     }
     fn root(&self) -> &Directory {
@@ -481,6 +507,10 @@ impl TuningStore {
         stage.write_synced(bytes, self.max_bytes)?;
         if stage.read(self.max_bytes)? != bytes {
             return Err(TuningNativeError::UnsafeStore("staging bytes changed"));
+        }
+        #[cfg(any(test, feature = "tuning-test-controls"))]
+        {
+            self.last_synced_stage = Some(stage.id());
         }
         self.inject(TuningPublishPoint::AfterStageSync)?;
         if let Some(previous) = old.as_ref() {
