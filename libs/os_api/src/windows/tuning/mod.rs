@@ -15,6 +15,7 @@ mod relative_io;
 mod relative_publication;
 mod security;
 mod store;
+mod store_io;
 #[cfg(any(test, feature = "tuning-test-controls"))]
 mod test_support;
 #[cfg(any(test, feature = "tuning-test-controls"))]

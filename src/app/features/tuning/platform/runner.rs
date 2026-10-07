@@ -1324,6 +1324,82 @@ mod tests {
         assert!(final_record.resources.is_empty() && final_record.owners.is_empty());
     }
     #[test]
+    fn durable_factory_timeout_and_drop_retain_partially_constructed_worker_context() {
+        use super::super::journal::{DurableSession, JournalStore};
+        let module = ScalarModule::new(7);
+        let block = Block::once();
+        let hook = block.hook.clone();
+        let memory = Arc::new(Mutex::new(DurableMemory::default()));
+        let worker_memory = memory.clone();
+        let mut runner =
+            Runner::start_test_durable(coordinator(&module), RunnerLimits::default(), move || {
+                let store = MemoryStore::open(worker_memory);
+                // This fixture models an unconfirmed factory operation. Only
+                // the test barrier supplies eventual completion, never timeout.
+                hook();
+                WorkerAuthority::Durable(Box::new(DurableSession::bootstrap(
+                    Box::new(store) as Box<dyn JournalStore>,
+                    test_machine(),
+                )))
+            })
+            .unwrap();
+        block.entered();
+        assert_eq!(runner.shutdown(Duration::ZERO), ShutdownResult::TimedOut);
+        assert_eq!(runner.shutdown(Duration::ZERO), ShutdownResult::TimedOut);
+        let client = runner.client();
+        drop(runner);
+        assert!(memory.lock().unwrap().dropped.is_none());
+        assert!(memory.lock().unwrap().calls.is_empty());
+        assert_eq!(module.writes(), 0);
+        assert!(client.submit(observe(), 1).is_err());
+        block.release();
+        let started = Instant::now();
+        while memory.lock().unwrap().dropped.is_none() && started.elapsed() < WAIT {
+            thread::yield_now();
+        }
+        let memory = memory.lock().unwrap();
+        let worker = memory.created.expect("factory created its context");
+        assert_ne!(worker, thread::current().id());
+        assert_eq!(memory.dropped, Some(worker));
+        assert!(memory.calls.iter().all(|call| *call == worker));
+        assert_eq!(module.writes(), 0);
+    }
+    #[test]
+    fn durable_drop_during_unconfirmed_intent_cannot_start_a_setting_write() {
+        let module = ScalarModule::new(7);
+        let block = Block::once();
+        let memory = Arc::new(Mutex::new(DurableMemory {
+            before_publish: Some(block.hook.clone()),
+            ..Default::default()
+        }));
+        let mut runner = durable_runner(&module, memory.clone());
+        let ticket = runner
+            .client()
+            .submit(acquire(&module, 1, 12, ActivationMode::Session), 1)
+            .unwrap();
+        block.entered();
+        assert!(ticket.wait(Duration::ZERO).is_none());
+        assert_eq!(runner.shutdown(Duration::ZERO), ShutdownResult::TimedOut);
+        drop(runner);
+        assert!(memory.lock().unwrap().dropped.is_none());
+        assert!(memory.lock().unwrap().records.is_empty());
+        assert_eq!(module.writes(), 0);
+        assert!(ticket.wait(Duration::ZERO).is_none());
+        block.release();
+        assert!(
+            matches!(result(&ticket).outcome, TerminalOutcome::Completed(ref result) if result.outcome == super::super::coordinator::Outcome::Cancelled)
+        );
+        let started = Instant::now();
+        while memory.lock().unwrap().dropped.is_none() && started.elapsed() < WAIT {
+            thread::yield_now();
+        }
+        let memory = memory.lock().unwrap();
+        assert_eq!(memory.dropped, memory.created);
+        assert!(memory.dropped.is_some());
+        assert_eq!(module.writes(), 0);
+        assert!(memory.records.last().unwrap().resources.is_empty());
+    }
+    #[test]
     fn durable_drop_retains_blocked_context_until_worker_finishes_compensation() {
         let module = ScalarModule::new(7);
         let block = Block::once();

@@ -196,6 +196,9 @@ Tuning foundation status:
 - continuity identity preserves an exact nonzero 32-byte nonce with versioned producer/domain/registry view; legacy bare-array identities are retained as blocked raw journal evidence. This wire contract does not supply a canonical boot producer
 - `libs/os_api/src/windows/tuning/canonical_marker/` is a feature-gated nonshipping continuity candidate. Its API borrows the retained canonical store/lease, retains actual token provenance and reobserves exact machine identity around guarded operations. Bounded codec, registry-specific security, operation traces and private-hive/token primitives have coverage; actual canonical/elevated/power validation remains open. Only the explicitly selected nonshipping continuity lab commands invoke it; application and default probe composition exclude it, and shipping continuity remains unavailable
 - a Send factory constructs the potentially !Send store/lease on the serial worker; its lifetime covers commands, panic handling and shutdown publication, while timeout/caller Drop retains the still-working context
+- the Windows metadata store uses retained directory handles for descendant opens, lease checks, bounded enumeration, journal I/O and publication; canonical bootstrap cross-checks the global and local drive roots by complete volume-GUID path and object identity before selecting Known Folder components
+- publication uses two no-replace renames with exact source identity/bytes and deletes only the retained old handle after fresh new-journal verification; interrupted staging/previous evidence blocks clean absence and publication rather than being automatically repaired
+- unexpected pending or ambiguous native completion retains the native request and outer context on the same nonterminal worker until process exit; synthetic request/lease tests do not establish observed SDK pending or cancellation completion
 - production runner write admission is closed, including canonical factory initialization with a clean journal; permissive simulator execution exists only under `cfg(test)`
 - module contribution rules are recorded in `src/app/features/tuning/README.md`; the specification remains `docs/modular-gaming-features-plan.md`
 - nonshipping native tests demonstrate forced-process recovery at intent, physical isolated target write and verified-progress boundaries, with the same worker lease retained through shutdown timeout; this does not certify canonical/elevated/boot scope or authoritative game attachment, which remain gates. Profile/session/UI integration and real setting adapters remain later work
@@ -347,8 +350,10 @@ Internal backend structure:
   - `cpu`
   - `event_log`
   - `tuning` - dormant metadata store/security/identity primitives, same-handle process lifetime observations and nonshipping isolated boot-marker probes; canonical boot/recovery admission remains unavailable
-  - `tuning/relative_io.rs` and `tuning/relative_io/` - private `cfg(test)` handle-relative NTFS primitives and owned native characterization; production storage does not use them
-  - `tuning/relative_publication.rs` and `tuning/relative_publication/` - private `cfg(test)` publication protocol and interruption fixtures; two no-replace renames retain interrupted artifacts, and do not change the production store protocol
+  - `tuning/store_io.rs` and `tuning/store_io/` - production handle-relative I/O, bootstrap/completion/name/parser decisions, complete native-request ownership and focused test leaves
+  - `tuning/store.rs` and `tuning/store/` - worker-owned store/lease, verified two-rename publication, unchanged strict ancestor security policy and isolated native migration/interruption tests
+  - `tuning/relative_io.rs` and `tuning/relative_io/` - private `cfg(test)` predecessor primitives and owned native characterization; production storage uses `store_io`
+  - `tuning/relative_publication.rs` and `tuning/relative_publication/` - private `cfg(test)` predecessor publication protocol and interruption fixtures
 - crate-root public shape remains intentionally narrow: external callers still interact through `OS` plus small boundary value types such as `PriorityClass` and `ShortcutSpec`
 - Linux backend remains a single-file minimal backend and is not forced into parity with the Windows internal layout
 

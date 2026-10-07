@@ -221,8 +221,9 @@ heap output, and the rename input, without inspection on `STATUS_PENDING`, then
 refuses the operation. Any delivered handle remains for process-exit cleanup;
 this is not production shutdown or cancellation evidence.
 
-Production storage still uses its existing implementation and ancestor policy.
-Adoption requires a complete migration of descendant operations, a separately
+At this private-only checkpoint production storage still used its existing
+implementation and ancestor policy. Adoption required a complete migration of
+descendant operations, a separately
 reviewed publication/recovery protocol and starting-object eligibility. A
 successful temporary-fixture test does not authorize weaker ancestor checks or
 close the canonical, cross-account or power-transition gates.
@@ -262,9 +263,60 @@ deletion, root pinning, capacity refusal and actual lease exclusion. A regressio
 also verifies that rejected requests cannot downgrade unresolved retention and
 release its lease. The conditional helper alone supplies no native evidence.
 
-Production storage, canonical admission and shipping write policy remain
-unchanged. Complete migration still requires the production journal capacity,
-security, recovery and worker-lifetime contracts.
+At this private-only checkpoint production storage, canonical admission and
+shipping write policy were unchanged. Complete migration required the production
+journal capacity, security, recovery and worker-lifetime contracts.
+
+## Production relative-store contract
+
+`store_io` supplies the production native boundary. Descendant opens, managed
+directory creation, exclusive lease acquisition and metadata rechecks use one
+component relative to the retained parent handle. Artifact enumeration, bounded
+journal reads, staged writes/sync, both no-replace renames and exact old-handle
+cleanup use those retained objects. There is no absolute descendant reopen,
+pathname publication or deletion fallback. Journal capacity remains 4 MiB; the
+component limit is 255 UTF-16 units. Opaque journal bytes and the public capacity
+error contract are preserved.
+
+Canonical bootstrap derives its drive from the actual OS Known Folder. It opens
+the global DOS-device root and cross-checks the local root using complete final
+volume-GUID root paths, full object identities and local fixed NTFS eligibility.
+Drive classification uses the captured GUID root and brackets retained identity
+and complete GUID-path rechecks rather than querying a mutable drive letter.
+A substituted directory or different local drive mapping refuses rather than
+minting canonical authority. Descendants use only the retained global handle.
+This is a selection proof, not a relaxation of ancestor ACLs or evidence of
+successful canonical initialization. See [the NT namespace](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file),
+[local/global device names](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/local-and-global-ms-dos-device-names)
+and [final handle paths](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew).
+The classification follows [the drive-root query contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdrivetypew).
+
+Publication deliberately has a missing-journal interval between the two renames.
+Readers require the same exclusive lease; concurrent contenders receive Busy.
+Cold staging/previous evidence blocks clean absence and subsequent publication,
+including continuity initialization. No interrupted version is automatically
+selected, repaired, overwritten or removed. This reduces automatic recovery
+availability and does not preserve `ReplaceFileW` physical atomicity or metadata.
+
+The native call result is checked before output inspection. Unexpected pending
+or ambiguous completion retains the complete native-used request and outer
+store/opening context on that exact worker until process exit. Timeout and caller
+Drop cannot manufacture completion or release/replace its lease. Synthetic
+request and owned child tests exercise this policy; they do not demonstrate
+actual SDK pending or cancellation completion. Normal confirmed terminal paths
+still close their owned objects. The strict ancestor security policy, shipping
+continuity unavailability and closed tuning write admission remain unchanged.
+
+On 2026-10-07 the complete migration passed 13 isolated store tests (12 actual
+native scenarios and one conditional child helper) and eight production-used
+decision/request-ownership tests within the full 243-test OS library run. The
+33 probe-example tests also passed. Actual tests cover all five replacement
+boundaries, exact 4 MiB limits, source/destination substitution, exact old-handle
+cleanup, late read-name/orphan changes and store/partial-opening lease retention.
+The latter outcomes are injected nonterminal fixtures, not observed SDK pending.
+Canonical bootstrap remains source-reviewed and awaits its actual scope matrix;
+the strict ancestor mutation-grant predicate still refuses the previously
+observed ProgramData permissions. No ACL repair or gaming-setting write is added.
 
 ## Remaining acceptance gates
 

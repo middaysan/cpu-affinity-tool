@@ -1,86 +1,82 @@
+use super::store_io::native::{Directory, Node};
 use super::{
     identity, native_error,
     security::{Descriptor, SecurityPolicy},
-    wide,
+    store_io::{self, Disposition, Entry, Kind, OpenMode, Sharing},
 };
 use crate::tuning::{MAX_TUNING_JOURNAL_BYTES, TuningNativeError, TuningStoreAuthority};
+#[cfg(any(test, feature = "tuning-test-controls"))]
+use std::path::Path;
 use std::{
-    ffi::OsStr,
-    fs::{self, File},
-    io::{Read, Write},
+    fs::File,
     marker::PhantomData,
-    os::windows::io::{AsRawHandle, FromRawHandle},
-    path::{Component, Path, PathBuf},
+    os::windows::{ffi::OsStrExt, io::AsRawHandle},
+    path::{Component, PathBuf},
     rc::Rc,
 };
-use windows::{
-    Win32::{
-        Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE},
-        Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
-            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-            FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_NONE,
-            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileDispositionInfo,
-            GetFileInformationByHandle, GetFileType, GetVolumeInformationByHandleW,
-            MOVE_FILE_FLAGS, MoveFileExW, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL,
-            REPLACE_FILE_FLAGS, ReplaceFileW, SetFileInformationByHandle,
-        },
-        System::Com::CoTaskMemFree,
-        UI::Shell::{FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
-    },
-    core::PCWSTR,
+use windows::Win32::{
+    Foundation::HANDLE,
+    Storage::FileSystem::GetVolumeInformationByHandleW,
+    System::Com::CoTaskMemFree,
+    UI::Shell::{FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
 };
-
 pub const JOURNAL_NAME: &str = "journal-v1.json";
 const STAGING_NAME: &str = "journal-v1.staging";
 const BACKUP_NAME: &str = "journal-v1.previous";
 const LEASE_NAME: &str = "writer-v1.lock";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TuningPublishPoint {
     AfterStageSync,
+    AfterOldMove,
     AfterPublish,
+    BeforeBackupCleanup,
+    AfterBackupCleanup,
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ObjectId {
-    volume: u32,
-    index: u64,
-}
+#[cfg(test)]
+type PublicationHook = Box<dyn FnMut(TuningPublishPoint) -> Result<(), TuningNativeError>>;
 struct PinnedDirectory {
-    path: PathBuf,
-    file: File,
-    id: ObjectId,
-    managed: bool,
+    name: Option<Vec<u16>>,
+    directory: Directory,
+    scope: Option<bool>,
 }
-
-/// Native authority is opened, retained and dropped by one worker.
-pub struct TuningStore {
-    root: PathBuf,
+/// Opening locals are the actual authority frame while descendant native IO
+/// runs. A nonterminal request parks the same worker without unwinding this
+/// chain or any newly delivered lease handle in its owned output allocation.
+struct OpeningContext {
+    // Lease closes before all ancestor handles.
+    lease: Node,
     directories: Vec<PinnedDirectory>,
-    lease: File,
-    lease_id: ObjectId,
-    policy: SecurityPolicy,
+    policy: Rc<SecurityPolicy>,
+    max_bytes: usize,
+}
+/// Native authority is opened, retained and dropped by one worker.
+/// All descendant operations use the retained root. An unresolved request
+/// retains the entire worker indefinitely; process exit is the release bound.
+pub struct TuningStore {
+    // Publication nodes are call locals, so close before the retained lease.
+    lease: Node,
+    directories: Vec<PinnedDirectory>,
+    _policy: Rc<SecurityPolicy>,
     max_bytes: usize,
     poisoned: bool,
     #[cfg(any(test, feature = "tuning-test-controls"))]
     fault: Option<TuningPublishPoint>,
     #[cfg(test)]
-    before_backup_remove: Option<Box<dyn FnOnce()>>,
+    publication_hook: Option<PublicationHook>,
+    #[cfg(test)]
+    after_read_snapshot: Option<Box<dyn FnMut()>>,
+    #[cfg(test)]
+    after_previous_read: Option<Box<dyn FnMut()>>,
     _worker_only: PhantomData<Rc<()>>,
 }
-
 impl TuningStore {
     pub fn authority(&self) -> TuningStoreAuthority {
         #[cfg(any(test, feature = "tuning-test-controls"))]
-        if self.policy.test_sid.is_some() {
+        if self._policy.test_sid.is_some() {
             return TuningStoreAuthority::IsolatedTest;
         }
         TuningStoreAuthority::Canonical
     }
-    /// This API never chooses a caller-supplied production path. Calling it is
-    /// an explicit metadata initialization, not proof that elevated gates ran.
     pub fn open_canonical(max_bytes: usize) -> Result<Self, TuningNativeError> {
         validate_bound(max_bytes)?;
         if !identity::elevated()? {
@@ -103,34 +99,55 @@ impl TuningStore {
     }
     #[cfg(any(test, feature = "tuning-test-controls"))]
     pub fn open_test_directory(root: &Path, max_bytes: usize) -> Result<Self, TuningNativeError> {
-        validate_bound(max_bytes)?;
-        let base = std::env::temp_dir();
-        if root.parent() != Some(base.as_path())
-            || !root.file_name().is_some_and(|name| {
-                name.to_string_lossy()
-                    .starts_with("cpu-affinity-tuning-test-")
-            })
-        {
-            return Err(TuningNativeError::UnsafeStore(
-                "isolated temporary store path required",
-            ));
-        }
-        let sid = crate::windows::OS::tuning_current_token_identity()?
-            .sid()
-            .to_owned();
-        Self::open(
-            root.to_owned(),
-            base,
-            SecurityPolicy {
-                test_sid: Some(sid),
-            },
-            max_bytes,
-        )
+        let (base, policy) = test_selection(root, max_bytes)?;
+        Self::open(root.to_owned(), base, policy, max_bytes)
     }
     pub fn read(&mut self) -> Result<Option<Vec<u8>>, TuningNativeError> {
-        self.validate_authority()?;
-        self.validate_artifacts()?;
-        self.read_journal()
+        if self.poisoned {
+            return Err(TuningNativeError::Poisoned);
+        }
+        let result = (|| {
+            self.validate_objects()?;
+            let mut journal = self.clean_journal(true)?;
+            let bytes = match journal.as_mut() {
+                Some(node) => Some(node.read(self.max_bytes)?),
+                None => None,
+            };
+            #[cfg(test)]
+            if let Some(hook) = self.after_read_snapshot.as_mut() {
+                hook();
+            }
+            match (journal.as_ref(), bytes.as_ref()) {
+                (Some(node), Some(bytes)) => {
+                    let fresh = self
+                        .clean_journal(true)?
+                        .ok_or(TuningNativeError::UnsafeStore("journal presence changed"))?;
+                    if fresh.id() != node.id() {
+                        return Err(TuningNativeError::UnsafeStore(
+                            "journal read namespace changed",
+                        ));
+                    }
+                    self.check_name(JOURNAL_NAME, node, bytes)?;
+                }
+                (None, None) => {
+                    if self.clean_journal(true)?.is_some() {
+                        return Err(TuningNativeError::UnsafeStore("journal absence changed"));
+                    }
+                }
+                _ => return Err(TuningNativeError::UnsafeStore("journal read evidence")),
+            }
+            self.validate_objects()?;
+            Ok(bytes)
+        })();
+        // Capacity is a terminal nonmutating bound refusal; a caller may
+        // independently test publication against the retained oversized record.
+        if result
+            .as_ref()
+            .is_err_and(|e| !matches!(e, TuningNativeError::Capacity { .. }))
+        {
+            self.poisoned = true;
+        }
+        result
     }
     pub fn publish(&mut self, bytes: &[u8]) -> Result<(), TuningNativeError> {
         if self.poisoned {
@@ -162,329 +179,344 @@ impl TuningStore {
     pub fn fail_publication_at(&mut self, point: TuningPublishPoint) {
         self.fault = Some(point);
     }
-
+    #[cfg(test)]
+    pub(super) fn set_publication_hook<
+        F: FnMut(TuningPublishPoint) -> Result<(), TuningNativeError> + 'static,
+    >(
+        &mut self,
+        hook: F,
+    ) {
+        self.publication_hook = Some(Box::new(hook));
+    }
+    #[cfg(test)]
+    pub(super) fn set_after_read_snapshot_hook<F: FnMut() + 'static>(&mut self, hook: F) {
+        self.after_read_snapshot = Some(Box::new(hook));
+    }
+    #[cfg(test)]
+    pub(super) fn set_after_previous_read_hook<F: FnMut() + 'static>(&mut self, hook: F) {
+        self.after_previous_read = Some(Box::new(hook));
+    }
+    #[cfg(test)]
+    pub(super) fn retain_nonterminal_for_test<F: FnOnce()>(&mut self, entered: F) -> ! {
+        assert_eq!(self.authority(), TuningStoreAuthority::IsolatedTest);
+        self.validate_authority()
+            .expect("isolated retained authority");
+        store_io::retain_nonterminal(Box::new(self), entered)
+    }
+    #[cfg(test)]
+    pub(super) fn retain_opening_for_test<F: FnOnce()>(
+        root: &Path,
+        max_bytes: usize,
+        entered: F,
+    ) -> ! {
+        let (base, policy) = test_selection(root, max_bytes).expect("isolated opening selection");
+        let mut opening = Self::prepare_open(root.to_owned(), base, policy, max_bytes)
+            .expect("actual isolated opening and lease");
+        store_io::retain_nonterminal(Box::new(&mut opening), entered)
+    }
     fn open(
         root: PathBuf,
         existing_base: PathBuf,
         policy: SecurityPolicy,
         max_bytes: usize,
     ) -> Result<Self, TuningNativeError> {
-        let descriptor = Descriptor::new(policy.test_sid.as_deref())?;
-        let mut directories = Vec::new();
-        let mut path = PathBuf::new();
-        let mut components = root.components();
-        match components.next() {
-            Some(Component::Prefix(prefix))
-                if matches!(prefix.kind(), std::path::Prefix::Disk(_)) =>
-            {
-                path.push(prefix.as_os_str())
-            }
+        let opening = Self::prepare_open(root, existing_base, policy, max_bytes)?;
+        let mut store = Self {
+            lease: opening.lease,
+            directories: opening.directories,
+            _policy: opening.policy,
+            max_bytes: opening.max_bytes,
+            poisoned: false,
+            #[cfg(any(test, feature = "tuning-test-controls"))]
+            fault: None,
+            #[cfg(test)]
+            publication_hook: None,
+            #[cfg(test)]
+            after_read_snapshot: None,
+            #[cfg(test)]
+            after_previous_read: None,
+            _worker_only: PhantomData,
+        };
+        store.validate_authority()?;
+        store.clean_journal(true)?;
+        Ok(store)
+    }
+    fn prepare_open(
+        root: PathBuf,
+        existing_base: PathBuf,
+        policy: SecurityPolicy,
+        max_bytes: usize,
+    ) -> Result<OpeningContext, TuningNativeError> {
+        let policy = Rc::new(policy);
+        let descriptor = Rc::new(Descriptor::new(policy.test_sid.as_deref())?);
+        let mut parts = root.components();
+        let (letter, drive) = match parts.next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                std::path::Prefix::Disk(letter) => (letter, PathBuf::from(prefix.as_os_str())),
+                _ => {
+                    return Err(TuningNativeError::Unsupported(
+                        "local drive absolute store required",
+                    ));
+                }
+            },
             _ => {
                 return Err(TuningNativeError::Unsupported(
                     "local drive absolute store required",
                 ));
             }
-        }
-        if components.next() != Some(Component::RootDir) {
+        };
+        if parts.next() != Some(Component::RootDir) {
             return Err(TuningNativeError::UnsafeStore("absolute store required"));
         }
+        let mut path = drive;
         path.push("\\");
-        let parts: Vec<_> = components.collect();
-        for index in 0..=parts.len() {
-            if index != 0 {
-                match parts[index - 1] {
-                    Component::Normal(value) => path.push(value),
-                    _ => {
-                        return Err(TuningNativeError::UnsafeStore(
-                            "normalized store components required",
-                        ));
-                    }
-                }
-            }
+        let anchor = if policy.test_sid.is_none() {
+            Directory::canonical_bootstrap(letter, Rc::clone(&descriptor), Rc::clone(&policy))?
+        } else {
+            Directory::bootstrap(&path, Rc::clone(&descriptor), Rc::clone(&policy), None)?
+        };
+        let root_scope = if policy.test_sid.is_none() {
+            Some(false)
+        } else {
+            None
+        };
+        let mut directories = vec![PinnedDirectory {
+            name: None,
+            directory: anchor,
+            scope: root_scope,
+        }];
+        for part in parts {
+            let Component::Normal(value) = part else {
+                return Err(TuningNativeError::UnsafeStore(
+                    "normalized store components required",
+                ));
+            };
+            let name: Vec<_> = value.encode_wide().collect();
+            store_io::component(&name)?;
+            path.push(value);
             let managed = path != existing_base && path.starts_with(&existing_base);
-            if managed {
-                let value = wide(path.as_os_str())?;
-                let attrs = descriptor.attributes();
-                if let Err(error) =
-                    unsafe { CreateDirectoryW(PCWSTR(value.as_ptr()), Some(&attrs)) }
-                {
-                    let error = native_error("CreateDirectoryW store", error);
-                    if !matches!(error, TuningNativeError::Io { code: 183, .. }) {
-                        return Err(error);
-                    }
-                }
-            }
-            let file = open_directory(&path)?;
-            let info = checked_info(&file, true)?;
-            // The nonshipping fixture proves managed-object primitives, not
-            // privileged security of the user's writable temp ancestors.
-            if managed || policy.test_sid.is_none() {
-                policy.validate(raw(&file), managed)?;
-            }
-            if index == 0 {
-                validate_volume(&file)?;
-            }
+            let scope = if managed || policy.test_sid.is_none() {
+                Some(managed)
+            } else {
+                None
+            };
+            let parent = &directories.last().expect("retained volume root").directory;
+            let (node, _) = parent.open(
+                &name,
+                Kind::Directory,
+                if managed {
+                    OpenMode::OpenOrCreate
+                } else {
+                    OpenMode::Existing
+                },
+                Sharing::Retained,
+                true,
+                scope,
+            )?;
             directories.push(PinnedDirectory {
-                path: path.clone(),
-                file,
-                id: object_id(&info),
-                managed,
+                name: Some(name),
+                directory: node.into_directory()?,
+                scope,
             });
         }
-        let lease_path = root.join(LEASE_NAME);
-        let lease = open_file(
-            &lease_path,
-            GENERIC_READ.0 | GENERIC_WRITE.0 | READ_CONTROL.0,
-            FILE_SHARE_NONE,
-            OPEN_ALWAYS,
-            Some(&descriptor),
+        let final_root = &directories
+            .last()
+            .ok_or(TuningNativeError::UnsafeStore("store root missing"))?
+            .directory;
+        let (lease, _) = final_root.open(
+            &units(LEASE_NAME),
+            Kind::File,
+            OpenMode::OpenOrCreate,
+            Sharing::ExclusiveLease,
+            false,
+            Some(true),
         )?;
-        let lease_id = object_id(&checked_info(&lease, false)?);
-        policy.validate(raw(&lease), true)?;
-        let mut result = Self {
-            root,
-            directories,
+        lease.verify()?;
+        Ok(OpeningContext {
             lease,
-            lease_id,
+            directories,
             policy,
             max_bytes,
-            poisoned: false,
-            #[cfg(any(test, feature = "tuning-test-controls"))]
-            fault: None,
-            #[cfg(test)]
-            before_backup_remove: None,
-            _worker_only: PhantomData,
-        };
-        result.validate_authority()?;
-        result.validate_artifacts()?;
-        Ok(result)
+        })
     }
-
+    fn root(&self) -> &Directory {
+        &self
+            .directories
+            .last()
+            .expect("retained store root")
+            .directory
+    }
     fn validate_objects(&self) -> Result<(), TuningNativeError> {
-        for entry in &self.directories {
-            if object_id(&checked_info(&entry.file, true)?) != entry.id {
-                return Err(TuningNativeError::UnsafeStore("held directory changed"));
-            }
-            if entry.managed || self.policy.test_sid.is_none() {
-                self.policy.validate(raw(&entry.file), entry.managed)?;
-            }
-            let reopened = open_directory(&entry.path)?;
-            if object_id(&checked_info(&reopened, true)?) != entry.id {
-                return Err(TuningNativeError::UnsafeStore(
-                    "directory namespace changed",
-                ));
-            }
-            if entry.managed || self.policy.test_sid.is_none() {
-                self.policy.validate(raw(&reopened), entry.managed)?;
+        let mut current = None;
+        for (index, entry) in self.directories.iter().enumerate() {
+            entry.directory.verify()?;
+            if index != 0 {
+                let parent = current.as_ref().unwrap_or(&self.directories[0].directory);
+                let name = entry
+                    .name
+                    .as_deref()
+                    .ok_or(TuningNativeError::UnsafeStore("store directory name"))?;
+                let (node, _) = parent.open(
+                    name,
+                    Kind::Directory,
+                    OpenMode::Existing,
+                    Sharing::Retained,
+                    true,
+                    entry.scope,
+                )?;
+                if node.id() != entry.directory.id() {
+                    return Err(TuningNativeError::UnsafeStore(
+                        "directory namespace changed",
+                    ));
+                }
+                current = Some(node.into_directory()?);
             }
         }
-        if object_id(&checked_info(&self.lease, false)?) != self.lease_id {
-            return Err(TuningNativeError::UnsafeStore("held lease changed"));
+        self.lease.verify()?;
+        let lease_name = units(LEASE_NAME);
+        let mut lease_seen = false;
+        for entry in self.root().entries()? {
+            if entry.name == lease_name {
+                if lease_seen || !self.root().entry_matches(&entry, &self.lease)? {
+                    return Err(TuningNativeError::UnsafeStore("lease namespace changed"));
+                }
+                lease_seen = true;
+            }
         }
-        self.policy.validate(raw(&self.lease), true)?;
-        let path = self.root.join(LEASE_NAME);
-        let reopened = open_file(
-            &path,
-            FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            OPEN_EXISTING,
-            None,
-        )?;
-        if object_id(&checked_info(&reopened, false)?) != self.lease_id {
+        if !lease_seen {
             return Err(TuningNativeError::UnsafeStore("lease namespace changed"));
         }
-        self.policy.validate(raw(&reopened), true)
-    }
-
-    fn validate_artifacts(&self) -> Result<(), TuningNativeError> {
-        let entries =
-            fs::read_dir(&self.root).map_err(|e| io_error("list journal artifacts", e))?;
-        for (index, entry) in entries.enumerate() {
-            if index > 3 {
-                return Err(TuningNativeError::UnsafeStore("unknown managed artifacts"));
-            }
-            let name = entry
-                .map_err(|e| io_error("journal artifact", e))?
-                .file_name();
-            if name != OsStr::new(JOURNAL_NAME) && name != OsStr::new(LEASE_NAME) {
-                return Err(TuningNativeError::UnsafeStore(
-                    "pending or unknown journal artifact",
-                ));
-            }
-        }
         Ok(())
     }
-
-    fn journal_file(&self) -> Result<Option<File>, TuningNativeError> {
-        let file = match open_file(
-            &self.root.join(JOURNAL_NAME),
-            GENERIC_READ.0 | READ_CONTROL.0,
-            FILE_SHARE_READ,
-            OPEN_EXISTING,
-            None,
-        ) {
-            Ok(file) => file,
-            Err(TuningNativeError::Io { code: 2, .. }) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        checked_info(&file, false)?;
-        self.policy.validate(raw(&file), true)?;
-        Ok(Some(file))
-    }
-
-    fn read_journal(&self) -> Result<Option<Vec<u8>>, TuningNativeError> {
-        let Some(file) = self.journal_file()? else {
-            return Ok(None);
-        };
-        let info = checked_info(&file, false)?;
-        let size = (info.nFileSizeHigh as u64) << 32 | info.nFileSizeLow as u64;
-        if size > self.max_bytes as u64 {
-            return Err(TuningNativeError::Capacity {
-                size,
-                limit: self.max_bytes,
-            });
-        }
-        let mut bytes = Vec::with_capacity(size as usize);
-        file.take(self.max_bytes as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| io_error("read journal", e))?;
-        if bytes.len() as u64 != size {
-            return Err(TuningNativeError::UnsafeStore("journal length changed"));
-        }
-        Ok(Some(bytes))
-    }
-
-    fn publish_inner(&mut self, bytes: &[u8]) -> Result<(), TuningNativeError> {
-        self.validate_authority()?;
-        self.validate_artifacts()?;
-        let old = self
-            .journal_file()?
-            .map(|file| {
-                let info = checked_info(&file, false)?;
-                let size = (info.nFileSizeHigh as u64) << 32 | info.nFileSizeLow as u64;
-                if size > self.max_bytes as u64 {
-                    return Err(TuningNativeError::Capacity {
-                        size,
-                        limit: self.max_bytes,
-                    });
-                }
-                Ok(object_id(&info))
-            })
-            .transpose()?;
-        let descriptor = Descriptor::new(self.policy.test_sid.as_deref())?;
-        let staging_path = self.root.join(STAGING_NAME);
-        let mut staging = open_file(
-            &staging_path,
-            GENERIC_READ.0 | GENERIC_WRITE.0 | READ_CONTROL.0,
-            FILE_SHARE_NONE,
-            CREATE_NEW,
-            Some(&descriptor),
-        )?;
-        let staging_id = object_id(&checked_info(&staging, false)?);
-        self.policy.validate(raw(&staging), true)?;
-        staging
-            .write_all(bytes)
-            .map_err(|e| io_error("write journal staging", e))?;
-        staging
-            .sync_all()
-            .map_err(|e| io_error("sync journal staging", e))?;
-        if object_id(&checked_info(&staging, false)?) != staging_id {
-            return Err(TuningNativeError::UnsafeStore("staging object changed"));
-        }
-        self.policy.validate(raw(&staging), true)?;
-        self.inject(TuningPublishPoint::AfterStageSync)?;
-        drop(staging);
+    fn clean_journal(&self, read_only: bool) -> Result<Option<Node>, TuningNativeError> {
         self.validate_objects()?;
-        let current = self
-            .journal_file()?
-            .map(|file| checked_info(&file, false).map(|info| object_id(&info)))
-            .transpose()?;
-        if current != old {
+        let journal_name = units(JOURNAL_NAME);
+        let lease_name = units(LEASE_NAME);
+        let mut journal: Option<Entry> = None;
+        let mut lease_seen = false;
+        for entry in self.root().entries()? {
+            if entry.name == journal_name {
+                if journal.replace(entry).is_some() {
+                    return Err(artifact_error());
+                }
+            } else if entry.name == lease_name {
+                if lease_seen || !self.root().entry_matches(&entry, &self.lease)? {
+                    return Err(artifact_error());
+                }
+                lease_seen = true;
+            } else {
+                return Err(artifact_error());
+            }
+        }
+        if !lease_seen {
+            return Err(artifact_error());
+        }
+        let opened = self.root().open(
+            &journal_name,
+            Kind::File,
+            OpenMode::Existing,
+            Sharing::Renameable,
+            read_only,
+            Some(true),
+        );
+        let result = match (journal, opened) {
+            (None, Err(TuningNativeError::Io { code: 2, .. })) => None,
+            (Some(entry), Ok((node, _))) => {
+                if !self.root().entry_matches(&entry, &node)? {
+                    return Err(artifact_error());
+                }
+                Some(node)
+            }
+            (_, Err(error)) => return Err(error),
+            _ => return Err(artifact_error()),
+        };
+        self.validate_objects()?;
+        Ok(result)
+    }
+    /// Fresh NAME -> actual retained full ID and full bounded bytes. A retained
+    /// handle's self-identity alone never proves its current namespace link.
+    fn check_name(
+        &self,
+        name: &str,
+        retained: &Node,
+        bytes: &[u8],
+    ) -> Result<(), TuningNativeError> {
+        self.validate_objects()?;
+        retained.verify()?;
+        let (mut current, _) = self.root().open(
+            &units(name),
+            Kind::File,
+            OpenMode::Existing,
+            Sharing::Renameable,
+            true,
+            Some(true),
+        )?;
+        if current.id() != retained.id() || current.read(self.max_bytes)? != bytes {
             return Err(TuningNativeError::UnsafeStore(
-                "journal object changed before publication",
+                "journal source namespace or bytes changed",
             ));
         }
-        let stage_proof = open_file(
-            &staging_path,
-            GENERIC_READ.0 | READ_CONTROL.0,
-            FILE_SHARE_READ,
-            OPEN_EXISTING,
-            None,
-        )?;
-        if object_id(&checked_info(&stage_proof, false)?) != staging_id {
-            return Err(TuningNativeError::UnsafeStore("staging namespace changed"));
-        }
-        self.policy.validate(raw(&stage_proof), true)?;
-        drop(stage_proof);
-        let source = wide(staging_path.as_os_str())?;
-        let target = wide(self.root.join(JOURNAL_NAME).as_os_str())?;
-        let backup = wide(self.root.join(BACKUP_NAME).as_os_str())?;
-        unsafe {
-            if old.is_some() {
-                ReplaceFileW(
-                    PCWSTR(target.as_ptr()),
-                    PCWSTR(source.as_ptr()),
-                    PCWSTR(backup.as_ptr()),
-                    REPLACE_FILE_FLAGS(0),
-                    None,
-                    None,
-                )
-            } else {
-                MoveFileExW(
-                    PCWSTR(source.as_ptr()),
-                    PCWSTR(target.as_ptr()),
-                    MOVE_FILE_FLAGS(0),
-                )
-            }
-        }
-        .map_err(|e| native_error("publish journal", e))?;
-        self.inject(TuningPublishPoint::AfterPublish)?;
+        retained.verify()?;
+        self.validate_objects()
+    }
+    fn publish_inner(&mut self, bytes: &[u8]) -> Result<(), TuningNativeError> {
         self.validate_objects()?;
-        let result_file = self
-            .journal_file()?
-            .ok_or(TuningNativeError::UnsafeStore("published journal missing"))?;
-        if object_id(&checked_info(&result_file, false)?) != staging_id {
-            return Err(TuningNativeError::UnsafeStore("published object mismatch"));
+        let mut old = self.clean_journal(false)?;
+        let old_bytes = match old.as_mut() {
+            Some(node) => node.read(self.max_bytes)?,
+            None => Vec::new(),
+        };
+        self.validate_objects()?;
+        let (mut stage, created) = self.root().open(
+            &units(STAGING_NAME),
+            Kind::File,
+            OpenMode::CreateNew,
+            Sharing::Renameable,
+            false,
+            Some(true),
+        )?;
+        if created != Disposition::Created {
+            return Err(TuningNativeError::UnsafeStore("store staging disposition"));
         }
-        drop(result_file);
-        if self.read_journal()?.as_deref() != Some(bytes) {
-            return Err(TuningNativeError::UnsafeStore("published bytes mismatch"));
+        stage.write_synced(bytes, self.max_bytes)?;
+        if stage.read(self.max_bytes)? != bytes {
+            return Err(TuningNativeError::UnsafeStore("staging bytes changed"));
         }
-        if old.is_some() {
-            // Only the authenticated exact previous object of this publication
-            // is eligible for cleanup; arbitrary artifact deletion is forbidden.
-            let previous = open_file(
-                &self.root.join(BACKUP_NAME),
-                GENERIC_READ.0 | READ_CONTROL.0 | DELETE.0,
-                FILE_SHARE_READ,
-                OPEN_EXISTING,
-                None,
-            )?;
-            if Some(object_id(&checked_info(&previous, false)?)) != old {
-                return Err(TuningNativeError::UnsafeStore("previous object mismatch"));
+        self.inject(TuningPublishPoint::AfterStageSync)?;
+        if let Some(previous) = old.as_ref() {
+            self.check_name(JOURNAL_NAME, previous, &old_bytes)?;
+            previous.rename_no_replace(self.root(), &units(BACKUP_NAME))?;
+            self.inject(TuningPublishPoint::AfterOldMove)?;
+        }
+        self.check_name(STAGING_NAME, &stage, bytes)?;
+        stage.rename_no_replace(self.root(), &units(JOURNAL_NAME))?;
+        self.inject(TuningPublishPoint::AfterPublish)?;
+        self.check_name(JOURNAL_NAME, &stage, bytes)?;
+        if let Some(mut previous) = old {
+            self.inject(TuningPublishPoint::BeforeBackupCleanup)?;
+            if previous.read(self.max_bytes)? != old_bytes {
+                return Err(TuningNativeError::UnsafeStore("previous bytes changed"));
             }
-            self.policy.validate(raw(&previous), true)?;
             #[cfg(test)]
-            if let Some(hook) = self.before_backup_remove.take() {
+            if let Some(hook) = self.after_previous_read.as_mut() {
                 hook();
             }
-            let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
-            unsafe {
-                SetFileInformationByHandle(
-                    raw(&previous),
-                    FileDispositionInfo,
-                    (&disposition as *const FILE_DISPOSITION_INFO).cast(),
-                    std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
-                )
-            }
-            .map_err(|e| native_error("delete verified previous journal handle", e))?;
-            drop(previous);
+            // Verify after the complete previous-byte read and its observable
+            // boundary. The fresh journal NAME -> stage ID/full-byte proof is
+            // the last high-level observation before exact-old-handle cleanup.
+            self.check_name(JOURNAL_NAME, &stage, bytes)?;
+            previous.delete_owned()?;
+            self.inject(TuningPublishPoint::AfterBackupCleanup)?;
         }
-        self.validate_artifacts()?;
+        self.clean_journal(true)?;
+        self.check_name(JOURNAL_NAME, &stage, bytes)?;
         Ok(())
     }
-
     fn inject(&mut self, point: TuningPublishPoint) -> Result<(), TuningNativeError> {
+        #[cfg(test)]
+        if let Some(hook) = self.publication_hook.as_mut() {
+            hook(point)?;
+        }
         #[cfg(any(test, feature = "tuning-test-controls"))]
         if self.fault == Some(point) {
             self.fault = None;
@@ -497,7 +529,42 @@ impl TuningStore {
         Ok(())
     }
 }
-
+#[cfg(any(test, feature = "tuning-test-controls"))]
+fn test_selection(
+    root: &Path,
+    max_bytes: usize,
+) -> Result<(PathBuf, SecurityPolicy), TuningNativeError> {
+    validate_bound(max_bytes)?;
+    let base = std::env::temp_dir();
+    if root.parent() != Some(base.as_path())
+        || !root.file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .starts_with("cpu-affinity-tuning-test-")
+        })
+    {
+        return Err(TuningNativeError::UnsafeStore(
+            "isolated temporary store path required",
+        ));
+    }
+    let sid = crate::windows::OS::tuning_current_token_identity()?
+        .sid()
+        .to_owned();
+    Ok((
+        base,
+        SecurityPolicy {
+            test_sid: Some(sid),
+        },
+    ))
+}
+fn units(name: &str) -> Vec<u16> {
+    name.encode_utf16().collect()
+}
+fn artifact_error() -> TuningNativeError {
+    TuningNativeError::UnsafeStore("pending or unknown journal artifact")
+}
+#[cfg(test)]
+#[path = "store/native_migration_tests.rs"]
+mod native_migration_tests;
 fn validate_bound(max: usize) -> Result<(), TuningNativeError> {
     if max == 0 || max > MAX_TUNING_JOURNAL_BYTES {
         Err(TuningNativeError::Unsupported("journal byte bound"))
@@ -505,42 +572,12 @@ fn validate_bound(max: usize) -> Result<(), TuningNativeError> {
         Ok(())
     }
 }
-fn raw(file: &File) -> HANDLE {
-    HANDLE(file.as_raw_handle())
-}
-fn io_error(operation: &'static str, error: std::io::Error) -> TuningNativeError {
-    super::code_error(operation, error.raw_os_error().unwrap_or(-1) as u32)
-}
-fn object_id(info: &BY_HANDLE_FILE_INFORMATION) -> ObjectId {
-    ObjectId {
-        volume: info.dwVolumeSerialNumber,
-        index: (info.nFileIndexHigh as u64) << 32 | info.nFileIndexLow as u64,
-    }
-}
-fn checked_info(
-    file: &File,
-    directory: bool,
-) -> Result<BY_HANDLE_FILE_INFORMATION, TuningNativeError> {
-    let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    unsafe { GetFileInformationByHandle(raw(file), &mut info) }
-        .map_err(|e| native_error("GetFileInformationByHandle", e))?;
-    if unsafe { GetFileType(raw(file)) } != FILE_TYPE_DISK
-        || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
-        || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0) != directory
-        || (!directory && info.nNumberOfLinks != 1)
-    {
-        return Err(TuningNativeError::UnsafeStore(
-            "unexpected object type/reparse/hardlink",
-        ));
-    }
-    Ok(info)
-}
 pub(super) fn validate_volume(file: &File) -> Result<(), TuningNativeError> {
     let mut flags = 0;
-    let mut name = [0u16; 32];
+    let mut name = [0_u16; 32];
     unsafe {
         GetVolumeInformationByHandleW(
-            raw(file),
+            HANDLE(file.as_raw_handle()),
             None,
             None,
             None,
@@ -557,46 +594,6 @@ pub(super) fn validate_volume(file: &File) -> Result<(), TuningNativeError> {
     }
     Ok(())
 }
-fn open_directory(path: &Path) -> Result<File, TuningNativeError> {
-    let value = wide(path.as_os_str())?;
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(value.as_ptr()),
-            FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-        )
-    }
-    .map_err(|e| native_error("open store directory", e))?;
-    Ok(unsafe { File::from_raw_handle(handle.0) })
-}
-fn open_file(
-    path: &Path,
-    access: u32,
-    sharing: FILE_SHARE_MODE,
-    disposition: windows::Win32::Storage::FileSystem::FILE_CREATION_DISPOSITION,
-    descriptor: Option<&Descriptor>,
-) -> Result<File, TuningNativeError> {
-    let value = wide(path.as_os_str())?;
-    let attrs = descriptor.map(Descriptor::attributes);
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(value.as_ptr()),
-            access,
-            sharing,
-            attrs.as_ref().map(|x| x as *const _),
-            disposition,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-        )
-    }
-    .map_err(|e| native_error("open journal object", e))?;
-    Ok(unsafe { File::from_raw_handle(handle.0) })
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::test_support::TuningTemporaryDirectory as TempRoot;
@@ -822,17 +819,33 @@ mod tests {
         let path = root.path().to_owned();
         let swapped = Arc::new(Mutex::new(false));
         let observe = Arc::clone(&swapped);
-        store.before_backup_remove = Some(Box::new(move || {
-            if fs::rename(path.join(BACKUP_NAME), path.join("retained-original")).is_ok() {
+        store.set_publication_hook(move |point| {
+            if point == TuningPublishPoint::BeforeBackupCleanup {
+                fs::rename(path.join(BACKUP_NAME), path.join("retained-original"))
+                    .expect("move owned previous exact object");
                 fs::write(path.join(BACKUP_NAME), b"unrelated replacement").unwrap();
                 *observe.lock().unwrap() = true;
             }
-        }));
-        let _result = store.publish(b"new");
+            Ok(())
+        });
+        let result = store.publish(b"new");
         assert!(
-            !*swapped.lock().unwrap(),
-            "authenticated backup handle must prevent namespace replacement"
+            *swapped.lock().unwrap(),
+            "real verified boundary permits the owned previous-name substitution"
         );
-        assert_eq!(store.read().unwrap().unwrap(), b"new");
+        assert!(
+            result.is_err(),
+            "foreign artifact prevents clean publication"
+        );
+        assert!(
+            !root.path().join("retained-original").exists(),
+            "only the exact moved original object is cleaned"
+        );
+        assert_eq!(
+            fs::read(root.path().join(BACKUP_NAME)).unwrap(),
+            b"unrelated replacement"
+        );
+        assert_eq!(fs::read(root.path().join(JOURNAL_NAME)).unwrap(), b"new");
+        assert_eq!(store.read(), Err(TuningNativeError::Poisoned));
     }
 }

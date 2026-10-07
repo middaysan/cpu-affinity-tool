@@ -165,7 +165,7 @@ Required operation sequence:
 
 1. Acquire the writer/resource ownership and validate target/capability/configuration.
 2. Observe touched fields and prepare an ordered, recoverable plan.
-3. Atomically publish and sync the prepared journal before the first OS mutation. If publication fails, do not write Windows.
+3. Complete, sync and verify the prepared journal under the exclusive writer lease before the first OS mutation. If publication fails or remains unconfirmed, do not write Windows.
 4. Recheck target and the expected current owned fields immediately before each write. Abort on drift.
 5. Execute each write, verify touched fields, and durably record progress before advancing.
 6. Expose stored and effective state separately, retaining pending-restart or unresolved steps.
@@ -173,6 +173,16 @@ Required operation sequence:
 8. Mark complete only after successful verification; retain incomplete records for recovery.
 
 Compare-before-write reduces races with external tools; it is not an atomic compare-and-swap for all Windows settings. Verification and visible conflict handling remain necessary.
+
+The Windows relative store uses two no-replace renames: retained old journal to
+the fixed previous name, then retained staging object to the journal name. There
+is a deliberate missing-journal interval between calls. Readers use the same
+exclusive lease; a contender receives Busy. A cold owner with staging or previous
+evidence refuses clean absence, initialization and further publication. It
+retains evidence for review rather than automatically selecting, repairing or
+deleting an interrupted version. This trades automatic recovery availability for
+preserving an unexpected namespace replacement. It does not provide physical
+atomic replacement, `ReplaceFileW` metadata preservation or a power-loss guarantee.
 
 Recovery runs under the writer lease before accepting new tuning writes. It re-observes rather than blindly replaying:
 
