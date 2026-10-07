@@ -27,8 +27,8 @@ absent canonical journal and permits one capsule write only to an actually new
 marker. Observation includes a bounded child-creation probe for volatility;
 unexpected metadata is retained and closes that guard's observation admission.
 This is an explicit metadata operation and must not be added to default token
-preflight or described as a read-only command. No actual canonical candidate
-execution is certified by this implementation checkpoint. Shipping continuity
+preflight or described as a read-only command. The native attempts below record
+their exact acceptance limits. Shipping continuity
 and tuning write admission remain unavailable until their native gates pass.
 The production store uses handle-relative descendant operations. Only an actual
 retained, relative-open ancestor can supply the borrowed capability described
@@ -68,6 +68,26 @@ fixed enum such as `mutation_grant_untrusted`. Only exact allowlisted internal
 reasons produce it; unknown text is omitted. The enum identifies the predicate,
 not the failing object, repair instructions or recovery authority. All other
 failure fields and exit rules remain unchanged.
+
+Known continuity refusal classes may similarly add an optional
+`failure.continuity_refusal` enum. Only exact recognized `Unsupported` literals
+are classified; arbitrary text and other native error classes remain omitted.
+The six private candidate classes are malformed capsule, query bound, unsafe
+security, unproven context, missing component and refused initialization. The
+existing aggregate observation-unknown and publisher/machine source/value
+refusals also have fixed classes. They preserve the original failure kind/code
+and nonzero exit; they do not enable recovery or change token, machine, registry
+or store admission. `missing_component` names an uncertain component/namespace
+proof and is not positive absence or permission to initialize. An Unknown
+observation need not supply a failure class. Optional-field absence preserves
+the previous report shape; no raw diagnostic text enters a report.
+
+The diagnostic addition passed seven pure candidate-mapping tests and four
+probe tests within the 260-test OS library and 37-test example runs. Pre-fix
+tests exposed six lost candidate categories and three missing report/category
+results. The tests also preserve native errors, exact previous JSON shapes,
+same-worker terminal cleanup, bounded output and failure exit `2`. These are
+diagnostic behavior checks and supply no native continuity acceptance.
 
 ## Explicit elevated lab checks
 
@@ -163,7 +183,8 @@ Stable certifies that same-process comparison only. It does not establish
 cross-account equality, power-transition behavior, an OS boot UUID, publication
 or game recovery. Automated command tests use fakes and shape values, never the
 native candidate. Neither command runs implicitly in tests, CI or normal launch.
-The initial authorized attempt below stopped before reaching the native candidate.
+The first two authorized attempts below stopped before reaching the native
+candidate; a subsequent attempt reached its continuity boundary and refused.
 
 ## Initial native lab evidence
 
@@ -360,6 +381,25 @@ bytes and identities before cleanup, remove only an authenticated matching tag,
 and clean only captured owned objects. Attribute rights are therefore treated as
 available despite sharing restrictions. These fixtures provide no canonical,
 cross-account, boot or power-transition acceptance.
+
+## Native canonical open after compatibility
+
+On 2026-10-07 the already authorized UAC initialization was repeated with the
+reviewed `2dab14e` compatibility source on Windows `10.0.26200.9445`. The built
+example SHA256 was
+`CE922A84E5A85BE9DBC0B279B98F44929999301E362CF7A25BA44BC957B32217`.
+Its terminal record reported an elevated/High token, `authority=canonical`,
+`journal.kind=absent` and `store_attempted=true`. Thus the actual canonical
+opening, lease validation and absent-journal read succeeded in this context.
+
+The same invocation then reported `stage=continuity`, `outcome=native_failure`,
+`failure.kind=unsupported`, no native code and `worker_terminal=true`. Both the
+probe and its retained elevated wrapper exited `2`; the wrapper skipped
+observation. No replacement process followed the earlier observation wait.
+This is a successful store-access slice and a failed continuity attempt; it
+does not establish continuity initialization, HKLM progress, cross-account or
+power behavior. The broad failure category does not identify its exact cause.
+Shipping continuity and tuning write admission remain unavailable.
 
 ## Remaining acceptance gates
 

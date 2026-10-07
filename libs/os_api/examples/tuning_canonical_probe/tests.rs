@@ -1235,3 +1235,228 @@ fn refusal_reports_are_bounded_fixed_enums_and_none_keeps_old_failure_wire() {
         assert_eq!(terminal_exit_code(&report, true, false, true), 2);
     }
 }
+
+const CONTINUITY_REFUSALS: [(&str, ContinuityRefusal, &str); 10] = [
+    (
+        "canonical continuity malformed capsule",
+        ContinuityRefusal::MalformedCapsule,
+        "malformed_capsule",
+    ),
+    (
+        "canonical continuity query bounds",
+        ContinuityRefusal::QueryBound,
+        "query_bound",
+    ),
+    (
+        "canonical continuity unsafe security",
+        ContinuityRefusal::UnsafeSecurity,
+        "unsafe_security",
+    ),
+    (
+        "canonical continuity context unproven",
+        ContinuityRefusal::ContextUnproven,
+        "context_unproven",
+    ),
+    (
+        "canonical continuity missing component",
+        ContinuityRefusal::MissingComponent,
+        "missing_component",
+    ),
+    (
+        "canonical continuity initialization refused",
+        ContinuityRefusal::InitializationRefused,
+        "initialization_refused",
+    ),
+    (
+        "canonical continuity observation unknown",
+        ContinuityRefusal::ObservationUnknown,
+        "observation_unknown",
+    ),
+    (
+        "publisher domain is not proven unpackaged",
+        ContinuityRefusal::PublisherDomainUnproven,
+        "publisher_domain_unproven",
+    ),
+    (
+        "system ID source is unavailable",
+        ContinuityRefusal::MachineSourceUnavailable,
+        "machine_source_unavailable",
+    ),
+    (
+        "system ID byte length",
+        ContinuityRefusal::MachineBytesInvalid,
+        "machine_bytes_invalid",
+    ),
+];
+
+#[test]
+fn continuity_refusals_require_exact_allowlisted_unsupported_literals() {
+    for (reason, expected, wire) in CONTINUITY_REFUSALS {
+        let failure = Failure::from(TuningNativeError::Unsupported(reason));
+        assert_eq!(failure.kind, FailureKind::Unsupported);
+        assert_eq!(failure.code, None);
+        assert_eq!(failure.store_refusal, None);
+        assert_eq!(failure.continuity_refusal, Some(expected));
+        assert_eq!(
+            serde_json::to_value(failure).unwrap()["continuity_refusal"],
+            wire
+        );
+    }
+}
+
+#[test]
+fn continuity_refusal_lookalikes_private_text_and_other_error_classes_are_omitted() {
+    for reason in [
+        "",
+        "S-1-5-21-private-user E:\\private\\store nonce=private",
+        "prefix canonical continuity context unproven",
+        "canonical continuity context unproven E:\\private\\store",
+        "CANONICAL CONTINUITY UNSAFE SECURITY",
+        "canonical continuity missing component\n",
+        "canonical continuity query bounds\r\nS-1-5-21-private-user",
+        "canonical continuity initialization refused ",
+        "canonical continuity malformed capsule: private",
+        " canonical continuity observation unknown",
+        "publisher domain is not proven unpackaged\n",
+        "system ID source is unavailable: private",
+        "system ID byte length ",
+    ] {
+        let failure = Failure::from(TuningNativeError::Unsupported(reason));
+        assert_eq!(failure.continuity_refusal, None);
+        assert_eq!(
+            serde_json::to_string(&failure).unwrap(),
+            r#"{"kind":"unsupported","code":null}"#
+        );
+    }
+    for (reason, _, _) in CONTINUITY_REFUSALS {
+        for (error, kind, code) in [
+            (
+                TuningNativeError::UnsafeStore(reason),
+                FailureKind::Unsafe,
+                None,
+            ),
+            (
+                TuningNativeError::Denied {
+                    operation: reason,
+                    code: 5,
+                },
+                FailureKind::Denied,
+                Some(5),
+            ),
+            (
+                TuningNativeError::Io {
+                    operation: reason,
+                    code: u32::MAX,
+                },
+                FailureKind::Io,
+                Some(u32::MAX),
+            ),
+        ] {
+            let failure = Failure::from(error);
+            assert_eq!(failure.kind, kind);
+            assert_eq!(failure.code, code);
+            assert_eq!(failure.store_refusal, None);
+            assert_eq!(failure.continuity_refusal, None);
+            let value = serde_json::to_value(failure).unwrap();
+            assert!(value.get("continuity_refusal").is_none());
+            assert!(!serde_json::to_string(&failure).unwrap().contains(reason));
+        }
+    }
+}
+
+#[test]
+fn continuity_refusal_errors_remain_terminal_failures_with_same_worker_drop_order() {
+    for mode in [Mode::LabContinuityObserve, Mode::LabContinuityInitialize] {
+        for (reason, expected, _) in CONTINUITY_REFUSALS {
+            let (report, evidence) = continuity_run(mode, move |backend| {
+                backend.continuity_result = Err(TuningNativeError::Unsupported(reason).into());
+            });
+            assert_eq!(report.stage, Stage::Continuity);
+            assert_eq!(report.outcome, Outcome::NativeFailure);
+            assert_eq!(report.token, context(Elevation::Elevated, Integrity::High));
+            assert!(report.store_attempted);
+            assert_eq!(report.authority, Authority::Canonical);
+            assert_eq!(report.journal, Presence::Absent);
+            assert_eq!(report.continuity, None);
+            assert!(report.worker_terminal);
+            assert!(!report.successful());
+            assert_eq!(terminal_exit_code(&report, true, false, true), 2);
+            assert_eq!(
+                calls(&evidence),
+                [
+                    "continuity_build",
+                    "token",
+                    "open",
+                    "validate",
+                    "read",
+                    if mode == Mode::LabContinuityObserve {
+                        "continuity_observe"
+                    } else {
+                        "continuity_initialize"
+                    },
+                    "drop",
+                    "backend_drop",
+                ]
+            );
+            let evidence = evidence.lock().unwrap();
+            assert!(
+                evidence
+                    .calls
+                    .iter()
+                    .all(|call| call.1 == evidence.calls[0].1)
+            );
+            assert_ne!(evidence.calls[0].1, std::thread::current().id());
+            let failure = report.failure.unwrap();
+            assert_eq!(failure.kind, FailureKind::Unsupported);
+            assert_eq!(failure.code, None);
+            assert_eq!(failure.store_refusal, None);
+            assert_eq!(failure.continuity_refusal, Some(expected));
+        }
+    }
+}
+
+#[test]
+fn continuity_refusal_wire_is_finite_bounded_and_preserves_existing_failure_shapes() {
+    assert_eq!(
+        serde_json::to_string(&Failure::from(TuningNativeError::Unsupported(
+            "private unknown context"
+        )))
+        .unwrap(),
+        r#"{"kind":"unsupported","code":null}"#,
+    );
+    for (reason, _, wire) in STORE_REFUSALS {
+        let failure = Failure::from(TuningNativeError::UnsafeStore(reason));
+        assert_eq!(failure.continuity_refusal, None);
+        assert_eq!(
+            serde_json::to_value(failure).unwrap(),
+            serde_json::json!({
+                "kind": "unsafe", "code": null, "store_refusal": wire,
+            })
+        );
+    }
+    for (reason, _, wire) in CONTINUITY_REFUSALS {
+        let mut report = Report::new(
+            Mode::LabContinuityInitialize,
+            Stage::Continuity,
+            Outcome::NativeFailure,
+        );
+        report.token = context(Elevation::Elevated, Integrity::High);
+        report.store_attempted = true;
+        report.authority = Authority::Canonical;
+        report.journal = Presence::Absent;
+        report.failure = Some(TuningNativeError::Unsupported(reason).into());
+        report.worker_terminal = true;
+        let line = report.line().unwrap();
+        assert!(line.len() <= MAX_REPORT_BYTES);
+        assert!(!line.contains('\n'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["failure"]["continuity_refusal"],
+            wire
+        );
+        for private in ["E:\\", "S-1-5", "nonce", "private", reason] {
+            assert!(!line.contains(private));
+        }
+        assert_eq!(report.continuity, None);
+        assert_eq!(terminal_exit_code(&report, true, false, true), 2);
+    }
+}

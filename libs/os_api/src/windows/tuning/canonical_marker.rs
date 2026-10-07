@@ -156,9 +156,14 @@ impl TuningStore {
 fn candidate_error(error: driver::DriverFailure) -> TuningNativeError {
     match error {
         driver::DriverFailure::Native(error) => error,
-        driver::DriverFailure::Unknown(_) => {
-            TuningNativeError::Unsupported("canonical continuity observation unknown")
-        }
+        driver::DriverFailure::Unknown(reason) => TuningNativeError::Unsupported(match reason {
+            UnknownReason::MalformedCapsule => "canonical continuity malformed capsule",
+            UnknownReason::QueryBound => "canonical continuity query bounds",
+            UnknownReason::UnsafeSecurity => "canonical continuity unsafe security",
+            UnknownReason::Context => "canonical continuity context unproven",
+            UnknownReason::MissingComponent => "canonical continuity missing component",
+            UnknownReason::Initialization => "canonical continuity initialization refused",
+        }),
     }
 }
 
@@ -172,6 +177,9 @@ pub(super) enum UnknownReason {
     Initialization,
 }
 
+#[cfg(test)]
+#[path = "canonical_marker/candidate_error_tests.rs"]
+mod candidate_error_tests;
 #[cfg(test)]
 #[path = "canonical_marker/capsule_tests.rs"]
 mod capsule_tests;

@@ -198,16 +198,52 @@ fn store_refusal(reason: &'static str) -> Option<StoreRefusal> {
     })
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuityRefusal {
+    MalformedCapsule,
+    QueryBound,
+    UnsafeSecurity,
+    ContextUnproven,
+    MissingComponent,
+    InitializationRefused,
+    ObservationUnknown,
+    PublisherDomainUnproven,
+    MachineSourceUnavailable,
+    MachineBytesInvalid,
+}
+fn continuity_refusal(reason: &'static str) -> Option<ContinuityRefusal> {
+    // Fixed refusal classes report no raw text or positive native proof.
+    Some(match reason {
+        "canonical continuity malformed capsule" => ContinuityRefusal::MalformedCapsule,
+        "canonical continuity query bounds" => ContinuityRefusal::QueryBound,
+        "canonical continuity unsafe security" => ContinuityRefusal::UnsafeSecurity,
+        "canonical continuity context unproven" => ContinuityRefusal::ContextUnproven,
+        "canonical continuity missing component" => ContinuityRefusal::MissingComponent,
+        "canonical continuity initialization refused" => ContinuityRefusal::InitializationRefused,
+        "canonical continuity observation unknown" => ContinuityRefusal::ObservationUnknown,
+        "publisher domain is not proven unpackaged" => ContinuityRefusal::PublisherDomainUnproven,
+        "system ID source is unavailable" => ContinuityRefusal::MachineSourceUnavailable,
+        "system ID byte length" => ContinuityRefusal::MachineBytesInvalid,
+        _ => return None,
+    })
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Failure {
     pub kind: FailureKind,
     pub code: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store_refusal: Option<StoreRefusal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuity_refusal: Option<ContinuityRefusal>,
 }
 impl From<TuningNativeError> for Failure {
     fn from(error: TuningNativeError) -> Self {
         let refusal = match &error {
             TuningNativeError::UnsafeStore(reason) => store_refusal(reason),
+            _ => None,
+        };
+        let continuity_refusal = match &error {
+            TuningNativeError::Unsupported(reason) => continuity_refusal(reason),
             _ => None,
         };
         let (kind, code) = match error {
@@ -223,6 +259,7 @@ impl From<TuningNativeError> for Failure {
             kind,
             code,
             store_refusal: refusal,
+            continuity_refusal,
         }
     }
 }
@@ -486,6 +523,7 @@ fn run_probe<B: Backend>(
             kind: FailureKind::Capacity,
             code: None,
             store_refusal: None,
+            continuity_refusal: None,
         });
         drop(store);
         return report;
