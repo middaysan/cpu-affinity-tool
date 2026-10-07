@@ -20,7 +20,8 @@ use crate::app::features::tuning::testing::scalar::{
     ScalarConfig, ScalarModule, ScalarSnapshot, ScalarStep,
 };
 use os_api::tuning::{
-    TuningNativeError, TuningStore, TuningStoreAuthority, TuningTemporaryDirectory,
+    TuningNativeError, TuningProcessIdentity, TuningProcessLifetime, TuningProcessLifetimeGuard,
+    TuningStore, TuningStoreAuthority, TuningTemporaryDirectory,
 };
 use std::{
     fs::OpenOptions,
@@ -29,6 +30,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
     sync::{
+        atomic::{AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender},
         Arc, Condvar, Mutex,
     },
@@ -41,9 +43,13 @@ const CHILD_TEST: &str =
 const ROOT_ENV: &str = "CPU_AFFINITY_NATIVE_FIXTURE_ROOT";
 const TARGET_ENV: &str = "CPU_AFFINITY_NATIVE_FIXTURE_TARGET";
 const ROLE_ENV: &str = "CPU_AFFINITY_NATIVE_FIXTURE_ROLE";
+const ACTOR_ENV: &str = "CPU_AFFINITY_NATIVE_FIXTURE_ACTOR";
 const PAUSED: &str = "NATIVE_FIXTURE_PAUSED";
 const TIMED_OUT: &str = "NATIVE_FIXTURE_TIMED_OUT";
 const RECOVERED: &str = "NATIVE_FIXTURE_RECOVERED";
+const ACTOR_READY: &str = "NATIVE_FIXTURE_ACTOR_READY";
+const REATTACHED: &str = "NATIVE_FIXTURE_REATTACHED";
+const UNKNOWN: &str = "NATIVE_FIXTURE_UNKNOWN";
 const PROTOCOL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PROTOCOL_LINES: usize = 64;
 const MAX_PROTOCOL_LINE_BYTES: usize = 1024;
@@ -76,6 +82,132 @@ fn machine() -> MachineIdentity {
         id: MachineId::new([0x42; 16]).unwrap(),
     }
 }
+fn fixture_binding(process: ProcessIdentity) -> ActivationBinding {
+    use crate::app::shared::ids::{GroupId, RuleId};
+    ActivationBinding::Game(
+        GameActivation::new(
+            ConfiguredIntent {
+                profile: ProfileId::new(1).unwrap(),
+                generation: ConfigGeneration::new(1).unwrap(),
+            },
+            RuleActivation::new(
+                GroupId("fixture-group".into()),
+                RuleId("fixture-rule".into()),
+            )
+            .unwrap(),
+            ActivationEligibility::Running,
+            process.session.clone(),
+            vec![process],
+        )
+        .unwrap(),
+    )
+}
+fn fixture_native_process(actual: &TuningProcessIdentity) -> ProcessIdentity {
+    // Only PID/creation/image/token are native observations. Machine and boot
+    // explicitly remain the isolated fixture domain, never native game proof.
+    ProcessIdentity::new(
+        SessionIdentity {
+            user: UserIdentity {
+                machine: machine(),
+                sid: UserSid::new(actual.token().sid()).unwrap(),
+            },
+            session_id: actual.token().session_id(),
+            logon: LogonId::new(actual.token().authentication_id()).unwrap(),
+            boot: BootId::new([3; 16]).unwrap(),
+        },
+        actual.pid(),
+        actual.creation_time(),
+        ImagePath::new(actual.image_path()).unwrap(),
+    )
+    .unwrap()
+}
+fn native_fixture_attachment(
+    owner: &JournalOwner,
+    recorded: &ProcessIdentity,
+    evidence: Result<TuningProcessLifetime, TuningNativeError>,
+) -> OwnerAttachment {
+    // The complete logical owner is a fixture. The only native producer input
+    // is a result from the worker's retained, initially authenticated object.
+    if owner.mode != ActivationMode::Session
+        || recorded.session.user.machine != machine()
+        || recorded.session.boot != BootId::new([3; 16]).unwrap()
+        || owner.binding != fixture_binding(recorded.clone())
+    {
+        return OwnerAttachment::Unknown;
+    }
+    let ActivationBinding::Game(binding) = &owner.binding else {
+        return OwnerAttachment::Unknown;
+    };
+    match evidence {
+        Ok(TuningProcessLifetime::VerifiedLive) => OwnerAttachment::VerifiedLive {
+            owner: owner.owner,
+            binding: binding.clone(),
+            live_processes: vec![recorded.clone()],
+        },
+        Ok(TuningProcessLifetime::PositivelyExited) => OwnerAttachment::PositivelyExpired {
+            owner: owner.owner,
+            binding: binding.clone(),
+        },
+        Err(_) => OwnerAttachment::Unknown,
+    }
+}
+#[test]
+fn native_actor_resolver_requires_exact_binding_and_retained_lifetime_evidence() {
+    let recorded = ProcessIdentity::new(
+        SessionIdentity {
+            user: UserIdentity {
+                machine: machine(),
+                sid: UserSid::new("S-1-5-21-10-20-30-1000").unwrap(),
+            },
+            session_id: 1,
+            logon: LogonId::new(1).unwrap(),
+            boot: BootId::new([3; 16]).unwrap(),
+        },
+        42,
+        91,
+        ImagePath::new("C:\\Fixture\\shape.exe").unwrap(),
+    )
+    .unwrap();
+    let owner = JournalOwner {
+        owner: OwnerId::new(1).unwrap(),
+        binding: fixture_binding(recorded.clone()),
+        source: super::journal::SourceRef(0),
+        mode: ActivationMode::Session,
+        resources: Vec::new(),
+        status: ModuleStatus::RecoveryRequired,
+    };
+    assert!(
+        matches!(native_fixture_attachment(&owner,&recorded,Ok(TuningProcessLifetime::VerifiedLive)),
+        OwnerAttachment::VerifiedLive {owner:candidate,live_processes,..} if candidate==owner.owner && live_processes==[recorded.clone()])
+    );
+    assert!(
+        matches!(native_fixture_attachment(&owner,&recorded,Ok(TuningProcessLifetime::PositivelyExited)),
+        OwnerAttachment::PositivelyExpired {owner:candidate,..} if candidate==owner.owner)
+    );
+    assert!(matches!(
+        native_fixture_attachment(
+            &owner,
+            &recorded,
+            Err(TuningNativeError::Unsupported("failed verify/open"))
+        ),
+        OwnerAttachment::Unknown
+    ));
+    let alias = ProcessIdentity::new(
+        recorded.session.clone(),
+        recorded.pid(),
+        recorded.creation_token(),
+        ImagePath::new("C:\\Fixture\\different.exe").unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        native_fixture_attachment(&owner, &alias, Ok(TuningProcessLifetime::VerifiedLive)),
+        OwnerAttachment::Unknown
+    ));
+    assert!(matches!(
+        native_fixture_attachment(&owner, &alias, Ok(TuningProcessLifetime::PositivelyExited)),
+        OwnerAttachment::Unknown
+    ));
+}
 fn read_target(path: &Path) -> i32 {
     i32::from_le_bytes(std::fs::read(path).unwrap().try_into().unwrap())
 }
@@ -88,15 +220,18 @@ fn write_target(path: &Path, value: i32) {
     file.sync_all().unwrap();
 }
 fn read_document(root: &Path) -> JournalDocument {
+    read_record(root).1
+}
+fn read_record(root: &Path) -> (Vec<u8>, JournalDocument) {
     let mut store = TuningStore::open_test_directory(root, MAX_JOURNAL_BYTES).unwrap();
     let bytes = store
         .read()
         .unwrap()
         .expect("interrupted durable record must survive");
-    let JournalLoad::Known(document) = JournalDocument::load(bytes, &machine()) else {
+    let JournalLoad::Known(document) = JournalDocument::load(bytes.clone(), &machine()) else {
         panic!("known fixture journal expected");
     };
-    document
+    (bytes, document)
 }
 
 struct ProbeChild {
@@ -106,7 +241,11 @@ struct ProbeChild {
 }
 impl ProbeChild {
     fn spawn(root: &Path, target: &Path, role: &str) -> Self {
-        let mut child = ProcessCommand::new(std::env::current_exe().unwrap())
+        Self::spawn_actor(root, target, role, None)
+    }
+    fn spawn_actor(root: &Path, target: &Path, role: &str, actor: Option<u32>) -> Self {
+        let mut command = ProcessCommand::new(std::env::current_exe().unwrap());
+        command
             .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
             .env(ROOT_ENV, root)
             .env(TARGET_ENV, target)
@@ -114,9 +253,11 @@ impl ProbeChild {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .creation_flags(0x0800_0000)
-            .spawn()
-            .unwrap();
+            .creation_flags(0x0800_0000);
+        if let Some(actor) = actor {
+            command.env(ACTOR_ENV, actor.to_string());
+        }
+        let mut child = command.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (sender, messages) = mpsc::sync_channel(MAX_PROTOCOL_LINES);
         let reader = thread::spawn(move || {
@@ -259,6 +400,128 @@ fn forced_exit_after_physical_write_restores_exact_original_baseline() {
 fn forced_exit_after_verified_progress_reloads_and_restores_original() {
     interruption(StopPoint::Progress);
 }
+fn retained_actor_interruption(ended_before_guard: bool) {
+    let journal_root = TuningTemporaryDirectory::new().unwrap();
+    let target_root = TuningTemporaryDirectory::new().unwrap();
+    let target = target_root.path().join("scalar-native-target.bin");
+    std::fs::write(&target, 7i32.to_le_bytes()).unwrap();
+    let mut actor = ProbeChild::spawn(journal_root.path(), &target, "actor");
+    actor.wait_message(ACTOR_READY);
+    let expected = os_api::OS::tuning_process_identity(actor.child.id()).unwrap();
+    let mut writer = ProbeChild::spawn_actor(
+        journal_root.path(),
+        &target,
+        "progress-native-actor",
+        Some(actor.child.id()),
+    );
+    writer.wait_message(PAUSED);
+    writer.wait_message(TIMED_OUT);
+    assert!(matches!(
+        TuningStore::open_test_directory(journal_root.path(), MAX_JOURNAL_BYTES),
+        Err(TuningNativeError::Busy)
+    ));
+    writer.terminate();
+    assert!(
+        actor.child.try_wait().unwrap().is_none(),
+        "separate owned actor survived writer"
+    );
+    let (original_bytes, original) = read_record(journal_root.path());
+    let ActivationBinding::Game(binding) = &original.owners[0].binding else {
+        panic!("fixture owner binding");
+    };
+    assert_eq!(binding.processes().len(), 1);
+    let recorded = &binding.processes()[0];
+    // Independent native oracle comparisons, without dumping actual values.
+    assert!(recorded.pid() == expected.pid(), "recorded native PID");
+    assert!(
+        recorded.creation_token() == expected.creation_time(),
+        "recorded full creation time"
+    );
+    assert!(
+        recorded.image_path.as_str() == expected.image_path(),
+        "recorded exact native image"
+    );
+    assert!(
+        recorded.session.user.sid.as_str() == expected.token().sid(),
+        "recorded native token SID"
+    );
+    assert!(
+        recorded.session.session_id == expected.token().session_id(),
+        "recorded native session"
+    );
+    assert!(
+        recorded.session.logon.get() == expected.token().authentication_id(),
+        "recorded full native authentication LUID"
+    );
+    assert!(
+        recorded.session.user.machine == machine()
+            && recorded.session.boot == BootId::new([3; 16]).unwrap(),
+        "explicit fixture machine/boot domain"
+    );
+    assert!(matches!(
+        original.phase,
+        JournalPhase::VerifiedWrite { step: 0, .. }
+    ));
+    assert_eq!(original.resources[0].baseline.bytes(), 7i32.to_le_bytes());
+    assert_eq!(original.resources[0].confirmed.bytes(), 12i32.to_le_bytes());
+    assert_eq!(read_target(&target), 12);
+    if ended_before_guard {
+        actor.terminate();
+    }
+    let role = if ended_before_guard {
+        "recover-native-unknown"
+    } else {
+        "recover-native-live"
+    };
+    let mut recovery = ProbeChild::spawn(journal_root.path(), &target, role);
+    recovery.wait_message(if ended_before_guard {
+        UNKNOWN
+    } else {
+        REATTACHED
+    });
+    recovery.wait_message(TIMED_OUT);
+    assert_eq!(read_target(&target), 12, "no premature restoration");
+    assert!(matches!(
+        TuningStore::open_test_directory(journal_root.path(), MAX_JOURNAL_BYTES),
+        Err(TuningNativeError::Busy)
+    ));
+    if !ended_before_guard {
+        assert!(actor.child.try_wait().unwrap().is_none());
+        actor.terminate(); // Only the worker's SAME authenticated guard can attest expiry.
+        recovery.wait_message(RECOVERED);
+        assert_eq!(read_target(&target), 7);
+        assert!(matches!(
+            TuningStore::open_test_directory(journal_root.path(), MAX_JOURNAL_BYTES),
+            Err(TuningNativeError::Busy)
+        ));
+    }
+    recovery.terminate();
+    let (final_bytes, final_document) = read_record(journal_root.path());
+    if ended_before_guard {
+        assert!(
+            final_bytes == original_bytes && final_document == original,
+            "Unknown preserves exact journal and original baseline"
+        );
+        assert_eq!(read_target(&target), 12);
+    } else {
+        assert_eq!(final_document.stamp, JournalStamp::Recovery);
+        assert!(final_document.owners.is_empty() && final_document.resources.is_empty());
+        assert!(final_document.revision > original.revision);
+    }
+    drop(recovery);
+    drop(writer);
+    drop(actor);
+    target_root.cleanup().unwrap();
+    journal_root.cleanup().unwrap();
+}
+#[test]
+fn retained_native_actor_survives_writer_and_same_guard_releases_fixture_after_exit() {
+    retained_actor_interruption(false);
+}
+#[test]
+fn native_actor_ended_before_guard_keeps_unknown_journal_and_target_unchanged() {
+    retained_actor_interruption(true);
+}
 
 struct PauseGate {
     reached: SyncSender<()>,
@@ -287,6 +550,8 @@ struct FileScalarModule {
     scalar: ScalarModule,
     target: PathBuf,
     pause_after_write: Option<Arc<PauseGate>>,
+    rehydrated: bool,
+    writes: Option<Arc<AtomicUsize>>,
 }
 impl Module for FileScalarModule {
     type Config = ScalarConfig;
@@ -333,6 +598,7 @@ impl Module for FileScalarModule {
         config: &Self::Config,
         current: &Self::Observation,
     ) -> Result<Plan<Self::Snapshot, Self::Step>, ModuleError> {
+        assert!(!self.rehydrated, "recovery must not recapture a baseline");
         self.scalar.prepare(target, config, current)
     }
     fn snapshot_claims(
@@ -386,6 +652,9 @@ impl Module for FileScalarModule {
         target: &TargetIdentity,
         step: &Self::Step,
     ) -> Result<Effect, ModuleError> {
+        if let Some(writes) = &self.writes {
+            writes.fetch_add(1, Ordering::SeqCst);
+        }
         self.scalar.external_change(read_target(&self.target));
         let effect = self.scalar.execute_step(target, step)?;
         write_target(&self.target, self.scalar.value());
@@ -478,6 +747,205 @@ impl RecoveryResolver for ExpiredFixtureActor {
 struct RecoveryControl<'a> {
     authority: &'a mut WorkerAuthority,
 }
+
+/// Test-only rule/resource ownership; native authority covers only the exact
+/// recorded process object's lifetime. It cannot prove a game, boot or logon.
+struct NativeFixtureActor {
+    recorded: ProcessIdentity,
+    guard: Result<TuningProcessLifetimeGuard, TuningNativeError>,
+}
+impl NativeFixtureActor {
+    fn open(recorded: ProcessIdentity) -> Self {
+        let guard = (|| {
+            let actual = os_api::OS::tuning_process_identity(recorded.pid())?;
+            if fixture_native_process(&actual) != recorded {
+                return Err(TuningNativeError::Unsupported("fixture process mismatch"));
+            }
+            os_api::OS::tuning_open_process_lifetime(&actual)
+        })();
+        Self { recorded, guard }
+    }
+    fn poll(&mut self) -> Result<TuningProcessLifetime, TuningNativeError> {
+        match &mut self.guard {
+            Ok(guard) => guard.poll(),
+            Err(error) => Err(error.clone()),
+        }
+    }
+}
+impl RecoveryResolver for NativeFixtureActor {
+    fn owner(&mut self, owner: &JournalOwner, _: &JournalSource) -> OwnerAttachment {
+        let evidence = self.poll();
+        native_fixture_attachment(owner, &self.recorded, evidence)
+    }
+    fn resource(&mut self, _: &ResourceKey) -> ResourceLifetime {
+        // The isolated machine scalar remains present independently of actor exit.
+        ResourceLifetime::VerifiedLive
+    }
+}
+fn authority_document(authority: &WorkerAuthority) -> JournalDocument {
+    let WorkerAuthority::Durable(session) = authority else {
+        panic!("fixture durable authority");
+    };
+    let JournalLoad::Known(document) = session.load() else {
+        panic!("fixture known durable journal");
+    };
+    document.clone()
+}
+fn native_actor_recovery_child(root: PathBuf, target: PathBuf, unknown: bool) {
+    let (reached, boundary) = mpsc::sync_channel(1);
+    let pause = Arc::new(PauseGate {
+        reached,
+        waiting: Mutex::new(()),
+        wake: Condvar::new(),
+    });
+    let worker_pause = pause.clone();
+    let mut runner = Runner::start_test_writer(RunnerLimits::default(), move || {
+        let native = TuningStore::open_test_directory(&root, MAX_JOURNAL_BYTES).unwrap();
+        assert_eq!(native.authority(), TuningStoreAuthority::IsolatedTest);
+        let writes = Arc::new(AtomicUsize::new(0));
+        let module = FileScalarModule {
+            scalar: ScalarModule::new(read_target(&target)),
+            target: target.clone(),
+            pause_after_write: None,
+            rehydrated: true,
+            writes: Some(writes.clone()),
+        };
+        let mut catalog = Catalog::default();
+        catalog.register(module).unwrap();
+        let store: Box<dyn JournalStore> = Box::new(IsolatedStore {
+            native,
+            pause: None,
+        });
+        let session = DurableSession::bootstrap(store, machine());
+        let JournalLoad::Known(original) = session.load().clone() else {
+            panic!("recorded fixture journal");
+        };
+        let mut authority = WorkerAuthority::Durable(Box::new(session));
+        let mut coordinator = Coordinator::recover(catalog, &original).unwrap();
+        let ActivationBinding::Game(game) = &original.owners[0].binding else {
+            panic!("recorded fixture binding");
+        };
+        assert_eq!(game.processes().len(), 1);
+        let mut resolver = NativeFixtureActor::open(game.processes()[0].clone());
+        if unknown {
+            assert!(
+                resolver.guard.is_err(),
+                "actual verify/open failure is required"
+            );
+        } else {
+            assert!(
+                resolver.guard.is_ok(),
+                "guard acquired while separate actor live"
+            );
+        }
+        let plan = RecoveryPlan::resolve(&original, &mut resolver);
+        assert!(
+            plan.retire.is_empty(),
+            "actor lifetime cannot retire projected fixture resource"
+        );
+        if unknown {
+            assert!(plan.blocked() && plan.release.is_empty() && plan.reattach.is_empty());
+            let result = coordinator.apply_recovery(
+                &plan,
+                &mut RecoveryControl {
+                    authority: &mut authority,
+                },
+            );
+            assert_eq!(result.outcome, Outcome::RecoveryRequired);
+            assert!(result.error.is_some());
+            assert!(
+                authority_document(&authority) == original,
+                "Unknown retains exact durable input"
+            );
+            assert_eq!(writes.load(Ordering::SeqCst), 0);
+            assert_eq!(read_target(&target), 12);
+            worker_pause.pause();
+        } else {
+            assert!(!plan.blocked() && plan.release.is_empty());
+            assert_eq!(plan.reattach, [OwnerId::new(1).unwrap()]);
+            let result = coordinator.apply_recovery(
+                &plan,
+                &mut RecoveryControl {
+                    authority: &mut authority,
+                },
+            );
+            assert_eq!(result.outcome, Outcome::Unchanged);
+            assert!(result.error.is_none());
+            assert_eq!(
+                result.snapshot.resources[0].baseline.bytes(),
+                7i32.to_le_bytes()
+            );
+            assert_eq!(
+                result.snapshot.resources[0].confirmed.bytes(),
+                12i32.to_le_bytes()
+            );
+            let attached = authority_document(&authority);
+            assert!(
+                attached.sources == original.sources
+                    && attached.owners[0].binding == original.owners[0].binding,
+                "reattachment preserves recorded actor and first baseline sources"
+            );
+            assert_eq!(
+                writes.load(Ordering::SeqCst),
+                0,
+                "zero premature target write"
+            );
+            assert_eq!(read_target(&target), 12);
+            worker_pause.reached.send(()).unwrap();
+            let deadline = Instant::now() + PROTOCOL_TIMEOUT;
+            loop {
+                match resolver.poll() {
+                    Ok(TuningProcessLifetime::VerifiedLive) => (),
+                    Ok(TuningProcessLifetime::PositivelyExited) => break,
+                    Err(_) => {
+                        // Exit can race the live tuple query. Unknown permits no
+                        // cleanup; keep this SAME guard/lease until its native
+                        // handle poll positively proves exit or deadline fails.
+                        assert_eq!(writes.load(Ordering::SeqCst), 0);
+                        assert_eq!(read_target(&target), 12);
+                    }
+                }
+                assert!(Instant::now() < deadline, "owned actor expiry deadline");
+                thread::yield_now();
+            }
+            let expired = RecoveryPlan::resolve(&attached, &mut resolver);
+            assert!(!expired.blocked() && expired.reattach.is_empty() && expired.retire.is_empty());
+            assert_eq!(expired.release, [OwnerId::new(1).unwrap()]);
+            let result = coordinator.apply_recovery(
+                &expired,
+                &mut RecoveryControl {
+                    authority: &mut authority,
+                },
+            );
+            assert_eq!(result.outcome, Outcome::Released);
+            assert!(result.error.is_none());
+            assert_eq!(
+                writes.load(Ordering::SeqCst),
+                1,
+                "one verified physical restore"
+            );
+            assert_eq!(read_target(&target), 7);
+            let released = authority_document(&authority);
+            assert!(
+                released.owners.is_empty()
+                    && released.resources.is_empty()
+                    && released.revision > attached.revision
+            );
+            announce(RECOVERED);
+            worker_pause.pause();
+        }
+        (coordinator, authority)
+    })
+    .unwrap();
+    boundary.recv_timeout(PROTOCOL_TIMEOUT).unwrap();
+    announce(if unknown { UNKNOWN } else { REATTACHED });
+    assert_eq!(runner.shutdown(Duration::ZERO), ShutdownResult::TimedOut);
+    announce(TIMED_OUT);
+    let mut waiting = pause.waiting.lock().unwrap();
+    loop {
+        waiting = pause.wake.wait(waiting).unwrap();
+    }
+}
 impl ExecutionControl for RecoveryControl<'_> {
     fn cancellation_requested(&self) -> bool {
         false
@@ -517,8 +985,29 @@ fn isolated_native_child() {
     let role = role.to_str().unwrap().to_owned();
     let root = PathBuf::from(std::env::var_os(ROOT_ENV).unwrap());
     let target = PathBuf::from(std::env::var_os(TARGET_ENV).unwrap());
+    if role == "actor" {
+        announce(ACTOR_READY);
+        loop {
+            thread::park();
+        }
+    }
+    if matches!(
+        role.as_str(),
+        "recover-native-live" | "recover-native-unknown"
+    ) {
+        native_actor_recovery_child(root, target, role == "recover-native-unknown");
+        return;
+    }
     let recovering = role == "recover-fixture-expired";
-    let point = (!recovering).then(|| StopPoint::parse(&role));
+    let native_actor = (role == "progress-native-actor")
+        .then(|| std::env::var(ACTOR_ENV).unwrap().parse::<u32>().unwrap());
+    let point = (!recovering).then(|| {
+        if native_actor.is_some() {
+            StopPoint::Progress
+        } else {
+            StopPoint::parse(&role)
+        }
+    });
     let (reached, boundary) = mpsc::sync_channel(1);
     let pause = Arc::new(PauseGate {
         reached,
@@ -536,6 +1025,8 @@ fn isolated_native_child() {
             scalar: ScalarModule::new(read_target(&target)),
             target,
             pause_after_write: (point == Some(StopPoint::Write)).then(|| worker_pause.clone()),
+            rehydrated: recovering,
+            writes: None,
         };
         let config = module
             .scalar
@@ -575,7 +1066,6 @@ fn isolated_native_child() {
             assert!(result.snapshot.owners.is_empty() && result.snapshot.resources.is_empty());
             worker_pause.pause();
         } else {
-            use crate::app::shared::ids::{GroupId, RuleId};
             // Explicit synthetic fixture provenance, never a native boot/game
             // attestation. Parent Child::wait controls this fixture actor.
             let session = SessionIdentity {
@@ -594,23 +1084,12 @@ fn isolated_native_child() {
                 ImagePath::new("C:\\Fixture\\owned-child.exe").unwrap(),
             )
             .unwrap();
-            let binding = ActivationBinding::Game(
-                GameActivation::new(
-                    ConfiguredIntent {
-                        profile: ProfileId::new(1).unwrap(),
-                        generation: ConfigGeneration::new(1).unwrap(),
-                    },
-                    RuleActivation::new(
-                        GroupId("fixture-group".into()),
-                        RuleId("fixture-rule".into()),
-                    )
-                    .unwrap(),
-                    ActivationEligibility::Running,
-                    session,
-                    vec![process],
-                )
-                .unwrap(),
-            );
+            let process = if let Some(pid) = native_actor {
+                fixture_native_process(&os_api::OS::tuning_process_identity(pid).unwrap())
+            } else {
+                process
+            };
+            let binding = fixture_binding(process);
             ready.send((config, binding)).unwrap();
         }
         (coordinator, authority)

@@ -543,6 +543,44 @@ lease across those same-account processes and executable locations. The sequence
 does not call the continuity candidate, publish a journal or certify exact
 cross-process identities, other accounts, power transitions or recovery.
 
+## Isolated retained-process recovery checks
+
+The Windows `native_recovery_tests` fixture now adds two cases at the existing
+verified-progress interruption boundary. A separate owned process survives forced
+writer exit. The writer records that actor's actual PID, full creation time, image
+and token SID/session/authentication LUID in the existing journal binding. These
+values stay in owned temporary metadata and RAM, with fixed protocol markers only.
+Machine, boot and logical rule/profile ownership remain explicit fixture domains.
+
+The new recovery worker hydrates the original scalar baseline 7, exactly checks
+the recorded native tuple and opens a lifetime guard while the actor lives. It
+retains that same worker-local guard and isolated lease through caller shutdown
+timeout. Reattachment leaves the physical target at 12 with zero target writes
+and no baseline recapture. After the parent ends only its owned actor, positive
+exit from that **same guard's poll** permits fixture-owner release, verified
+restoration to 7 and durable release. An Unknown poll during the exit/query race
+permits no write: the worker retains the same guard until its own positive signal
+or the existing bounded deadline. It never reopens or substitutes the process.
+
+In the second case the actor ends before guard acquisition. Actual failed native
+verification remains Unknown; recovery retains the exact journal bytes, baseline
+7 and physical target 12, without release, retirement or restoration. No parent
+`Child::wait` boolean supplies lifetime evidence to the resolver.
+
+Run the bounded fixture module with:
+
+```powershell
+cargo test --locked --features 'windows tuning-test-controls' --bin cpu-affinity-tool native_recovery_tests -- --test-threads=1
+```
+
+The seven tests include the original three forced boundaries, these two native
+process cases, one pure resolver regression and the conditional child helper.
+The helper's default no-op is not native evidence. This module uses only owned
+isolated temporary scalar/metadata files and exact owned child handles. It does
+not publish canonically, prove native boot/logon/game attachment, install a
+shipping resolver or close the remaining S36 native scope gates. The existing CI
+script's three required named recovery tests are unchanged.
+
 ## Disposable-VM canonical publication helper
 
 The application test `canonical_publication_lab` is compiled only for Windows
