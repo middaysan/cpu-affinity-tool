@@ -66,6 +66,38 @@ pub(in crate::windows::tuning) struct Node {
     // Bootstrap handles cannot produce relative-ancestor evidence.
     relative_plan: Option<OpenPlan>,
 }
+#[cfg(any(test, feature = "tuning-test-controls"))]
+impl Node {
+    /// Duplicate only this already owned and verified object. No raw handle or
+    /// caller identity can construct a lab deletion receipt.
+    pub(in crate::windows::tuning) fn clone_for_lab(&self) -> Result<Self> {
+        if self.kind != Kind::File {
+            return Err(TuningNativeError::UnsafeStore("lab owned file required"));
+        }
+        self.verify()?;
+        let file = self
+            .file
+            .try_clone()
+            .map_err(|e| io_error("lab owned handle", e))?;
+        let node = Self {
+            file,
+            id: self.id,
+            kind: self.kind,
+            descriptor: Rc::clone(&self.descriptor),
+            policy: Rc::clone(&self.policy),
+            scope: self.scope,
+            relative_plan: self.relative_plan.as_ref().map(|plan| OpenPlan {
+                desired: plan.desired,
+                share: plan.share,
+                disposition: plan.disposition,
+                options: plan.options,
+                attributes: plan.attributes,
+            }),
+        };
+        node.verify()?;
+        Ok(node)
+    }
+}
 /// Borrowed proof of this exact retained relative ancestor. No raw constructor,
 /// cloning, or independent caller-selected handle can enter the security seam.
 pub(in crate::windows::tuning) struct RelativeAncestorCapability<'a> {

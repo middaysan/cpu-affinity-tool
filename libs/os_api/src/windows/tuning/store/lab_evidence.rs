@@ -69,6 +69,12 @@ impl TuningLabSnapshot {
             && self.managed == [TuningLabCreation::Created; 2]
             && self.lease == TuningLabCreation::Created
     }
+    /// Observation only. Deletion authority lives solely in the retained store.
+    pub fn opened_canonical(&self) -> bool {
+        self.authority == TuningStoreAuthority::Canonical
+            && self.managed == [TuningLabCreation::Opened; 2]
+            && self.lease == TuningLabCreation::Opened
+    }
     pub fn artifact(&self, kind: TuningLabArtifactKind) -> Option<&TuningLabArtifact> {
         self.artifacts
             .iter()

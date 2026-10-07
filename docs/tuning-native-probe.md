@@ -641,6 +641,63 @@ Raw machine data, journal bytes, IDs, paths and arbitrary native error text are
 not emitted by the helper. Normal GUI composition and shipping write admission
 remain unchanged; ordinary tests and CI leave this canonical test ignored.
 
+## Existing-metadata host publication helper
+
+The separate Windows+`tuning-test-controls` test
+`host_canonical_publication_lab` is explicitly ignored. It is prepared for the
+user-authorized host lab with mandatory verified rollback; an actual host run
+has not yet been performed. The disposable-VM helper above is unchanged.
+
+This route uses **existing-only canonical opening and final reopening** through
+the same production Known Folder, security and lease pipeline. It never creates
+missing directories or the lease. Both managed directories and lease must have
+actual `Opened` provenance; journal, staging and previous must all be absent.
+Present, corrupt, empty-present, unknown, unsafe or missing metadata refuses
+before publication. There is no caller path override or fixture-identity fallback.
+
+Only after source review and acceptance gates, select the exact ignored test in
+an elevated shell at the reviewed checkpoint:
+
+```powershell
+$env:CPU_AFFINITY_PUBLICATION_HOST_LAB = 'restore-verified-absent-only'
+$env:CPU_AFFINITY_PUBLICATION_HOST_LAB_CASE = 'success'
+cargo test --locked --features 'windows tuning-test-controls' --bin cpu-affinity-tool app::features::tuning::platform::publication_lab_tests::host_canonical_publication_lab -- --ignored --exact --nocapture --test-threads=1
+```
+
+Start with success. Only after its actual terminal report/exit is accepted, run
+the five finite cases `fault-stage`, `fault-old-move`, `fault-publish`,
+`fault-before-cleanup` and `fault-after-cleanup` sequentially. Stop after any
+failure, refusal or timeout; do not launch a replacement or attempt manual repair.
+The host test writes only two valid empty machine-bound records, revisions 1/2,
+using the existing production publication protocol and native machine re-query.
+It applies no game settings or recovery modules.
+
+A private capability in the actual worker-owned store retains each verified
+newly created publication handle **before** the first write or sync, together
+with its full bytes and confirmed name transitions. Snapshots and caller IDs
+cannot mint this capability. Every controlled terminal outcome attempts its
+single-use rollback. The complete set, names, IDs, bytes, security and original
+root/lease authority are validated before any deletion, then revalidated for
+each exact-handle delete. Original directories, lease and ACLs stay untouched.
+After artifact handles close, the worker verifies the lease-only namespace,
+drops the original store and reopens existing canonical metadata to prove Absent
+and the same root/lease IDs. Poison from a fault remains sticky on the old store.
+
+The host report starts on a fresh line and contains exactly `schema`, `result`,
+`worker_terminal`, `verified` and `rollback_verified`. Accepted terminal results
+are `verified_rolled_back` or `fault_rolled_back`, both proof booleans true and
+process exit 0. Other finite results are `pending`, `refused`, `failed`,
+`timed_out`, `worker_failed` and `rollback_unresolved`; none passes acceptance.
+No raw identity, paths, journal bytes or arbitrary error text is reported.
+
+Rollback claims cover the controlled terminal cases, **not power loss or forced
+exit**. Failed verification before delivery of a safe newly created native Node
+cannot provide a cleanup receipt. Unsealed or unproven partial bytes, substitution or unknown
+entries cause nondestructive refusal. Unknown native completion retains the same
+worker, request buffers, capability and lease; no cleanup is guessed. A ten-second
+timeout reports pending and retains that worker until actual terminal completion;
+late verified rollback still leaves the run unsuccessful.
+
 ## Remaining acceptance gates
 
 The probe supplies a concrete way to inspect canonical metadata and lease

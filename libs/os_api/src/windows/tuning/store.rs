@@ -25,6 +25,9 @@ pub const JOURNAL_NAME: &str = "journal-v1.json";
 #[path = "store/lab_evidence.rs"]
 mod lab_evidence;
 #[cfg(any(test, feature = "tuning-test-controls"))]
+#[path = "store/lab_rollback.rs"]
+mod lab_rollback;
+#[cfg(any(test, feature = "tuning-test-controls"))]
 pub use lab_evidence::{
     TuningLabArtifact, TuningLabArtifactKind, TuningLabCreation, TuningLabObjectId,
     TuningLabSnapshot,
@@ -65,7 +68,9 @@ struct OpeningContext {
 /// All descendant operations use the retained root. An unresolved request
 /// retains the entire worker indefinitely; process exit is the release bound.
 pub struct TuningStore {
-    // Publication nodes are call locals, so close before the retained lease.
+    // Lab-owned publication handles also close before the retained lease.
+    #[cfg(any(test, feature = "tuning-test-controls"))]
+    lab_rollback: Option<lab_rollback::LabRollback>,
     lease: Node,
     directories: Vec<PinnedDirectory>,
     _policy: Rc<SecurityPolicy>,
@@ -94,6 +99,12 @@ impl TuningStore {
         TuningStoreAuthority::Canonical
     }
     pub fn open_canonical(max_bytes: usize) -> Result<Self, TuningNativeError> {
+        Self::open_canonical_selected(max_bytes, false)
+    }
+    fn open_canonical_selected(
+        max_bytes: usize,
+        existing_only: bool,
+    ) -> Result<Self, TuningNativeError> {
         validate_bound(max_bytes)?;
         if !identity::elevated()? {
             return Err(TuningNativeError::Denied {
@@ -111,12 +122,28 @@ impl TuningStore {
             text.map_err(|_| TuningNativeError::Unsupported("ProgramData path encoding"))?,
         );
         let root = base.join("CpuAffinityTool").join("tuning");
-        Self::open(root, base, SecurityPolicy { test_sid: None }, max_bytes)
+        Self::open_selected(
+            root,
+            base,
+            SecurityPolicy { test_sid: None },
+            max_bytes,
+            existing_only,
+        )
     }
     #[cfg(any(test, feature = "tuning-test-controls"))]
     pub fn open_test_directory(root: &Path, max_bytes: usize) -> Result<Self, TuningNativeError> {
         let (base, policy) = test_selection(root, max_bytes)?;
         Self::open(root.to_owned(), base, policy, max_bytes)
+    }
+    /// Nonshipping host lab selection; never bootstraps absent metadata.
+    #[cfg(any(test, feature = "tuning-test-controls"))]
+    pub fn open_canonical_existing(max_bytes: usize) -> Result<Self, TuningNativeError> {
+        Self::open_canonical_selected(max_bytes, true)
+    }
+    #[cfg(test)]
+    fn open_test_existing(root: &Path, max_bytes: usize) -> Result<Self, TuningNativeError> {
+        let (base, policy) = test_selection(root, max_bytes)?;
+        Self::open_selected(root.to_owned(), base, policy, max_bytes, true)
     }
     pub fn read(&mut self) -> Result<Option<Vec<u8>>, TuningNativeError> {
         if self.poisoned {
@@ -175,6 +202,8 @@ impl TuningStore {
                 limit: self.max_bytes,
             });
         }
+        #[cfg(any(test, feature = "tuning-test-controls"))]
+        self.lab_admit_publication()?;
         let result = self.publish_inner(bytes);
         if result.is_err() {
             self.poisoned = true;
@@ -230,14 +259,27 @@ impl TuningStore {
             .expect("actual isolated opening and lease");
         store_io::retain_nonterminal(Box::new(&mut opening), entered)
     }
+    #[cfg(any(test, feature = "tuning-test-controls"))]
     fn open(
         root: PathBuf,
         existing_base: PathBuf,
         policy: SecurityPolicy,
         max_bytes: usize,
     ) -> Result<Self, TuningNativeError> {
-        let opening = Self::prepare_open(root, existing_base, policy, max_bytes)?;
+        Self::open_selected(root, existing_base, policy, max_bytes, false)
+    }
+    fn open_selected(
+        root: PathBuf,
+        existing_base: PathBuf,
+        policy: SecurityPolicy,
+        max_bytes: usize,
+        existing_only: bool,
+    ) -> Result<Self, TuningNativeError> {
+        let opening =
+            Self::prepare_open_selected(root, existing_base, policy, max_bytes, existing_only)?;
         let mut store = Self {
+            #[cfg(any(test, feature = "tuning-test-controls"))]
+            lab_rollback: None,
             lease: opening.lease,
             directories: opening.directories,
             _policy: opening.policy,
@@ -261,11 +303,21 @@ impl TuningStore {
         store.clean_journal(true)?;
         Ok(store)
     }
+    #[cfg(test)]
     fn prepare_open(
         root: PathBuf,
         existing_base: PathBuf,
         policy: SecurityPolicy,
         max_bytes: usize,
+    ) -> Result<OpeningContext, TuningNativeError> {
+        Self::prepare_open_selected(root, existing_base, policy, max_bytes, false)
+    }
+    fn prepare_open_selected(
+        root: PathBuf,
+        existing_base: PathBuf,
+        policy: SecurityPolicy,
+        max_bytes: usize,
+        existing_only: bool,
     ) -> Result<OpeningContext, TuningNativeError> {
         let policy = Rc::new(policy);
         let descriptor = Rc::new(Descriptor::new(policy.test_sid.as_deref())?);
@@ -326,7 +378,7 @@ impl TuningStore {
             let (node, _creation) = parent.open(
                 &name,
                 Kind::Directory,
-                if managed {
+                if managed && !existing_only {
                     OpenMode::OpenOrCreate
                 } else {
                     OpenMode::Existing
@@ -350,7 +402,11 @@ impl TuningStore {
         let (lease, _lease_creation) = final_root.open(
             &units(LEASE_NAME),
             Kind::File,
-            OpenMode::OpenOrCreate,
+            if existing_only {
+                OpenMode::Existing
+            } else {
+                OpenMode::OpenOrCreate
+            },
             Sharing::ExclusiveLease,
             false,
             Some(true),
@@ -493,7 +549,7 @@ impl TuningStore {
             None => Vec::new(),
         };
         self.validate_objects()?;
-        let (mut stage, created) = self.root().open(
+        let (stage, created) = self.root().open(
             &units(STAGING_NAME),
             Kind::File,
             OpenMode::CreateNew,
@@ -504,10 +560,27 @@ impl TuningStore {
         if created != Disposition::Created {
             return Err(TuningNativeError::UnsafeStore("store staging disposition"));
         }
-        stage.write_synced(bytes, self.max_bytes)?;
+        #[cfg(any(test, feature = "tuning-test-controls"))]
+        let mut stage = self.lab_register_stage(stage)?;
+        #[cfg(not(any(test, feature = "tuning-test-controls")))]
+        let mut stage = stage;
+        let written = stage.write_synced(bytes, self.max_bytes);
+        #[cfg(any(test, feature = "tuning-test-controls"))]
+        if written.is_err() {
+            // Known terminal partial writes may seal only their actual bounded
+            // prefix; unknown completion never returns from the native engine.
+            if let Ok(actual) = stage.read(self.max_bytes)
+                && bytes.starts_with(&actual)
+            {
+                self.lab_seal_stage(stage.id(), &actual)?;
+            }
+        }
+        written?;
         if stage.read(self.max_bytes)? != bytes {
             return Err(TuningNativeError::UnsafeStore("staging bytes changed"));
         }
+        #[cfg(any(test, feature = "tuning-test-controls"))]
+        self.lab_seal_stage(stage.id(), bytes)?;
         #[cfg(any(test, feature = "tuning-test-controls"))]
         {
             self.last_synced_stage = Some(stage.id());
@@ -516,10 +589,14 @@ impl TuningStore {
         if let Some(previous) = old.as_ref() {
             self.check_name(JOURNAL_NAME, previous, &old_bytes)?;
             previous.rename_no_replace(self.root(), &units(BACKUP_NAME))?;
+            #[cfg(any(test, feature = "tuning-test-controls"))]
+            self.lab_moved(previous.id(), JOURNAL_NAME, BACKUP_NAME)?;
             self.inject(TuningPublishPoint::AfterOldMove)?;
         }
         self.check_name(STAGING_NAME, &stage, bytes)?;
         stage.rename_no_replace(self.root(), &units(JOURNAL_NAME))?;
+        #[cfg(any(test, feature = "tuning-test-controls"))]
+        self.lab_moved(stage.id(), STAGING_NAME, JOURNAL_NAME)?;
         self.inject(TuningPublishPoint::AfterPublish)?;
         self.check_name(JOURNAL_NAME, &stage, bytes)?;
         if let Some(mut previous) = old {
@@ -535,7 +612,11 @@ impl TuningStore {
             // boundary. The fresh journal NAME -> stage ID/full-byte proof is
             // the last high-level observation before exact-old-handle cleanup.
             self.check_name(JOURNAL_NAME, &stage, bytes)?;
+            #[cfg(any(test, feature = "tuning-test-controls"))]
+            let previous_id = previous.id();
             previous.delete_owned()?;
+            #[cfg(any(test, feature = "tuning-test-controls"))]
+            self.lab_deleted(previous_id)?;
             self.inject(TuningPublishPoint::AfterBackupCleanup)?;
         }
         self.clean_journal(true)?;

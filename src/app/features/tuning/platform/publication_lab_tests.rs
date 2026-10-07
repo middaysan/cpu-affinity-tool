@@ -13,10 +13,276 @@ enum LabCase {
     Success,
     Fault(TuningPublishPoint),
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostFailure {
+    Failed,
+    RollbackUnresolved,
+}
+#[derive(Clone, Copy)]
+enum HostResult {
+    VerifiedRolledBack,
+    FaultRolledBack,
+    Pending,
+    Refused,
+    Failed,
+    TimedOut,
+    WorkerFailed,
+    RollbackUnresolved,
+}
+impl HostResult {
+    fn label(self) -> &'static str {
+        match self {
+            Self::VerifiedRolledBack => "verified_rolled_back",
+            Self::FaultRolledBack => "fault_rolled_back",
+            Self::Pending => "pending",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+            Self::WorkerFailed => "worker_failed",
+            Self::RollbackUnresolved => "rollback_unresolved",
+        }
+    }
+}
+struct HostOutcome {
+    result: HostResult,
+    verified: bool,
+    rollback_verified: bool,
+}
+fn host_selection(value: Option<&str>, marker: Option<&str>) -> Option<LabCase> {
+    if marker != Some("restore-verified-absent-only") {
+        return None;
+    }
+    case_selection(value)
+}
+fn host_guarded_bytes(
+    authority: TuningStoreAuthority,
+    opened: bool,
+    first: &Result<Option<Vec<u8>>, TuningNativeError>,
+    machine: &MachineIdentity,
+    document: &JournalDocument,
+) -> Result<Vec<u8>, ()> {
+    guarded_bytes(authority, opened, first, machine, document)
+}
+fn host_report_line(result: HostResult, terminal: bool, verified: bool, rollback: bool) -> String {
+    let result = result.label();
+    format!("\n{{\"schema\":1,\"result\":\"{result}\",\"worker_terminal\":{terminal},\"verified\":{verified},\"rollback_verified\":{rollback}}}\n")
+}
+fn rollback_protocol(
+    store: &mut TuningStore,
+    old: &JournalDocument,
+    new: &JournalDocument,
+    case: LabCase,
+    verify_machine: impl FnMut() -> Result<(), ()>,
+) -> Result<bool, HostFailure> {
+    let proof = protocol(store, old, new, case, verify_machine);
+    // Once armed, every controlled terminal outcome attempts the same cap's
+    // rollback; no early protocol return bypasses cleanup.
+    store
+        .lab_rollback()
+        .map_err(|_| HostFailure::RollbackUnresolved)?;
+    proof.map_err(|_| HostFailure::Failed)
+}
+#[test]
+fn host_publication_selection_is_explicit_finite_and_preserves_vm_selection() {
+    for value in [
+        "success",
+        "fault-stage",
+        "fault-old-move",
+        "fault-publish",
+        "fault-before-cleanup",
+        "fault-after-cleanup",
+    ] {
+        assert!(host_selection(Some(value), Some("restore-verified-absent-only")).is_some());
+        assert!(host_selection(Some(value), Some("fresh-disposable-windows-snapshot")).is_none());
+    }
+    for value in [None, Some(""), Some("success "), Some("arbitrary")] {
+        assert!(host_selection(value, Some("restore-verified-absent-only")).is_none());
+    }
+    assert!(host_selection(Some("success"), None).is_none());
+    assert!(selection(Some("success"), Some("restore-verified-absent-only")).is_none());
+}
+#[test]
+fn host_publication_guard_reuses_empty_codec_without_fixture_authority() {
+    let machine = shape_machine();
+    let document = empty_document(machine.clone(), 1);
+    assert!(host_guarded_bytes(
+        TuningStoreAuthority::Canonical,
+        true,
+        &Ok(None),
+        &machine,
+        &document
+    )
+    .is_ok());
+    let mut calls = 0;
+    for (authority, opened, first) in [
+        (TuningStoreAuthority::IsolatedTest, true, Ok(None)),
+        (TuningStoreAuthority::Canonical, false, Ok(None)),
+        (TuningStoreAuthority::Canonical, true, Ok(Some(Vec::new()))),
+        (
+            TuningStoreAuthority::Canonical,
+            true,
+            Err(TuningNativeError::Poisoned),
+        ),
+    ] {
+        if host_guarded_bytes(authority, opened, &first, &machine, &document).is_ok() {
+            calls += 1;
+        }
+    }
+    assert_eq!(calls, 0);
+}
+#[test]
+fn host_publication_report_is_fresh_line_five_fixed_fields_and_bounded() {
+    let line = host_report_line(HostResult::VerifiedRolledBack, true, true, true);
+    assert!(line.starts_with('\n'), "libtest prefix cannot swallow JSON");
+    let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(value.as_object().unwrap().len(), 5);
+    assert_eq!(value["rollback_verified"], true);
+    assert_eq!(value["schema"], 1);
+    assert!(line.len() < 256);
+}
+#[test]
+fn host_publication_isolated_protocol_rolls_back_all_terminal_paths() {
+    let machine = MachineIdentity {
+        id: MachineId::new([0x43; 16]).unwrap(),
+    };
+    let old = empty_document(machine.clone(), 1);
+    let new = empty_document(machine, 2);
+    for case in [
+        LabCase::Success,
+        LabCase::Fault(TuningPublishPoint::AfterStageSync),
+        LabCase::Fault(TuningPublishPoint::AfterOldMove),
+        LabCase::Fault(TuningPublishPoint::AfterPublish),
+        LabCase::Fault(TuningPublishPoint::BeforeBackupCleanup),
+        LabCase::Fault(TuningPublishPoint::AfterBackupCleanup),
+    ] {
+        let root = TuningTemporaryDirectory::new().unwrap();
+        drop(TuningStore::open_test_directory(root.path(), MAX_JOURNAL_BYTES).unwrap());
+        let mut store = TuningStore::open_test_directory(root.path(), MAX_JOURNAL_BYTES).unwrap();
+        let initial = store.lab_snapshot().unwrap();
+        assert!(!initial.opened_canonical(), "fixture stays isolated");
+        store.lab_arm_rollback().unwrap();
+        let result = rollback_protocol(&mut store, &old, &new, case, || Ok(()));
+        let after = store.lab_snapshot().unwrap();
+        assert!(
+            after.artifact(ArtifactKind::Journal).is_none()
+                && after.artifact(ArtifactKind::Stage).is_none()
+                && after.artifact(ArtifactKind::Previous).is_none(),
+            "terminal lab always attempts exact rollback"
+        );
+        assert!(
+            initial.root_id() == after.root_id() && initial.lease_id() == after.lease_id(),
+            "original metadata retained"
+        );
+        drop(store);
+        let mut reopened =
+            TuningStore::open_test_directory(root.path(), MAX_JOURNAL_BYTES).unwrap();
+        assert!(matches!(reopened.read(), Ok(None)));
+        drop(reopened);
+        root.cleanup().unwrap();
+        assert_eq!(result, Ok(case != LabCase::Success));
+    }
+}
+#[test]
+fn host_publication_protocol_machine_refusal_after_first_publish_still_rolls_back() {
+    let root = TuningTemporaryDirectory::new().unwrap();
+    drop(TuningStore::open_test_directory(root.path(), MAX_JOURNAL_BYTES).unwrap());
+    let mut store = TuningStore::open_test_directory(root.path(), MAX_JOURNAL_BYTES).unwrap();
+    store.lab_arm_rollback().unwrap();
+    let machine = MachineIdentity {
+        id: MachineId::new([0x43; 16]).unwrap(),
+    };
+    let mut calls = 0;
+    let result = rollback_protocol(
+        &mut store,
+        &empty_document(machine.clone(), 1),
+        &empty_document(machine, 2),
+        LabCase::Success,
+        || {
+            calls += 1;
+            if calls == 2 {
+                Err(())
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert_eq!(calls, 2);
+    assert!(
+        store
+            .lab_snapshot()
+            .unwrap()
+            .artifact(ArtifactKind::Journal)
+            .is_none(),
+        "rollback after controlled terminal protocol refusal"
+    );
+    assert_eq!(result, Err(HostFailure::Failed));
+    drop(store);
+    root.cleanup().unwrap();
+}
+#[test]
+fn host_publication_timeout_keeps_armed_cap_and_lease_until_same_worker_rollback() {
+    use std::{sync::mpsc, time::Duration};
+    let root = TuningTemporaryDirectory::new().unwrap();
+    let bootstrap = TuningStore::open_test_directory(root.path(), MAX_JOURNAL_BYTES).unwrap();
+    let initial = bootstrap.lab_snapshot().unwrap();
+    drop(bootstrap);
+    let path = root.path().to_owned();
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let controller = std::thread::spawn(move || {
+        let result = wait_worker(
+            move || {
+                let mut store = TuningStore::open_test_directory(&path, MAX_JOURNAL_BYTES).unwrap();
+                store.lab_arm_rollback().unwrap();
+                store.publish(b"owned timed-out fixture bytes").unwrap();
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                store.lab_rollback().unwrap();
+                let snapshot = store.lab_snapshot().unwrap();
+                assert!(snapshot.artifact(ArtifactKind::Journal).is_none());
+                drop(store);
+                true
+            },
+            Duration::ZERO,
+            || (),
+        );
+        result_tx.send(result).unwrap();
+    });
+    entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(matches!(
+        result_rx.recv_timeout(Duration::ZERO),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert!(matches!(
+        TuningStore::open_test_directory(root.path(), MAX_JOURNAL_BYTES),
+        Err(TuningNativeError::Busy)
+    ));
+    release_tx.send(()).unwrap();
+    let result = result_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    controller.join().unwrap();
+    assert_eq!(
+        result,
+        Ok((true, true)),
+        "late exact rollback keeps timeout sticky"
+    );
+    let mut reopened = TuningStore::open_test_directory(root.path(), MAX_JOURNAL_BYTES).unwrap();
+    assert!(matches!(reopened.read(), Ok(None)));
+    let final_state = reopened.lab_snapshot().unwrap();
+    assert!(
+        initial.root_id() == final_state.root_id() && initial.lease_id() == final_state.lease_id(),
+        "same original metadata after actual worker terminal"
+    );
+    drop(reopened);
+    root.cleanup().unwrap();
+}
 fn selection(value: Option<&str>, snapshot: Option<&str>) -> Option<LabCase> {
     if snapshot != Some("fresh-disposable-windows-snapshot") {
         return None;
     }
+    case_selection(value)
+}
+fn case_selection(value: Option<&str>) -> Option<LabCase> {
     Some(match value? {
         "success" => LabCase::Success,
         "fault-stage" => LabCase::Fault(TuningPublishPoint::AfterStageSync),
@@ -535,6 +801,153 @@ fn report(result: &str, terminal: bool, verified: bool) -> Result<(), ()> {
     use std::io::Write;
     // Every argument comes from fixed call-site literals/booleans; no identities or error text.
     writeln!(std::io::stdout().lock(),"{{\"schema\":1,\"result\":\"{result}\",\"worker_terminal\":{terminal},\"verified\":{verified}}}").map_err(|_| ())
+}
+fn host_report(
+    result: HostResult,
+    terminal: bool,
+    verified: bool,
+    rollback: bool,
+) -> Result<(), ()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    out.write_all(host_report_line(result, terminal, verified, rollback).as_bytes())
+        .map_err(|_| ())?;
+    out.flush().map_err(|_| ())
+}
+fn host_run(case: LabCase) -> Result<HostOutcome, ()> {
+    // This route never invokes a metadata bootstrap, including its final reopen.
+    let mut store = TuningStore::open_canonical_existing(MAX_JOURNAL_BYTES).map_err(|_| ())?;
+    let first = store.read();
+    let initial = store.lab_snapshot().map_err(|_| ())?;
+    let native = os_api::OS::tuning_machine_identity().map_err(|_| ())?;
+    let machine = super::writer::native_machine(native.source(), native.bytes()).map_err(|_| ())?;
+    let old = empty_document(machine.clone(), 1);
+    let new = empty_document(machine.clone(), 2);
+    for document in [&old, &new] {
+        host_guarded_bytes(
+            store.authority(),
+            initial.opened_canonical(),
+            &first,
+            &machine,
+            document,
+        )?;
+    }
+    store.lab_arm_rollback().map_err(|_| ())?;
+    // No fallible early return after arm. Unknown native completion retains this
+    // very worker/store/capability; it cannot be reported as terminal rollback.
+    let proof = rollback_protocol(&mut store, &old, &new, case, || {
+        let current = os_api::OS::tuning_machine_identity().map_err(|_| ())?;
+        if current == native {
+            Ok(())
+        } else {
+            Err(())
+        }
+    });
+    let rollback_proven = !matches!(proof, Err(HostFailure::RollbackUnresolved));
+    let held_proof = rollback_proven
+        && store.lab_snapshot().is_ok_and(|snapshot| {
+            snapshot.opened_canonical()
+                && snapshot.root_id() == initial.root_id()
+                && snapshot.lease_id() == initial.lease_id()
+                && [
+                    ArtifactKind::Journal,
+                    ArtifactKind::Stage,
+                    ArtifactKind::Previous,
+                ]
+                .into_iter()
+                .all(|kind| snapshot.artifact(kind).is_none())
+        });
+    drop(store);
+    if !held_proof {
+        return Ok(HostOutcome {
+            result: HostResult::RollbackUnresolved,
+            verified: false,
+            rollback_verified: false,
+        });
+    }
+    let reopened_proof = (|| {
+        let mut reopened =
+            TuningStore::open_canonical_existing(MAX_JOURNAL_BYTES).map_err(|_| ())?;
+        if !matches!(reopened.read(), Ok(None)) {
+            return Err(());
+        }
+        let snapshot = reopened.lab_snapshot().map_err(|_| ())?;
+        if !snapshot.opened_canonical()
+            || snapshot.root_id() != initial.root_id()
+            || snapshot.lease_id() != initial.lease_id()
+        {
+            return Err(());
+        }
+        Ok(())
+    })();
+    if reopened_proof.is_err() {
+        return Ok(HostOutcome {
+            result: HostResult::RollbackUnresolved,
+            verified: false,
+            rollback_verified: false,
+        });
+    }
+    Ok(match proof {
+        Ok(fault) => HostOutcome {
+            result: if fault {
+                HostResult::FaultRolledBack
+            } else {
+                HostResult::VerifiedRolledBack
+            },
+            verified: true,
+            rollback_verified: true,
+        },
+        Err(_) => HostOutcome {
+            result: HostResult::Failed,
+            verified: false,
+            rollback_verified: true,
+        },
+    })
+}
+#[test]
+#[ignore = "explicit host lab only; existing empty canonical metadata and verified exact rollback required"]
+fn host_canonical_publication_lab() -> Result<(), &'static str> {
+    let case = std::env::var("CPU_AFFINITY_PUBLICATION_HOST_LAB_CASE").ok();
+    let marker = std::env::var("CPU_AFFINITY_PUBLICATION_HOST_LAB").ok();
+    let Some(case) = host_selection(case.as_deref(), marker.as_deref()) else {
+        let _ = host_report(HostResult::Refused, true, false, false);
+        return Err("explicit host rollback selection required");
+    };
+    match wait_worker(
+        move || host_run(case),
+        std::time::Duration::from_secs(10),
+        || {
+            let _ = host_report(HostResult::Pending, false, false, false);
+        },
+    ) {
+        Ok((Ok(outcome), false)) => {
+            host_report(
+                outcome.result,
+                true,
+                outcome.verified,
+                outcome.rollback_verified,
+            )
+            .map_err(|_| "host report unavailable")?;
+            if outcome.verified && outcome.rollback_verified {
+                Ok(())
+            } else {
+                Err("host proof failed")
+            }
+        }
+        Ok((outcome, true)) => {
+            let rolled_back = outcome.is_ok_and(|value| value.rollback_verified);
+            let _ = host_report(HostResult::TimedOut, true, false, rolled_back);
+            Err("host worker exceeded deadline")
+        }
+        Ok((Err(()), false)) => {
+            let _ = host_report(HostResult::Refused, true, false, false);
+            Err("host proof refused")
+        }
+        Err(()) => {
+            let _ = host_report(HostResult::WorkerFailed, true, false, false);
+            Err("host worker failed")
+        }
+    }
 }
 #[test]
 #[ignore = "explicitly selected fresh disposable Windows VM snapshot only; writes canonical lab metadata"]
