@@ -11,9 +11,10 @@ use windows::{
     Win32::{
         Foundation::{OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE},
         Storage::FileSystem::{
-            DELETE, FILE_ACCESS_RIGHTS, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
-            FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE,
+            DELETE, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_ENCRYPTED,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_MODE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE,
         },
     },
 };
@@ -28,6 +29,20 @@ pub(super) const CALL_LIMIT: usize = 16;
 pub(super) enum Kind {
     Directory,
     File,
+}
+/// Decision over the attributes observed on the actual opened handle.
+pub(super) fn observed_attributes(attributes: u32, kind: Kind) -> Result<()> {
+    if attributes & FILE_ATTRIBUTE_ENCRYPTED.0 != 0 {
+        return Err(TuningNativeError::UnsafeStore("store encrypted object"));
+    }
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+        || (attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0) != (kind == Kind::Directory)
+    {
+        return Err(TuningNativeError::UnsafeStore(
+            "unexpected object type/reparse/hardlink",
+        ));
+    }
+    Ok(())
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OpenMode {
@@ -286,6 +301,9 @@ pub(super) fn global_root_proof(
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "store_io/attribute_tests.rs"]
+mod attribute_tests;
 #[cfg(test)]
 #[path = "store_io/native_contract_tests.rs"]
 mod native_contract_tests;

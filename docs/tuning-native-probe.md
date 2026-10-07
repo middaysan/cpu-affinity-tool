@@ -30,11 +30,10 @@ This is an explicit metadata operation and must not be added to default token
 preflight or described as a read-only command. No actual canonical candidate
 execution is certified by this implementation checkpoint. Shipping continuity
 and tuning write admission remain unavailable until their native gates pass.
-The path-based store refuses ordinary ancestor grants capable of namespace or
-security mutation, including `FILE_WRITE_DATA` (the directory `FILE_ADD_FILE`
-bit) and `FILE_WRITE_ATTRIBUTES`. Read and add-subdirectory grants retain their
-existing policy. The broader handle-relative compatibility work remains separate;
-this stricter check never repairs an existing system descriptor.
+The production store uses handle-relative descendant operations. Only an actual
+retained, relative-open ancestor can supply the borrowed capability described
+below. Bootstrap and managed objects retain strict security checks; no command
+repairs an existing system descriptor.
 
 ## Automated checks and safe preflight
 
@@ -185,7 +184,7 @@ the diagnostic result identifies the refusal predicate, not its object location.
 The store/security policy and continuity implementation were unchanged.
 Subsequent fixed-path read-only inspection found no managed application
 directories or lease. ProgramData had an ordinary
-here-applicable allow mask `0x116`, which intersects the current ancestor mutation
+here-applicable allow mask `0x116`, which intersected the then-current ancestor mutation
 predicate. This is a grounded candidate cause; it does not justify modifying the
 system ACL or weakening the store policy. Metadata-attribute access is not barred
 by file sharing flags, and reparse setup can admit `FILE_WRITE_ATTRIBUTES` subject
@@ -304,8 +303,9 @@ store/opening context on that exact worker until process exit. Timeout and calle
 Drop cannot manufacture completion or release/replace its lease. Synthetic
 request and owned child tests exercise this policy; they do not demonstrate
 actual SDK pending or cancellation completion. Normal confirmed terminal paths
-still close their owned objects. The strict ancestor security policy, shipping
-continuity unavailability and closed tuning write admission remain unchanged.
+still close their owned objects. The complete migration initially preserved the
+strict ancestor security policy. Shipping continuity remains unavailable and
+tuning write admission remains closed.
 
 On 2026-10-07 the complete migration passed 13 isolated store tests (12 actual
 native scenarios and one conditional child helper) and eight production-used
@@ -315,8 +315,51 @@ boundaries, exact 4 MiB limits, source/destination substitution, exact old-handl
 cleanup, late read-name/orphan changes and store/partial-opening lease retention.
 The latter outcomes are injected nonterminal fixtures, not observed SDK pending.
 Canonical bootstrap remains source-reviewed and awaits its actual scope matrix;
-the strict ancestor mutation-grant predicate still refuses the previously
+the strict ancestor mutation-grant predicate at that checkpoint still refused the previously
 observed ProgramData permissions. No ACL repair or gaming-setting write is added.
+
+## Capability-bound ancestor compatibility
+
+The subsequent compatibility change binds the ancestor policy to a borrowed,
+nontransferable capability over the actual relative-open node. It requires a
+retained directory, ancestor scope, the existing read-only access plan and
+sharing without delete. Bootstrap, managed directories, files, renameable or
+unscoped nodes cannot supply it. Identity, type and attributes are checked before
+and after the complete owner/DACL validation. Descendant traversal continues
+through that retained handle with no reparse following or path fallback.
+
+Only this capability permits the additional `0x112` rights: directory add-file /
+write-data, write-EA and write-attributes. Existing read, add-subdirectory and
+standard-read rights retain their policy. Ordinary delete-child, delete,
+write-DACL, write-owner and remaining broad raw generic rights still refuse.
+Bootstrap and managed security remain strict. All observed encrypted objects
+refuse before metadata writes; the tests do not invoke EFS or change encryption.
+
+Windows can map a requested generic right into concrete file rights before the
+DACL is observed. An actual owned fixture requested `GENERIC_WRITE` and observed
+`0x00120116`; the strict and managed checks refuse it, while the eligible relative
+ancestor capability accepts that concrete mask. Raw generic bits remain refused.
+The policy evaluates observed rights and cannot recover the original request
+spelling. See [generic access rights](https://learn.microsoft.com/en-us/windows/win32/secauthz/generic-access-rights),
+[file-right mappings](https://learn.microsoft.com/en-us/windows/win32/fileio/file-security-and-access-rights)
+and [MapGenericMask](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-mapgenericmask).
+
+On 2026-10-07 the focused production boundary suite passed 17 tests within a
+253-test OS library run; the 33 probe-example tests also passed. Genuine pre-fix
+failures covered encrypted directory/file admission and the actual relative
+`0x116` fixture. A separate test-assumption correction records the native generic
+mapping above; it is characterization evidence, not a new production exception.
+
+Two owned native race fixtures intervene after the final parent check and before
+the real child-open call. The empty ancestor accepts an actual junction tag; the
+test requires either refusal or traversal confined to the exact original objects,
+with the external owned sentinel unchanged. The nonempty
+ancestor's actual tag installation returns directory-not-empty (`145`), and
+original-handle traversal remains intact. Both fixtures compare full sentinel
+bytes and identities before cleanup, remove only an authenticated matching tag,
+and clean only captured owned objects. Attribute rights are therefore treated as
+available despite sharing restrictions. These fixtures provide no canonical,
+cross-account, boot or power-transition acceptance.
 
 ## Remaining acceptance gates
 

@@ -6,8 +6,9 @@ use super::super::{
     wide,
 };
 use super::{
-    CALL_LIMIT, Disposition, ENUM_BYTES, Entry, Kind, NativeProgress, OpenMode, Result, Sharing,
-    component, disposition, io_progress, open_plan, parse_records, retain_nonterminal,
+    CALL_LIMIT, Disposition, ENUM_BYTES, Entry, Kind, NativeProgress, OpenMode, OpenPlan, Result,
+    Sharing, component, disposition, io_progress, observed_attributes, open_plan, parse_records,
+    retain_nonterminal,
 };
 use crate::tuning::TuningNativeError;
 use std::{
@@ -61,6 +62,22 @@ pub(in crate::windows::tuning) struct Node {
     descriptor: Rc<Descriptor>,
     policy: Rc<SecurityPolicy>,
     scope: Option<bool>,
+    // Present only after the actual relative NtCreateFile used this exact plan.
+    // Bootstrap handles cannot produce relative-ancestor evidence.
+    relative_plan: Option<OpenPlan>,
+}
+/// Borrowed proof of this exact retained relative ancestor. No raw constructor,
+/// cloning, or independent caller-selected handle can enter the security seam.
+pub(in crate::windows::tuning) struct RelativeAncestorCapability<'a> {
+    node: &'a Node,
+}
+impl RelativeAncestorCapability<'_> {
+    pub(in crate::windows::tuning) fn verify_object(&self) -> Result<()> {
+        self.node.verify_identity()
+    }
+    pub(in crate::windows::tuning) fn handle(&self) -> HANDLE {
+        raw(&self.node.file)
+    }
 }
 pub(in crate::windows::tuning) struct Directory {
     node: Node,
@@ -110,6 +127,7 @@ impl Directory {
             descriptor,
             policy,
             scope,
+            relative_plan: None,
         };
         node.verify()?;
         Ok(Self { node })
@@ -178,8 +196,32 @@ impl Directory {
         read_only: bool,
         scope: Option<bool>,
     ) -> Result<(Node, Disposition)> {
+        self.open_inner(name, kind, mode, (sharing, read_only), scope, || Ok(()))
+    }
+    #[cfg(test)]
+    fn open_after_parent_check(
+        &self,
+        name: &[u16],
+        kind: Kind,
+        mode: OpenMode,
+        access: (Sharing, bool),
+        scope: Option<bool>,
+        after_parent_check: impl FnOnce() -> Result<()>,
+    ) -> Result<(Node, Disposition)> {
+        self.open_inner(name, kind, mode, access, scope, after_parent_check)
+    }
+    fn open_inner(
+        &self,
+        name: &[u16],
+        kind: Kind,
+        mode: OpenMode,
+        access: (Sharing, bool),
+        scope: Option<bool>,
+        after_parent_check: impl FnOnce() -> Result<()>,
+    ) -> Result<(Node, Disposition)> {
         component(name)?;
         self.verify()?;
+        let (sharing, read_only) = access;
         let plan = open_plan(kind, mode, sharing, read_only)?;
         let bytes = u16::try_from(size_of_val(name))
             .map_err(|_| TuningNativeError::UnsafeStore("store relative component"))?;
@@ -205,6 +247,7 @@ impl Directory {
             ..Default::default()
         };
         self.verify()?;
+        after_parent_check()?;
         let r = &mut *request;
         let status = unsafe {
             NtCreateFile(
@@ -246,6 +289,7 @@ impl Directory {
             descriptor: Rc::clone(&self.node.descriptor),
             policy: Rc::clone(&self.node.policy),
             scope,
+            relative_plan: Some(plan),
         };
         node.verify()?;
         self.verify()?;
@@ -316,13 +360,45 @@ impl Node {
         Ok(Directory { node: self })
     }
     pub(in crate::windows::tuning) fn verify(&self) -> Result<()> {
+        self.verify_identity()?;
+        if let Some(managed) = self.scope {
+            if !managed && self.has_relative_ancestor_plan() {
+                let capability = self.relative_ancestor_capability()?;
+                self.policy.validate_relative_ancestor(&capability)?;
+            } else {
+                self.policy.validate(raw(&self.file), managed)?;
+            }
+        }
+        Ok(())
+    }
+    fn verify_identity(&self) -> Result<()> {
         if identity(&self.file, self.kind)? != self.id {
             return Err(TuningNativeError::UnsafeStore("store held object changed"));
         }
-        if let Some(managed) = self.scope {
-            self.policy.validate(raw(&self.file), managed)?;
-        }
         Ok(())
+    }
+    fn relative_ancestor_capability(&self) -> Result<RelativeAncestorCapability<'_>> {
+        let invalid = || TuningNativeError::UnsafeStore("relative ancestor capability");
+        if !self.has_relative_ancestor_plan() {
+            return Err(invalid());
+        }
+        self.verify_identity()?;
+        Ok(RelativeAncestorCapability { node: self })
+    }
+    fn has_relative_ancestor_plan(&self) -> bool {
+        let Some(plan) = &self.relative_plan else {
+            return false;
+        };
+        let Ok(expected) = open_plan(Kind::Directory, OpenMode::Existing, Sharing::Retained, true)
+        else {
+            return false;
+        };
+        self.kind == Kind::Directory
+            && self.scope == Some(false)
+            && plan.desired == expected.desired
+            && plan.share == expected.share
+            && plan.options == expected.options
+            && plan.attributes == expected.attributes
     }
     pub(in crate::windows::tuning) fn read(&mut self, limit: usize) -> Result<Vec<u8>> {
         self.verify()?;
@@ -470,9 +546,8 @@ fn identity(file: &File, kind: Kind) -> Result<ObjectId> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     unsafe { GetFileInformationByHandle(raw(file), &mut info) }
         .map_err(|e| native_error("store relative identity", e))?;
+    observed_attributes(info.dwFileAttributes, kind)?;
     if unsafe { GetFileType(raw(file)) } != FILE_TYPE_DISK
-        || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
-        || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0) != (kind == Kind::Directory)
         || (kind == Kind::File && info.nNumberOfLinks != 1)
     {
         return Err(TuningNativeError::UnsafeStore(
@@ -511,3 +586,10 @@ fn nt_error(operation: &'static str, status: i32) -> TuningNativeError {
 fn io_error(operation: &'static str, error: std::io::Error) -> TuningNativeError {
     code_error(operation, error.raw_os_error().unwrap_or(-1) as u32)
 }
+
+#[cfg(test)]
+#[path = "native/ancestor_tests.rs"]
+mod ancestor_tests;
+#[cfg(test)]
+#[path = "native/capability_tests.rs"]
+mod capability_tests;

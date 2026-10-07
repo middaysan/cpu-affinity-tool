@@ -318,7 +318,7 @@ Data source separation:
 
 ## Platform boundary
 `libs/os_api` is the main boundary between the app and the OS. It covers:
-- dormant tuning metadata primitives: canonical Known Folder store with a worker-held file lease, bounded publication/validation, strict ancestor mutation-grant refusal including the directory add-file/write-data bit, exact read-only machine/token/process identity and an opaque worker-only retained process lifetime guard; no gaming-setting writer is registered
+- dormant tuning metadata primitives: canonical Known Folder store with a worker-held file lease, bounded publication/validation, strict bootstrap/managed security and a borrowed capability for actual handle-relative retained ancestors; that capability permits only the additional add-file/write-data, write-EA and write-attributes rights while destructive/security grants remain refused. Encrypted objects are refused. Exact read-only machine/token/process identity and an opaque worker-only retained process lifetime guard remain separate; no gaming-setting writer is registered
 - Windows local named-pipe and mutex transport for saved-rule shortcut forwarding
 - process launch
 - installed-app discovery and activation on Windows
@@ -351,7 +351,7 @@ Internal backend structure:
   - `event_log`
   - `tuning` - dormant metadata store/security/identity primitives, same-handle process lifetime observations and nonshipping isolated boot-marker probes; canonical boot/recovery admission remains unavailable
   - `tuning/store_io.rs` and `tuning/store_io/` - production handle-relative I/O, bootstrap/completion/name/parser decisions, complete native-request ownership and focused test leaves
-  - `tuning/store.rs` and `tuning/store/` - worker-owned store/lease, verified two-rename publication, unchanged strict ancestor security policy and isolated native migration/interruption tests
+  - `tuning/store.rs` and `tuning/store/` - worker-owned store/lease, verified two-rename publication and isolated native migration/interruption tests; `store_io` binds the narrow ancestor ACL policy to an actual relative-open capability while bootstrap and managed objects retain strict checks
   - `tuning/relative_io.rs` and `tuning/relative_io/` - private `cfg(test)` predecessor primitives and owned native characterization; production storage uses `store_io`
   - `tuning/relative_publication.rs` and `tuning/relative_publication/` - private `cfg(test)` predecessor publication protocol and interruption fixtures
 - crate-root public shape remains intentionally narrow: external callers still interact through `OS` plus small boundary value types such as `PriorityClass` and `ShortcutSpec`

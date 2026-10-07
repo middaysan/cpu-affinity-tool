@@ -1,3 +1,4 @@
+use super::store_io::native::RelativeAncestorCapability;
 use super::{native_error, wide};
 use crate::tuning::TuningNativeError;
 use std::{ffi::c_void, mem::size_of, ptr};
@@ -23,6 +24,12 @@ const DANGEROUS_PARENT_RIGHTS: u32 = 0x000d_0152 | 0x1000_0000 | 0x4000_0000;
 
 fn untrusted_grant_is_unsafe(managed: bool, mask: u32) -> bool {
     managed || mask & DANGEROUS_PARENT_RIGHTS != 0
+}
+fn relative_ancestor_grant_is_unsafe(mask: u32) -> bool {
+    // Only actual bound relative ancestors may admit metadata/create grants.
+    // Delete, owner/DACL changes and both raw generic bits remain refused.
+    // Native ACLs may map generic requests to indistinguishable concrete rights.
+    mask & (DANGEROUS_PARENT_RIGHTS & !0x112) != 0
 }
 
 pub(super) struct LocalAllocation(pub *mut c_void);
@@ -72,6 +79,18 @@ pub(super) struct SecurityPolicy {
     pub test_sid: Option<String>,
 }
 impl SecurityPolicy {
+    pub fn validate_relative_ancestor(
+        &self,
+        capability: &RelativeAncestorCapability<'_>,
+    ) -> Result<(), TuningNativeError> {
+        capability.verify_object()?;
+        self.validate_with_grants(
+            capability.handle(),
+            false,
+            relative_ancestor_grant_is_unsafe,
+        )?;
+        capability.verify_object()
+    }
     fn trusted(&self, sid: &str, managed: bool) -> bool {
         sid == SYSTEM
             || sid == ADMINISTRATORS
@@ -80,6 +99,17 @@ impl SecurityPolicy {
     }
 
     pub fn validate(&self, handle: HANDLE, managed: bool) -> Result<(), TuningNativeError> {
+        self.validate_with_grants(handle, managed, |mask| {
+            untrusted_grant_is_unsafe(managed, mask)
+        })
+    }
+
+    fn validate_with_grants(
+        &self,
+        handle: HANDLE,
+        managed: bool,
+        unsafe_grant: impl Fn(u32) -> bool,
+    ) -> Result<(), TuningNativeError> {
         let mut owner = PSID::default();
         let mut dacl = ptr::null_mut();
         let mut sacl = ptr::null_mut();
@@ -137,7 +167,7 @@ impl SecurityPolicy {
                 return Err(TuningNativeError::Unsupported("complex storage DACL"));
             }
             let trusted = self.trusted(&entry.sid, managed);
-            if untrusted_grant_is_unsafe(managed, entry.mask) && !trusted {
+            if unsafe_grant(entry.mask) && !trusted {
                 return Err(TuningNativeError::UnsafeStore(
                     "untrusted storage mutation grant",
                 ));
@@ -231,6 +261,15 @@ pub(super) fn sid_string(sid: PSID) -> Result<String, TuningNativeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn raw_generic_and_destructive_relative_ancestor_grants_are_refused() {
+        for mask in [0x40, 0x10000, 0x40000, 0x80000, 0x10000000, 0x40000000] {
+            assert!(
+                relative_ancestor_grant_is_unsafe(mask),
+                "raw mask={mask:#x}"
+            );
+        }
+    }
     #[test]
     fn ordinary_ancestor_grants_that_can_set_reparse_data_are_refused() {
         // Directory FILE_ADD_FILE has the same access bit as FILE_WRITE_DATA.
