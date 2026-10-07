@@ -453,14 +453,51 @@ On 2026-10-07 all six focused tests, the full 266-test OS library suite,
 37 probe-example tests, 482 Windows application tests and four OS doctests
 passed. The OS all-target Clippy check uses its same five previously documented
 allowances; the shipping application Clippy check adds none. The corrected
-source still awaits a new canonical UAC initialization/observation attempt.
+source at that checkpoint still awaited a new canonical UAC attempt.
+
+## Successful canonical candidate after the correction
+
+On 2026-10-07 the previously authorized pair was run using reviewed source
+`aca9a86` and rebuilt example SHA256
+`9E4C90DF60BC91EC528292C26C19114A7D43CCB63B9FBC3EBE586B67D4AA0058`.
+Both initialization and observation reported elevated/High, canonical authority,
+an absent journal, `continuity_stable`, no failure and a terminal worker.
+Both exited `0`; the retained elevated wrapper also completed with exit `0`.
+Direct review confirmed one bounded record per invocation and no pending probe.
+
+This establishes protected metadata access, successful candidate initialization
+and two equal full observations within each invocation. The output contains no
+raw identity data and does not compare the identities between those separate
+processes. Canonical journal publication, cross-account and power-transition
+behavior remain separate acceptance gates.
+Shipping continuity and tuning write admission remain closed.
+
+## Same-account lease and moved-executable check
+
+On 2026-10-07 the same reviewed build passed a four-process elevated/High lab
+sequence. The original `lab-hold` reported canonical authority and an absent
+journal before READY. Both the original `lab-contend` and a byte-identical,
+hash-pinned copy launched from a different executable and working directory
+reported `busy` and exited `0`. After the exact RELEASE frame, the holder
+reported Completed and actually exited `0`. The copied executable's `lab-open`
+then acquired canonical authority, read an absent journal and exited `0`.
+
+The owning wrapper completed with exit `0`, no timeout, and all four children
+terminal. It retained their actual handles through exit and EOF; the executable
+copy remains in its owned build-target directory. Fixed bounded reports contain
+no raw identities. This confirms the shared canonical location and independent
+lease across those same-account processes and executable locations. The sequence
+does not call the continuity candidate, publish a journal or certify exact
+cross-process identities, other accounts, power transitions or recovery.
 
 ## Remaining acceptance gates
 
 The probe supplies a concrete way to inspect canonical metadata and lease
-contention. It does not certify canonical publication, filtered-token object
-access, exact machine equality across elevated accounts, moved-executable scope,
-protected HKLM continuity, power transitions, or authoritative game reattachment.
+contention. Successful candidate invocations do not certify canonical
+publication, filtered-token object access, exact machine/continuity equality
+between processes or elevated accounts, power transitions, or authoritative
+game reattachment. The moved-executable check above covers only its stated
+same-account lease/location sequence.
 Those require their separate native matrix. No probe result alone completes the
 recovery foundation or admits a gaming-setting writer.
 
