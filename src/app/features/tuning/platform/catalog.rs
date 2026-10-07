@@ -22,6 +22,9 @@ pub trait Module: Send + Sync + 'static {
     fn config_codec(&self) -> &dyn VersionedCodec<Self::Config>;
     fn snapshot_codec(&self) -> &dyn VersionedCodec<Self::Snapshot>;
     fn validate_config(&self, config: &Self::Config) -> Result<(), ModuleError>;
+    /// Pure recovery validation; never observe native state or recapture an
+    /// original. Config and snapshot must describe the same typed request.
+    fn snapshot_config_matches(&self, snapshot: &Self::Snapshot, config: &Self::Config) -> bool;
     fn capability(&self, target: &TargetIdentity) -> Capability;
     fn observe(&self, target: &TargetIdentity) -> Result<Self::Observation, ModuleError>;
     fn observation_summary(&self, observation: &Self::Observation) -> ObservationSummary;
@@ -305,6 +308,11 @@ fn check_snapshot<M: Module>(
 }
 
 trait ErasedModule: Send + Sync {
+    fn recover_source(
+        &self,
+        snapshot: &ModuleEnvelope,
+        config: Option<&ModuleEnvelope>,
+    ) -> Result<PreparedOperation, CatalogError>;
     fn descriptor(&self) -> &ModuleDescriptor;
     fn validate_config(&self, envelope: &ModuleEnvelope) -> Result<(), CatalogError>;
     fn observe(&self, target: &TargetIdentity) -> Result<ObservationSummary, CatalogError>;
@@ -360,6 +368,40 @@ impl<M: Module> ModuleAdapter<M> {
     }
 }
 impl<M: Module> ErasedModule for ModuleAdapter<M> {
+    fn recover_source(
+        &self,
+        envelope: &ModuleEnvelope,
+        config: Option<&ModuleEnvelope>,
+    ) -> Result<PreparedOperation, CatalogError> {
+        let target = envelope.target.clone().ok_or(CodecError::WrongTarget)?;
+        check_target(&self.descriptor, &target)?;
+        if self.descriptor.access != ModuleAccess::Managed {
+            return Err(CatalogError::ReadOnly);
+        }
+        let snapshot = self.module.snapshot_codec().decode(envelope)?;
+        let claims = self.module.snapshot_claims(&target, &snapshot)?;
+        let config = config
+            .map(|envelope| self.decode_config(envelope))
+            .transpose()?;
+        if config
+            .as_ref()
+            .is_some_and(|config| !self.module.snapshot_config_matches(&snapshot, config))
+        {
+            return Err(CatalogError::InvalidPlan(
+                "snapshot request differs from configuration",
+            ));
+        }
+        self.bind(
+            config,
+            Plan {
+                target,
+                claims,
+                snapshot,
+                steps: vec![],
+                effect: self.descriptor.effect,
+            },
+        )
+    }
     fn descriptor(&self) -> &ModuleDescriptor {
         &self.descriptor
     }
@@ -476,11 +518,19 @@ fn check_observations(
     Ok(())
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Catalog {
-    modules: BTreeMap<FeatureId, Box<dyn ErasedModule>>,
+    modules: BTreeMap<FeatureId, Arc<dyn ErasedModule>>,
 }
 impl Catalog {
+    pub(super) fn recover_source(
+        &self,
+        snapshot: &ModuleEnvelope,
+        config: Option<&ModuleEnvelope>,
+    ) -> Result<PreparedOperation, CatalogError> {
+        self.module(&snapshot.feature)?
+            .recover_source(snapshot, config)
+    }
     pub fn register<M: Module>(&mut self, module: M) -> Result<(), CatalogError> {
         let descriptor = module.descriptor();
         check_descriptor(&module, &descriptor)?;
@@ -489,7 +539,7 @@ impl Catalog {
         }
         self.modules.insert(
             descriptor.id.clone(),
-            Box::new(ModuleAdapter {
+            Arc::new(ModuleAdapter {
                 module: Arc::new(module),
                 descriptor,
             }),

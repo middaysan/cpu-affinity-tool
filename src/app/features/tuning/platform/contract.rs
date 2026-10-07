@@ -127,40 +127,290 @@ numeric_identity!(OperationId, u64, NonZeroU64);
 numeric_identity!(LogonId, u64, NonZeroU64);
 numeric_identity!(SchemaVersion, u32, NonZeroU32);
 
-macro_rules! incarnation_identity {
-    ($name:ident) => {
-        #[derive(
-            Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-        )]
-        #[serde(try_from = "[u8; 16]", into = "[u8; 16]")]
-        pub struct $name([u8; 16]);
-        impl $name {
-            pub fn new(value: [u8; 16]) -> Result<Self, InvalidIdentity> {
-                if value == [0; 16] {
-                    Err(InvalidIdentity)
-                } else {
-                    Ok(Self(value))
-                }
-            }
-            pub fn bytes(self) -> [u8; 16] {
-                self.0
-            }
-        }
-        impl TryFrom<[u8; 16]> for $name {
-            type Error = InvalidIdentity;
-            fn try_from(value: [u8; 16]) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-        impl From<$name> for [u8; 16] {
-            fn from(value: $name) -> Self {
-                value.0
-            }
-        }
-    };
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+enum ContinuityProducer {
+    #[serde(rename = "windows_hklm_software_volatile_marker")]
+    ProtectedHive,
+    #[cfg(test)]
+    #[serde(rename = "test_continuity_identity")]
+    Test,
 }
-incarnation_identity!(MachineId);
-incarnation_identity!(BootId);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+enum ContinuityDomain {
+    #[serde(rename = "cpu_affinity_tool_tuning")]
+    Tuning,
+    #[cfg(test)]
+    #[serde(rename = "private_fixture")]
+    Test,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+enum ContinuityView {
+    #[serde(rename = "native64")]
+    Native64,
+    #[cfg(test)]
+    #[serde(rename = "fixture")]
+    Test,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootIdWire {
+    producer: ContinuityProducer,
+    version: SchemaVersion,
+    domain: ContinuityDomain,
+    view: ContinuityView,
+    nonce: [u8; 32],
+}
+
+/// Protected-hive continuity data, not an OS-provided boot UUID or authority.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "BootIdWire", into = "BootIdWire")]
+pub struct BootId(BootIdWire);
+
+impl BootId {
+    /// Shape only: a protected native producer must authenticate continuity.
+    pub fn observed_nonce(nonce: [u8; 32]) -> Result<Self, InvalidIdentity> {
+        BootIdWire {
+            producer: ContinuityProducer::ProtectedHive,
+            version: SchemaVersion::new(1)?,
+            domain: ContinuityDomain::Tuning,
+            view: ContinuityView::Native64,
+            nonce,
+        }
+        .try_into()
+    }
+    #[cfg(test)]
+    pub fn new(value: [u8; 16]) -> Result<Self, InvalidIdentity> {
+        // Synthetic test-domain values never originate from a native marker.
+        let mut nonce = [0; 32];
+        nonce[..16].copy_from_slice(&value);
+        nonce[16..].copy_from_slice(&value);
+        BootIdWire {
+            producer: ContinuityProducer::Test,
+            version: SchemaVersion::new(1)?,
+            domain: ContinuityDomain::Test,
+            view: ContinuityView::Test,
+            nonce,
+        }
+        .try_into()
+    }
+    pub fn bytes(self) -> [u8; 32] {
+        self.0.nonce
+    }
+}
+impl TryFrom<BootIdWire> for BootId {
+    type Error = InvalidIdentity;
+    fn try_from(wire: BootIdWire) -> Result<Self, Self::Error> {
+        let valid_domain = matches!(
+            (wire.producer, wire.domain, wire.view),
+            (
+                ContinuityProducer::ProtectedHive,
+                ContinuityDomain::Tuning,
+                ContinuityView::Native64
+            )
+        );
+        #[cfg(test)]
+        let valid_domain = valid_domain
+            || matches!(
+                (wire.producer, wire.domain, wire.view),
+                (
+                    ContinuityProducer::Test,
+                    ContinuityDomain::Test,
+                    ContinuityView::Test
+                )
+            );
+        if !valid_domain || wire.version.get() != 1 || wire.nonce == [0; 32] {
+            return Err(InvalidIdentity);
+        }
+        Ok(Self(wire))
+    }
+}
+impl From<BootId> for BootIdWire {
+    fn from(value: BootId) -> Self {
+        value.0
+    }
+}
+impl std::fmt::Debug for BootId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BootId")
+            .field("producer", &self.0.producer)
+            .field("view", &self.0.view)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod boot_continuity_tests {
+    use super::*;
+
+    #[test]
+    fn boot_continuity_preserves_full_nonce_domain_and_wire() {
+        let first = [9; 32];
+        let mut second = first;
+        second[31] = 10;
+        let identity = BootId::observed_nonce(first).unwrap();
+        assert_ne!(identity, BootId::observed_nonce(second).unwrap());
+        let encoded = serde_json::to_value(identity).unwrap();
+        assert_eq!(encoded["producer"], "windows_hklm_software_volatile_marker");
+        assert_eq!(encoded["domain"], "cpu_affinity_tool_tuning");
+        assert_eq!(encoded["view"], "native64");
+        assert_eq!(encoded["version"], 1);
+        assert_eq!(encoded["nonce"], serde_json::json!(first));
+        assert_eq!(serde_json::from_value::<BootId>(encoded).unwrap(), identity);
+        let fixture = BootId::new([9; 16]).unwrap();
+        assert_ne!(identity, fixture);
+        assert_eq!(
+            serde_json::to_value(fixture).unwrap()["producer"],
+            "test_continuity_identity"
+        );
+    }
+
+    #[test]
+    fn boot_continuity_rejects_legacy_arrays_and_unknown_wire() {
+        let legacy = [2; 16];
+        let nonce = [2; 32];
+        let zero = [0; 32];
+        assert!(serde_json::from_value::<BootId>(serde_json::json!(legacy)).is_err());
+        assert!(BootId::observed_nonce([0; 32]).is_err());
+        let wire = serde_json::json!({
+            "producer": "windows_hklm_software_volatile_marker",
+            "domain": "cpu_affinity_tool_tuning",
+            "view": "native64",
+            "version": 1,
+            "nonce": nonce,
+        });
+        for (field, wrong) in [
+            ("producer", serde_json::json!("opaque_boot_uuid")),
+            ("domain", serde_json::json!("private_fixture")),
+            ("view", serde_json::json!("native32")),
+            ("version", serde_json::json!(2)),
+            ("nonce", serde_json::json!(legacy)),
+            ("nonce", serde_json::json!(zero)),
+        ] {
+            let mut invalid = wire.clone();
+            invalid[field] = wrong;
+            assert!(
+                serde_json::from_value::<BootId>(invalid).is_err(),
+                "{field}"
+            );
+        }
+        let mut extra = wire;
+        extra["extra"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<BootId>(extra).is_err());
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum MachineIdSource {
+    Tpm,
+    Uefi,
+    #[cfg(test)]
+    Test,
+}
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "MachineIdWire", into = "MachineIdWire")]
+pub struct MachineId(std::sync::Arc<MachineIdWire>);
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineIdWire {
+    producer: ResourceId,
+    version: SchemaVersion,
+    source: MachineIdSource,
+    bytes: Vec<u8>,
+}
+impl MachineId {
+    /// Shape only. Native producer must supply and revalidate all observed bytes.
+    pub fn observed(source: MachineIdSource, bytes: Vec<u8>) -> Result<Self, InvalidIdentity> {
+        MachineIdWire {
+            producer: ResourceId::new("windows_publisher_system_id_unpackaged_win32")?,
+            version: SchemaVersion::new(1)?,
+            source,
+            bytes,
+        }
+        .try_into()
+    }
+    #[cfg(test)]
+    pub fn new(bytes: [u8; 16]) -> Result<Self, InvalidIdentity> {
+        MachineIdWire {
+            producer: ResourceId::new("test_machine_identity")?,
+            version: SchemaVersion::new(1)?,
+            source: MachineIdSource::Test,
+            bytes: bytes.to_vec(),
+        }
+        .try_into()
+    }
+    pub fn bytes(&self) -> &[u8] {
+        &self.0.bytes
+    }
+    pub fn source(&self) -> MachineIdSource {
+        self.0.source
+    }
+    pub fn producer(&self) -> &ResourceId {
+        &self.0.producer
+    }
+}
+impl TryFrom<MachineIdWire> for MachineId {
+    type Error = InvalidIdentity;
+    fn try_from(wire: MachineIdWire) -> Result<Self, Self::Error> {
+        let valid_domain = wire.producer.as_str() == "windows_publisher_system_id_unpackaged_win32"
+            && matches!(wire.source, MachineIdSource::Tpm | MachineIdSource::Uefi);
+        #[cfg(test)]
+        let valid_domain = valid_domain
+            || (wire.producer.as_str() == "test_machine_identity"
+                && wire.source == MachineIdSource::Test);
+        if !valid_domain
+            || wire.version.get() != 1
+            || wire.bytes.is_empty()
+            || wire.bytes.len() > 4096
+            || wire.bytes.iter().all(|byte| *byte == 0)
+        {
+            return Err(InvalidIdentity);
+        }
+        Ok(Self(std::sync::Arc::new(wire)))
+    }
+}
+impl From<MachineId> for MachineIdWire {
+    fn from(value: MachineId) -> Self {
+        std::sync::Arc::unwrap_or_clone(value.0)
+    }
+}
+
+#[cfg(test)]
+mod machine_binding_tests {
+    use super::*;
+    #[test]
+    fn machine_binding_preserves_native_source_domain_and_entire_variable_buffer() {
+        let wire = serde_json::json!({"producer":"windows_publisher_system_id_unpackaged_win32", "version":1, "source":"Tpm", "bytes":vec![17u8; 27]});
+        let parsed = serde_json::from_value::<MachineId>(wire.clone());
+        assert!(
+            parsed.is_ok(),
+            "native machine buffers have no documented fixed16 length"
+        );
+        assert_eq!(serde_json::to_value(parsed.unwrap()).unwrap(), wire);
+    }
+    #[test]
+    fn machine_binding_rejects_legacy_array_unknown_source_domain_and_invalid_buffers() {
+        assert!(serde_json::from_value::<MachineId>(serde_json::json!(vec![1u8; 16])).is_err());
+        let valid = serde_json::json!({"producer":"windows_publisher_system_id_unpackaged_win32", "version":1, "source":"Tpm", "bytes":vec![17u8; 27]});
+        for (field, value) in [
+            ("producer", serde_json::json!("other_producer")),
+            ("version", serde_json::json!(2)),
+            ("source", serde_json::json!("Registry")),
+            ("bytes", serde_json::json!([])),
+            ("bytes", serde_json::json!([0])),
+            ("bytes", serde_json::json!(vec![1u8; 4097])),
+        ] {
+            let mut wire = valid.clone();
+            wire[field] = value;
+            assert!(serde_json::from_value::<MachineId>(wire).is_err());
+        }
+        let mut uefi = valid.clone();
+        uefi["source"] = serde_json::json!("Uefi");
+        assert_ne!(
+            serde_json::from_value::<MachineId>(valid).unwrap(),
+            serde_json::from_value::<MachineId>(uefi).unwrap()
+        );
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -303,11 +553,34 @@ pub struct ResourceKey {
 
 /// Exact module-produced canonical desired bytes. The ownership core compares
 /// these tokens without interpreting them. Different semantics/versions conflict.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "DesiredStateWire", into = "DesiredStateWire")]
 pub struct DesiredStateToken {
     pub semantics: ResourceId,
     pub version: SchemaVersion,
     bytes: Vec<u8>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DesiredStateWire {
+    semantics: ResourceId,
+    version: SchemaVersion,
+    bytes: Vec<u8>,
+}
+impl TryFrom<DesiredStateWire> for DesiredStateToken {
+    type Error = InvalidIdentity;
+    fn try_from(value: DesiredStateWire) -> Result<Self, Self::Error> {
+        Self::new(value.semantics, value.version, value.bytes)
+    }
+}
+impl From<DesiredStateToken> for DesiredStateWire {
+    fn from(value: DesiredStateToken) -> Self {
+        Self {
+            semantics: value.semantics,
+            version: value.version,
+            bytes: value.bytes,
+        }
+    }
 }
 impl DesiredStateToken {
     pub fn new(
@@ -371,7 +644,7 @@ pub enum ModuleAccess {
     ReadOnly,
     Managed,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Effect {
     Immediate,
     GameRestartRequired,
@@ -449,7 +722,7 @@ pub struct ModuleDescriptor {
     pub activation_modes: Vec<ActivationMode>,
     pub effect: Effect,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleStatus {
     Unmanaged,
     Unsupported,

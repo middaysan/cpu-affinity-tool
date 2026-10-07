@@ -6,6 +6,7 @@ mod launch;
 mod processes;
 mod scheduling;
 mod shell;
+pub(crate) mod tuning;
 mod window;
 
 pub use event_log::WindowsApplicationFailure;

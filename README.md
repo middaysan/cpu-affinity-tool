@@ -190,6 +190,7 @@ cargo test --manifest-path libs/os_api/Cargo.toml
 cargo test --features windows --bin cpu-affinity-tool
 cargo build --release --features windows --bin cpu-affinity-tool
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-crash-reports.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-tuning-recovery.ps1
 cargo test --features linux --bin cpu-affinity-tool-linux
 cargo build --release --features linux --bin cpu-affinity-tool-linux
 ```

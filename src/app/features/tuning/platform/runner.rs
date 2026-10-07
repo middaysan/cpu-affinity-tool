@@ -4,6 +4,8 @@ use super::coordinator::{
     Command, CommandResult, Coordinator, CoordinatorSnapshot, ExecutionControl, GateError,
     WriteIntent,
 };
+use super::journal::{JournalPhase, JournalStamp};
+use super::writer::{WorkerAuthority, WriterStatus};
 use std::{
     collections::BTreeMap,
     panic::{catch_unwind, AssertUnwindSafe},
@@ -78,6 +80,7 @@ pub struct RunnerSnapshot {
     pub possible_write: bool,
     pub coordinator: CoordinatorSnapshot,
     pub shutdown_result: Option<Arc<CommandResult>>,
+    pub writer: super::writer::WriterStatus,
 }
 #[derive(Clone)]
 pub enum TerminalOutcome {
@@ -456,13 +459,34 @@ enum WriteAdmission {
     #[cfg(test)]
     Fake,
 }
-struct WorkerControl {
+struct WorkerControl<'a> {
     shared: Arc<Shared>,
     ticket: Option<Arc<TicketData>>,
-    admission: WriteAdmission,
+    authority: &'a mut WorkerAuthority,
     possible_write: bool,
+    transition_committed: bool,
 }
-impl ExecutionControl for WorkerControl {
+impl WorkerControl<'_> {
+    fn stamp(&self) -> JournalStamp {
+        self.ticket
+            .as_ref()
+            .map_or(JournalStamp::Shutdown, |ticket| JournalStamp::Operation {
+                operation: ticket.stamp.operation,
+                config_generation: ticket.stamp.config_generation,
+            })
+    }
+    fn commit(
+        &mut self,
+        phase: JournalPhase,
+        snapshot: &CoordinatorSnapshot,
+    ) -> Result<(), GateError> {
+        let stamp = self.stamp();
+        let result = self.authority.commit(stamp, phase, snapshot);
+        self.shared.runtime.lock().unwrap().writer = self.authority.status();
+        result
+    }
+}
+impl ExecutionControl for WorkerControl<'_> {
     fn cancellation_requested(&self) -> bool {
         self.ticket
             .as_ref()
@@ -476,34 +500,44 @@ impl ExecutionControl for WorkerControl {
         {
             return Err(GateError::Cancelled);
         }
-        match self.admission {
-            WriteAdmission::ReadOnly => Err(GateError::MutationDisabled),
-            #[cfg(test)]
-            WriteAdmission::Fake => {
-                self.possible_write = true;
-                let mut runtime = self.shared.runtime.lock().unwrap();
-                runtime.possible_write = true;
-                runtime.coordinator = intent.ownership.clone();
-                Ok(())
-            }
-        }
+        let step =
+            u32::try_from(intent.step).map_err(|_| GateError::Rejected("invalid step index"))?;
+        self.commit(
+            JournalPhase::BeforeWrite {
+                step,
+                effect: intent.operation.effect(),
+            },
+            &intent.ownership,
+        )?;
+        self.possible_write = true;
+        let mut runtime = self.shared.runtime.lock().unwrap();
+        runtime.possible_write = true;
+        runtime.coordinator = intent.ownership.clone();
+        Ok(())
     }
     fn after_verified_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError> {
-        // S36 will replace the test admission with worker-owned durable storage
-        // and the native writer lease. Verification alone is no durable commit.
         self.shared.runtime.lock().unwrap().coordinator = intent.ownership.clone();
-        match self.admission {
-            WriteAdmission::ReadOnly => Err(GateError::MutationDisabled),
-            #[cfg(test)]
-            WriteAdmission::Fake => Ok(()),
-        }
+        let step =
+            u32::try_from(intent.step).map_err(|_| GateError::Rejected("invalid step index"))?;
+        self.commit(
+            JournalPhase::VerifiedWrite {
+                step,
+                effect: intent.operation.effect(),
+            },
+            &intent.ownership,
+        )
+    }
+    fn commit_transition(&mut self, snapshot: &CoordinatorSnapshot) -> Result<(), GateError> {
+        self.commit(JournalPhase::Transition, snapshot)?;
+        self.transition_committed = true;
+        Ok(())
     }
     fn publish(&mut self, snapshot: CoordinatorSnapshot) {
         self.shared.runtime.lock().unwrap().coordinator = snapshot;
     }
 }
 struct WorkerExit {
-    coordinator: Coordinator,
+    coordinator: Option<Coordinator>,
     faulted: bool,
     recovery_required: bool,
 }
@@ -523,14 +557,56 @@ impl Runner {
     pub fn start(coordinator: Coordinator, limits: RunnerLimits) -> Result<Self, StartError> {
         Self::spawn(coordinator, limits, WriteAdmission::ReadOnly)
     }
+    // Canonical metadata initialization is explicit and remains outside the
+    // current application composition. No caller can inject a permissive store.
+    #[cfg(windows)]
+    pub(super) fn start_native(
+        catalog: super::catalog::Catalog,
+        limits: RunnerLimits,
+    ) -> Result<Self, StartError> {
+        Self::spawn_factory(CoordinatorSnapshot::default(), limits, move || {
+            super::writer::open_native(catalog)
+        })
+    }
     #[cfg(test)]
     fn start_fake(coordinator: Coordinator, limits: RunnerLimits) -> Result<Self, StartError> {
         Self::spawn(coordinator, limits, WriteAdmission::Fake)
+    }
+    #[cfg(test)]
+    pub(super) fn start_test_durable(
+        coordinator: Coordinator,
+        limits: RunnerLimits,
+        factory: impl FnOnce() -> super::writer::WorkerAuthority + Send + 'static,
+    ) -> Result<Self, StartError> {
+        let initial = coordinator.snapshot();
+        Self::spawn_factory(initial, limits, move || (coordinator, factory()))
+    }
+    #[cfg(test)]
+    pub(super) fn start_test_writer(
+        limits: RunnerLimits,
+        factory: impl FnOnce() -> (Coordinator, WorkerAuthority) + Send + 'static,
+    ) -> Result<Self, StartError> {
+        Self::spawn_factory(CoordinatorSnapshot::default(), limits, factory)
     }
     fn spawn(
         coordinator: Coordinator,
         limits: RunnerLimits,
         write_admission: WriteAdmission,
+    ) -> Result<Self, StartError> {
+        let initial = coordinator.snapshot();
+        Self::spawn_factory(initial, limits, move || {
+            let authority = match write_admission {
+                WriteAdmission::ReadOnly => WorkerAuthority::ReadOnly,
+                #[cfg(test)]
+                WriteAdmission::Fake => WorkerAuthority::Fake,
+            };
+            (coordinator, authority)
+        })
+    }
+    fn spawn_factory(
+        initial: CoordinatorSnapshot,
+        limits: RunnerLimits,
+        factory: impl FnOnce() -> (Coordinator, WorkerAuthority) + Send + 'static,
     ) -> Result<Self, StartError> {
         if limits.queue_capacity == 0
             || limits.queue_capacity > MAX_QUEUE_CAPACITY
@@ -556,16 +632,17 @@ impl Runner {
                 current: None,
                 queued: vec![],
                 possible_write: false,
-                coordinator: coordinator.snapshot(),
+                coordinator: initial,
                 shutdown_result: None,
+                writer: super::writer::WriterStatus::ReadOnly,
             }),
         });
         let state = Arc::clone(&shared);
-        // No native lease is acquired on the caller. S36 must construct/drop its
-        // thread-bound writer context inside this worker, around this full loop.
+        // A Send factory creates the potentially !Send authority here. Its
+        // ownership covers commands, panic handling and shutdown publication.
         let worker = thread::Builder::new()
             .name("tuning-runner".into())
-            .spawn(move || worker_loop(coordinator, receiver, state, write_admission, done))
+            .spawn(move || worker_loop(factory, receiver, state, done))
             .map_err(|_| StartError::WorkerSpawn)?;
         Ok(Self {
             shared,
@@ -609,7 +686,7 @@ impl Runner {
         }
         match self.worker.take().unwrap().join() {
             Ok(exit) => {
-                self.retained = Some(exit.coordinator);
+                self.retained = exit.coordinator;
                 self.faulted = exit.faulted;
                 self.recovery_required = exit.recovery_required;
             }
@@ -637,40 +714,64 @@ impl Drop for Runner {
 }
 
 fn worker_loop(
-    mut coordinator: Coordinator,
+    factory: impl FnOnce() -> (Coordinator, WorkerAuthority),
     receiver: Receiver<WorkItem>,
     shared: Arc<Shared>,
-    admission: WriteAdmission,
     done: SyncSender<()>,
 ) -> WorkerExit {
+    let (mut coordinator, mut authority) = match catch_unwind(AssertUnwindSafe(factory)) {
+        Ok(state) => state,
+        Err(_) => {
+            complete_faulted(&shared);
+            let _ = done.send(());
+            return WorkerExit {
+                coordinator: None,
+                faulted: true,
+                recovery_required: true,
+            };
+        }
+    };
     let (faulted, recovery_required) = match catch_unwind(AssertUnwindSafe(|| {
-        worker_body(&mut coordinator, &receiver, &shared, admission)
+        let snapshot = coordinator.snapshot();
+        {
+            let mut runtime = shared.runtime.lock().unwrap();
+            runtime.writer = authority.status();
+            runtime.coordinator = snapshot;
+        }
+        worker_body(&mut coordinator, &receiver, &shared, &mut authority)
     })) {
         Ok(result) => result,
         Err(_) => {
             // A module's codec can also panic during snapshot export after its
             // command returned. Do not call that code again to report failure.
-            shared.close(true);
-            let snapshot = shared.runtime.lock().unwrap().coordinator.clone();
-            let pending = shared
-                .admission
-                .lock()
-                .unwrap()
-                .pending
-                .values()
-                .cloned()
-                .collect::<Vec<_>>();
-            for ticket in pending {
-                shared.complete(&ticket, TerminalOutcome::WorkerPanicked, snapshot.clone());
-            }
+            complete_faulted(&shared);
             (true, true)
         }
     };
+    // The lease is still held while faulted tickets are made terminal. Only the
+    // worker releases it, after its last possible publication/native operation.
+    drop(authority);
     let _ = done.send(());
     WorkerExit {
-        coordinator,
+        coordinator: Some(coordinator),
         faulted,
         recovery_required,
+    }
+}
+
+fn complete_faulted(shared: &Shared) {
+    shared.close(true);
+    let snapshot = shared.runtime.lock().unwrap().coordinator.clone();
+    let pending = shared
+        .admission
+        .lock()
+        .unwrap()
+        .pending
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for ticket in pending {
+        shared.complete(&ticket, TerminalOutcome::WorkerPanicked, snapshot.clone());
     }
 }
 
@@ -678,7 +779,7 @@ fn worker_body(
     coordinator: &mut Coordinator,
     receiver: &Receiver<WorkItem>,
     shared: &Arc<Shared>,
-    admission: WriteAdmission,
+    authority: &mut WorkerAuthority,
 ) -> (bool, bool) {
     let mut faulted = false;
     while let Ok(item) = receiver.recv() {
@@ -694,8 +795,9 @@ fn worker_body(
         let mut control = WorkerControl {
             shared: Arc::clone(shared),
             ticket: Some(Arc::clone(&item.ticket)),
-            admission,
+            authority,
             possible_write: false,
+            transition_committed: false,
         };
         match catch_unwind(AssertUnwindSafe(|| {
             coordinator.handle(item.command, &mut control)
@@ -735,12 +837,25 @@ fn worker_body(
         let mut control = WorkerControl {
             shared: Arc::clone(shared),
             ticket: None,
-            admission,
+            authority,
             possible_write: false,
+            transition_committed: false,
         };
         match catch_unwind(AssertUnwindSafe(|| coordinator.shutdown(&mut control))) {
             Ok(mut result) => {
                 result.snapshot = coordinator.snapshot();
+                // An unchanged manual ledger still needs an explicit shutdown
+                // stamp. Read-only runners have no durable lifecycle to publish.
+                if !control.transition_committed
+                    && matches!(control.authority, WorkerAuthority::Durable(_))
+                {
+                    if let Err(error) = control.commit_transition(&result.snapshot) {
+                        result.outcome = super::coordinator::Outcome::RecoveryRequired;
+                        if result.error.is_none() {
+                            result.error = Some(super::coordinator::CoordinatorError::Gate(error));
+                        }
+                    }
+                }
                 recovery_required = result.error.is_some()
                     || matches!(
                         result.outcome,
@@ -754,6 +869,7 @@ fn worker_body(
             }
         }
     }
+    recovery_required |= matches!(authority.status(), WriterStatus::Blocked(_));
     let final_snapshot = coordinator.snapshot();
     {
         let mut runtime = shared.runtime.lock().unwrap();
@@ -859,6 +975,348 @@ mod tests {
     }
     fn finish(runner: &mut Runner) {
         assert_eq!(runner.shutdown(WAIT), ShutdownResult::Complete);
+    }
+
+    #[derive(Default)]
+    struct DurableMemory {
+        bytes: Option<Vec<u8>>,
+        records: Vec<super::super::journal::JournalDocument>,
+        calls: Vec<std::thread::ThreadId>,
+        created: Option<std::thread::ThreadId>,
+        dropped: Option<std::thread::ThreadId>,
+        publishes: usize,
+        fail_at: Option<usize>,
+        before_publish: Option<Arc<dyn Fn() + Send + Sync>>,
+    }
+    struct MemoryStore {
+        memory: Arc<Mutex<DurableMemory>>,
+        // The authority is intentionally !Send: a Send factory creates it on
+        // the worker instead of moving a caller-owned lease across threads.
+        _local: std::rc::Rc<()>,
+    }
+    impl MemoryStore {
+        fn open(memory: Arc<Mutex<DurableMemory>>) -> Self {
+            memory.lock().unwrap().created = Some(thread::current().id());
+            Self {
+                memory,
+                _local: std::rc::Rc::new(()),
+            }
+        }
+    }
+    impl Drop for MemoryStore {
+        fn drop(&mut self) {
+            self.memory.lock().unwrap().dropped = Some(thread::current().id());
+        }
+    }
+    impl super::super::journal::JournalStore for MemoryStore {
+        fn read(
+            &mut self,
+        ) -> Result<super::super::journal::StoredJournal, super::super::journal::JournalIoError>
+        {
+            let mut memory = self.memory.lock().unwrap();
+            memory.calls.push(thread::current().id());
+            Ok(memory.bytes.clone().map_or(
+                super::super::journal::StoredJournal::Absent,
+                super::super::journal::StoredJournal::Bytes,
+            ))
+        }
+        fn publish(&mut self, bytes: &[u8]) -> Result<(), super::super::journal::JournalIoError> {
+            use super::super::journal::*;
+            let hook = self.memory.lock().unwrap().before_publish.clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+            let mut memory = self.memory.lock().unwrap();
+            memory.calls.push(thread::current().id());
+            memory.publishes += 1;
+            if memory.fail_at == Some(memory.publishes) {
+                return Err(JournalIoError {
+                    kind: JournalIoKind::Io,
+                    operation: "test publication",
+                    native_code: Some(5),
+                });
+            }
+            let JournalLoad::Known(document) =
+                JournalDocument::load(bytes.to_vec(), &test_machine())
+            else {
+                panic!("valid typed publication");
+            };
+            memory.records.push(document);
+            memory.bytes = Some(bytes.to_vec());
+            Ok(())
+        }
+        fn validate_authority(&mut self) -> Result<(), super::super::journal::JournalIoError> {
+            self.memory
+                .lock()
+                .unwrap()
+                .calls
+                .push(thread::current().id());
+            Ok(())
+        }
+    }
+    fn test_machine() -> MachineIdentity {
+        let TargetIdentity::Machine(machine) = target() else {
+            unreachable!()
+        };
+        machine
+    }
+    fn durable_runner(module: &ScalarModule, memory: Arc<Mutex<DurableMemory>>) -> Runner {
+        use super::super::{
+            journal::{DurableSession, JournalStore},
+            writer::WorkerAuthority,
+        };
+        Runner::start_test_durable(coordinator(module), RunnerLimits::default(), move || {
+            let store = Box::new(MemoryStore::open(memory)) as Box<dyn JournalStore>;
+            WorkerAuthority::Durable(Box::new(DurableSession::bootstrap(store, test_machine())))
+        })
+        .unwrap()
+    }
+    #[test]
+    fn durable_factory_intent_progress_transition_and_drop_stay_on_one_worker() {
+        use super::super::journal::{JournalPhase, JournalStamp};
+        let module = ScalarModule::new(7);
+        let memory = Arc::new(Mutex::new(DurableMemory::default()));
+        let mut runner = durable_runner(&module, memory.clone());
+        let ticket = runner
+            .client()
+            .submit(acquire(&module, 1, 12, ActivationMode::Manual), 3)
+            .unwrap();
+        let completed = result(&ticket);
+        assert!(
+            matches!(completed.outcome, TerminalOutcome::Completed(ref result) if result.outcome == super::super::coordinator::Outcome::Applied(Effect::Immediate))
+        );
+        assert_eq!(module.value(), 12);
+        finish(&mut runner);
+        let memory = memory.lock().unwrap();
+        let worker = memory
+            .created
+            .expect("worker factory must construct its authority");
+        assert_ne!(worker, thread::current().id());
+        assert_eq!(memory.dropped, Some(worker));
+        assert!(memory.calls.iter().all(|call| *call == worker));
+        assert!(matches!(
+            memory.records[0].phase,
+            JournalPhase::BeforeWrite { step: 0, .. }
+        ));
+        assert!(matches!(
+            memory.records[1].phase,
+            JournalPhase::VerifiedWrite { step: 0, .. }
+        ));
+        assert_eq!(memory.records[2].phase, JournalPhase::Transition);
+        assert_eq!(
+            memory.records[0].stamp,
+            JournalStamp::Operation {
+                operation: ticket.stamp().operation,
+                config_generation: 3
+            }
+        );
+        assert_eq!(memory.records.last().unwrap().stamp, JournalStamp::Shutdown);
+        assert_eq!(
+            memory.records.last().unwrap().owners.len(),
+            1,
+            "manual owner survives orderly shutdown"
+        );
+    }
+    #[test]
+    fn durable_failed_intent_makes_zero_calls_and_keeps_observation_available() {
+        let module = ScalarModule::new(7);
+        let memory = Arc::new(Mutex::new(DurableMemory {
+            fail_at: Some(1),
+            ..Default::default()
+        }));
+        let mut runner = durable_runner(&module, memory.clone());
+        let ticket = runner
+            .client()
+            .submit(acquire(&module, 1, 12, ActivationMode::Session), 1)
+            .unwrap();
+        let completed = result(&ticket);
+        assert!(
+            matches!(completed.outcome, TerminalOutcome::Completed(ref result) if result.error.is_some())
+        );
+        assert_eq!(module.writes(), 0);
+        assert_eq!(
+            memory.lock().unwrap().publishes,
+            1,
+            "durable intent must be attempted before native write"
+        );
+        assert!(matches!(
+            runner.snapshot().writer,
+            super::super::writer::WriterStatus::Blocked(_)
+        ));
+        let observed = result(&runner.client().submit(observe(), 1).unwrap());
+        assert!(
+            matches!(observed.outcome, TerminalOutcome::Completed(ref result) if matches!(result.outcome, super::super::coordinator::Outcome::Observed(_)))
+        );
+        assert_eq!(runner.shutdown(WAIT), ShutdownResult::RecoveryRequired);
+    }
+    #[test]
+    fn durable_progress_failure_keeps_original_and_attempt_without_a_second_write() {
+        let module = ScalarModule::new(7);
+        let memory = Arc::new(Mutex::new(DurableMemory {
+            fail_at: Some(2),
+            ..Default::default()
+        }));
+        let mut runner = durable_runner(&module, memory.clone());
+        let completed = result(
+            &runner
+                .client()
+                .submit(acquire(&module, 1, 12, ActivationMode::Session), 1)
+                .unwrap(),
+        );
+        assert!(
+            matches!(completed.outcome, TerminalOutcome::Completed(ref result) if result.outcome == super::super::coordinator::Outcome::RecoveryRequired)
+        );
+        assert_eq!(module.value(), 12);
+        assert_eq!(module.writes(), 1);
+        let snapshot = runner.snapshot().coordinator;
+        assert_eq!(snapshot.resources.len(), 1);
+        assert!(!snapshot.resources[0].possible.is_empty());
+        let memory_guard = memory.lock().unwrap();
+        assert_eq!(memory_guard.records.len(), 1);
+        assert_eq!(
+            memory_guard.records[0].resources[0].baseline,
+            snapshot.resources[0].baseline
+        );
+        assert_eq!(
+            memory_guard.records[0].resources[0].attempted,
+            snapshot.resources[0].possible
+        );
+        drop(memory_guard);
+        result(
+            &runner
+                .client()
+                .submit(Command::Release { owner: owner(1) }, 1)
+                .unwrap(),
+        );
+        assert_eq!(
+            module.writes(),
+            1,
+            "poisoned durability cannot authorize cleanup retry"
+        );
+        assert_eq!(runner.shutdown(WAIT), ShutdownResult::RecoveryRequired);
+    }
+    #[test]
+    fn durable_sharing_requires_final_commit_even_without_a_native_write() {
+        let module = ScalarModule::new(7);
+        let memory = Arc::new(Mutex::new(DurableMemory::default()));
+        let mut runner = durable_runner(&module, memory.clone());
+        result(
+            &runner
+                .client()
+                .submit(acquire(&module, 1, 12, ActivationMode::Manual), 1)
+                .unwrap(),
+        );
+        {
+            let mut memory = memory.lock().unwrap();
+            memory.fail_at = Some(memory.publishes + 1);
+        }
+        let completed = result(
+            &runner
+                .client()
+                .submit(acquire(&module, 2, 12, ActivationMode::Manual), 1)
+                .unwrap(),
+        );
+        assert!(
+            matches!(completed.outcome, TerminalOutcome::Completed(ref result) if result.outcome == super::super::coordinator::Outcome::Rejected)
+        );
+        assert_eq!(module.writes(), 1);
+        assert_eq!(completed.snapshot.owners.len(), 1);
+        assert_eq!(completed.snapshot.owners[0].owner, owner(1));
+        assert_eq!(runner.shutdown(WAIT), ShutdownResult::RecoveryRequired);
+    }
+    #[test]
+    fn durable_timeout_keeps_context_until_cancelled_intent_and_shutdown_are_committed() {
+        use super::super::journal::JournalStamp;
+        let module = ScalarModule::new(7);
+        let block = Block::once();
+        let memory = Arc::new(Mutex::new(DurableMemory {
+            before_publish: Some(block.hook.clone()),
+            ..Default::default()
+        }));
+        let mut runner = durable_runner(&module, memory.clone());
+        let ticket = runner
+            .client()
+            .submit(acquire(&module, 1, 12, ActivationMode::Session), 1)
+            .unwrap();
+        block.entered();
+        assert_eq!(
+            runner.shutdown(Duration::from_millis(10)),
+            ShutdownResult::TimedOut
+        );
+        assert!(memory.lock().unwrap().dropped.is_none());
+        assert_eq!(module.writes(), 0);
+        block.release();
+        assert!(
+            matches!(result(&ticket).outcome, TerminalOutcome::Completed(ref result) if result.outcome == super::super::coordinator::Outcome::Cancelled)
+        );
+        finish(&mut runner);
+        assert_eq!(module.writes(), 0);
+        let memory = memory.lock().unwrap();
+        assert_eq!(memory.dropped, memory.created);
+        let final_record = memory.records.last().unwrap();
+        assert_eq!(final_record.stamp, JournalStamp::Shutdown);
+        assert!(final_record.resources.is_empty() && final_record.owners.is_empty());
+    }
+    #[test]
+    fn durable_drop_retains_blocked_context_until_worker_finishes_compensation() {
+        let module = ScalarModule::new(7);
+        let block = Block::once();
+        module.set_execute_hook(block.hook.clone());
+        let memory = Arc::new(Mutex::new(DurableMemory::default()));
+        let runner = durable_runner(&module, memory.clone());
+        let ticket = runner
+            .client()
+            .submit(acquire(&module, 1, 12, ActivationMode::Session), 1)
+            .unwrap();
+        block.entered();
+        drop(runner);
+        assert!(memory.lock().unwrap().dropped.is_none());
+        assert_eq!(
+            memory.lock().unwrap().records.len(),
+            1,
+            "the possible call already has durable intent"
+        );
+        block.release();
+        assert!(
+            matches!(result(&ticket).outcome, TerminalOutcome::Completed(ref result) if result.outcome == super::super::coordinator::Outcome::Compensated)
+        );
+        let started = Instant::now();
+        while memory.lock().unwrap().dropped.is_none() && started.elapsed() < WAIT {
+            thread::yield_now();
+        }
+        let memory = memory.lock().unwrap();
+        assert_eq!(memory.dropped, memory.created);
+        assert!(memory.records.last().unwrap().resources.is_empty());
+        assert_eq!(module.value(), 7);
+    }
+    #[test]
+    fn durable_panic_keeps_last_intent_and_releases_context_only_after_terminal_failure() {
+        let module = ScalarModule::new(7);
+        module.set_execute_hook(Arc::new(|| panic!("test native-call boundary")));
+        let memory = Arc::new(Mutex::new(DurableMemory::default()));
+        let mut runner = durable_runner(&module, memory.clone());
+        let ticket = runner
+            .client()
+            .submit(acquire(&module, 1, 12, ActivationMode::Session), 1)
+            .unwrap();
+        assert!(matches!(
+            result(&ticket).outcome,
+            TerminalOutcome::WorkerPanicked
+        ));
+        assert_eq!(runner.shutdown(WAIT), ShutdownResult::Faulted);
+        let memory = memory.lock().unwrap();
+        assert_eq!(memory.dropped, memory.created);
+        assert_eq!(
+            memory.records.len(),
+            1,
+            "faulted worker must retain intent, never publish false cleanup"
+        );
+        assert_eq!(memory.records[0].resources.len(), 1);
+        assert!(!memory.records[0].resources[0].attempted.is_empty());
+        assert!(matches!(
+            runner.client().submit(observe(), 1),
+            Err(SubmitError::Closed)
+        ));
     }
 
     #[test]

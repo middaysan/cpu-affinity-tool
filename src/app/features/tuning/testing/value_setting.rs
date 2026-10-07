@@ -96,6 +96,9 @@ impl ValueModule {
     }
 }
 impl Module for ValueModule {
+    fn snapshot_config_matches(&self, snapshot: &ValueSnapshot, config: &ValueConfig) -> bool {
+        snapshot.desired == Some(value_native(config.value))
+    }
     type Config = ValueConfig;
     type Observation = Option<NativeValue>;
     type Snapshot = ValueSnapshot;

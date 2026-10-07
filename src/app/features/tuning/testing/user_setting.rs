@@ -286,6 +286,10 @@ impl UserModule {
     }
 }
 impl Module for UserModule {
+    fn snapshot_config_matches(&self, snapshot: &UserSnapshot, config: &UserConfig) -> bool {
+        snapshot.desired.enabled == config.enabled
+            && snapshot.desired.value == Some(value_native(config.value))
+    }
     type Config = UserConfig;
     type Observation = UserObservation;
     type Snapshot = UserSnapshot;

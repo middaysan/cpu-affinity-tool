@@ -36,6 +36,7 @@ pub enum GateError {
     MutationDisabled,
     Cancelled,
     Rejected(&'static str),
+    Durability(super::journal::JournalError),
 }
 pub(super) struct WriteIntent<'a> {
     pub operation: &'a PreparedOperation,
@@ -47,6 +48,7 @@ pub(super) trait ExecutionControl {
     fn before_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError>;
     fn after_verified_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError>;
     fn publish(&mut self, snapshot: CoordinatorSnapshot);
+    fn commit_transition(&mut self, snapshot: &CoordinatorSnapshot) -> Result<(), GateError>;
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoordinatorError {
@@ -85,8 +87,10 @@ pub struct ResourceView {
     pub status: ModuleStatus,
     pub baseline_source: FeatureId,
     pub baseline_snapshot: Arc<ModuleEnvelope>,
+    pub baseline_config: Option<Arc<ModuleEnvelope>>,
     pub current_source: FeatureId,
     pub current_snapshot: Arc<ModuleEnvelope>,
+    pub current_config: Option<Arc<ModuleEnvelope>>,
     pub confirmed: DesiredStateToken,
     pub possible: Vec<DesiredStateToken>,
 }
@@ -99,11 +103,13 @@ pub struct OwnerView {
     pub source: FeatureId,
     pub target: TargetIdentity,
     pub config: Option<Arc<ModuleEnvelope>>,
+    pub snapshot: Arc<ModuleEnvelope>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CoordinatorSnapshot {
     pub resources: Vec<ResourceView>,
     pub owners: Vec<OwnerView>,
+    pub restoration_effect: Option<Effect>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandResult {
@@ -151,6 +157,12 @@ struct OwnerRecord {
     resources: Vec<ResourceKey>,
     status: ModuleStatus,
 }
+#[derive(Clone)]
+struct LedgerCheckpoint {
+    resources: BTreeMap<ResourceKey, ResourceRecord>,
+    owners: BTreeMap<OwnerId, OwnerRecord>,
+    restoration_effect: Option<Effect>,
+}
 const MAX_OWNERS: usize = 256;
 const MAX_RESOURCES: usize = 4096;
 
@@ -159,18 +171,240 @@ pub struct Coordinator {
     resources: BTreeMap<ResourceKey, ResourceRecord>,
     owners: BTreeMap<OwnerId, OwnerRecord>,
     restoration_effect: Option<Effect>,
+    command_native_started: bool,
+    durable_checkpoint: Option<LedgerCheckpoint>,
+    durability_failed: bool,
 }
 impl Coordinator {
+    pub(super) fn recover(
+        catalog: Catalog,
+        document: &super::journal::JournalDocument,
+    ) -> Result<Self, CoordinatorError> {
+        document
+            .validate()
+            .map_err(|error| CoordinatorError::Gate(GateError::Durability(error)))?;
+        let mut sources = Vec::with_capacity(document.sources.len());
+        for source in &document.sources {
+            sources.push(Source::new(
+                catalog.recover_source(&source.snapshot, source.config.as_ref())?,
+            )?);
+        }
+        let mut recovered = Self::new(catalog);
+        recovered.restoration_effect = document.restoration_effect;
+        for stored in &document.resources {
+            let original = Arc::clone(&sources[stored.original.0 as usize]);
+            let current = Arc::clone(&sources[stored.current.0 as usize]);
+            if original.config.is_none()
+                || !original
+                    .operation
+                    .baseline_states()?
+                    .iter()
+                    .any(|state| state.key == stored.key && state.value == stored.baseline)
+            {
+                return Err(CatalogError::InvalidPlan("journal first baseline mismatch").into());
+            }
+            for source in [&original, &current] {
+                if !source.operation.resources().iter().any(|claim| {
+                    claim.key == stored.key
+                        && claim.desired.semantics == stored.desired.semantics
+                        && claim.desired.version == stored.desired.version
+                }) {
+                    return Err(CatalogError::InvalidPlan("journal source claims mismatch").into());
+                }
+            }
+            recovered.resources.insert(
+                stored.key.clone(),
+                ResourceRecord {
+                    original,
+                    current,
+                    baseline: stored.baseline.clone(),
+                    desired: stored.desired.clone(),
+                    confirmed: stored.confirmed.clone(),
+                    possible: stored.attempted.clone(),
+                    owners: stored.owners.iter().copied().collect(),
+                    status: stored.status,
+                },
+            );
+        }
+        for stored in &document.owners {
+            let source = Arc::clone(&sources[stored.source.0 as usize]);
+            if !source
+                .operation
+                .descriptor()
+                .activation_modes
+                .contains(&stored.mode)
+                || stored.resources.iter().any(|key| {
+                    !source.operation.resources().iter().any(|claim| {
+                        claim.key == *key && claim.desired == recovered.resources[key].desired
+                    })
+                })
+            {
+                return Err(CatalogError::InvalidPlan("journal owner intent mismatch").into());
+            }
+            recovered.owners.insert(
+                stored.owner,
+                OwnerRecord {
+                    source,
+                    mode: stored.mode,
+                    resources: stored.resources.clone(),
+                    status: stored.status,
+                },
+            );
+        }
+        Ok(recovered)
+    }
+    pub(super) fn apply_recovery(
+        &mut self,
+        plan: &super::recovery::RecoveryPlan,
+        control: &mut dyn ExecutionControl,
+    ) -> CommandResult {
+        if plan.blocked() || self.durability_failed {
+            return self.result(
+                Outcome::RecoveryRequired,
+                Some(CoordinatorError::Gate(GateError::Durability(
+                    plan.error
+                        .clone()
+                        .unwrap_or(super::journal::JournalError::Blocked),
+                ))),
+                control,
+            );
+        }
+        let covered = plan
+            .reattach
+            .iter()
+            .chain(&plan.release)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if covered.len() != plan.reattach.len() + plan.release.len()
+            || covered != self.owners.keys().copied().collect()
+            || plan.retire.iter().any(|target| {
+                !matches!(
+                    target,
+                    TargetIdentity::Process(_) | TargetIdentity::Session(_)
+                )
+            })
+        {
+            return self.result(
+                Outcome::RecoveryRequired,
+                Some(CoordinatorError::ResourceSetChanged),
+                control,
+            );
+        }
+        let before = self.checkpoint();
+        let before_snapshot = self.snapshot();
+        self.command_native_started = false;
+        self.durable_checkpoint = Some(before.clone());
+        let mut error = None;
+        // A native producer proves attachment; setting readback proves only
+        // the exact current value. Never promote another historical or planned
+        // snapshot value to new app-written evidence.
+        let active = plan.reattach.iter().copied().collect::<BTreeSet<_>>();
+        let keys = self
+            .resources
+            .iter()
+            .filter(|(key, record)| {
+                record.owners.iter().any(|owner| active.contains(owner))
+                    && !plan
+                        .retire
+                        .iter()
+                        .any(|ended| ended_lifetime(&key.target, ended))
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            let source = Arc::clone(&self.resources[&key].current);
+            match source
+                .operation
+                .observe_resources(std::slice::from_ref(&key))
+            {
+                Ok(states) => {
+                    let state = &states[0];
+                    let record = self.resources.get_mut(&key).unwrap();
+                    let evidenced =
+                        state.value == record.confirmed || record.possible.contains(&state.value);
+                    if state.value == record.desired && evidenced {
+                        record.confirmed = state.value.clone();
+                        record.possible.clear();
+                        record.status = active_status(source.operation.effect());
+                    } else if evidenced || state.value == record.baseline {
+                        record.status = ModuleStatus::RecoveryRequired;
+                    } else {
+                        record.status = ModuleStatus::ExternalChange;
+                        error = Some(CoordinatorError::ExternalDrift(vec![key.clone()]));
+                    }
+                }
+                Err(failure) => {
+                    let failure = CoordinatorError::from(failure);
+                    let owners = self.resources[&key]
+                        .owners
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    for owner in owners {
+                        self.mark_pending(owner, std::slice::from_ref(&key), &failure);
+                    }
+                    error = Some(failure);
+                }
+            }
+        }
+        for owner in &plan.reattach {
+            if let Some(request) = self.owners.get_mut(owner) {
+                request.status = if request.resources.iter().any(|key| {
+                    self.resources
+                        .get(key)
+                        .is_some_and(|record| unresolved(record.status))
+                }) {
+                    ModuleStatus::RecoveryRequired
+                } else {
+                    active_status(request.source.operation.effect())
+                };
+            }
+        }
+        // Expiry concerns actual resource keys; the original adapter may remain
+        // bound to a dead activation while restoring a live Machine/User field.
+        for ended in &plan.retire {
+            let result = self.retire(ended, control);
+            if result.error.is_some() {
+                error = result.error;
+            }
+        }
+        for owner in &plan.release {
+            let result = self.release(*owner, control);
+            if result.error.is_some() {
+                error = result.error;
+            }
+        }
+        let unresolved = self
+            .resources
+            .values()
+            .any(|record| unresolved(record.status));
+        let result = self.result(
+            if unresolved {
+                Outcome::RecoveryRequired
+            } else if self.owners.is_empty() && !covered.is_empty() {
+                Outcome::Released
+            } else {
+                Outcome::Unchanged
+            },
+            error,
+            control,
+        );
+        self.finish_transition(result, before, before_snapshot, control)
+    }
     pub fn new(catalog: Catalog) -> Self {
         Self {
             catalog,
             resources: BTreeMap::new(),
             owners: BTreeMap::new(),
             restoration_effect: None,
+            command_native_started: false,
+            durable_checkpoint: None,
+            durability_failed: false,
         }
     }
     pub fn snapshot(&self) -> CoordinatorSnapshot {
         CoordinatorSnapshot {
+            restoration_effect: self.restoration_effect,
             resources: self
                 .resources
                 .iter()
@@ -182,8 +416,10 @@ impl Coordinator {
                     status: record.status,
                     baseline_source: record.original.operation.descriptor().id.clone(),
                     baseline_snapshot: record.original.snapshot.clone(),
+                    baseline_config: record.original.config.clone(),
                     current_source: record.current.operation.descriptor().id.clone(),
                     current_snapshot: record.current.snapshot.clone(),
+                    current_config: record.current.config.clone(),
                     confirmed: record.confirmed.clone(),
                     possible: record.possible.clone(),
                 })
@@ -199,6 +435,7 @@ impl Coordinator {
                     source: record.source.operation.descriptor().id.clone(),
                     target: record.source.operation.target().clone(),
                     config: record.source.config.clone(),
+                    snapshot: record.source.snapshot.clone(),
                 })
                 .collect(),
         }
@@ -223,7 +460,26 @@ impl Coordinator {
         command: Command,
         control: &mut dyn ExecutionControl,
     ) -> CommandResult {
-        self.restoration_effect = None;
+        if matches!(command, Command::Observe { .. }) {
+            return self.dispatch(command, control);
+        }
+        if self.durability_failed {
+            return self.result(
+                Outcome::RecoveryRequired,
+                Some(CoordinatorError::Gate(GateError::Durability(
+                    super::journal::JournalError::Blocked,
+                ))),
+                control,
+            );
+        }
+        let before = self.checkpoint();
+        let before_snapshot = self.snapshot();
+        self.command_native_started = false;
+        self.durable_checkpoint = None;
+        let result = self.dispatch(command, control);
+        self.finish_transition(result, before, before_snapshot, control)
+    }
+    fn dispatch(&mut self, command: Command, control: &mut dyn ExecutionControl) -> CommandResult {
         match command {
             Command::Acquire {
                 owner,
@@ -245,7 +501,23 @@ impl Coordinator {
         }
     }
     pub(super) fn shutdown(&mut self, control: &mut dyn ExecutionControl) -> CommandResult {
-        self.restoration_effect = None;
+        if self.durability_failed {
+            return self.result(
+                Outcome::RecoveryRequired,
+                Some(CoordinatorError::Gate(GateError::Durability(
+                    super::journal::JournalError::Blocked,
+                ))),
+                control,
+            );
+        }
+        let before = self.checkpoint();
+        let before_snapshot = self.snapshot();
+        self.command_native_started = false;
+        self.durable_checkpoint = None;
+        let result = self.shutdown_inner(control);
+        self.finish_transition(result, before, before_snapshot, control)
+    }
+    fn shutdown_inner(&mut self, control: &mut dyn ExecutionControl) -> CommandResult {
         let session_owners = self
             .owners
             .iter()
@@ -268,6 +540,56 @@ impl Coordinator {
         } else {
             self.result(Outcome::Released, error, control)
         }
+    }
+    fn checkpoint(&self) -> LedgerCheckpoint {
+        LedgerCheckpoint {
+            resources: self.resources.clone(),
+            owners: self.owners.clone(),
+            restoration_effect: self.restoration_effect,
+        }
+    }
+    fn restore_checkpoint(&mut self, checkpoint: LedgerCheckpoint) {
+        self.resources = checkpoint.resources;
+        self.owners = checkpoint.owners;
+        self.restoration_effect = checkpoint.restoration_effect;
+    }
+    fn finish_transition(
+        &mut self,
+        result: CommandResult,
+        before: LedgerCheckpoint,
+        before_snapshot: CoordinatorSnapshot,
+        control: &mut dyn ExecutionControl,
+    ) -> CommandResult {
+        if self.command_native_started
+            || self.durable_checkpoint.is_some()
+            || self.snapshot() != before_snapshot
+        {
+            if let Err(error) = control.commit_transition(&self.snapshot()) {
+                if self.command_native_started {
+                    let checkpoint = self.durable_checkpoint.take().unwrap_or(before);
+                    self.restore_checkpoint(checkpoint);
+                    for resource in self.resources.values_mut() {
+                        resource.status = ModuleStatus::RecoveryRequired;
+                    }
+                    for owner in self.owners.values_mut() {
+                        owner.status = ModuleStatus::RecoveryRequired;
+                    }
+                } else {
+                    self.restore_checkpoint(before);
+                }
+                self.durability_failed = true;
+                return self.result(
+                    if self.command_native_started {
+                        Outcome::RecoveryRequired
+                    } else {
+                        Outcome::Rejected
+                    },
+                    Some(CoordinatorError::Gate(error)),
+                    control,
+                );
+            }
+        }
+        result
     }
     fn acquire(
         &mut self,
@@ -555,17 +877,21 @@ impl Coordinator {
                     self.undo_provisional(&provisional);
                     return Err(CoordinatorError::Gate(error));
                 }
+                self.durable_checkpoint = Some(self.checkpoint());
                 if !operation.is_restoration() && control.cancellation_requested() {
                     self.undo_provisional(&provisional);
                     return Err(CoordinatorError::Gate(GateError::Cancelled));
                 }
                 let previously_possible = *possible_write;
+                let previously_started = self.command_native_started;
                 *possible_write = true;
+                self.command_native_started = true;
                 match operation.execute_step_expected(step, &proof) {
                     Err(failure) => {
                         if !failure.native_started {
                             self.undo_provisional(&provisional);
                             *possible_write = previously_possible;
+                            self.command_native_started = previously_started;
                         }
                         self.capture_possible(source, &writes);
                         return Err(failure.error.into());
@@ -617,6 +943,7 @@ impl Coordinator {
                 control
                     .after_verified_write(&intent)
                     .map_err(CoordinatorError::Gate)?;
+                self.durable_checkpoint = Some(self.checkpoint());
             }
             control.publish(self.snapshot());
         }
@@ -731,6 +1058,13 @@ impl Coordinator {
             if let Err(failure) = result {
                 self.mark_pending(owner, std::slice::from_ref(key), &failure);
                 error = Some(failure);
+            }
+            // The next field's durable intent must not reference a field that
+            // was already restored and removed from the resource ledger.
+            if let Some(request) = self.owners.get_mut(&owner) {
+                request
+                    .resources
+                    .retain(|key| self.resources.contains_key(key));
             }
         }
         let remaining = pending
@@ -873,7 +1207,7 @@ fn unresolved(status: ModuleStatus) -> bool {
             | ModuleStatus::PermissionDenied
     )
 }
-fn effect_rank(effect: Effect) -> u8 {
+pub(super) fn effect_rank(effect: Effect) -> u8 {
     match effect {
         Effect::Immediate => 0,
         Effect::GameRestartRequired => 1,
@@ -903,6 +1237,9 @@ mod tests {
     #[derive(Default)]
     struct Control;
     impl ExecutionControl for Control {
+        fn commit_transition(&mut self, _: &CoordinatorSnapshot) -> Result<(), GateError> {
+            Ok(())
+        }
         fn cancellation_requested(&self) -> bool {
             false
         }
@@ -923,6 +1260,9 @@ mod tests {
         after_error: bool,
     }
     impl ExecutionControl for FaultControl {
+        fn commit_transition(&mut self, _: &CoordinatorSnapshot) -> Result<(), GateError> {
+            Ok(())
+        }
         fn cancellation_requested(&self) -> bool {
             self.cancel
         }
@@ -1583,6 +1923,9 @@ mod tests {
             native: ScalarModule,
         }
         impl ExecutionControl for DenyLater {
+            fn commit_transition(&mut self, _: &CoordinatorSnapshot) -> Result<(), GateError> {
+                Ok(())
+            }
             fn cancellation_requested(&self) -> bool {
                 false
             }
@@ -1633,6 +1976,9 @@ mod tests {
             native: ScalarModule,
         }
         impl ExecutionControl for ChangeLater {
+            fn commit_transition(&mut self, _: &CoordinatorSnapshot) -> Result<(), GateError> {
+                Ok(())
+            }
             fn cancellation_requested(&self) -> bool {
                 false
             }
@@ -1855,5 +2201,95 @@ mod tests {
         );
         assert!(new_end.snapshot.owners.is_empty());
         assert_eq!(scalar.value(), 7);
+    }
+    struct FailedCommit;
+    impl ExecutionControl for FailedCommit {
+        fn cancellation_requested(&self) -> bool {
+            false
+        }
+        fn before_write(&mut self, _: &WriteIntent<'_>) -> Result<(), GateError> {
+            Ok(())
+        }
+        fn after_verified_write(&mut self, _: &WriteIntent<'_>) -> Result<(), GateError> {
+            Ok(())
+        }
+        fn publish(&mut self, _: CoordinatorSnapshot) {}
+        fn commit_transition(&mut self, _: &CoordinatorSnapshot) -> Result<(), GateError> {
+            Err(GateError::Rejected("durable transition refused"))
+        }
+    }
+    #[test]
+    fn failed_no_write_transition_never_discards_or_changes_durable_ownership() {
+        for scenario in 0..4 {
+            let (mut coordinator, scalar) = scalar_fixture(7);
+            if scenario != 0 {
+                acquire_scalar(&mut coordinator, &scalar, 1, 12, ActivationMode::Session);
+            }
+            if scenario == 3 {
+                acquire_scalar(&mut coordinator, &scalar, 2, 12, ActivationMode::Session);
+            }
+            let before = coordinator.snapshot();
+            let writes = scalar.writes();
+            let command = match scenario {
+                0 => Command::Acquire {
+                    owner: owner(1),
+                    config: scalar.config_envelope(&ScalarConfig { value: 7 }).unwrap(),
+                    target: target(),
+                    mode: ActivationMode::Session,
+                },
+                1 => Command::Acquire {
+                    owner: owner(2),
+                    config: scalar.config_envelope(&ScalarConfig { value: 12 }).unwrap(),
+                    target: target(),
+                    mode: ActivationMode::Session,
+                },
+                2 => Command::Acquire {
+                    owner: owner(1),
+                    config: scalar.config_envelope(&ScalarConfig { value: 12 }).unwrap(),
+                    target: target(),
+                    mode: ActivationMode::Manual,
+                },
+                _ => Command::Release { owner: owner(2) },
+            };
+            let result = coordinator.handle(command, &mut FailedCommit);
+            assert_eq!(
+                result.outcome,
+                Outcome::Rejected,
+                "a zero-write ownership transition still requires durable publication"
+            );
+            assert_eq!(result.snapshot, before);
+            assert_eq!(scalar.writes(), writes);
+            assert!(result.error.is_some());
+        }
+    }
+    #[test]
+    fn successful_native_restore_followed_by_failed_final_commit_retains_recovery_evidence() {
+        let (mut coordinator, scalar) = scalar_fixture(7);
+        let original = acquire_scalar(&mut coordinator, &scalar, 1, 12, ActivationMode::Session);
+        let result = coordinator.handle(Command::Release { owner: owner(1) }, &mut FailedCommit);
+        assert_eq!(
+            result.outcome,
+            Outcome::RecoveryRequired,
+            "a failed final journal transition cannot erase restored evidence"
+        );
+        assert_eq!(scalar.value(), 7);
+        assert_eq!(result.snapshot.resources.len(), 1);
+        assert_eq!(result.snapshot.owners.len(), 1);
+        assert_eq!(
+            result.snapshot.resources[0].baseline,
+            original.snapshot.resources[0].baseline
+        );
+        let writes = scalar.writes();
+        let blocked = acquire_scalar(&mut coordinator, &scalar, 2, 13, ActivationMode::Session);
+        assert_eq!(blocked.outcome, Outcome::RecoveryRequired);
+        assert_eq!(scalar.writes(), writes);
+        let observed = coordinator.handle(
+            Command::Observe {
+                feature: FeatureId::new("test_scalar").unwrap(),
+                target: target(),
+            },
+            &mut FailedCommit,
+        );
+        assert!(matches!(observed.outcome, Outcome::Observed(_)));
     }
 }

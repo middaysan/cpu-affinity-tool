@@ -68,7 +68,7 @@ Key directories:
 - `src/` - application runtime code and entrypoints
 - `src/app/shell/` - the top-level `eframe::App` shell, route enums, transient UI sessions, typed shell events, and presenter module ownership
 - `src/app/features/` - bounded feature modules for `rules`, `execution`, `preferences`, `shortcut`, `topology`, `diagnostics`, and the dormant `tuning` foundation
-- `src/app/features/tuning/platform/` - platform-independent typed tuning contracts, bounded versioned codecs, static heterogeneous module catalog, resource coordinator and bounded serial runner; test-only backend/module shapes live under `tuning/testing/`
+- `src/app/features/tuning/platform/` - typed tuning contracts/codecs, static heterogeneous catalog, resource coordinator, bounded serial runner, recovery journal/decisions and worker-local writer composition; test-only backend/module shapes live under `tuning/testing/`
 - `src/app/adapters/` - seams for persisted state loading, OS helpers, and installed-app discovery
 - `src/app/runtime/` - thin composition-root state facade kept around `AppState`
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
@@ -114,7 +114,7 @@ Layers:
   - `preferences` owns theme and monitoring toggles
   - `topology` owns CPU model/thread detection helpers
   - `diagnostics` owns startup logging, typed diagnostic event shape, bounded local crash-report formatting/capture, safe report discovery/retention, report-list state, and the Windows-only read-only Event Log lookup
-  - `tuning` currently owns the dormant modular-settings facade, typed target/resource and module contracts, bounded configuration/snapshot codecs, static catalog, resource coordinator and serial operation runner; it is not yet composed into `AppState`, persisted state, shell routes, or execution monitoring
+  - `tuning` currently owns the dormant modular-settings facade, typed contracts/codecs, static catalog, resource coordinator, serial runner, bounded recovery journal and typed recovery decisions; it is not yet composed into `AppState`, persisted state, shell routes, or execution monitoring
 - `adapters` isolate storage loading, OS helper calls, and installed-app discovery
 - `models` hold persisted schema plus domain and runtime-adjacent value types
 - `runtime` is now a thin composition-root facade around `AppState`
@@ -189,9 +189,13 @@ Tuning foundation status:
 - prepared operations retain their originating typed adapter, first snapshot, and exact resource declarations; scoped restoration can preserve independently retained fields
 - the coordinator acquires complete resource claims atomically, shares equal requests, rejects conflicting requests, and retains the first baseline/restorer independently of later writers; private expected-current evidence guards execution and compensation
 - the serial runner owns the coordinator on one worker, bounds command/generation admission, exposes generation-tagged tickets and immutable snapshots, and retains the same worker through shutdown timeout; faulted or unresolved cleanup is visible rather than reported as successful shutdown
-- production runner write admission is closed; permissive simulator execution exists only under `cfg(test)`
+- the bounded journal stores deduplicated typed original/current/owner sources and exact confirmed/attempted tokens; intent, verification and zero-write ownership transitions are durable boundaries, with unknown/corrupt input and failed-publication evidence retained without a clean fallback
+- typed recovery hydrates sources without native reads or baseline recapture and distinguishes verified attachment, positive actual-resource expiry and Unknown; contradictory lifetime evidence and unknown drift block blind restoration
+- continuity identity preserves an exact nonzero 32-byte nonce with versioned producer/domain/registry view; legacy bare-array identities are retained as blocked raw journal evidence. This wire contract does not supply a canonical boot producer
+- a Send factory constructs the potentially !Send store/lease on the serial worker; its lifetime covers commands, panic handling and shutdown publication, while timeout/caller Drop retains the still-working context
+- production runner write admission is closed, including canonical factory initialization with a clean journal; permissive simulator execution exists only under `cfg(test)`
 - module contribution rules are recorded in `src/app/features/tuning/README.md`; the specification remains `docs/modular-gaming-features-plan.md`
-- durable journaling/native writer lease, profile/session/UI integration, authoritative target lifetime producers, and real Windows adapters remain later staged work; in-memory ownership does not claim crash recovery or safe native writes by itself
+- nonshipping native tests demonstrate forced-process recovery at intent, physical isolated target write and verified-progress boundaries, with the same worker lease retained through shutdown timeout; this does not certify canonical/elevated/boot scope or authoritative game attachment, which remain gates. Profile/session/UI integration and real setting adapters remain later work
 
 ## Concurrency model
 - GUI runs on the main thread
@@ -308,6 +312,7 @@ Data source separation:
 
 ## Platform boundary
 `libs/os_api` is the main boundary between the app and the OS. It covers:
+- dormant tuning metadata primitives: canonical Known Folder store with a worker-held file lease, bounded publication/validation, exact read-only machine/token/process identity and an opaque worker-only retained process lifetime guard; no gaming-setting writer is registered
 - Windows local named-pipe and mutex transport for saved-rule shortcut forwarding
 - process launch
 - installed-app discovery and activation on Windows
@@ -338,6 +343,7 @@ Internal backend structure:
   - `window`
   - `cpu`
   - `event_log`
+  - `tuning` - dormant metadata store/security/identity primitives, same-handle process lifetime observations and nonshipping isolated boot-marker probes; canonical boot/recovery admission remains unavailable
 - crate-root public shape remains intentionally narrow: external callers still interact through `OS` plus small boundary value types such as `PriorityClass` and `ShortcutSpec`
 - Linux backend remains a single-file minimal backend and is not forced into parity with the Windows internal layout
 
@@ -414,6 +420,7 @@ Local verification commands:
 - `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-pdb-verifier.ps1 -ExePath target/release/cpu-affinity-tool.exe -PdbPath target/release/cpu_affinity_tool.pdb`
 - `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe`
 - `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-crash-reports.ps1`
+- `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-tuning-recovery.ps1`
 - `cargo test --features linux --bin cpu-affinity-tool-linux`
 - `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`
 - `cargo build --release --features linux --bin cpu-affinity-tool-linux`
@@ -427,14 +434,14 @@ Current CI facts:
 - runners:
   - `windows-latest` for the Windows release-path job
   - `ubuntu-24.04` for the Linux desktop beta job
-- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, runs feature-gated real-binary crash probes, reproduces the stable line-table release build, verifies the built EXE/PDB identity and manifest resource, and verifies the Linux beta binary on `ubuntu-24.04`
+- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, runs feature-gated real-binary crash probes and isolated forced-process tuning recovery probes, reproduces the stable line-table release build, verifies the built EXE/PDB identity and manifest resource, and verifies the Linux beta binary on `ubuntu-24.04`
 - tests are part of the committed CI contract for `ci.yml`; both jobs require committed lockfiles to remain unchanged after compilation/tests, and the Windows release build reports EXE/PDB byte sizes
 - the Windows CI job validates the feature-gated Windows binary path explicitly with `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --features windows --bin cpu-affinity-tool`, `scripts/build-windows-release.ps1`, `scripts/test-windows-pdb-verifier.ps1`, and `scripts/assert-windows-release-manifest.ps1` against the built release EXE/PDB pair
 
 Current release facts:
 - stable GitHub Release workflow reacts to pushed tags matching `v*`
 - the stable release workflow validates that the tag matches `vX.Y.Z`, that `Cargo.toml` version matches `X.Y.Z`, and that `changelogs/vX.Y.Z.txt` exists before building
-- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, runs `scripts/test-windows-crash-reports.ps1`, builds `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb` with `scripts/build-windows-release.ps1`, verifies the EXE/PDB basename, GUID, and age with `scripts/assert-windows-pdb-matches.ps1`, and then verifies the built exe manifest resource with `scripts/assert-windows-release-manifest.ps1` in the same runner before upload
+- the stable Windows build job restores Rust cache, runs `cargo fmt --all -- --check`, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features windows --bin cpu-affinity-tool`, runs `scripts/test-windows-crash-reports.ps1` and `scripts/test-windows-tuning-recovery.ps1`, builds `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb` with `scripts/build-windows-release.ps1`, verifies the EXE/PDB basename, GUID, and age with `scripts/assert-windows-pdb-matches.ps1`, and then verifies the built exe manifest resource with `scripts/assert-windows-release-manifest.ps1` in the same runner before upload
 - the stable release publish job runs on `ubuntu-24.04` and publishes `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb`; missing declared release files fail the publish step
 - stable release target: `x86_64-pc-windows-msvc`
 - Linux beta prerelease workflow reacts to pushed tags matching `linux-beta-v*`
@@ -452,6 +459,7 @@ Additional release facts:
 - `scripts/assert-windows-pdb-matches.ps1` uses the Windows `dbghelp` API to require the expected PDB basename and matching EXE/PDB CodeView GUID and age before publishing
 - `scripts/assert-windows-release-manifest.ps1` reads the built Windows exe `RT_MANIFEST` resource and asserts `requireAdministrator` plus `uiAccess=false`; UAC prompt behavior remains manual smoke validation
 - `scripts/test-windows-crash-reports.ps1` builds a debug binary with the non-shipping `diagnostics-test-controls` feature and verifies pre-Tokio main-thread panic plus synthetic native-loop-error report ordering, completion markers, event kinds, and exit codes
+- `scripts/test-windows-tuning-recovery.ps1` uses nonshipping `tuning-test-controls`, requires the three named recovery tests to exist, and runs the isolated native subprocess suite serially. Its Rust fixtures own temporary metadata and scalar targets; it does not certify canonical ProgramData, elevated cross-user or boot continuity.
 - manual pre-release validation lives in `docs/release-checklist.md` and its subordinate `docs/release-smoke-matrix.md`
 - manual Linux beta pre-release validation lives in `docs/linux-beta-release-checklist.md`
 - `docs/release-process.md` documents the current automated stable tag-release flow, Linux beta prerelease flow, and their current artifact limits
@@ -473,6 +481,7 @@ Privilege model:
 - Windows release binary embeds `app.manifest` with `requestedExecutionLevel=requireAdministrator` and `uiAccess="false"`
 - Windows CI and the stable release workflow verify the built release exe's embedded manifest resource after `cargo build --release --features windows --bin cpu-affinity-tool`
 - local test/debug binaries do not embed the administrator manifest so CI and local `cargo test` can run without elevation
+- `tuning-test-controls` is an explicit nonshipping root/os_api feature for isolated tuning probes; temporary native fixtures do not certify canonical ProgramData, elevated cross-user or reboot behavior
 
 ## AGENTS.md maintenance rules
 Update `AGENTS.md` in the same change when you alter:

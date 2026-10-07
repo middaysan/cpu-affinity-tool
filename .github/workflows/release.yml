@@ -73,6 +73,10 @@ jobs:
       - name: Run tests
         run: cargo test --features windows --bin cpu-affinity-tool
 
+      - name: Run Windows tuning recovery probes
+        shell: pwsh
+        run: ./scripts/test-windows-tuning-recovery.ps1
+
       - name: Build Windows release binary
         shell: pwsh
         run: ./scripts/build-windows-release.ps1

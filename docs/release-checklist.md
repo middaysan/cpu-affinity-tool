@@ -34,6 +34,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-release.ps1`.
 - Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-pdb-verifier.ps1 -ExePath target/release/cpu-affinity-tool.exe -PdbPath target/release/cpu_affinity_tool.pdb`.
 - Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-crash-reports.ps1`.
+- Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-tuning-recovery.ps1`. This gate requires all three isolated forced-process recovery tests; passing it does not complete canonical/elevated/boot admission.
 - Run `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe`.
 - Run `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`.
 - Run `cargo test --features linux --bin cpu-affinity-tool-linux`.

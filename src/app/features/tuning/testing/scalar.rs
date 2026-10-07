@@ -268,6 +268,9 @@ impl ScalarModule {
     }
 }
 impl Module for ScalarModule {
+    fn snapshot_config_matches(&self, snapshot: &ScalarSnapshot, config: &ScalarConfig) -> bool {
+        snapshot.desired == config.value
+    }
     type Config = ScalarConfig;
     type Observation = i32;
     type Snapshot = ScalarSnapshot;

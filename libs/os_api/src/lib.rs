@@ -1,6 +1,7 @@
 mod catalog;
 mod process;
 mod shortcut;
+pub mod tuning;
 pub use catalog::{
     InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
     InstalledPackageRuntimeInfo,

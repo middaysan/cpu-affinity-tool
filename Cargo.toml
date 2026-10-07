@@ -46,3 +46,4 @@ winres = "0.1.12"
 windows = []
 linux = []
 diagnostics-test-controls = []
+tuning-test-controls = ["os_api/tuning-test-controls"]

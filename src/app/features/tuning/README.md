@@ -1,12 +1,15 @@
 # Tuning module contribution contract
 
-The dormant platform supplies typed contracts, a catalog, an in-memory resource
-coordinator and a bounded serial runner. The production catalog is empty and
-runner write admission is closed. The two backend shapes and cross-adapter
-simulators under `testing/` compile only with `cfg(test)` and perform no OS changes.
-Durable journaling, cross-process coordination, crash recovery, authoritative
-native identity/lifetime producers, app-state integration and user controls remain
-later work. Those stages must pass before a writable module can ship.
+The dormant platform supplies typed contracts, a catalog, a resource coordinator,
+a bounded serial runner, a bounded recovery journal and typed recovery decisions.
+The production catalog is empty and write admission is closed. The Windows
+boundary supplies store/lease and identity primitives; canonical native admission
+remains closed pending scope/lifetime validation. The two backend shapes and
+cross-adapter simulators under `testing/` compile only with `cfg(test)`.
+Isolated forced-process recovery is demonstrated at three durable boundaries.
+Canonical/elevated/boot validation, authoritative game attachment, app-state
+integration and user controls remain staged work. Passing isolated test objects
+does not admit a writable module.
 
 The canonical specification is
 [`docs/modular-gaming-features-plan.md`](../../../../docs/modular-gaming-features-plan.md).
@@ -25,6 +28,12 @@ The Windows recommendations and exclusions are documented in
   first baselines, step verification, compensation and last-owner restoration.
 - `platform/runner.rs` owns bounded serial dispatch, generations, cancellation,
   terminal tickets, immutable snapshots and bounded shutdown.
+- `platform/journal.rs` owns aggregate limits, deduplicated typed source envelopes,
+  exact unknown input retention and durable intent/progress/ownership transitions.
+- `platform/recovery.rs` distinguishes verified attachment, positive expiry and
+  Unknown for each actual resource lifetime.
+- `platform/writer.rs` creates worker-local storage authority, imports retained
+  typed sources and maps bounded native errors. Its canonical factory is dormant.
 - `testing/scalar.rs` demonstrates a scalar machine setting.
 - `testing/user_setting.rs` demonstrates two native fields, exact absent/present
   values with original type and raw bytes, partial application, subset restoration,
@@ -48,6 +57,8 @@ exceptions to hide unused integrations.
    config/snapshot versions, supported targets, OS-setting resource fields, and
    activation modes. Read-only descriptors have no mutation resources or modes.
    Restart-required settings support only manual activation in this contract.
+   Implement the pure `snapshot_config_matches(snapshot, config)` hook: a decoded
+   request must agree with its retained typed snapshot without a native read.
 4. Return exact `ResourceClaim` keys and canonical desired tokens. A resource field
    describes the native setting independently of the feature ID. Tokens encode
    presence, native type, and value without lossy hashes; matching semantics,
@@ -158,11 +169,41 @@ Cancellation or a newer generation suppresses activation, while compensation and
 restoration continue. Shutdown timeout retains the same worker and ownership;
 unresolved cleanup and worker panic have explicit results. Retiring Process or
 Session resources requires an authoritative lifetime producer, not rule deletion,
-read denial or an unchecked PID. F4 supplies that producer.
+read denial or an unchecked PID. The OS boundary provides a query/synchronize-only
+process guard: exact creation/image/token identity and zero-timeout lifetime
+observations use the same retained object. A signaled guard proves that object's
+exit; query/open/wait failure remains Unknown. F4 wires authoritative game
+bindings and execution snapshots; this guard grants no setting writes.
 
-The worker exposes prewrite/progress seams for F3. They do not yet persist a
-write-ahead journal or acquire a native lease: production admission rejects all
-writes. F3 must durably record intent before every native call and preserve the
-same worker-owned lease through uncertain completion. No native rollback or
-forced-termination recovery guarantee is implemented here. Windows native smoke
-validation and Linux CI remain gates for later adapter/integration stages.
+The worker records intent before each call, verified progress before advancing,
+and ownership transitions even when they require no native write. The journal is
+limited to 4 MiB with at most 8448 deduplicated sources. Publication failure
+retains the previous and proposed evidence and closes mutation admission;
+observation remains available. Unknown codecs or targets never trigger a clean
+fallback, fresh baseline capture or eviction of unresolved state.
+
+Only a Send factory crosses threads. It creates and drops the potentially !Send
+store and native lease on the serial worker, around commands, panic handling and
+shutdown publication. Timeout or caller Drop does not release a still-working
+authority. Orderly shutdown has an explicit stamp and retains manual owners.
+Restart effects survive empty ledgers and unrelated later observations/transitions
+until a future explicit validated acknowledgement clears them.
+
+Hydration decodes original, current-writer and owner sources independently, without
+observing or recapturing native values. Recovery uses exact confirmed/attempted
+tokens, preserves external drift and rejects contradictory lifetime evidence.
+Production native admission remains closed even for an absent journal; a Clean
+store does not prove safe process/session provenance. Native scope, elevated
+cross-user and power-transition evidence plus Linux integration checks remain
+explicit gates. The nonshipping Windows recovery script verifies
+three forced-process boundaries against isolated physical scalar targets and
+requires each named test to exist before running the suite. These tests do not
+certify canonical/elevated/boot scope or native gaming settings. There is no
+immediate crash rollback guarantee.
+
+Continuity identity stores all 32 nonce bytes with a fixed versioned producer,
+domain and registry view; its shape is not native authenticity or a boot UUID.
+Test-domain identities are distinct and unavailable in production. The unreleased
+journal format remains version 1, while legacy bare-array continuity identities
+are blocked with their exact raw bytes retained; there is no inferred upgrade.
+The canonical continuity producer remains unavailable pending its native matrix.
