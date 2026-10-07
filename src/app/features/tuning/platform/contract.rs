@@ -126,6 +126,7 @@ numeric_identity!(OwnerId, u64, NonZeroU64);
 numeric_identity!(OperationId, u64, NonZeroU64);
 numeric_identity!(LogonId, u64, NonZeroU64);
 numeric_identity!(SchemaVersion, u32, NonZeroU32);
+numeric_identity!(ConfigGeneration, u64, NonZeroU64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 enum ContinuityProducer {
@@ -541,6 +542,330 @@ impl TargetIdentity {
             }
             _ => None,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredIntent {
+    pub profile: ProfileId,
+    pub generation: ConfigGeneration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleActivationWire {
+    group: crate::app::shared::ids::GroupId,
+    rule: crate::app::shared::ids::RuleId,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RuleActivationWire", into = "RuleActivationWire")]
+pub struct RuleActivation(RuleActivationWire);
+impl RuleActivation {
+    pub fn new(
+        group: crate::app::shared::ids::GroupId,
+        rule: crate::app::shared::ids::RuleId,
+    ) -> Result<Self, InvalidIdentity> {
+        RuleActivationWire { group, rule }.try_into()
+    }
+    pub fn group(&self) -> &crate::app::shared::ids::GroupId {
+        &self.0.group
+    }
+    pub fn rule(&self) -> &crate::app::shared::ids::RuleId {
+        &self.0.rule
+    }
+}
+impl TryFrom<RuleActivationWire> for RuleActivation {
+    type Error = InvalidIdentity;
+    fn try_from(wire: RuleActivationWire) -> Result<Self, Self::Error> {
+        let valid =
+            |id: &str| !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control);
+        if valid(&wire.group.0) && valid(&wire.rule.0) {
+            Ok(Self(wire))
+        } else {
+            Err(InvalidIdentity)
+        }
+    }
+}
+impl From<RuleActivation> for RuleActivationWire {
+    fn from(value: RuleActivation) -> Self {
+        value.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivationEligibility {
+    Running,
+    Foreground,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GameActivationWire {
+    configured: ConfiguredIntent,
+    rule: RuleActivation,
+    eligibility: ActivationEligibility,
+    session: SessionIdentity,
+    processes: Vec<ProcessIdentity>,
+}
+/// Durable shape only. Native authenticity and complete eligibility must come
+/// from the execution/foreground producer; deserialization grants no authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "GameActivationWire", into = "GameActivationWire")]
+pub struct GameActivation(std::sync::Arc<GameActivationWire>);
+impl GameActivation {
+    pub fn new(
+        configured: ConfiguredIntent,
+        rule: RuleActivation,
+        eligibility: ActivationEligibility,
+        session: SessionIdentity,
+        processes: Vec<ProcessIdentity>,
+    ) -> Result<Self, InvalidIdentity> {
+        GameActivationWire {
+            configured,
+            rule,
+            eligibility,
+            session,
+            processes,
+        }
+        .try_into()
+    }
+    pub fn configured(&self) -> ConfiguredIntent {
+        self.0.configured
+    }
+    pub fn rule(&self) -> &RuleActivation {
+        &self.0.rule
+    }
+    pub fn eligibility(&self) -> ActivationEligibility {
+        self.0.eligibility
+    }
+    pub fn session(&self) -> &SessionIdentity {
+        &self.0.session
+    }
+    pub fn processes(&self) -> &[ProcessIdentity] {
+        &self.0.processes
+    }
+}
+impl TryFrom<GameActivationWire> for GameActivation {
+    type Error = InvalidIdentity;
+    fn try_from(mut wire: GameActivationWire) -> Result<Self, Self::Error> {
+        if wire.processes.is_empty()
+            || wire.processes.len() > 64
+            || wire
+                .processes
+                .iter()
+                .any(|process| process.session != wire.session)
+        {
+            return Err(InvalidIdentity);
+        }
+        wire.processes.sort();
+        let mut pids = std::collections::BTreeSet::new();
+        if wire
+            .processes
+            .iter()
+            .any(|process| !pids.insert(process.pid()))
+        {
+            return Err(InvalidIdentity);
+        }
+        struct Budget(usize);
+        impl std::io::Write for Budget {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self
+                    .0
+                    .checked_add(bytes.len())
+                    .filter(|count| *count <= 64 * 1024)
+                    .ok_or_else(|| std::io::Error::other("activation binding capacity"))?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        serde_json::to_writer(&mut Budget(0), &wire).map_err(|_| InvalidIdentity)?;
+        Ok(Self(std::sync::Arc::new(wire)))
+    }
+}
+impl From<GameActivation> for GameActivationWire {
+    fn from(value: GameActivation) -> Self {
+        std::sync::Arc::unwrap_or_clone(value.0)
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum ActivationBinding {
+    #[default]
+    Unknown,
+    Manual(ConfiguredIntent),
+    Game(GameActivation),
+}
+impl ActivationBinding {
+    pub fn configured(&self) -> Option<ConfiguredIntent> {
+        match self {
+            Self::Unknown => None,
+            Self::Manual(intent) => Some(*intent),
+            Self::Game(game) => Some(game.configured()),
+        }
+    }
+    pub(super) fn permits(&self, mode: ActivationMode, target: &TargetIdentity) -> bool {
+        match self {
+            Self::Unknown => true,
+            Self::Manual(_) => mode == ActivationMode::Manual,
+            Self::Game(game) if mode == ActivationMode::Session => match target {
+                TargetIdentity::Machine(machine)
+                | TargetIdentity::PnpDevice { machine, .. }
+                | TargetIdentity::Gpu { machine, .. }
+                | TargetIdentity::Display { machine, .. } => {
+                    game.session().user.machine == *machine
+                }
+                TargetIdentity::User(user) => game.session().user == *user,
+                TargetIdentity::Session(session) => game.session() == session,
+                TargetIdentity::Process(process) => game.processes().contains(process),
+            },
+            _ => false,
+        }
+    }
+    pub(super) fn succeeds(&self, previous: &Self) -> bool {
+        let same_actor = match (self, previous) {
+            (Self::Unknown, Self::Unknown) => true,
+            (Self::Manual(new), Self::Manual(old)) => new.profile == old.profile,
+            (Self::Game(new), Self::Game(old)) => {
+                new.configured().profile == old.configured().profile
+                    && new.rule() == old.rule()
+                    && new.eligibility() == old.eligibility()
+                    && new.session() == old.session()
+                    && new.processes() == old.processes()
+            }
+            _ => false,
+        };
+        same_actor
+            && match (self.configured(), previous.configured()) {
+                (Some(new), Some(old)) => new.generation >= old.generation,
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+#[cfg(test)]
+mod activation_binding_tests {
+    use super::*;
+    use crate::app::shared::ids::{GroupId, RuleId};
+    fn configured() -> ConfiguredIntent {
+        ConfiguredIntent {
+            profile: ProfileId::new(1).unwrap(),
+            generation: ConfigGeneration::new(1).unwrap(),
+        }
+    }
+    fn session() -> SessionIdentity {
+        SessionIdentity {
+            user: UserIdentity {
+                machine: MachineIdentity {
+                    id: MachineId::new([1; 16]).unwrap(),
+                },
+                sid: UserSid::new("S-1-5-21-10-20-30-1000").unwrap(),
+            },
+            session_id: 1,
+            logon: LogonId::new(17).unwrap(),
+            boot: BootId::new([2; 16]).unwrap(),
+        }
+    }
+    fn process(pid: u32) -> ProcessIdentity {
+        ProcessIdentity::new(
+            session(),
+            pid,
+            123,
+            ImagePath::new("C:\\Games\\game.exe").unwrap(),
+        )
+        .unwrap()
+    }
+    fn game(processes: Vec<ProcessIdentity>) -> Result<GameActivation, InvalidIdentity> {
+        GameActivation::new(
+            configured(),
+            RuleActivation::new(GroupId("group-0".into()), RuleId("rule-0".into()))?,
+            ActivationEligibility::Running,
+            session(),
+            processes,
+        )
+    }
+    #[test]
+    fn explicit_manual_and_exact_game_binding_round_trip() {
+        let manual = ActivationBinding::Manual(configured());
+        assert_eq!(
+            serde_json::from_value::<ActivationBinding>(serde_json::to_value(&manual).unwrap())
+                .unwrap(),
+            manual
+        );
+        let original = ActivationBinding::Game(
+            game(vec![process(43), process(42)]).expect("valid complete process set"),
+        );
+        assert_eq!(
+            serde_json::from_value::<ActivationBinding>(serde_json::to_value(&original).unwrap())
+                .unwrap(),
+            original
+        );
+        let ActivationBinding::Game(game) = original else {
+            unreachable!()
+        };
+        assert_eq!(game.processes()[0].pid(), 42);
+    }
+    #[test]
+    fn game_binding_rejects_empty_duplicate_mixed_session_and_oversized_sets() {
+        let valid = game(vec![process(42)]).expect("one eligible verified process");
+        let mut wire = serde_json::to_value(&valid).unwrap();
+        for processes in [
+            vec![],
+            vec![process(42), process(42)],
+            (1..=65).map(process).collect(),
+        ] {
+            wire["processes"] = serde_json::to_value(processes).unwrap();
+            assert!(serde_json::from_value::<GameActivation>(wire.clone()).is_err());
+        }
+        let mut other = process(43);
+        other.session.logon = LogonId::new(18).unwrap();
+        assert!(game(vec![process(42), other]).is_err());
+        let alias = ProcessIdentity::new(
+            session(),
+            42,
+            123,
+            ImagePath::new("C:\\Games\\other.exe").unwrap(),
+        )
+        .unwrap();
+        assert!(game(vec![process(42), alias]).is_err());
+    }
+    #[test]
+    fn shared_rule_ids_keep_existing_identity_and_validate_bounds_on_decode() {
+        let rule =
+            RuleActivation::new(GroupId("legitimate-id:old".into()), RuleId("rule-0".into()))
+                .expect("opaque logical IDs remain readable");
+        let mut wire = serde_json::to_value(rule).unwrap();
+        for invalid in [
+            "".to_owned(),
+            "x".repeat(129),
+            "rule\0path".into(),
+            "rule\n".into(),
+        ] {
+            wire["rule"] = serde_json::json!(invalid);
+            assert!(serde_json::from_value::<RuleActivation>(wire.clone()).is_err());
+        }
+        assert!(ConfigGeneration::new(0).is_err());
+    }
+    #[test]
+    fn activation_binding_budget_and_reused_pid_aliases_are_rejected() {
+        let reused = ProcessIdentity::new(
+            session(),
+            42,
+            124,
+            ImagePath::new("C:\\Games\\game.exe").unwrap(),
+        )
+        .unwrap();
+        assert!(game(vec![process(42), reused]).is_err());
+        let long = ImagePath::new(format!("C:\\Games\\{}.exe", "x".repeat(32000))).unwrap();
+        let processes = (1..=3)
+            .map(|pid| ProcessIdentity::new(session(), pid, 123, long.clone()).unwrap())
+            .collect();
+        assert!(
+            game(processes).is_err(),
+            "a bounded queued binding cannot retain megabytes of repeated provenance"
+        );
     }
 }
 

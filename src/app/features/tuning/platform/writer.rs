@@ -365,6 +365,7 @@ mod bootstrap_tests {
         let mut coordinator = Coordinator::new(catalog(module));
         coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: OwnerId::new(1).unwrap(),
                 config: module.config_envelope(&ScalarConfig { value: 12 }).unwrap(),
                 target: TargetIdentity::Machine(machine()),

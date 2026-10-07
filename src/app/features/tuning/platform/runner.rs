@@ -338,6 +338,14 @@ impl RunnerClient {
         if config_generation == 0 {
             return Err(SubmitError::InvalidGeneration);
         }
+        if matches!(&command, Command::Acquire { binding, .. } if binding
+                .configured()
+                .is_some_and(|intent| intent.generation.get() != config_generation))
+        {
+            // The ticket and durable intent must identify the same saved
+            // configuration before admission can cancel any earlier work.
+            return Err(SubmitError::InvalidGeneration);
+        }
         let generation_owner = match &command {
             Command::Acquire { owner, .. } | Command::Release { owner } => Some(*owner),
             _ => None,
@@ -956,10 +964,68 @@ mod tests {
     }
     fn acquire(module: &ScalarModule, who: u64, value: i32, mode: ActivationMode) -> Command {
         Command::Acquire {
+            binding: ActivationBinding::Unknown,
             owner: owner(who),
             config: module.config_envelope(&ScalarConfig { value }).unwrap(),
             target: target(),
             mode,
+        }
+    }
+    fn configured_acquire(
+        module: &ScalarModule,
+        value: i32,
+        generation: u64,
+        game: bool,
+    ) -> Command {
+        let configured = ConfiguredIntent {
+            profile: ProfileId::new(1).unwrap(),
+            generation: ConfigGeneration::new(generation).unwrap(),
+        };
+        let binding = if game {
+            use crate::app::shared::ids::{GroupId, RuleId};
+            let TargetIdentity::Machine(machine) = target() else {
+                unreachable!()
+            };
+            let session = SessionIdentity {
+                user: UserIdentity {
+                    machine,
+                    sid: UserSid::new("S-1-5-21-10-20-30-1000").unwrap(),
+                },
+                session_id: 1,
+                logon: LogonId::new(17).unwrap(),
+                boot: BootId::new([2; 16]).unwrap(),
+            };
+            let process = ProcessIdentity::new(
+                session.clone(),
+                42,
+                123,
+                ImagePath::new("C:\\Games\\game.exe").unwrap(),
+            )
+            .unwrap();
+            ActivationBinding::Game(
+                GameActivation::new(
+                    configured,
+                    RuleActivation::new(GroupId("group-0".into()), RuleId("rule-0".into()))
+                        .unwrap(),
+                    ActivationEligibility::Running,
+                    session,
+                    vec![process],
+                )
+                .unwrap(),
+            )
+        } else {
+            ActivationBinding::Manual(configured)
+        };
+        Command::Acquire {
+            owner: owner(1),
+            binding,
+            config: module.config_envelope(&ScalarConfig { value }).unwrap(),
+            target: target(),
+            mode: if game {
+                ActivationMode::Session
+            } else {
+                ActivationMode::Manual
+            },
         }
     }
     fn observe() -> Command {
@@ -1383,6 +1449,84 @@ mod tests {
             client.submit(observe(), 1),
             Err(SubmitError::Closed)
         ));
+    }
+
+    #[test]
+    fn configured_binding_generation_mismatch_never_enters_the_worker() {
+        for game in [false, true] {
+            let module = ScalarModule::new(7);
+            let mut runner =
+                Runner::start_fake(coordinator(&module), RunnerLimits::default()).unwrap();
+            let client = runner.client();
+            for submitted in [0, 2, 4] {
+                assert!(matches!(
+                    client.submit(configured_acquire(&module, 12, 3, game), submitted),
+                    Err(SubmitError::InvalidGeneration)
+                ));
+            }
+            assert_eq!(module.reads(), 0);
+            assert_eq!(module.writes(), 0);
+            assert!(client.snapshot().coordinator.owners.is_empty());
+            assert!(client.snapshot().queued.is_empty());
+            let valid = client
+                .submit(configured_acquire(&module, 12, 3, game), 3)
+                .unwrap();
+            assert_eq!(valid.stamp().operation.get(), 1);
+            let completed = result(&valid);
+            assert!(!completed.stale);
+            assert_eq!(module.value(), 12);
+            result(
+                &client
+                    .submit(Command::Release { owner: owner(1) }, 4)
+                    .unwrap(),
+            );
+            assert_eq!(module.value(), 7);
+            let legacy = client
+                .submit(acquire(&module, 1, 13, ActivationMode::Session), 5)
+                .unwrap();
+            assert_eq!(legacy.stamp().operation.get(), 3);
+            result(&legacy);
+            assert_eq!(module.value(), 13);
+            finish(&mut runner);
+            assert_eq!(module.value(), 7);
+        }
+    }
+
+    #[test]
+    fn configured_binding_generation_rejection_preserves_the_accepted_intent() {
+        let module = ScalarModule::new(7);
+        let block = Block::once();
+        module.set_observe_hook(Arc::clone(&block.hook));
+        let mut runner = Runner::start_fake(coordinator(&module), RunnerLimits::default()).unwrap();
+        let client = runner.client();
+        let first = client
+            .submit(configured_acquire(&module, 12, 1, false), 1)
+            .unwrap();
+        block.entered();
+        assert!(matches!(
+            client.submit(configured_acquire(&module, 13, 1, false), 2),
+            Err(SubmitError::InvalidGeneration)
+        ));
+        assert!(client.snapshot().queued.is_empty());
+        assert_eq!(module.writes(), 0);
+        block.release();
+        let completed = result(&first);
+        assert!(!completed.stale);
+        assert_eq!(module.value(), 12);
+        assert_eq!(module.writes(), 1);
+        let edit = client
+            .submit(configured_acquire(&module, 13, 2, false), 2)
+            .unwrap();
+        assert_eq!(edit.stamp().operation.get(), 2);
+        result(&edit);
+        assert_eq!(module.value(), 13);
+        result(
+            &client
+                .submit(Command::Release { owner: owner(1) }, 3)
+                .unwrap(),
+        );
+        assert_eq!(module.value(), 7);
+        finish(&mut runner);
     }
 
     #[test]

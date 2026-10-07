@@ -13,6 +13,7 @@ use std::{
 pub enum Command {
     Acquire {
         owner: OwnerId,
+        binding: ActivationBinding,
         config: ModuleEnvelope,
         target: TargetIdentity,
         mode: ActivationMode,
@@ -97,6 +98,7 @@ pub struct ResourceView {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnerView {
     pub owner: OwnerId,
+    pub binding: ActivationBinding,
     pub resources: Vec<ResourceKey>,
     pub status: ModuleStatus,
     pub mode: ActivationMode,
@@ -153,6 +155,7 @@ struct ResourceRecord {
 #[derive(Clone)]
 struct OwnerRecord {
     source: Arc<Source>,
+    binding: ActivationBinding,
     mode: ActivationMode,
     resources: Vec<ResourceKey>,
     status: ModuleStatus,
@@ -245,6 +248,7 @@ impl Coordinator {
                 stored.owner,
                 OwnerRecord {
                     source,
+                    binding: stored.binding.clone(),
                     mode: stored.mode,
                     resources: stored.resources.clone(),
                     status: stored.status,
@@ -429,6 +433,7 @@ impl Coordinator {
                 .iter()
                 .map(|(owner, record)| OwnerView {
                     owner: *owner,
+                    binding: record.binding.clone(),
                     resources: record.resources.clone(),
                     status: record.status,
                     mode: record.mode,
@@ -483,10 +488,11 @@ impl Coordinator {
         match command {
             Command::Acquire {
                 owner,
+                binding,
                 config,
                 target,
                 mode,
-            } => self.acquire(owner, config, target, mode, control),
+            } => self.acquire(owner, config, target, mode, binding, control),
             Command::Release { owner } => self.release(owner, control),
             Command::Observe { feature, target } => {
                 if control.cancellation_requested() {
@@ -597,10 +603,30 @@ impl Coordinator {
         config: ModuleEnvelope,
         target: TargetIdentity,
         mode: ActivationMode,
+        binding: ActivationBinding,
         control: &mut dyn ExecutionControl,
     ) -> CommandResult {
         if control.cancellation_requested() {
             return self.result(Outcome::Cancelled, None, control);
+        }
+        let previous_owner = self.owners.get(&owner).cloned();
+        let invalid_binding = !binding.permits(mode, &target)
+            || previous_owner.as_ref().is_some_and(|previous| {
+                !binding.succeeds(&previous.binding)
+                    || (binding.configured().is_some()
+                        && (previous.source.operation.descriptor().id != config.feature
+                            || previous.source.operation.target() != &target
+                            || (binding.configured() == previous.binding.configured()
+                                && previous.source.config.as_deref() != Some(&config))))
+            });
+        if invalid_binding {
+            return self.result(
+                Outcome::Rejected,
+                Some(CoordinatorError::Gate(GateError::Rejected(
+                    "activation binding mismatch",
+                ))),
+                control,
+            );
         }
         let prepared = match self
             .catalog
@@ -616,7 +642,6 @@ impl Coordinator {
             .iter()
             .map(|claim| claim.key.clone())
             .collect::<Vec<_>>();
-        let previous_owner = self.owners.get(&owner).cloned();
         if previous_owner.as_ref().is_some_and(|previous| {
             previous.resources.len() != keys.len()
                 || previous.resources.iter().any(|key| !keys.contains(key))
@@ -690,6 +715,7 @@ impl Coordinator {
         if previous_owner.is_some() && same_values {
             let previous = self.owners.get_mut(&owner).unwrap();
             previous.mode = mode;
+            previous.binding = binding;
             previous.source = Arc::clone(&prepared);
             return self.result(Outcome::Unchanged, None, control);
         }
@@ -731,6 +757,7 @@ impl Coordinator {
             owner,
             OwnerRecord {
                 source: Arc::clone(&prepared),
+                binding,
                 mode,
                 resources: keys.clone(),
                 status: ModuleStatus::Applying,
@@ -1314,6 +1341,209 @@ mod tests {
         catalog.register(scalar.clone()).unwrap();
         (Coordinator::new(catalog), scalar)
     }
+    fn activation_binding(rule: u64, generation: u64) -> ActivationBinding {
+        use crate::app::shared::ids::{GroupId, RuleId};
+        let process = ProcessIdentity::new(
+            session(),
+            40 + rule as u32,
+            123,
+            ImagePath::new("C:\\Games\\game.exe").unwrap(),
+        )
+        .unwrap();
+        ActivationBinding::Game(
+            GameActivation::new(
+                ConfiguredIntent {
+                    profile: ProfileId::new(rule).unwrap(),
+                    generation: ConfigGeneration::new(generation).unwrap(),
+                },
+                RuleActivation::new(GroupId("group-0".into()), RuleId(format!("rule-{rule}")))
+                    .unwrap(),
+                ActivationEligibility::Running,
+                session(),
+                vec![process],
+            )
+            .unwrap(),
+        )
+    }
+    fn bound_command(
+        scalar: &ScalarModule,
+        who: u64,
+        value: i32,
+        binding: ActivationBinding,
+    ) -> Command {
+        Command::Acquire {
+            owner: owner(who),
+            config: scalar.config_envelope(&ScalarConfig { value }).unwrap(),
+            target: target(),
+            mode: ActivationMode::Session,
+            binding,
+        }
+    }
+    #[test]
+    fn activation_binding_survives_sharing_capture_and_hydration() {
+        use super::super::journal::{JournalDocument, JournalLoad, JournalPhase, JournalStamp};
+        let (mut coordinator, scalar) = scalar_fixture(7);
+        let first = activation_binding(1, 1);
+        let second = activation_binding(2, 1);
+        assert_eq!(
+            coordinator
+                .handle(bound_command(&scalar, 1, 12, first.clone()), &mut Control)
+                .outcome,
+            Outcome::Applied(Effect::Immediate)
+        );
+        assert_eq!(
+            coordinator
+                .handle(bound_command(&scalar, 2, 12, second.clone()), &mut Control)
+                .outcome,
+            Outcome::Shared
+        );
+        assert_eq!(coordinator.snapshot().owners[0].binding, first);
+        assert_eq!(coordinator.snapshot().owners[1].binding, second);
+        let document = JournalDocument::capture(
+            session().user.machine,
+            1,
+            JournalStamp::Recovery,
+            JournalPhase::Recovery,
+            &coordinator.snapshot(),
+        )
+        .unwrap();
+        let JournalLoad::Known(document) =
+            JournalDocument::load(document.to_bytes().unwrap(), &session().user.machine)
+        else {
+            panic!("valid typed bindings");
+        };
+        assert_eq!(document.owners[0].binding, first);
+        let reads = scalar.reads();
+        let mut catalog = Catalog::default();
+        catalog.register(scalar.clone()).unwrap();
+        let recovered = Coordinator::recover(catalog, &document).unwrap();
+        assert_eq!(scalar.reads(), reads);
+        assert_eq!(recovered.snapshot().owners[0].binding, first);
+        assert_eq!(recovered.snapshot().owners[1].binding, second);
+    }
+    #[test]
+    fn activation_binding_owner_cannot_transfer_to_another_actor_before_reads() {
+        let (mut coordinator, scalar) = scalar_fixture(7);
+        coordinator.handle(
+            bound_command(&scalar, 1, 12, activation_binding(1, 1)),
+            &mut Control,
+        );
+        let before = coordinator.snapshot();
+        let reads = scalar.reads();
+        let writes = scalar.writes();
+        assert_eq!(
+            coordinator
+                .handle(
+                    bound_command(&scalar, 1, 12, activation_binding(2, 1)),
+                    &mut Control
+                )
+                .outcome,
+            Outcome::Rejected
+        );
+        assert_eq!(scalar.reads(), reads);
+        assert_eq!(scalar.writes(), writes);
+        assert_eq!(coordinator.snapshot(), before);
+    }
+    #[test]
+    fn activation_binding_same_generation_config_change_requires_new_saved_intent() {
+        let (mut coordinator, scalar) = scalar_fixture(7);
+        coordinator.handle(
+            bound_command(&scalar, 1, 12, activation_binding(1, 1)),
+            &mut Control,
+        );
+        let reads = scalar.reads();
+        let writes = scalar.writes();
+        assert_eq!(
+            coordinator
+                .handle(
+                    bound_command(&scalar, 1, 18, activation_binding(1, 1)),
+                    &mut Control
+                )
+                .outcome,
+            Outcome::Rejected
+        );
+        assert_eq!(scalar.reads(), reads);
+        assert_eq!(scalar.writes(), writes);
+        let result = coordinator.handle(
+            bound_command(&scalar, 1, 18, activation_binding(1, 2)),
+            &mut Control,
+        );
+        assert_eq!(result.outcome, Outcome::Applied(Effect::Immediate));
+        assert_eq!(
+            result.snapshot.resources[0].baseline.bytes(),
+            7i32.to_le_bytes()
+        );
+        assert_eq!(
+            result.snapshot.owners[0]
+                .binding
+                .configured()
+                .unwrap()
+                .generation
+                .get(),
+            2
+        );
+    }
+    #[test]
+    fn activation_binding_must_match_source_target_account_and_mode_before_reads() {
+        let (mut coordinator, scalar) = scalar_fixture(7);
+        let mut command = bound_command(&scalar, 1, 12, activation_binding(1, 1));
+        if let Command::Acquire { target, .. } = &mut command {
+            *target = TargetIdentity::Machine(MachineIdentity {
+                id: MachineId::new([9; 16]).unwrap(),
+            });
+        }
+        assert_eq!(
+            coordinator.handle(command, &mut Control).outcome,
+            Outcome::Rejected
+        );
+        assert_eq!(scalar.reads(), 0);
+        let mut command = bound_command(&scalar, 1, 12, activation_binding(1, 1));
+        if let Command::Acquire { mode, .. } = &mut command {
+            *mode = ActivationMode::Manual;
+        }
+        assert_eq!(
+            coordinator.handle(command, &mut Control).outcome,
+            Outcome::Rejected
+        );
+        assert_eq!(scalar.reads(), 0);
+        let mut other_user = session().user;
+        other_user.sid = UserSid::new("S-1-5-21-10-20-30-1001").unwrap();
+        let mut other_session = session();
+        other_session.logon = LogonId::new(18).unwrap();
+        let other_process = ProcessIdentity::new(
+            session(),
+            99,
+            123,
+            ImagePath::new("C:\\Games\\game.exe").unwrap(),
+        )
+        .unwrap();
+        for target in [
+            TargetIdentity::User(other_user),
+            TargetIdentity::Session(other_session),
+            TargetIdentity::Process(other_process),
+        ] {
+            let mut descriptor = crate::app::features::tuning::testing::scalar::descriptor();
+            descriptor.target_scopes = vec![target.scope()];
+            descriptor.resources[0].scope = target.scope();
+            let module = ScalarModule::with_descriptor(descriptor);
+            let mut catalog = Catalog::default();
+            catalog.register(module.clone()).unwrap();
+            let mut coordinator = Coordinator::new(catalog);
+            let result = coordinator.handle(
+                Command::Acquire {
+                    owner: owner(1),
+                    binding: activation_binding(1, 1),
+                    config: module.config_envelope(&ScalarConfig { value: 12 }).unwrap(),
+                    target,
+                    mode: ActivationMode::Session,
+                },
+                &mut Control,
+            );
+            assert_eq!(result.outcome, Outcome::Rejected);
+            assert_eq!(module.reads(), 0);
+            assert_eq!(module.writes(), 0);
+        }
+    }
     fn acquire_scalar(
         coordinator: &mut Coordinator,
         scalar: &ScalarModule,
@@ -1323,6 +1553,7 @@ mod tests {
     ) -> CommandResult {
         coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: owner(id),
                 config: scalar.config_envelope(&ScalarConfig { value }).unwrap(),
                 target: target(),
@@ -1348,6 +1579,7 @@ mod tests {
     ) -> CommandResult {
         coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: owner(id),
                 config: module
                     .config_envelope(&UserConfig { enabled, value })
@@ -1366,6 +1598,7 @@ mod tests {
     ) -> CommandResult {
         coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: owner(id),
                 config: module.config_envelope(&ValueConfig { value }).unwrap(),
                 target: TargetIdentity::Session(session()),
@@ -1383,6 +1616,7 @@ mod tests {
         let mut coordinator = Coordinator::new(catalog);
         let result = coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: OwnerId::new(1).unwrap(),
                 config,
                 target: target(),
@@ -1608,6 +1842,7 @@ mod tests {
         let mut coordinator = Coordinator::new(catalog);
         coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: owner(1),
                 config: scalar.config_envelope(&ScalarConfig { value: 12 }).unwrap(),
                 target: process.clone(),
@@ -1701,6 +1936,7 @@ mod tests {
             let mut coordinator = Coordinator::new(catalog);
             let applied = coordinator.handle(
                 Command::Acquire {
+                    binding: ActivationBinding::Unknown,
                     owner: owner(1),
                     config: scalar.config_envelope(&ScalarConfig { value: 12 }).unwrap(),
                     target: activation.clone(),
@@ -1820,6 +2056,7 @@ mod tests {
         let config = scalar.config_envelope(&ScalarConfig { value: 12 }).unwrap();
         let result = coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: owner(1),
                 config,
                 target: target(),
@@ -1841,6 +2078,7 @@ mod tests {
         let config = scalar.config_envelope(&ScalarConfig { value: 13 }).unwrap();
         let result = coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: owner(1),
                 config,
                 target: target(),
@@ -1868,6 +2106,7 @@ mod tests {
         let config = scalar.config_envelope(&ScalarConfig { value: 12 }).unwrap();
         let result = coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: owner(1),
                 config,
                 target: target(),
@@ -1944,6 +2183,7 @@ mod tests {
         }
         let result = coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: owner(1),
                 config: scalar.config_envelope(&ScalarConfig { value: 2 }).unwrap(),
                 target: target(),
@@ -1995,6 +2235,7 @@ mod tests {
         }
         let result = coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: owner(1),
                 config: scalar.config_envelope(&ScalarConfig { value: 2 }).unwrap(),
                 target: target(),
@@ -2162,6 +2403,7 @@ mod tests {
         let config = scalar.config_envelope(&ScalarConfig { value: 12 }).unwrap();
         let first = coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: owner(1),
                 config: config.clone(),
                 target: first_target.clone(),
@@ -2171,6 +2413,7 @@ mod tests {
         );
         let renewed = coordinator.handle(
             Command::Acquire {
+                binding: ActivationBinding::Unknown,
                 owner: owner(1),
                 config,
                 target: second_target.clone(),
@@ -2232,18 +2475,21 @@ mod tests {
             let writes = scalar.writes();
             let command = match scenario {
                 0 => Command::Acquire {
+                    binding: ActivationBinding::Unknown,
                     owner: owner(1),
                     config: scalar.config_envelope(&ScalarConfig { value: 7 }).unwrap(),
                     target: target(),
                     mode: ActivationMode::Session,
                 },
                 1 => Command::Acquire {
+                    binding: ActivationBinding::Unknown,
                     owner: owner(2),
                     config: scalar.config_envelope(&ScalarConfig { value: 12 }).unwrap(),
                     target: target(),
                     mode: ActivationMode::Session,
                 },
                 2 => Command::Acquire {
+                    binding: ActivationBinding::Unknown,
                     owner: owner(1),
                     config: scalar.config_envelope(&ScalarConfig { value: 12 }).unwrap(),
                     target: target(),

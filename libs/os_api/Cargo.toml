@@ -4,8 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# Explicit nonshipping isolated-object harness; never enabled by release builds.
+# Explicit nonshipping development/lab probes; never enabled by release builds.
 tuning-test-controls = []
+
+[[example]]
+name = "tuning-canonical-probe"
+path = "examples/tuning_canonical_probe/main.rs"
+required-features = ["tuning-test-controls"]
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }

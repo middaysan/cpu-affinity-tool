@@ -44,6 +44,11 @@ The modular tuning foundation in source is currently dormant: it adds typed cont
 | UAC / administrator expectation | Launching the built binary requires elevation as documented; a non-elevated start shows the expected UAC prompt, while an already elevated launch starts without contradicting the docs | Yes |
 | Built Windows manifest resource | `scripts/assert-windows-release-manifest.ps1` passes against `target/release/cpu-affinity-tool.exe`, confirming `requireAdministrator` and `uiAccess=false` on the built artifact | Yes |
 
+The optional nonshipping tuning metadata probe is documented in
+[tuning-native-probe.md](tuning-native-probe.md). Default preflight performs no
+canonical open; its explicit elevated lab commands are separate foundation
+acceptance work and are never implicit release smoke steps.
+
 ## Shortcut MVP Smoke
 
 Saved-rule desktop shortcuts are Windows-only in the stable release path. They target the current executable path and should be recreated after moving a portable app folder. Shortcut launches may show UAC because they run the same elevated executable. Shortcut creation uses the Desktop for the current elevated Windows token; credential-over-the-shoulder UAC can place shortcuts on the elevated account's Desktop. Linux beta builds do not expose shortcut UI or generate `.desktop` launchers.

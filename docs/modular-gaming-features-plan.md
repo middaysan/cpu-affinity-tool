@@ -157,6 +157,10 @@ A native machine-wide writer lease protects this shared store and managed writes
 
 Journal envelopes include format and module snapshot versions, operation/owner identities, actual target scope, resources, exact original state, desired state, last confirmed state, step progress, activation mode, and restart/effect status. Preserve absence, registry type and raw bytes; preserve GUIDs, lists, masks and individual driver overrides. Never store guessed Windows defaults as restoration values.
 
+Retain activation provenance separately from projected setting targets. A configured manual binding records profile and nonzero configuration generation. A game binding additionally records logical group/rule, Running or Foreground eligibility, exact user/logon/continuity identity and a bounded canonical set of process incarnations. Command and binding generations must agree before queue acceptance. Missing legacy provenance remains Unknown; malformed provenance retains blocked raw journal bytes. Typed shape alone is not authoritative execution evidence.
+
+Recovery reattachment requires the exact recorded binding and a nonempty verified subset of its original process incarnations. Foreground loss releases the foreground request without inferring process exit. Validate lifetime evidence across owners as well as resource targets: one owner's positive whole-game expiry cannot contradict another owner's verified surviving incarnation, even when both settings project to Machine or User scope. Membership changes require explicit session reconciliation; ordinary configuration updates cannot transfer an owner to another actor.
+
 Required operation sequence:
 
 1. Acquire the writer/resource ownership and validate target/capability/configuration.

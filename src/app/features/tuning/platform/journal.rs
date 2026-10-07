@@ -42,6 +42,8 @@ pub struct JournalSource {
 #[serde(deny_unknown_fields)]
 pub struct JournalOwner {
     pub owner: OwnerId,
+    #[serde(default)]
+    pub binding: ActivationBinding,
     pub source: SourceRef,
     pub mode: ActivationMode,
     pub resources: Vec<ResourceKey>,
@@ -302,6 +304,7 @@ impl JournalDocument {
             )?;
             let stored = JournalOwner {
                 owner: owner.owner,
+                binding: owner.binding.clone(),
                 source,
                 mode: owner.mode,
                 resources: owner.resources.clone(),
@@ -420,6 +423,14 @@ impl JournalDocument {
             if source.config.is_none()
                 || owner.resources.is_empty()
                 || !distinct(owner.resources.iter())
+                || !owner.binding.permits(
+                    owner.mode,
+                    source
+                        .snapshot
+                        .target
+                        .as_ref()
+                        .ok_or(invalid("owner source target"))?,
+                )
             {
                 return Err(invalid("owner intent"));
             }
@@ -660,6 +671,7 @@ mod tests {
                 possible: vec![],
             }],
             owners: vec![OwnerView {
+                binding: ActivationBinding::Unknown,
                 owner,
                 resources: vec![claim.key],
                 status: ModuleStatus::Applying,
@@ -708,6 +720,33 @@ mod tests {
             panic!("machine mismatch");
         };
         assert_eq!(block.reason, JournalError::MachineMismatch);
+        assert_eq!(block.raw.unwrap().as_ref(), raw);
+    }
+    #[test]
+    fn activation_binding_invalid_wire_or_mode_retains_exact_raw_without_clean_fallback() {
+        let document =
+            JournalDocument::capture(machine(), 1, stamp(), JournalPhase::Transition, &snapshot())
+                .unwrap();
+        let mut wire = serde_json::to_value(document).unwrap();
+        for binding in [
+            serde_json::json!({"Future":{"opaque":"retain"}}),
+            serde_json::json!({"Manual":{"profile":1,"generation":0}}),
+            serde_json::json!({"Manual":{"profile":1,"generation":1,"future":"retain"}}),
+        ] {
+            wire["owners"][0]["binding"] = binding;
+            let raw = serde_json::to_vec(&wire).unwrap();
+            let JournalLoad::Blocked(block) = JournalDocument::load(raw.clone(), &machine()) else {
+                panic!("malformed binding must remain blocked evidence");
+            };
+            assert_eq!(block.raw.unwrap().as_ref(), raw);
+            assert!(block.proposed.is_none());
+        }
+        wire["owners"][0]["binding"] = serde_json::json!({"Manual":{"profile":1,"generation":1}});
+        wire["owners"][0]["mode"] = serde_json::json!("Session");
+        let raw = serde_json::to_vec(&wire).unwrap();
+        let JournalLoad::Blocked(block) = JournalDocument::load(raw.clone(), &machine()) else {
+            panic!("manual binding cannot authorize game ownership");
+        };
         assert_eq!(block.raw.unwrap().as_ref(), raw);
     }
     #[test]
@@ -769,6 +808,7 @@ mod tests {
             .collect::<Vec<_>>();
         let ownership = CoordinatorSnapshot {
             owners: vec![OwnerView {
+                binding: ActivationBinding::Unknown,
                 owner,
                 resources: resources
                     .iter()

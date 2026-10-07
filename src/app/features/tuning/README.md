@@ -165,6 +165,24 @@ capacity exhaustion rejects admission without dropping unresolved ownership.
 Terminal results belong to caller-held tickets rather than an unbounded result
 queue. Immutable snapshot envelopes are shared rather than cloned per resource.
 
+An owner retains its activation binding separately from module sources and
+resource targets. Explicit manual requests carry a profile and nonzero saved
+configuration generation. Game requests additionally carry logical GroupId/RuleId,
+Running or Foreground eligibility, exact logon/continuity identity and a bounded
+set of verified process instances. Deserialization validates shape only. Unknown
+bindings remain representable for retained legacy evidence and test callers;
+they cannot establish native attachment authority. The runner rejects a configured
+binding whose generation differs from its command generation before queue
+acceptance, generation advancement or cancellation of older accepted intent.
+
+Recovery requires the exact retained game binding plus a nonempty verified subset
+of its recorded process instances. Resource lifetime remains independent of game
+eligibility. Positive foreground loss releases only an exact foreground owner;
+it does not retire a process or logon. Changing recorded membership or actor
+requires the future explicit reconciliation API, rather than rebinding an owner
+through an ordinary configuration update. Missing journal bindings deserialize
+as Unknown; malformed bindings retain blocked raw evidence.
+
 Cancellation or a newer generation suppresses activation, while compensation and
 restoration continue. Shutdown timeout retains the same worker and ownership;
 unresolved cleanup and worker panic have explicit results. Retiring Process or
@@ -207,3 +225,11 @@ Test-domain identities are distinct and unavailable in production. The unrelease
 journal format remains version 1, while legacy bare-array continuity identities
 are blocked with their exact raw bytes retained; there is no inferred upgrade.
 The canonical continuity producer remains unavailable pending its native matrix.
+
+The required-feature os_api `tuning-canonical-probe` example provides safe token
+preflight and explicitly selected elevated metadata observation/contention. Default
+preflight always skips canonical open. Lab commands may initialize missing
+protected directories and lease metadata; they never publish journal data or
+change gaming settings. No lab command is an implicit test or release step.
+See [the probe guide](../../../../docs/tuning-native-probe.md) for exact commands,
+worker timeout semantics and the remaining canonical native gates.

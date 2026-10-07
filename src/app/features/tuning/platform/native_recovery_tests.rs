@@ -462,8 +462,14 @@ impl JournalStore for IsolatedStore {
 /// as a production Windows game/logon/boot lifetime producer.
 struct ExpiredFixtureActor;
 impl RecoveryResolver for ExpiredFixtureActor {
-    fn owner(&mut self, _: &JournalOwner, _: &JournalSource) -> OwnerAttachment {
-        OwnerAttachment::PositivelyExpired
+    fn owner(&mut self, owner: &JournalOwner, _: &JournalSource) -> OwnerAttachment {
+        match &owner.binding {
+            ActivationBinding::Game(binding) => OwnerAttachment::PositivelyExpired {
+                owner: owner.owner,
+                binding: binding.clone(),
+            },
+            _ => OwnerAttachment::Unknown,
+        }
     }
     fn resource(&mut self, _: &ResourceKey) -> ResourceLifetime {
         ResourceLifetime::VerifiedLive
@@ -520,7 +526,7 @@ fn isolated_native_child() {
         wake: Condvar::new(),
     });
     let worker_pause = pause.clone();
-    let (ready, bootstrap) = mpsc::sync_channel::<ModuleEnvelope>(1);
+    let (ready, bootstrap) = mpsc::sync_channel::<(ModuleEnvelope, ActivationBinding)>(1);
     let mut runner = Runner::start_test_writer(RunnerLimits::default(), move || {
         // Store, exact physical observation, typed hydration and recovery all
         // occur on this serial worker with one native isolated lease retained.
@@ -569,7 +575,43 @@ fn isolated_native_child() {
             assert!(result.snapshot.owners.is_empty() && result.snapshot.resources.is_empty());
             worker_pause.pause();
         } else {
-            ready.send(config).unwrap();
+            use crate::app::shared::ids::{GroupId, RuleId};
+            // Explicit synthetic fixture provenance, never a native boot/game
+            // attestation. Parent Child::wait controls this fixture actor.
+            let session = SessionIdentity {
+                user: UserIdentity {
+                    machine: machine(),
+                    sid: UserSid::new("S-1-5-21-10-20-30-1000").unwrap(),
+                },
+                session_id: 1,
+                logon: LogonId::new(1).unwrap(),
+                boot: BootId::new([3; 16]).unwrap(),
+            };
+            let process = ProcessIdentity::new(
+                session.clone(),
+                std::process::id(),
+                1,
+                ImagePath::new("C:\\Fixture\\owned-child.exe").unwrap(),
+            )
+            .unwrap();
+            let binding = ActivationBinding::Game(
+                GameActivation::new(
+                    ConfiguredIntent {
+                        profile: ProfileId::new(1).unwrap(),
+                        generation: ConfigGeneration::new(1).unwrap(),
+                    },
+                    RuleActivation::new(
+                        GroupId("fixture-group".into()),
+                        RuleId("fixture-rule".into()),
+                    )
+                    .unwrap(),
+                    ActivationEligibility::Running,
+                    session,
+                    vec![process],
+                )
+                .unwrap(),
+            );
+            ready.send((config, binding)).unwrap();
         }
         (coordinator, authority)
     })
@@ -578,11 +620,12 @@ fn isolated_native_child() {
         boundary.recv_timeout(PROTOCOL_TIMEOUT).unwrap();
         announce(RECOVERED);
     } else {
-        let config = bootstrap.recv_timeout(PROTOCOL_TIMEOUT).unwrap();
+        let (config, binding) = bootstrap.recv_timeout(PROTOCOL_TIMEOUT).unwrap();
         let ticket = runner
             .client()
             .submit(
                 Command::Acquire {
+                    binding,
                     owner: OwnerId::new(1).unwrap(),
                     config,
                     target: TargetIdentity::Machine(machine()),

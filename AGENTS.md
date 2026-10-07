@@ -101,6 +101,7 @@ Important root files:
 - `docs/release-process.md` - current tag-based stable Windows release flow plus Linux beta prerelease flow and release-notes template
 - `docs/release-smoke-matrix.md` - compact manual smoke reference subordinate to the release checklist
 - `docs/dependency-advisories.md` - reviewed RustSec findings that remain in resolved dependencies, including reachability and re-evaluation conditions
+- `docs/tuning-native-probe.md` - opt-in metadata probe commands, bounded results and remaining native admission gates
 - `docs/github-metadata.md` - manual GitHub UI metadata plan
 - `CPU_SCHEME_INSTRUCTION` - format contract for `cpu_presets.json`
 
@@ -190,6 +191,7 @@ Tuning foundation status:
 - the coordinator acquires complete resource claims atomically, shares equal requests, rejects conflicting requests, and retains the first baseline/restorer independently of later writers; private expected-current evidence guards execution and compensation
 - the serial runner owns the coordinator on one worker, bounds command/generation admission, exposes generation-tagged tickets and immutable snapshots, and retains the same worker through shutdown timeout; faulted or unresolved cleanup is visible rather than reported as successful shutdown
 - the bounded journal stores deduplicated typed original/current/owner sources and exact confirmed/attempted tokens; intent, verification and zero-write ownership transitions are durable boundaries, with unknown/corrupt input and failed-publication evidence retained without a clean fallback
+- durable activation bindings distinguish explicit manual configuration, exact logical game/rule/process provenance and Unknown; their typed shape does not supply an authoritative native producer. Game owner eligibility and actual resource lifetime are resolved independently; positive foreground loss releases only that foreground intent
 - typed recovery hydrates sources without native reads or baseline recapture and distinguishes verified attachment, positive actual-resource expiry and Unknown; contradictory lifetime evidence and unknown drift block blind restoration
 - continuity identity preserves an exact nonzero 32-byte nonce with versioned producer/domain/registry view; legacy bare-array identities are retained as blocked raw journal evidence. This wire contract does not supply a canonical boot producer
 - a Send factory constructs the potentially !Send store/lease on the serial worker; its lifetime covers commands, panic handling and shutdown publication, while timeout/caller Drop retains the still-working context
@@ -460,6 +462,7 @@ Additional release facts:
 - `scripts/assert-windows-release-manifest.ps1` reads the built Windows exe `RT_MANIFEST` resource and asserts `requireAdministrator` plus `uiAccess=false`; UAC prompt behavior remains manual smoke validation
 - `scripts/test-windows-crash-reports.ps1` builds a debug binary with the non-shipping `diagnostics-test-controls` feature and verifies pre-Tokio main-thread panic plus synthetic native-loop-error report ordering, completion markers, event kinds, and exit codes
 - `scripts/test-windows-tuning-recovery.ps1` uses nonshipping `tuning-test-controls`, requires the three named recovery tests to exist, and runs the isolated native subprocess suite serially. Its Rust fixtures own temporary metadata and scalar targets; it does not certify canonical ProgramData, elevated cross-user or boot continuity.
+- `libs/os_api/examples/tuning_canonical_probe/` is a required-feature nonshipping example. Default/preflight reads only token context and always skips canonical open; explicit elevated lab commands may initialize protected directories/lease metadata, validate and read, but never publish or repair journal evidence. No lab command runs implicitly in tests, CI, release builds or normal app launch. Commands and remaining gates are documented in `docs/tuning-native-probe.md`.
 - manual pre-release validation lives in `docs/release-checklist.md` and its subordinate `docs/release-smoke-matrix.md`
 - manual Linux beta pre-release validation lives in `docs/linux-beta-release-checklist.md`
 - `docs/release-process.md` documents the current automated stable tag-release flow, Linux beta prerelease flow, and their current artifact limits
@@ -481,7 +484,7 @@ Privilege model:
 - Windows release binary embeds `app.manifest` with `requestedExecutionLevel=requireAdministrator` and `uiAccess="false"`
 - Windows CI and the stable release workflow verify the built release exe's embedded manifest resource after `cargo build --release --features windows --bin cpu-affinity-tool`
 - local test/debug binaries do not embed the administrator manifest so CI and local `cargo test` can run without elevation
-- `tuning-test-controls` is an explicit nonshipping root/os_api feature for isolated tuning probes; temporary native fixtures do not certify canonical ProgramData, elevated cross-user or reboot behavior
+- `tuning-test-controls` is an explicit nonshipping root/os_api feature for development and lab tuning probes; isolated fixtures and default preflight do not certify canonical ProgramData, elevated cross-user or reboot behavior
 
 ## AGENTS.md maintenance rules
 Update `AGENTS.md` in the same change when you alter:
