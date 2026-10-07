@@ -59,6 +59,11 @@ Reports contain fixed enums, booleans, lengths and optional native error codes.
 They contain no raw machine identity, SID, authentication ID, executable path,
 store path, journal bytes or arbitrary native error text. `present_uninterpreted`
 means only that a bounded byte buffer was read; it grants no recovery authority.
+For recognized store refusal predicates, `failure.store_refusal` adds an optional
+fixed enum such as `mutation_grant_untrusted`. Only exact allowlisted internal
+reasons produce it; unknown text is omitted. The enum identifies the predicate,
+not the failing object, repair instructions or recovery authority. All other
+failure fields and exit rules remain unchanged.
 
 ## Explicit elevated lab checks
 
@@ -143,8 +148,8 @@ is existing-only. Only an actually new marker receives its capsule once. Existin
 incomplete or unsafe metadata is retained without overwrite or normalization.
 
 Both commands compare two observations through one retained guard and then drop
-the guard and store on the same worker before its terminal report. Reports add
-only an optional fixed `continuity` enum; old-command reports omit that field.
+the guard and store on the same worker before its terminal report. Reports may
+include an optional fixed `continuity` enum; old-command reports omit that field.
 `continuity_stable` with `continuity=stable` is successful only with a joined,
 terminal worker, complete report output and no controller timeout. Unknown,
 Changed, blocked initialization, unsupported build and native failures exit
@@ -154,7 +159,37 @@ Stable certifies that same-process comparison only. It does not establish
 cross-account equality, power-transition behavior, an OS boot UUID, publication
 or game recovery. Automated command tests use fakes and shape values, never the
 native candidate. Neither command runs implicitly in tests, CI or normal launch.
-The implementation checkpoint has not executed these native commands.
+The initial authorized attempt below stopped before reaching the native candidate.
+
+## Initial native lab evidence
+
+On 2026-10-07, an explicitly authorized UAC launch of the built example on
+Windows build `10.0.26200.9445` attempted `lab-continuity-initialize`. It reported
+an elevated/High token, then failed at `stage=open` with `native_failure`,
+`store_attempted=true`, `authority=not_opened`, `journal=not_read`,
+`failure.kind=unsafe` and `worker_terminal=true`; both the probe and capture
+wrapper exited `2`. The wrapper skipped `lab-continuity-observe` after this
+failure. Continuity, hardware and HKLM producer operations were not reached.
+
+That first artifact predates the optional refusal enum, so its report does not
+identify the rejected object or predicate. After the diagnostic-only change passed
+33 example tests and independent review, a second authorized initialization
+attempt returned the same terminal failure and exit `2`, now with
+`failure.store_refusal=mutation_grant_untrusted`. Observation was again skipped;
+the diagnostic result identifies the refusal predicate, not its object location.
+The store/security policy and continuity implementation were unchanged.
+Subsequent fixed-path read-only inspection found no managed application
+directories or lease. ProgramData had an ordinary
+here-applicable allow mask `0x116`, which intersects the current ancestor mutation
+predicate. This is a grounded candidate cause; it does not justify modifying the
+system ACL or weakening the store policy. Metadata-attribute access is not barred
+by file sharing flags, and reparse setup can admit `FILE_WRITE_ATTRIBUTES` subject
+to additional checks. See [CreateFileW sharing semantics](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+and [the file-system reparse operation](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/4aeefef8-92c3-4abc-af7a-a610caf8a165).
+
+These failed attempts establish neither canonical admission nor continuity.
+Shipping continuity and tuning writers remain unavailable. Further source and
+native validation must preserve refusal evidence and address namespace safety.
 
 ## Remaining acceptance gates
 

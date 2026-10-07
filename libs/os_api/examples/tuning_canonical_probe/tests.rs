@@ -1001,3 +1001,237 @@ fn continuity_timeout_retains_the_same_worker_until_explicit_completion() {
     assert_ne!(evidence.calls[0].1, std::thread::current().id());
     assert_eq!(terminal_exit_code(&report, true, true, true), 2);
 }
+
+const STORE_REFUSALS: [(&str, StoreRefusal, &str); 20] = [
+    (
+        "untrusted object owner",
+        StoreRefusal::OwnerUntrusted,
+        "owner_untrusted",
+    ),
+    ("missing DACL", StoreRefusal::DaclMissing, "dacl_missing"),
+    (
+        "unprotected managed DACL",
+        StoreRefusal::DaclUnprotected,
+        "dacl_unprotected",
+    ),
+    ("empty DACL", StoreRefusal::DaclEmpty, "dacl_empty"),
+    (
+        "untrusted storage mutation grant",
+        StoreRefusal::MutationGrantUntrusted,
+        "mutation_grant_untrusted",
+    ),
+    (
+        "missing authority grant",
+        StoreRefusal::AuthorityGrantMissing,
+        "authority_grant_missing",
+    ),
+    (
+        "missing high integrity no-write-up",
+        StoreRefusal::IntegrityLabelInvalid,
+        "integrity_label_invalid",
+    ),
+    ("missing ACL", StoreRefusal::AclMissing, "acl_missing"),
+    ("malformed ACE", StoreRefusal::AceMalformed, "ace_malformed"),
+    (
+        "malformed ACE SID",
+        StoreRefusal::AceSidMalformed,
+        "ace_sid_malformed",
+    ),
+    (
+        "unexpected object type/reparse/hardlink",
+        StoreRefusal::ObjectTopologyInvalid,
+        "object_topology_invalid",
+    ),
+    (
+        "held directory changed",
+        StoreRefusal::ObjectChanged,
+        "object_changed",
+    ),
+    (
+        "held lease changed",
+        StoreRefusal::ObjectChanged,
+        "object_changed",
+    ),
+    (
+        "directory namespace changed",
+        StoreRefusal::NamespaceChanged,
+        "namespace_changed",
+    ),
+    (
+        "lease namespace changed",
+        StoreRefusal::NamespaceChanged,
+        "namespace_changed",
+    ),
+    (
+        "unknown managed artifacts",
+        StoreRefusal::ArtifactsUnexpected,
+        "artifacts_unexpected",
+    ),
+    (
+        "pending or unknown journal artifact",
+        StoreRefusal::ArtifactsUnexpected,
+        "artifacts_unexpected",
+    ),
+    (
+        "absolute store required",
+        StoreRefusal::PathInvalid,
+        "path_invalid",
+    ),
+    (
+        "normalized store components required",
+        StoreRefusal::PathInvalid,
+        "path_invalid",
+    ),
+    (
+        "invalid native path",
+        StoreRefusal::PathInvalid,
+        "path_invalid",
+    ),
+];
+
+#[test]
+fn store_refusals_report_only_the_exact_allowlisted_predicate() {
+    for (reason, expected, wire) in STORE_REFUSALS {
+        let failure = Failure::from(TuningNativeError::UnsafeStore(reason));
+        assert_eq!(failure.kind, FailureKind::Unsafe);
+        assert_eq!(failure.code, None);
+        assert_eq!(failure.store_refusal, Some(expected));
+        assert_eq!(
+            serde_json::to_value(failure).unwrap()["store_refusal"],
+            wire
+        );
+    }
+}
+
+#[test]
+fn unrecognized_private_refusal_text_and_lookalikes_remain_omitted() {
+    for reason in [
+        "",
+        "S-1-5-21-private-user E:\\private\\store nonce=private",
+        "untrusted object owner E:\\private\\store",
+        "prefix untrusted object owner",
+        "UNTRUSTED OBJECT OWNER",
+        "untrusted object owner\n",
+        "missing DACL\r\nS-1-5-21-private-user",
+        "canonical continuity candidate requires canonical store",
+    ] {
+        let failure = Failure::from(TuningNativeError::UnsafeStore(reason));
+        assert_eq!(failure.kind, FailureKind::Unsafe);
+        assert_eq!(failure.code, None);
+        assert_eq!(failure.store_refusal, None);
+        assert_eq!(
+            serde_json::to_string(&failure).unwrap(),
+            r#"{"kind":"unsafe","code":null}"#
+        );
+    }
+}
+
+#[test]
+fn store_refusal_mapping_never_reclassifies_other_native_errors() {
+    for (error, kind, code) in [
+        (TuningNativeError::Busy, FailureKind::Busy, None),
+        (TuningNativeError::Poisoned, FailureKind::Poisoned, None),
+        (
+            TuningNativeError::Unsupported("untrusted object owner"),
+            FailureKind::Unsupported,
+            None,
+        ),
+        (
+            TuningNativeError::Capacity {
+                size: u64::MAX,
+                limit: usize::MAX,
+            },
+            FailureKind::Capacity,
+            None,
+        ),
+        (
+            TuningNativeError::Denied {
+                operation: "untrusted object owner",
+                code: 5,
+            },
+            FailureKind::Denied,
+            Some(5),
+        ),
+        (
+            TuningNativeError::Io {
+                operation: "missing DACL E:\\private\\store",
+                code: u32::MAX,
+            },
+            FailureKind::Io,
+            Some(u32::MAX),
+        ),
+    ] {
+        let failure = Failure::from(error);
+        assert_eq!(failure.kind, kind);
+        assert_eq!(failure.code, code);
+        assert_eq!(failure.store_refusal, None);
+        assert!(
+            serde_json::to_value(failure)
+                .unwrap()
+                .get("store_refusal")
+                .is_none()
+        );
+        assert!(!serde_json::to_string(&failure).unwrap().contains("private"));
+    }
+}
+
+#[test]
+fn canonical_open_refusal_remains_terminal_without_continuity_or_cleanup_claim() {
+    for mode in [Mode::LabContinuityObserve, Mode::LabContinuityInitialize] {
+        let (report, evidence) = continuity_run(mode, |backend| {
+            backend.failure =
+                Some(TuningNativeError::UnsafeStore("untrusted storage mutation grant").into());
+        });
+        assert_eq!(report.stage, Stage::Open);
+        assert_eq!(report.outcome, Outcome::NativeFailure);
+        assert!(report.store_attempted);
+        assert_eq!(report.authority, Authority::NotOpened);
+        assert_eq!(report.journal, Presence::NotRead);
+        assert_eq!(report.continuity, None);
+        assert!(report.worker_terminal);
+        assert_eq!(
+            calls(&evidence),
+            ["continuity_build", "token", "open", "backend_drop"]
+        );
+        let failure = report.failure.unwrap();
+        assert_eq!(failure.kind, FailureKind::Unsafe);
+        assert_eq!(failure.code, None);
+        assert_eq!(
+            failure.store_refusal,
+            Some(StoreRefusal::MutationGrantUntrusted)
+        );
+        let evidence = evidence.lock().unwrap();
+        assert!(
+            evidence
+                .calls
+                .iter()
+                .all(|call| call.1 == evidence.calls[0].1)
+        );
+        assert_ne!(evidence.calls[0].1, std::thread::current().id());
+        assert_eq!(terminal_exit_code(&report, true, false, true), 2);
+    }
+}
+
+#[test]
+fn refusal_reports_are_bounded_fixed_enums_and_none_keeps_old_failure_wire() {
+    let mut report = Report::new(Mode::LabOpen, Stage::Open, Outcome::NativeFailure);
+    report.failure = Some(TuningNativeError::UnsafeStore("unrecognized private context").into());
+    assert_eq!(
+        report.line().unwrap(),
+        r#"{"schema":1,"command":"lab_open","stage":"open","outcome":"native_failure","token":{"elevation":"unknown","integrity":"unknown"},"store_attempted":false,"authority":"not_opened","journal":{"kind":"not_read"},"failure":{"kind":"unsafe","code":null},"worker_terminal":false}"#
+    );
+    for (reason, _, wire) in STORE_REFUSALS {
+        report.failure = Some(TuningNativeError::UnsafeStore(reason).into());
+        let line = report.line().unwrap();
+        assert!(line.len() <= MAX_REPORT_BYTES);
+        assert!(!line.contains('\n'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["failure"]["store_refusal"],
+            wire
+        );
+        for private in ["E:\\", "S-1-5", "nonce", "private", reason] {
+            assert!(!line.contains(private));
+        }
+        assert_eq!(terminal_exit_code(&report, true, false, true), 2);
+    }
+}

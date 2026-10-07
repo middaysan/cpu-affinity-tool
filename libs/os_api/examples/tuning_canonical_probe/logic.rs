@@ -154,12 +154,62 @@ pub enum FailureKind {
     Io,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreRefusal {
+    OwnerUntrusted,
+    DaclMissing,
+    DaclUnprotected,
+    DaclEmpty,
+    MutationGrantUntrusted,
+    AuthorityGrantMissing,
+    IntegrityLabelInvalid,
+    AclMissing,
+    AceMalformed,
+    AceSidMalformed,
+    ObjectTopologyInvalid,
+    ObjectChanged,
+    NamespaceChanged,
+    ArtifactsUnexpected,
+    PathInvalid,
+}
+fn store_refusal(reason: &'static str) -> Option<StoreRefusal> {
+    // Exact internal literals map to fixed predicates; arbitrary text is omitted.
+    Some(match reason {
+        "untrusted object owner" => StoreRefusal::OwnerUntrusted,
+        "missing DACL" => StoreRefusal::DaclMissing,
+        "unprotected managed DACL" => StoreRefusal::DaclUnprotected,
+        "empty DACL" => StoreRefusal::DaclEmpty,
+        "untrusted storage mutation grant" => StoreRefusal::MutationGrantUntrusted,
+        "missing authority grant" => StoreRefusal::AuthorityGrantMissing,
+        "missing high integrity no-write-up" => StoreRefusal::IntegrityLabelInvalid,
+        "missing ACL" => StoreRefusal::AclMissing,
+        "malformed ACE" => StoreRefusal::AceMalformed,
+        "malformed ACE SID" => StoreRefusal::AceSidMalformed,
+        "unexpected object type/reparse/hardlink" => StoreRefusal::ObjectTopologyInvalid,
+        "held directory changed" | "held lease changed" => StoreRefusal::ObjectChanged,
+        "directory namespace changed" | "lease namespace changed" => StoreRefusal::NamespaceChanged,
+        "unknown managed artifacts" | "pending or unknown journal artifact" => {
+            StoreRefusal::ArtifactsUnexpected
+        }
+        "absolute store required"
+        | "normalized store components required"
+        | "invalid native path" => StoreRefusal::PathInvalid,
+        _ => return None,
+    })
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Failure {
     pub kind: FailureKind,
     pub code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_refusal: Option<StoreRefusal>,
 }
 impl From<TuningNativeError> for Failure {
     fn from(error: TuningNativeError) -> Self {
+        let refusal = match &error {
+            TuningNativeError::UnsafeStore(reason) => store_refusal(reason),
+            _ => None,
+        };
         let (kind, code) = match error {
             TuningNativeError::Busy => (FailureKind::Busy, None),
             TuningNativeError::Unsupported(_) => (FailureKind::Unsupported, None),
@@ -169,7 +219,11 @@ impl From<TuningNativeError> for Failure {
             TuningNativeError::Denied { code, .. } => (FailureKind::Denied, Some(code)),
             TuningNativeError::Io { code, .. } => (FailureKind::Io, Some(code)),
         };
-        Self { kind, code }
+        Self {
+            kind,
+            code,
+            store_refusal: refusal,
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -431,6 +485,7 @@ fn run_probe<B: Backend>(
         report.failure = Some(Failure {
             kind: FailureKind::Capacity,
             code: None,
+            store_refusal: None,
         });
         drop(store);
         return report;
