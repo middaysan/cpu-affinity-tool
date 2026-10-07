@@ -644,9 +644,9 @@ remain unchanged; ordinary tests and CI leave this canonical test ignored.
 ## Existing-metadata host publication helper
 
 The separate Windows+`tuning-test-controls` test
-`host_canonical_publication_lab` is explicitly ignored. It is prepared for the
-user-authorized host lab with mandatory verified rollback; an actual host run
-has not yet been performed. The disposable-VM helper above is unchanged.
+`host_canonical_publication_lab` is explicitly ignored. The user-authorized
+same-account host lab passed success and all five faults with verified rollback
+on 2026-10-08, as recorded below. The disposable-VM helper above is unchanged.
 
 This route uses **existing-only canonical opening and final reopening** through
 the same production Known Folder, security and lease pipeline. It never creates
@@ -698,12 +698,47 @@ worker, request buffers, capability and lease; no cleanup is guessed. A ten-seco
 timeout reports pending and retains that worker until actual terminal completion;
 late verified rollback still leaves the run unsuccessful.
 
+## Accepted controlled host publication — 2026-10-08
+
+The independently reviewed source checkpoint `7a7f9b4` was exercised on the
+current Windows PC under explicitly authorized same-account elevation. The
+test EXE SHA256 was
+`1F01887924D20B5AFEA805C982BEF1AAE4223F03990C9B846682A89F22F75B30`
+(16,805,376 bytes). Success ran first; the five fault cases then ran serially
+under one elevated controller. Every next case required the previous actual
+wrapper exit 0 and its strict accepted rollback report.
+
+| Case | Run tag | Accepted result |
+| --- | --- | --- |
+| `success` | `fc584802bbc24256b810ba23c7cf178a` | `verified_rolled_back` |
+| `fault-stage` | `cfc5d8399a6149438dbd58b1b690ef16` | `fault_rolled_back` |
+| `fault-old-move` | `59cbc54c71ef4de7bd0caedda79f7823` | `fault_rolled_back` |
+| `fault-publish` | `8d9659348e8b4686b75b56c8f97347aa` | `fault_rolled_back` |
+| `fault-before-cleanup` | `08e78ee075964f9088240298cd0ff55d` | `fault_rolled_back` |
+| `fault-after-cleanup` | `bc92bba7282548feaa5bb1163666d346` | `fault_rolled_back` |
+
+All six reports contained `worker_terminal`, `verified` and
+`rollback_verified` equal to true; all one-case wrappers and both original
+launchers/controllers actually terminated with exit 0. Each same native worker
+proved its exact artifact rollback, followed by an existing-only canonical
+reopen with Absent and the original root/lease IDs. Fixed sanitized reports
+remain under ignored `target/host-publication-lab`; the accepted EXE and bounded
+manifest are retained under `target/host-publication-accepted/7a7f9b4`.
+
+This accepts controlled canonical publication and rollback on the tested
+same-account scope. It does not demonstrate canonical recovery of a setting,
+forced host-process interruption, power-loss durability, boot/logon/game
+attachment or another account. Original root/lease identities and ACLs were
+preserved; gaming settings were unchanged. Shipping writer admission remains closed.
+
 ## Remaining acceptance gates
 
 The probe supplies a concrete way to inspect canonical metadata and lease
-contention. Successful candidate invocations do not certify canonical
-publication, filtered-token object access, machine/continuity equality across
-elevated accounts, power transitions, or authoritative game reattachment.
+contention. Successful candidate invocations alone do not certify canonical
+publication; the separate six-case host packet above supplies its bounded
+publication/rollback evidence. Filtered-token object access, full machine and
+continuity equality across elevated accounts, power transitions and authoritative
+game reattachment remain separate gates.
 The comparator covers only the stated same-account serial processes, and the
 moved-executable check covers only its stated lease/location sequence.
 Those require their separate native matrix. No probe result alone completes the
