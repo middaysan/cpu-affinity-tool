@@ -227,6 +227,45 @@ reviewed publication/recovery protocol and starting-object eligibility. A
 successful temporary-fixture test does not authorize weaker ancestor checks or
 close the canonical, cross-account or power-transition gates.
 
+## Isolated publication protocol
+
+The private `cfg(test)` publication fixture uses an exclusive lease and retained
+root, old-journal and staged-file handles. It syncs the staged bytes, moves the
+old journal to a fixed previous name without replacement, then moves the stage
+to the journal name without replacement. This deliberately leaves a gap between
+the two calls. A stage or previous artifact blocks a fresh read from reporting
+Absent, including when the journal name is missing. Failed operations poison the
+owner and retain remaining artifacts without rollback, retry or repair.
+
+Before each rename, the source name must still identify the retained object and
+complete bytes. Old-object cleanup requires a fresh match of the journal name
+to the staged object and bytes, and deletes only the retained old handle.
+These operations do not reproduce `ReplaceFileW` metadata preservation or prove
+namespace durability across power loss.
+
+Subprocess fixtures use a parent-created temporary root. A private borrowed
+selector checks its fixed temporary-name boundary, actual NTFS/type and original
+object ID; it cannot create a root, own its cleanup or supply canonical authority.
+The parent terminates and waits for its actual child before inspecting recovery.
+Synthetic pending tests retain the whole fixture context and lease until process
+exit. They do not demonstrate actual native pending completion or implement a
+production worker reaper.
+
+On 2026-10-07 all 23 private publication tests passed: 14 owned native scenarios,
+one conditional child helper and eight pure tests. Forced termination covers all
+five replacement boundaries, two initial-publication boundaries, and before/after
+clean publication. When staging or previous remains, fresh owners preserve
+interrupted object IDs and full bytes and refuse both clean absence and another
+publication. Separate tests cover
+rename collisions, same-byte object substitution before cleanup, exact old-handle
+deletion, root pinning, capacity refusal and actual lease exclusion. A regression
+also verifies that rejected requests cannot downgrade unresolved retention and
+release its lease. The conditional helper alone supplies no native evidence.
+
+Production storage, canonical admission and shipping write policy remain
+unchanged. Complete migration still requires the production journal capacity,
+security, recovery and worker-lifetime contracts.
+
 ## Remaining acceptance gates
 
 The probe supplies a concrete way to inspect canonical metadata and lease

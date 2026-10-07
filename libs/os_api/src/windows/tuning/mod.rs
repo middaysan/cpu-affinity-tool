@@ -11,6 +11,8 @@ pub use canonical_marker::{
 mod marker;
 #[cfg(test)]
 mod relative_io;
+#[cfg(test)]
+mod relative_publication;
 mod security;
 mod store;
 #[cfg(any(test, feature = "tuning-test-controls"))]

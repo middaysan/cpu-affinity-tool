@@ -188,11 +188,30 @@ impl Directory {
     /// Setup only: selects the already owned TempRoot and retains a real handle.
     /// There is no public/raw handle constructor or caller-selected root path.
     pub(super) fn fixture(root: &TuningTemporaryDirectory) -> Result<Self> {
+        Self::fixture_observed_root(root.path(), root.original_identity())
+    }
+    /// Existing-only subprocess fixture setup. The parent owns the actual
+    /// TempRoot and supplies its creation identity; this creates no ownership,
+    /// cleanup responsibility or canonical authority in the child.
+    pub(super) fn fixture_observed_root(
+        path: &std::path::Path,
+        expected: (u32, u64),
+    ) -> Result<Self> {
+        if path.parent() != Some(std::env::temp_dir().as_path())
+            || !path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with("cpu-affinity-tuning-test-")
+            })
+        {
+            return Err(TuningNativeError::UnsafeStore(
+                "owned temporary root required",
+            ));
+        }
         let sid = crate::windows::OS::tuning_current_token_identity()?
             .sid()
             .to_owned();
         let descriptor = Rc::new(Descriptor::new(Some(&sid))?);
-        let text = wide(root.path().as_os_str())?;
+        let text = wide(path.as_os_str())?;
         let handle = unsafe {
             CreateFileW(
                 PCWSTR(text.as_ptr()),
@@ -211,7 +230,16 @@ impl Directory {
         let file = unsafe { File::from_raw_handle(handle.0) };
         super::store::validate_volume(&file)?;
         let id = fixture_identity(&file)?;
-        require_original_root(root, &file)?;
+        if id
+            != (ObjectId {
+                volume: expected.0,
+                index: expected.1,
+            })
+        {
+            return Err(TuningNativeError::UnsafeStore(
+                "relative fixture root identity",
+            ));
+        }
         Ok(Self {
             node: Node {
                 file,
@@ -224,6 +252,17 @@ impl Directory {
     }
     pub(super) fn as_node(&self) -> &Node {
         &self.node
+    }
+    /// Bind a freshly enumerated record to an actual retained object in this
+    /// same-volume root. Shape records cannot construct native authority.
+    pub(super) fn entry_matches(&self, entry: &Entry, node: &Node) -> Result<bool> {
+        self.node.verify()?;
+        node.verify()?;
+        Ok(node.id.volume == self.node.id.volume
+            && entry.file_id as u64 == node.id.index
+            && entry.attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0
+            && (entry.attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0)
+                == (node.kind == Kind::Directory))
     }
     /// Independent setup of an already existing directly owned fixture child.
     /// No create/overwrite/repair, no desired relative-operation fallback.
@@ -548,7 +587,7 @@ impl Node {
         drop(self);
         Ok(())
     }
-    fn verify(&self) -> Result<()> {
+    pub(super) fn verify(&self) -> Result<()> {
         if object_identity(&self.file, self.kind)? != self.id {
             return Err(TuningNativeError::UnsafeStore("relative object identity"));
         }
