@@ -16,6 +16,10 @@ pub(super) struct NativeContext {
     expected_machine: TuningMachineIdentity,
 }
 impl NativeContext {
+    #[cfg(feature = "tuning-test-controls")]
+    pub(super) fn retained_machine_identity(&self) -> &TuningMachineIdentity {
+        &self.expected_machine
+    }
     pub fn capture(store: &mut TuningStore) -> DriverResult<Self> {
         native64_build()?;
         require_canonical(store)?;

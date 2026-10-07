@@ -20,6 +20,69 @@ const MAX_TOKEN_BYTES: usize = 64 * 1024;
 // winnt.h SE_GROUP_INTEGRITY. Keep the helper within the existing Security
 // feature boundary rather than enabling an unrelated Windows API namespace.
 const INTEGRITY_GROUP_ATTRIBUTE: u32 = 0x0000_0020;
+
+pub fn capture_private_sample() -> Result<crate::logic::PrivateSample, ()> {
+    use os_api::tuning::{TuningMachineDomain, TuningMachineSource};
+    let mut backend = NativeBackend;
+    if !backend.continuity_supported_build() {
+        return Err(());
+    }
+    let token = backend.token_context().map_err(|_| ())?;
+    if token.elevation != Elevation::Elevated
+        || !matches!(
+            token.integrity,
+            crate::logic::Integrity::High | crate::logic::Integrity::System
+        )
+    {
+        return Err(());
+    }
+    let mut store = backend.open_canonical().map_err(|_| ())?;
+    if !store.canonical() {
+        return Err(());
+    }
+    store.validate().map_err(|_| ())?;
+    if !matches!(
+        store.presence().map_err(|_| ())?,
+        Presence::Absent | Presence::PresentUninterpreted(_)
+    ) {
+        return Err(());
+    }
+    let mut candidate = store
+        .0
+        .canonical_continuity_candidate(TuningContinuityCandidateMode::ObserveExisting)
+        .map_err(|_| ())?;
+    let first = candidate.observe().map_err(|_| ())?;
+    let second = candidate.observe().map_err(|_| ())?;
+    let (
+        TuningContinuityCandidateObservation::Observed(first),
+        TuningContinuityCandidateObservation::Observed(second),
+    ) = (first, second)
+    else {
+        return Err(());
+    };
+    if first != second {
+        return Err(());
+    }
+    let machine = candidate.retained_machine_identity();
+    let sample = crate::logic::PrivateSample {
+        machine_source: match machine.source() {
+            TuningMachineSource::Tpm => 1,
+            TuningMachineSource::Uefi => 2,
+        },
+        machine_domain: match machine.domain() {
+            TuningMachineDomain::UnpackagedWin32 => 1,
+        },
+        machine_bytes: machine.bytes().to_vec(),
+        producer: first.producer().into(),
+        version: first.version(),
+        domain: first.domain().into(),
+        view: first.view().into(),
+        nonce: first.nonce(),
+    };
+    drop(candidate);
+    drop(store);
+    Ok(sample)
+}
 struct TokenGuard(HANDLE);
 impl Drop for TokenGuard {
     fn drop(&mut self) {

@@ -72,6 +72,9 @@ fn inspect(store: &mut TuningStore) -> Result<(), TuningNativeError> {
     let mut candidate = store.canonical_continuity_candidate(
         TuningContinuityCandidateMode::ObserveExisting)?;
     let _ = candidate.observe()?;
+    // Readonly retained context, after a successful native observation. This
+    // accessor cannot construct a candidate or confer shipping authority.
+    let _machine = candidate.retained_machine_identity();
     Ok(())
 }
 ```
@@ -109,6 +112,12 @@ impl std::fmt::Debug for TuningCanonicalContinuityCandidate<'_> {
     }
 }
 impl TuningCanonicalContinuityCandidate<'_> {
+    /// The retained native context tuple. This is not a fresh observation or permit.
+    /// Use only after successful observations; no caller identity is accepted.
+    #[cfg(feature = "tuning-test-controls")]
+    pub fn retained_machine_identity(&self) -> &crate::tuning::TuningMachineIdentity {
+        self.context.retained_machine_identity()
+    }
     pub fn observe(&mut self) -> Result<TuningContinuityCandidateObservation, TuningNativeError> {
         let mut native = native_driver::NativeDriver {
             store: self.store,

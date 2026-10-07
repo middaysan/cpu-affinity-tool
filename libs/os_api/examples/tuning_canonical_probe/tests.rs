@@ -1460,3 +1460,336 @@ fn continuity_refusal_wire_is_finite_bounded_and_preserves_existing_failure_shap
         assert_eq!(terminal_exit_code(&report, true, false, true), 2);
     }
 }
+
+fn comparator_shape() -> PrivateSample {
+    PrivateSample {
+        machine_source: 1,
+        machine_domain: 1,
+        machine_bytes: vec![0x35; 4096],
+        producer: "windows_hklm_software_volatile_marker".into(),
+        version: 1,
+        domain: "cpu_affinity_tool_tuning".into(),
+        view: "native64".into(),
+        nonce: [0x5a; 32],
+    }
+}
+#[test]
+fn comparator_command_and_handshake_are_explicit_and_pipe_only() {
+    assert_eq!(
+        parse_mode(&["lab-continuity-compare".into()]),
+        Ok(Mode::LabContinuityCompare)
+    );
+    for args in [
+        vec![PRIVATE_SAMPLE_ARGUMENT.into()],
+        vec!["lab-continuity-compare".into(), "override".into()],
+    ] {
+        assert!(parse_mode(&args).is_err());
+    }
+    assert!(sample_handshake(&mut &SAMPLE_HANDSHAKE[..], true));
+    for mut input in [
+        b"".as_slice(),
+        b"CMP-SAMPLE-1\r\n",
+        b"cmp-sample-1\n",
+        b"CMP-SAMPLE-1\nextra",
+    ] {
+        assert!(!sample_handshake(&mut input, true));
+    }
+    assert!(!sample_handshake(&mut &SAMPLE_HANDSHAKE[..], false));
+}
+#[test]
+fn comparator_full_machine_and_continuity_tuple_is_compared_without_truncation() {
+    let first = comparator_shape();
+    let equal = compare_samples(&first, &first);
+    assert_eq!(equal.result, ComparisonResult::Equal);
+    assert_eq!(equal.exit_code(), 0);
+    for field in 0..9 {
+        let mut second = first.clone();
+        match field {
+            0 => second.machine_source = 2,
+            1 => second.machine_domain = 2,
+            2 => second.machine_bytes[4095] ^= 1,
+            3 => second.producer.push('x'),
+            4 => second.version += 1,
+            5 => second.domain.push('x'),
+            6 => second.view = "native32".into(),
+            7 => second.nonce[31] ^= 1,
+            _ => second.machine_bytes.pop().map(|_| ()).unwrap(),
+        }
+        let report = compare_samples(&first, &second);
+        assert_eq!(report.result, ComparisonResult::Different);
+        assert_eq!(report.machine_equal, Some((3..=7).contains(&field)));
+        assert_eq!(report.continuity_equal, Some(field <= 2 || field == 8));
+        assert_eq!(report.exit_code(), 2);
+        let line = report.line().unwrap();
+        assert!(line.len() < MAX_REPORT_BYTES);
+        assert!(
+            !line.contains("nonce") && !line.contains("windows_hklm") && !line.contains("5a5a")
+        );
+    }
+    assert!(!format!("{first:?}").contains("windows_hklm"));
+    let mut invalid = equal;
+    invalid.worker_terminal = false;
+    assert_eq!(invalid.exit_code(), 2);
+}
+#[test]
+fn comparator_frame_is_one_exact_bounded_record_and_rejects_malformed_input() {
+    let expected = comparator_shape();
+    let frame = encode_sample(&expected).unwrap();
+    assert!(frame.len() <= MAX_SAMPLE_BYTES);
+    assert!(
+        decode_sample(&frame).unwrap() == expected,
+        "complete private tuple roundtrip"
+    );
+    for end in [0, 1, 7, 8, frame.len() - 1] {
+        assert!(decode_sample(&frame[..end]).is_err());
+    }
+    let mut extra = frame.clone();
+    extra.push(0);
+    assert!(decode_sample(&extra).is_err());
+    let mut extra = frame.clone();
+    extra.extend_from_slice(&frame);
+    assert!(decode_sample(&extra).is_err());
+    let mut wrong = frame.clone();
+    wrong[0] ^= 1;
+    assert!(decode_sample(&wrong).is_err());
+    let mut wrong = frame.clone();
+    wrong[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(decode_sample(&wrong).is_err());
+    for field in 0..6 {
+        let mut malformed = expected.clone();
+        match field {
+            0 => malformed.machine_bytes.clear(),
+            1 => malformed.machine_bytes.push(1),
+            2 => malformed.nonce = [0; 32],
+            3 => malformed.producer = "x".repeat(65),
+            4 => malformed.domain = "private\nvalue".into(),
+            _ => malformed.machine_source = 0,
+        }
+        assert!(encode_sample(&malformed).is_err());
+    }
+}
+
+// This child is fixture transport/lifetime only: it never calls native sampling.
+#[cfg(windows)]
+#[test]
+fn comparator_child_fixture() {
+    use std::io::{Read, Write};
+    let Ok(role) = std::env::var("TUNING_COMPARATOR_FIXTURE_ROLE") else {
+        return;
+    };
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut input = std::io::stdin().lock();
+    let mut handshake = [0; SAMPLE_HANDSHAKE.len()];
+    input.read_exact(&mut handshake).unwrap();
+    assert!(handshake == SAMPLE_HANDSHAKE, "fixture handshake");
+    let mut output = std::io::stdout().lock();
+    output.write_all(b"\nFIXTURE-PIPE\n").unwrap();
+    output.flush().unwrap();
+    // Fixed fixture framing independent of the implementation encoder.
+    let mut payload = vec![1, 1];
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.push(0x35);
+    for label in [
+        "windows_hklm_software_volatile_marker",
+        "cpu_affinity_tool_tuning",
+        "native64",
+    ] {
+        payload.push(label.len() as u8);
+        payload.extend_from_slice(label.as_bytes());
+    }
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&[0x5a; 32]);
+    let mut frame = b"CMP1".to_vec();
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&payload);
+    match role.as_str() {
+        "truncated" => output.write_all(&frame[..frame.len() - 1]).unwrap(),
+        "extra" => {
+            output.write_all(&frame).unwrap();
+            output.write_all(b"extra").unwrap();
+        }
+        _ => output.write_all(&frame).unwrap(),
+    }
+    output.flush().unwrap();
+    drop(output);
+    if role == "blocked" {
+        let mut release = [0];
+        input.read_exact(&mut release).unwrap();
+        assert_eq!(release, [1]);
+    }
+    std::process::exit(if role == "nonzero" { 2 } else { 0 });
+}
+#[cfg(windows)]
+fn comparator_fixture(role: &str) -> std::process::Child {
+    use std::io::{Read, Write};
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "logic::tests::comparator_child_fixture",
+            "--nocapture",
+            "--quiet",
+        ])
+        .env("TUNING_COMPARATOR_FIXTURE_ROLE", role)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let sent = child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(SAMPLE_HANDSHAKE)
+        .is_ok();
+    // Strip only bounded libtest setup output, before the production collector.
+    let mut stdout = child.stdout.take().unwrap();
+    let (ready, result) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let mut setup = Vec::new();
+        let mut byte = [0];
+        let valid = loop {
+            if setup.ends_with(b"\nFIXTURE-PIPE\n") {
+                break true;
+            }
+            if setup.len() >= 512 || stdout.read_exact(&mut byte).is_err() {
+                break false;
+            }
+            setup.push(byte[0]);
+        };
+        let _ = ready.send((valid, stdout));
+    });
+    let prepared = if sent {
+        result.recv_timeout(Duration::from_secs(3)).ok()
+    } else {
+        None
+    };
+    let Some((true, stdout)) = prepared else {
+        // Only the exact transport-fixture child may be terminated on setup failure.
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader.join();
+        panic!("owned fixture pipe setup failed");
+    };
+    reader.join().unwrap();
+    child.stdout = Some(stdout);
+    child
+}
+#[cfg(windows)]
+#[test]
+fn comparator_owned_child_requires_exact_frame_eof_and_actual_zero_exit() {
+    for role in ["complete", "truncated", "extra", "nonzero"] {
+        let mut child = comparator_fixture(role);
+        let result = collect_sample_child(
+            &mut child,
+            std::time::Instant::now() + Duration::from_secs(3),
+            || {},
+        );
+        // Cleanup always reaches the exact child before any assertion.
+        assert!(child.wait().is_ok());
+        assert_eq!(
+            result.is_ok(),
+            role == "complete",
+            "owned fixture terminal classification"
+        );
+    }
+}
+#[cfg(windows)]
+#[test]
+fn comparator_timeout_retains_same_child_and_terminal_looking_frame_until_exit_and_eof() {
+    use std::io::Write;
+    let mut child = comparator_fixture("blocked");
+    let mut release = child.stdin.take().unwrap();
+    let (timed_out, notice) = mpsc::sync_channel(1);
+    let (returned, result) = mpsc::sync_channel(1);
+    let handle = std::thread::spawn(move || {
+        let captured = collect_sample_child(&mut child, std::time::Instant::now(), || {
+            let _ = timed_out.try_send(());
+        });
+        let _ = returned.send(captured);
+        child.wait().unwrap()
+    });
+    let timeout = notice.recv_timeout(Duration::from_secs(3));
+    let early = result.try_recv();
+    // Release exact owned fixture even when an assertion will fail on the stub.
+    release.write_all(&[1]).unwrap();
+    drop(release);
+    let terminal = handle.join().unwrap();
+    assert!(terminal.success());
+    assert!(
+        timeout.is_ok(),
+        "timeout must be reported before actual fixture exit"
+    );
+    assert!(
+        matches!(early, Err(mpsc::TryRecvError::Empty)),
+        "same child must remain retained until terminal+EOF"
+    );
+    assert_eq!(
+        result.recv().unwrap().unwrap_err(),
+        ComparisonResult::TimedOut
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn comparator_serial_controller_starts_second_only_after_first_terminal_success() {
+    for role in ["complete", "truncated", "nonzero"] {
+        let mut starts = 0;
+        let report = run_comparison(
+            || {
+                starts += 1;
+                Ok(comparator_fixture(role))
+            },
+            std::time::Instant::now() + Duration::from_secs(3),
+            || {},
+        );
+        assert_eq!(starts, if role == "complete" { 2 } else { 1 });
+        assert_eq!(report.exit_code(), if role == "complete" { 0 } else { 2 });
+    }
+}
+#[cfg(windows)]
+#[test]
+fn comparator_serial_controller_never_replaces_timed_out_first_actor() {
+    use std::io::Write;
+    let mut child = comparator_fixture("blocked");
+    let mut release = child.stdin.take().unwrap();
+    let slot = Arc::new(Mutex::new(Some(child)));
+    let retained = slot.clone();
+    let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let actual_starts = starts.clone();
+    let (timeout, entered) = mpsc::sync_channel(1);
+    let (completed, returned) = mpsc::sync_channel(1);
+    let handle = std::thread::spawn(move || {
+        let report = run_comparison(
+            || {
+                actual_starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(retained
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("only the first owned fixture"))
+            },
+            std::time::Instant::now(),
+            || {
+                let _ = timeout.try_send(());
+            },
+        );
+        let _ = completed.send(report);
+    });
+    let observed_timeout = entered.recv_timeout(Duration::from_secs(3));
+    let early = returned.try_recv();
+    let count_before_release = starts.load(std::sync::atomic::Ordering::SeqCst);
+    release.write_all(&[1]).unwrap();
+    drop(release);
+    handle.join().unwrap();
+    // Intentional controller stub may leave setup child unstarted; clean it exactly.
+    if let Some(mut unused) = slot.lock().unwrap().take() {
+        unused.wait().unwrap();
+    }
+    assert!(observed_timeout.is_ok());
+    assert!(matches!(early, Err(mpsc::TryRecvError::Empty)));
+    assert_eq!(count_before_release, 1);
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let report = returned.recv().unwrap();
+    assert_eq!(report.result, ComparisonResult::TimedOut);
+    assert_eq!(report.exit_code(), 2);
+}

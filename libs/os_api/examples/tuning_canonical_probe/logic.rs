@@ -20,6 +20,7 @@ pub enum Mode {
     LabContend,
     LabContinuityObserve,
     LabContinuityInitialize,
+    LabContinuityCompare,
 }
 pub fn parse_mode(args: &[String]) -> Result<Mode, ()> {
     match args {
@@ -31,6 +32,7 @@ pub fn parse_mode(args: &[String]) -> Result<Mode, ()> {
             "lab-contend" => Ok(Mode::LabContend),
             "lab-continuity-observe" => Ok(Mode::LabContinuityObserve),
             "lab-continuity-initialize" => Ok(Mode::LabContinuityInitialize),
+            "lab-continuity-compare" => Ok(Mode::LabContinuityCompare),
             _ => Err(()),
         },
         _ => Err(()),
@@ -434,6 +436,10 @@ fn run_probe<B: Backend>(
     hold_deadline: Duration,
 ) -> Report {
     let mut report = Report::new(mode, Stage::Preflight, Outcome::UnknownToken);
+    if mode == Mode::LabContinuityCompare {
+        report.outcome = Outcome::InvalidArguments;
+        return report;
+    }
     let continuity_mode = match mode {
         Mode::LabContinuityObserve => Some(ContinuityMode::ObserveExisting),
         Mode::LabContinuityInitialize => Some(ContinuityMode::InitializeWhenAbsent),
@@ -579,3 +585,335 @@ fn run_probe<B: Backend>(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+// Private child-pipe evidence only. Neither decoding nor fixtures issue native authority.
+pub const SAMPLE_HANDSHAKE: &[u8] = b"CMP-SAMPLE-1\n";
+pub const PRIVATE_SAMPLE_ARGUMENT: &str = "--private-continuity-sample";
+pub const MAX_SAMPLE_BYTES: usize = 4352;
+#[derive(Clone, PartialEq, Eq)]
+pub struct PrivateSample {
+    pub machine_source: u8,
+    pub machine_domain: u8,
+    pub machine_bytes: Vec<u8>,
+    pub producer: String,
+    pub version: u32,
+    pub domain: String,
+    pub view: String,
+    pub nonce: [u8; 32],
+}
+impl std::fmt::Debug for PrivateSample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PrivateSample { evidence: redacted }")
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonResult {
+    Equal,
+    Different,
+    Failed,
+    TimedOut,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ComparisonReport {
+    pub schema: u32,
+    pub command: Mode,
+    pub result: ComparisonResult,
+    pub machine_equal: Option<bool>,
+    pub continuity_equal: Option<bool>,
+    pub worker_terminal: bool,
+}
+impl ComparisonReport {
+    pub fn failed(result: ComparisonResult) -> Self {
+        Self {
+            schema: 1,
+            command: Mode::LabContinuityCompare,
+            result,
+            machine_equal: None,
+            continuity_equal: None,
+            worker_terminal: false,
+        }
+    }
+    pub fn exit_code(&self) -> i32 {
+        if self.result == ComparisonResult::Equal
+            && self.machine_equal == Some(true)
+            && self.continuity_equal == Some(true)
+            && self.worker_terminal
+        {
+            0
+        } else {
+            2
+        }
+    }
+    pub fn line(&self) -> Result<String, ()> {
+        let line = serde_json::to_string(self).map_err(|_| ())?;
+        if line.len() <= MAX_REPORT_BYTES {
+            Ok(line)
+        } else {
+            Err(())
+        }
+    }
+}
+pub fn compare_samples(first: &PrivateSample, second: &PrivateSample) -> ComparisonReport {
+    let machine_equal = first.machine_source == second.machine_source
+        && first.machine_domain == second.machine_domain
+        && first.machine_bytes == second.machine_bytes;
+    let continuity_equal = first.producer == second.producer
+        && first.version == second.version
+        && first.domain == second.domain
+        && first.view == second.view
+        && first.nonce == second.nonce;
+    ComparisonReport {
+        schema: 1,
+        command: Mode::LabContinuityCompare,
+        result: if machine_equal && continuity_equal {
+            ComparisonResult::Equal
+        } else {
+            ComparisonResult::Different
+        },
+        machine_equal: Some(machine_equal),
+        continuity_equal: Some(continuity_equal),
+        worker_terminal: true,
+    }
+}
+fn valid_sample(sample: &PrivateSample) -> bool {
+    matches!(sample.machine_source, 1 | 2)
+        && sample.machine_domain == 1
+        && (1..=4096).contains(&sample.machine_bytes.len())
+        && sample.machine_bytes.iter().any(|byte| *byte != 0)
+        && sample.version != 0
+        && sample.nonce != [0; 32]
+        && [&sample.producer, &sample.domain, &sample.view]
+            .into_iter()
+            .all(|label| {
+                (1..=64).contains(&label.len())
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            })
+}
+pub fn encode_sample(sample: &PrivateSample) -> Result<Vec<u8>, ()> {
+    if !valid_sample(sample) {
+        return Err(());
+    }
+    let mut payload = vec![sample.machine_source, sample.machine_domain];
+    payload.extend_from_slice(&(sample.machine_bytes.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&sample.machine_bytes);
+    for label in [&sample.producer, &sample.domain, &sample.view] {
+        payload.push(label.len() as u8);
+        payload.extend_from_slice(label.as_bytes());
+    }
+    payload.extend_from_slice(&sample.version.to_le_bytes());
+    payload.extend_from_slice(&sample.nonce);
+    let mut frame = b"CMP1".to_vec();
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&payload);
+    if frame.len() > MAX_SAMPLE_BYTES {
+        Err(())
+    } else {
+        Ok(frame)
+    }
+}
+pub fn decode_sample(frame: &[u8]) -> Result<PrivateSample, ()> {
+    if frame.len() < 8 || frame.len() > MAX_SAMPLE_BYTES || &frame[..4] != b"CMP1" {
+        return Err(());
+    }
+    let length = u32::from_le_bytes(frame[4..8].try_into().map_err(|_| ())?) as usize;
+    if length.checked_add(8) != Some(frame.len()) {
+        return Err(());
+    }
+    let mut rest = &frame[8..];
+    fn take<'a>(rest: &mut &'a [u8], length: usize) -> Result<&'a [u8], ()> {
+        let (value, tail) = rest.split_at_checked(length).ok_or(())?;
+        *rest = tail;
+        Ok(value)
+    }
+    let machine_source = take(&mut rest, 1)?[0];
+    let machine_domain = take(&mut rest, 1)?[0];
+    let count = u32::from_le_bytes(take(&mut rest, 4)?.try_into().map_err(|_| ())?) as usize;
+    if !(1..=4096).contains(&count) {
+        return Err(());
+    }
+    let machine_bytes = take(&mut rest, count)?.to_vec();
+    fn label(rest: &mut &[u8]) -> Result<String, ()> {
+        let length = take(rest, 1)?[0] as usize;
+        if !(1..=64).contains(&length) {
+            return Err(());
+        }
+        String::from_utf8(take(rest, length)?.to_vec()).map_err(|_| ())
+    }
+    let producer = label(&mut rest)?;
+    let domain = label(&mut rest)?;
+    let view = label(&mut rest)?;
+    let version = u32::from_le_bytes(take(&mut rest, 4)?.try_into().map_err(|_| ())?);
+    let nonce = take(&mut rest, 32)?.try_into().map_err(|_| ())?;
+    let sample = PrivateSample {
+        machine_source,
+        machine_domain,
+        machine_bytes,
+        producer,
+        version,
+        domain,
+        view,
+        nonce,
+    };
+    if !rest.is_empty() || !valid_sample(&sample) {
+        Err(())
+    } else {
+        Ok(sample)
+    }
+}
+pub fn sample_handshake(reader: &mut impl std::io::Read, pipes: bool) -> bool {
+    if !pipes {
+        return false;
+    }
+    let mut exact = [0; SAMPLE_HANDSHAKE.len()];
+    let mut extra = [0];
+    reader.read_exact(&mut exact).is_ok()
+        && exact == SAMPLE_HANDSHAKE
+        && matches!(reader.read(&mut extra), Ok(0))
+}
+pub fn collect_sample_child(
+    child: &mut std::process::Child,
+    deadline: std::time::Instant,
+    mut on_timeout: impl FnMut(),
+) -> Result<PrivateSample, ComparisonResult> {
+    use std::io::Read;
+    // Readers retain their actual stream in the event until actual child exit.
+    enum PipeEnd {
+        Output(Result<PrivateSample, ()>, std::process::ChildStdout),
+        Error(bool, std::process::ChildStderr),
+    }
+    let (sender, events) = mpsc::sync_channel(2);
+    let mut readers = Vec::new();
+    let mut expected = 0;
+    if let Some(mut output) = child.stdout.take() {
+        expected += 1;
+        let sender = sender.clone();
+        readers.push(thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 256];
+            let mut invalid = false;
+            loop {
+                match output.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        if bytes.len() + count <= MAX_SAMPLE_BYTES {
+                            bytes.extend_from_slice(&chunk[..count]);
+                        } else {
+                            invalid = true;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        invalid = true;
+                        break;
+                    }
+                }
+            }
+            let reply = if invalid {
+                Err(())
+            } else {
+                decode_sample(&bytes)
+            };
+            let _ = sender.send(PipeEnd::Output(reply, output));
+        }));
+    }
+    if let Some(mut error) = child.stderr.take() {
+        expected += 1;
+        let sender = sender.clone();
+        readers.push(thread::spawn(move || {
+            let mut chunk = [0; 256];
+            let mut nonempty = false;
+            loop {
+                match error.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(_) => nonempty = true,
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        nonempty = true;
+                        break;
+                    }
+                }
+            }
+            let _ = sender.send(PipeEnd::Error(nonempty, error));
+        }));
+    }
+    drop(sender);
+    let mut received = 0;
+    let mut retained = Vec::new();
+    let mut sample = None;
+    let mut invalid = expected != 2;
+    let mut timed_out = false;
+    let status = loop {
+        if !timed_out && std::time::Instant::now() >= deadline {
+            timed_out = true;
+            on_timeout();
+        }
+        if received < expected {
+            match events.recv_timeout(Duration::from_millis(25)) {
+                Ok(event) => {
+                    received += 1;
+                    match &event {
+                        PipeEnd::Output(result, _) => match result {
+                            Ok(value) => sample = Some(value.clone()),
+                            Err(()) => invalid = true,
+                        },
+                        PipeEnd::Error(nonempty, _) => invalid |= *nonempty,
+                    }
+                    retained.push(event);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    invalid = true;
+                    received = expected;
+                }
+            }
+        } else if let Ok(Some(status)) = child.try_wait() {
+            break status;
+        } else {
+            thread::sleep(Duration::from_millis(25));
+        }
+    };
+    // EOF/read completion AND actual process completion precede reader disposal.
+    let waited = child.wait().is_ok();
+    for reader in readers {
+        invalid |= reader.join().is_err();
+    }
+    for event in retained {
+        match event {
+            PipeEnd::Output(_, stream) => drop(stream),
+            PipeEnd::Error(_, stream) => drop(stream),
+        }
+    }
+    if timed_out {
+        Err(ComparisonResult::TimedOut)
+    } else if invalid || !waited || !status.success() {
+        Err(ComparisonResult::Failed)
+    } else {
+        sample.ok_or(ComparisonResult::Failed)
+    }
+}
+
+pub fn run_comparison(
+    mut start: impl FnMut() -> std::io::Result<std::process::Child>,
+    deadline: std::time::Instant,
+    mut on_timeout: impl FnMut(),
+) -> ComparisonReport {
+    let mut samples = Vec::with_capacity(2);
+    for ordinal in 0..2 {
+        if ordinal != 0 && std::time::Instant::now() >= deadline {
+            on_timeout();
+            return ComparisonReport::failed(ComparisonResult::TimedOut);
+        }
+        let mut child = match start() {
+            Ok(child) => child,
+            Err(_) => return ComparisonReport::failed(ComparisonResult::Failed),
+        };
+        match collect_sample_child(&mut child, deadline, &mut on_timeout) {
+            Ok(sample) => samples.push(sample),
+            Err(result) => return ComparisonReport::failed(result),
+        }
+    }
+    compare_samples(&samples[0], &samples[1])
+}

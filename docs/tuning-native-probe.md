@@ -4,7 +4,7 @@
 explicit Windows lab validation. Its default `preflight` only reads the current
 process token. It never opens the canonical store, including when already
 elevated. Explicit `lab-*` commands can initialize missing protected application
-directories and lease metadata. The two `lab-continuity-*` commands additionally
+directories and lease metadata. The explicit `lab-continuity-*` commands additionally
 invoke the protected registry candidate described below. They do not publish,
 repair, delete or normalize journal data, change gaming settings, or enable
 production tuning admission.
@@ -15,7 +15,7 @@ integration. Run Cargo commands from the repository
 root. Use a prepared lab context for the commands in the lab section.
 
 The separate feature-gated `TuningStore::canonical_continuity_candidate` API is
-implemented in `os_api` for explicit native validation. Only this example's two
+implemented in `os_api` for explicit native validation. Only this example's
 explicit `lab-continuity-*` commands call it. It borrows the real canonical store/lease
 and retains actual token provenance; each guarded operation reobserves exact
 machine and token context. Private operation-trace and owned-hive tests do not
@@ -185,6 +185,59 @@ or game recovery. Automated command tests use fakes and shape values, never the
 native candidate. Neither command runs implicitly in tests, CI or normal launch.
 The first two authorized attempts below stopped before reaching the native
 candidate; a subsequent attempt reached its continuity boundary and refused.
+
+## Exact same-account process comparison
+
+The explicit comparator observes the existing candidate in two serial owned
+processes; it never initializes the marker or publishes a journal:
+
+```powershell
+cargo run --locked --manifest-path libs/os_api/Cargo.toml --features tuning-test-controls --example tuning-canonical-probe -- lab-continuity-compare
+```
+
+Each child's single worker validates its actual elevated context and canonical
+store, then requires two equal observations through one ObserveExisting guard.
+The child copies the exact machine tuple retained by that verified context and
+the full continuity producer/version/domain/view/32-byte nonce. Its guard and
+store are dropped on the worker before a joined terminal sample is sent. The
+readonly machine accessor is not a fresh observation or shipping permit.
+
+Private binary frames travel only through owned redirected child pipes, after
+actual stdin/stdout pipe checks and an exact fixed handshake followed by input
+EOF. Frames are capped at 4352 bytes, including at most 4096 machine bytes and
+64 bytes per continuity label. No raw tuple, nonce, hash or baseline is written
+to disk, public stdout or Debug. The internal sample entry is not a public lab
+command and refuses console/file handles or malformed handshakes.
+
+The parent requires complete framing, no stderr, joined-worker provenance,
+actual child exit0 and both pipe EOFs before starting the next process. One
+10-second deadline covers both actors. Timeout retains the same actual child,
+streams and worker until completion; it never kills or starts a replacement and
+remains exit2 afterward. Public reports contain only schema, command, a fixed
+`equal`/`different`/`failed`/`timed_out` result, nullable machine/continuity equality
+booleans and `worker_terminal`. Only equal full tuples with terminal evidence
+exit0. Failed sampling supplies no positive equality or terminal-worker proof.
+
+Eight targeted tests (including one conditional child helper) passed after
+actual RED runs for parsing/framing/full-tuple comparisons and serial child
+admission. They cover last-byte/source/domain/view differences, malformed and
+extra frames, actual fixture process exit/EOF, and timeout retention/no second
+actor. They never invoke canonical or hardware sampling. Full acceptance passed
+266 OS tests, all 45 example tests, 482 Windows application tests and four OS
+doctests, both Clippy gates, formatting and unchanged lockfiles. The OS Clippy
+gate uses only its same five existing allowances; the shipping gate adds none.
+
+On 2026-10-07 the reviewed, rebuilt comparator SHA256
+`853B97CD2400B0F71866E31B68CD627BC1B666024D357F2974C5F969E2BB1F56`
+was run through an owned elevated wrapper on Windows build `26200.9445`.
+Its single bounded report returned `equal`, both equality booleans true and
+`worker_terminal=true`. The public parent and actual owning wrapper exited `0`;
+independent review verified the fixed report and terminal status. The private
+observations and comparison retained no raw identities outside their memory
+channels. This establishes full machine and continuity equality across those
+two serial sample processes in the same-account live context.
+Cross-account, boot/power, journal publication and shipping recovery remain
+separate gates. Old commands and their JSON report shapes are unchanged.
 
 ## Initial native lab evidence
 
@@ -494,10 +547,10 @@ cross-process identities, other accounts, power transitions or recovery.
 
 The probe supplies a concrete way to inspect canonical metadata and lease
 contention. Successful candidate invocations do not certify canonical
-publication, filtered-token object access, exact machine/continuity equality
-between processes or elevated accounts, power transitions, or authoritative
-game reattachment. The moved-executable check above covers only its stated
-same-account lease/location sequence.
+publication, filtered-token object access, machine/continuity equality across
+elevated accounts, power transitions, or authoritative game reattachment.
+The comparator covers only the stated same-account serial processes, and the
+moved-executable check covers only its stated lease/location sequence.
 Those require their separate native matrix. No probe result alone completes the
 recovery foundation or admits a gaming-setting writer.
 
