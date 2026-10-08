@@ -244,6 +244,9 @@ impl ConfigurationOrigin {
         }
         .try_into()
     }
+    pub(in crate::app::features::tuning) fn matches_lineage(&self, lineage: &[u8; 32]) -> bool {
+        &self.0.lineage == lineage
+    }
     #[cfg(test)]
     pub(crate) fn fixture() -> Self {
         Self::from_source(

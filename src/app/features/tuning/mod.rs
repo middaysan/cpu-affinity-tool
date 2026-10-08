@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod config;
+pub(crate) mod configured_source;
 pub mod platform;
 
 /// Public feature facade. Concrete shipping registrations belong only in this

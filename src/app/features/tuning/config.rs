@@ -189,20 +189,39 @@ fn module_shape(v: &serde_json::Value) -> Result<Option<ModuleEnvelope>, ()> {
     Ok(Some(envelope))
 }
 fn forward_shape(v: &serde_json::Value) -> Result<bool, ()> {
-    if version_forward(v)? {
+    let version = v
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|n| *n > 0)
+        .ok_or(())?;
+    if !matches!(version, 1 | 2) {
         return Ok(true);
     }
+    let v2 = version == 2;
     let mut forward = fields_forward(
         v,
-        &[
-            "version",
-            "lineage",
-            "profiles",
-            "associations",
-            "allocations",
-            "activations",
-            "withdrawals",
-        ],
+        if v2 {
+            &[
+                "version",
+                "lineage",
+                "profiles",
+                "associations",
+                "allocations",
+                "activations",
+                "withdrawals",
+                "transitions",
+            ][..]
+        } else {
+            &[
+                "version",
+                "lineage",
+                "profiles",
+                "associations",
+                "allocations",
+                "activations",
+                "withdrawals",
+            ][..]
+        },
     )?;
     // Core known-envelope metadata remains required, including when extensions
     // are preserved. Unsupported nested records cannot be executed.
@@ -332,23 +351,11 @@ fn forward_shape(v: &serde_json::Value) -> Result<bool, ()> {
                 }
                 max_profile = max_profile.max(profile);
             } else {
-                let owner = record
-                    .get("owner")
-                    .and_then(serde_json::Value::as_u64)
-                    .filter(|id| *id > 0)
-                    .ok_or(())?;
-                let binding: ActivationBinding =
-                    serde_json::from_value(record.get("binding").ok_or(())?.clone())
-                        .map_err(|_| ())?;
-                let target: TargetIdentity =
-                    serde_json::from_value(record.get("target").ok_or(())?.clone())
-                        .map_err(|_| ())?;
-                let mode: ActivationMode =
-                    serde_json::from_value(record.get("mode").ok_or(())?.clone())
-                        .map_err(|_| ())?;
-                let configured = binding.configured().ok_or(())?;
+                let shape = known_intent_shape(record)?;
+                let owner = shape.owner.get();
+                let configured = shape.configured;
+                forward |= shape.forward;
                 if !owners.insert(owner)
-                    || !binding.permits(mode, &target)
                     || (name == "activations"
                         && !opaque_profiles
                         && !profiles.contains(&configured.profile.get()))
@@ -358,19 +365,97 @@ fn forward_shape(v: &serde_json::Value) -> Result<bool, ()> {
                 max_profile = max_profile.max(configured.profile.get());
                 max_owner = max_owner.max(owner);
                 max_generation = max_generation.max(configured.generation.get());
-                let config = record.get("config").ok_or(())?;
-                forward |=
-                    fields_forward(config, &["feature", "kind", "version", "target", "payload"])?;
-                let _ = module_shape(config)?;
             }
         }
     }
     let active = v["activations"].as_array().ok_or(())?.len();
     let withdrawn = v["withdrawals"].as_array().ok_or(())?.len();
+    let transitions = if v2 {
+        v.get("transitions")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(())?
+            .as_slice()
+    } else {
+        &[]
+    };
     if active
         .checked_add(withdrawn)
+        .and_then(|n| n.checked_add(transitions.len()))
         .is_none_or(|n| n > MAX_INTENTS)
     {
+        return Err(());
+    }
+    for record in transitions {
+        if version_forward(record)? {
+            forward = true;
+            continue;
+        }
+        forward |= fields_forward(record, &["version", "owner", "generation", "old", "new"])?;
+        let owner = record
+            .get("owner")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|n| *n > 0)
+            .ok_or(())?;
+        let generation = record
+            .get("generation")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|n| *n > 0)
+            .ok_or(())?;
+        if !owners.insert(owner) {
+            return Err(());
+        }
+        max_owner = max_owner.max(owner);
+        max_generation = max_generation.max(generation);
+        let mut tuples = Vec::with_capacity(2);
+        for (name, intent) in [
+            ("old", record.get("old").ok_or(())?),
+            ("new", record.get("new").ok_or(())?),
+        ] {
+            if version_forward(intent)? {
+                forward = true;
+                tuples.push(None);
+                continue;
+            }
+            let shape = known_intent_shape(intent)?;
+            forward |= shape.forward;
+            if shape.owner.get() != owner
+                || (name == "new"
+                    && (shape.configured.generation.get() != generation
+                        || (!opaque_profiles
+                            && !profiles.contains(&shape.configured.profile.get()))))
+            {
+                return Err(());
+            }
+            max_profile = max_profile.max(shape.configured.profile.get());
+            max_owner = max_owner.max(shape.owner.get());
+            max_generation = max_generation.max(shape.configured.generation.get());
+            tuples.push(Some(shape));
+        }
+        if let (Some(old), Some(new)) = (tuples[0].take(), tuples[1].take()) {
+            // Understood actor/generation metadata validates even when a module
+            // shape is opaque; Unknown cannot erase these constraints.
+            if !same_actor(&old.binding, &new.binding)
+                || old.target != new.target
+                || old.mode != new.mode
+                || new.configured.generation <= old.configured.generation
+            {
+                return Err(());
+            }
+            if let (Some(old), Some(new)) = (old.intent, new.intent) {
+                let transition = SavedTransition {
+                    version: 1,
+                    owner: OwnerId::new(owner).map_err(|_| ())?,
+                    generation: ConfigGeneration::new(generation).map_err(|_| ())?,
+                    old,
+                    new,
+                };
+                if !transition.valid() {
+                    return Err(());
+                }
+            }
+        }
+    }
+    if v2 && [next_profile, next_owner, next_generation].contains(&u64::MAX) {
         return Err(());
     }
     if next_profile <= max_profile || next_owner <= max_owner || next_generation <= max_generation {
@@ -382,6 +467,52 @@ fn forward_shape(v: &serde_json::Value) -> Result<bool, ()> {
     )?;
     Ok(forward)
 }
+struct KnownIntentShape {
+    forward: bool,
+    owner: OwnerId,
+    configured: ConfiguredIntent,
+    binding: ActivationBinding,
+    target: TargetIdentity,
+    mode: ActivationMode,
+    intent: Option<SavedIntent>,
+}
+fn known_intent_shape(v: &serde_json::Value) -> Result<KnownIntentShape, ()> {
+    let mut forward = fields_forward(
+        v,
+        &["version", "owner", "binding", "config", "target", "mode"],
+    )?;
+    let owner = serde_json::from_value(v.get("owner").ok_or(())?.clone()).map_err(|_| ())?;
+    let binding: ActivationBinding =
+        serde_json::from_value(v.get("binding").ok_or(())?.clone()).map_err(|_| ())?;
+    let target = serde_json::from_value(v.get("target").ok_or(())?.clone()).map_err(|_| ())?;
+    let mode = serde_json::from_value(v.get("mode").ok_or(())?.clone()).map_err(|_| ())?;
+    let configured = binding.configured().ok_or(())?;
+    if !binding.permits(mode, &target) {
+        return Err(());
+    }
+    let raw_config = v.get("config").ok_or(())?;
+    forward |= fields_forward(
+        raw_config,
+        &["feature", "kind", "version", "target", "payload"],
+    )?;
+    let intent = module_shape(raw_config)?.map(|config| SavedIntent {
+        version: 1,
+        owner,
+        binding: binding.clone(),
+        config,
+        target: target.clone(),
+        mode,
+    });
+    Ok(KnownIntentShape {
+        forward,
+        owner,
+        configured,
+        binding,
+        target,
+        mode,
+        intent,
+    })
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TuningConfig {
@@ -392,6 +523,8 @@ pub(crate) struct TuningConfig {
     pub allocations: Allocations,
     pub activations: Vec<SavedIntent>,
     pub withdrawals: Vec<SavedIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transitions: Option<Vec<SavedTransition>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -436,7 +569,89 @@ pub(crate) struct SavedIntent {
     pub target: TargetIdentity,
     pub mode: ActivationMode,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SavedTransition {
+    pub version: u32,
+    pub owner: OwnerId,
+    pub generation: ConfigGeneration,
+    pub old: SavedIntent,
+    pub new: SavedIntent,
+}
+impl SavedTransition {
+    fn valid(&self) -> bool {
+        let (Some(old), Some(new)) = (self.old.binding.configured(), self.new.binding.configured())
+        else {
+            return false;
+        };
+        self.version == 1
+            && self.old.version == 1
+            && self.new.version == 1
+            && self.owner == self.old.owner
+            && self.owner == self.new.owner
+            && self.generation == new.generation
+            && new.generation > old.generation
+            && same_actor(&self.old.binding, &self.new.binding)
+            && self.old.target == self.new.target
+            && self.old.mode == self.new.mode
+            && self.old.config.feature == self.new.config.feature
+            && self.old.binding.permits(self.old.mode, &self.old.target)
+            && self.new.binding.permits(self.new.mode, &self.new.target)
+            && [&self.old, &self.new].iter().all(|intent| {
+                intent
+                    .config
+                    .target
+                    .as_ref()
+                    .is_none_or(|target| target == &intent.target)
+            })
+    }
+}
+fn same_actor(old: &ActivationBinding, new: &ActivationBinding) -> bool {
+    match (old, new) {
+        (ActivationBinding::Manual(old), ActivationBinding::Manual(new)) => {
+            old.profile == new.profile
+        }
+        (ActivationBinding::Game(old), ActivationBinding::Game(new)) => {
+            old.configured().profile == new.configured().profile
+                && old.rule() == new.rule()
+                && old.eligibility() == new.eligibility()
+                && old.session() == new.session()
+                && old.processes() == new.processes()
+        }
+        _ => false,
+    }
+}
 impl TuningConfig {
+    pub(in crate::app::features::tuning) fn request_matches(&self, intent: &SavedIntent) -> bool {
+        let Some(binding) = intent.binding.configured() else {
+            return false;
+        };
+        let preference = self
+            .profiles
+            .iter()
+            .find(|p| p.id == binding.profile)
+            .and_then(|p| {
+                p.modules
+                    .iter()
+                    .find(|m| m.feature == intent.config.feature)
+            });
+        preference.is_some_and(|m| m.enabled && m.mode == intent.mode && m.config == intent.config)
+            && intent
+                .config
+                .target
+                .as_ref()
+                .is_none_or(|target| target == &intent.target)
+            && match &intent.binding {
+                ActivationBinding::Manual(_) => true,
+                ActivationBinding::Game(game) => self.associations.iter().any(|a| {
+                    &a.group == game.rule().group()
+                        && &a.rule == game.rule().rule()
+                        && a.profile == binding.profile
+                        && a.eligibility == game.eligibility()
+                }),
+                ActivationBinding::Unknown => false,
+            }
+    }
     fn valid(&self) -> bool {
         use super::platform::codec::EnvelopeKind;
         use std::collections::BTreeSet;
@@ -447,6 +662,11 @@ impl TuningConfig {
         let mut max_profile = 0;
         let mut max_owner = 0;
         let mut max_generation = 0;
+        if (self.version == 1 && self.transitions.is_some())
+            || (self.version == 2 && self.transitions.is_none())
+        {
+            return false;
+        }
         for profile in &self.profiles {
             if !profiles.insert(profile.id) || !text(&profile.name) {
                 return false;
@@ -486,6 +706,31 @@ impl TuningConfig {
             max_profile = max_profile.max(binding.profile.get());
             max_owner = max_owner.max(intent.owner.get());
             max_generation = max_generation.max(binding.generation.get());
+        }
+        if let Some(transitions) = &self.transitions {
+            for transition in transitions {
+                if !owners.insert(transition.owner)
+                    || !transition.valid()
+                    || !self.request_matches(&transition.new)
+                {
+                    return false;
+                }
+                for intent in [&transition.old, &transition.new] {
+                    let Some(binding) = intent.binding.configured() else {
+                        return false;
+                    };
+                    max_profile = max_profile.max(binding.profile.get());
+                    max_owner = max_owner.max(intent.owner.get());
+                    max_generation = max_generation.max(binding.generation.get());
+                }
+            }
+            if !self
+                .activations
+                .iter()
+                .all(|intent| self.request_matches(intent))
+            {
+                return false;
+            }
         }
         self.activations.iter().all(|intent| {
             intent

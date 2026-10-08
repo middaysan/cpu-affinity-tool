@@ -38,6 +38,9 @@ impl std::fmt::Debug for NativeConfigurationProof {
 }
 #[cfg(windows)]
 impl NativeConfigurationProof {
+    fn saved_bytes(&self) -> &[u8] {
+        self.receipt.bytes()
+    }
     pub(crate) fn from_receipt(
         selected_path: &std::path::Path,
         receipt: os_api::tuning::TuningConfigReceipt,
@@ -119,6 +122,8 @@ pub(crate) struct ConfiguredSet {
     native: Option<NativeConfigurationProof>,
     revision: u64,
     entries: Vec<ConfiguredEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    continuations: Vec<ConfiguredEntry>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ConfiguredSnapshot {
@@ -136,10 +141,52 @@ impl ConfiguredIntentSource for UnavailableConfiguredIntent {
     }
 }
 impl ConfiguredSnapshot {
+    pub(crate) fn continuation_for_origin(
+        &self,
+        expected: &ConfigurationOrigin,
+        owner: OwnerId,
+        binding: &ActivationBinding,
+        config: &ModuleEnvelope,
+        target: &TargetIdentity,
+        mode: ActivationMode,
+    ) -> IntentDecision {
+        let Self::Complete(set) = self else {
+            return IntentDecision::Unknown;
+        };
+        if &set.origin == expected
+            && set.continuations.iter().any(|entry| {
+                entry.owner == owner
+                    && &entry.binding == binding
+                    && &entry.config == config
+                    && &entry.target == target
+                    && entry.mode == mode
+            })
+        {
+            IntentDecision::Enabled
+        } else {
+            IntentDecision::Unknown
+        }
+    }
     #[cfg(test)]
     pub(crate) fn complete(
         revision: u64,
+        entries: Vec<ConfiguredEntry>,
+    ) -> Result<Self, &'static str> {
+        Self::build_set(
+            ConfigurationOrigin::fixture(),
+            revision,
+            entries,
+            vec![],
+            #[cfg(windows)]
+            None,
+        )
+    }
+    fn build_set(
+        origin: ConfigurationOrigin,
+        revision: u64,
         mut entries: Vec<ConfiguredEntry>,
+        mut continuations: Vec<ConfiguredEntry>,
+        #[cfg(windows)] native: Option<NativeConfigurationProof>,
     ) -> Result<Self, &'static str> {
         use super::codec::EnvelopeKind;
         if revision == 0 || entries.len() > MAX_CONFIGURED_OWNERS {
@@ -160,12 +207,28 @@ impl ConfiguredSnapshot {
                 .map_err(|_| "invalid configured envelope")?;
         }
         entries.sort_by_key(|entry| entry.owner);
+        let mut old_owners = std::collections::BTreeSet::new();
+        for old in &continuations {
+            if !old_owners.insert(old.owner)
+                || old.decision != ConfiguredDecision::Enabled
+                || !entries.iter().any(|entry| {
+                    entry.owner == old.owner && entry.decision == ConfiguredDecision::Enabled
+                })
+            {
+                return Err("invalid configured continuation");
+            }
+            old.config
+                .to_bytes()
+                .map_err(|_| "invalid configured continuation")?;
+        }
+        continuations.sort_by_key(|entry| entry.owner);
         let set = ConfiguredSet {
-            origin: ConfigurationOrigin::fixture(),
+            origin,
             #[cfg(windows)]
-            native: None,
+            native,
             revision,
             entries,
+            continuations,
         };
         struct Budget(usize);
         impl std::io::Write for Budget {
@@ -186,6 +249,101 @@ impl ConfiguredSnapshot {
         serde_json::to_writer(&mut Budget(0), &set)
             .map_err(|_| "configured snapshot bytes exceeded")?;
         Ok(Self::Complete(Arc::new(set)))
+    }
+    #[cfg(windows)]
+    pub(in crate::app::features::tuning) fn from_saved_native(
+        proof: NativeConfigurationProof,
+        catalog: &super::catalog::Catalog,
+    ) -> Self {
+        // No caller tuple/config/origin is accepted: all derive from the same
+        // sealed receipt bytes that created the private proof.
+        Self::saved_set(
+            proof.saved_bytes(),
+            proof.origin().clone(),
+            catalog,
+            Some(proof.clone()),
+        )
+        .unwrap_or_default()
+    }
+    #[cfg(test)]
+    pub(in crate::app::features::tuning) fn from_saved_fixture(
+        bytes: &[u8],
+        origin: ConfigurationOrigin,
+        catalog: &super::catalog::Catalog,
+    ) -> Self {
+        Self::saved_set(
+            bytes,
+            origin,
+            catalog,
+            #[cfg(windows)]
+            None,
+        )
+        .unwrap_or_default()
+    }
+    fn saved_set(
+        bytes: &[u8],
+        origin: ConfigurationOrigin,
+        catalog: &super::catalog::Catalog,
+        #[cfg(windows)] native: Option<NativeConfigurationProof>,
+    ) -> Option<Self> {
+        let config = saved_configuration(bytes)?;
+        if !origin.matches_lineage(&config.lineage)
+            || !config
+                .activations
+                .iter()
+                .all(|entry| config.request_matches(entry))
+        {
+            return None;
+        }
+        let entry = |intent: &super::super::config::SavedIntent, decision| ConfiguredEntry {
+            owner: intent.owner,
+            binding: intent.binding.clone(),
+            config: intent.config.clone(),
+            target: intent.target.clone(),
+            mode: intent.mode,
+            decision,
+        };
+        let mut entries = config
+            .activations
+            .iter()
+            .map(|intent| entry(intent, ConfiguredDecision::Enabled))
+            .chain(
+                config
+                    .withdrawals
+                    .iter()
+                    .map(|intent| entry(intent, ConfiguredDecision::Disabled)),
+            )
+            .collect::<Vec<_>>();
+        let mut continuations = Vec::new();
+        for transition in config.transitions.as_deref().unwrap_or_default() {
+            if !config.request_matches(&transition.new) {
+                return None;
+            }
+            entries.push(entry(&transition.new, ConfiguredDecision::Enabled));
+            continuations.push(entry(&transition.old, ConfiguredDecision::Enabled));
+        }
+        // Unknown inactive preferences are retained but are not execution input.
+        // Every relevant tuple must validate; none is silently discarded.
+        for intent in entries.iter().chain(&continuations) {
+            if intent
+                .config
+                .target
+                .as_ref()
+                .is_some_and(|target| target != &intent.target)
+                || catalog.validate_config(&intent.config).is_err()
+            {
+                return None;
+            }
+        }
+        Self::build_set(
+            origin,
+            config.allocations.next_config_generation,
+            entries,
+            continuations,
+            #[cfg(windows)]
+            native,
+        )
+        .ok()
     }
     fn decision(
         &self,
@@ -245,12 +403,14 @@ impl ConfiguredSnapshot {
         revision: u64,
         entries: Vec<ConfiguredEntry>,
     ) -> Result<Self, &'static str> {
-        let Self::Complete(set) = Self::complete(revision, entries)? else {
-            unreachable!()
-        };
-        let mut set = (*set).clone();
-        set.origin = origin;
-        Ok(Self::Complete(Arc::new(set)))
+        Self::build_set(
+            origin,
+            revision,
+            entries,
+            vec![],
+            #[cfg(windows)]
+            None,
+        )
     }
 }
 
@@ -305,6 +465,36 @@ mod tests {
     }
     fn decide(snapshot: &ConfiguredSnapshot, e: &ConfiguredEntry) -> IntentDecision {
         snapshot.decision(e.owner, &e.binding, &e.config, &e.target, e.mode)
+    }
+    #[test]
+    fn p2a_configured_budget_counts_both_old_and_new_metadata() {
+        let mut e = entry(ConfiguredDecision::Enabled);
+        e.config.payload = serde_json::json!("x".repeat(200_000));
+        let entries = (1..=11)
+            .map(|id| {
+                let mut e = e.clone();
+                e.owner = OwnerId::new(id).unwrap();
+                e
+            })
+            .collect::<Vec<_>>();
+        assert!(ConfiguredSnapshot::build_set(
+            ConfigurationOrigin::fixture(),
+            2,
+            entries.clone(),
+            vec![],
+            #[cfg(windows)]
+            None
+        )
+        .is_ok());
+        assert!(ConfiguredSnapshot::build_set(
+            ConfigurationOrigin::fixture(),
+            2,
+            entries.clone(),
+            entries,
+            #[cfg(windows)]
+            None
+        )
+        .is_err());
     }
     #[test]
     fn p1b_configured_origin_precedes_identical_numeric_owner_tuple() {

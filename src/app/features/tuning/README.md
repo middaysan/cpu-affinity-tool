@@ -19,6 +19,11 @@ FORMAT2 matches the independently expected original source before hydration or
 owner matching; legacy or foreign evidence remains blocked and retained. Worker
 source guards are scoped to bounded operations. The live configured producer is
 still Unavailable; provenance supplies no game/logon/boot authority.
+The dormant saved-input builder accepts sealed proof and derives immutable tuples
+from its exact bytes. Envelope v2 separates a same-owner old continuation from
+the new requested value; explicit withdrawals alone supply Disabled. Drafts,
+missing records and journal ownership do not supply intent. Transactions and
+matching recovery remain prerequisites before connecting this producer.
 Passing isolated test objects
 does not admit a writable module.
 
@@ -34,6 +39,9 @@ The Windows recommendations and exclusions are documented in
   shapes. An absent envelope is Off. Exact raw forward data remains read-only;
   malformed/oversized evidence refuses saves. Known structural data still requires
   its module codec/catalog and an independently qualified source before execution.
+- `configured_source.rs` builds immutable input from saved sealed proof. Its
+  ordinary saved-file fixtures supply explicit test origin and no native proof;
+  production runner composition remains Unavailable.
 - `platform/contract.rs` contains validated IDs, targets, setting resources,
   capability and status values, exact canonical tokens, and typed plans.
 - `platform/catalog.rs` contains `Module`, checked registration and preparation,
@@ -67,7 +75,14 @@ exceptions to hide unused integrations.
 Configuration uses a separately versioned envelope bounded to 4 MiB, depth 32
 and 65536 nodes, including raw metadata. Known records cap profiles/modules per
 profile at 64, associations at 256 and activation/withdrawal tuples together at
-256. Allocation counters exceed every retained used ID/generation. Unknown
+256 in v1. V2 caps activation/withdrawal/transition owner records together at 256;
+both transition tuples count toward aggregate bytes/nodes. A transition retains
+the same owner/profile/actor/target/mode and advances configuration generation.
+Old continuation never authorizes old Acquire; only the new tuple does. Exact
+active/new preferences and game associations are required as saved shape, without
+establishing native game eligibility. Unsupported execution-relevant codecs make
+the producer unavailable with records retained; unused preferences do not block it.
+Allocation counters exceed every retained used ID/generation. Unknown
 structural fields/versions preserve original JSON through unrelated state saves;
 understood metadata remains validated before an Unknown result, and duplicate
 JSON names are blocked before conversion can discard evidence. Whole-state reads
@@ -76,8 +91,9 @@ directory creation, stage write and publication. Raw tuning evidence is guarded
 even when an unrelated base field fails decoding.
 Module payload versions belong to the registered codecs, independently of the
 platform envelope version. File parsing does not authenticate an account, source
-directory, saved producer or journal origin. Native qualification and durable
-intent transactions remain later F4 work; production input stays Unavailable.
+directory, saved producer or journal origin. Receipt qualification and origin
+binding are present; durable transactions and recovery composition remain later
+F4 work, and production input stays Unavailable.
 
 ## Adding a module
 
