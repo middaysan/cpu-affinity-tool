@@ -720,86 +720,89 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                 let mut attached_no_identity_pids = Vec::new();
                 let mut newly_attached_package_pids = 0usize;
                 if let Ok(mut apps) = request.running_apps.try_write() {
-                    if !outcome.managed_pids.is_empty() && !apps.apps.contains_key(&request.app_key)
-                    {
-                        runtime_changed = true;
-                        apps.add_app(
-                            &request.app_key,
-                            outcome.managed_pids[0],
-                            request.group_id.clone(),
-                            request.rule_id.clone(),
-                        );
-                        if let Some(app) = apps.apps.get_mut(&request.app_key) {
-                            if let Some(&token) =
-                                outcome.instance_tokens.get(&outcome.managed_pids[0])
-                            {
-                                app.pid_instance_tokens
-                                    .insert(outcome.managed_pids[0], token);
-                            }
-                        }
-                    }
-
-                    if let Some(app) = apps.apps.get_mut(&request.app_key) {
-                        runtime_changed |=
-                            app.group_id != request.group_id || app.rule_id != request.rule_id;
-                        app.group_id = request.group_id.clone();
-                        app.rule_id = request.rule_id.clone();
-                    }
-
-                    for &pid in &outcome.managed_pids {
-                        if let Some(app) = apps.apps.get_mut(&request.app_key) {
-                            if !app.pids.contains(&pid) {
-                                app.pids.push(pid);
-                                runtime_changed = true;
-                            }
-                            if let Some(&token) = outcome.instance_tokens.get(&pid) {
-                                runtime_changed |=
-                                    app.pid_instance_tokens.insert(pid, token) != Some(token);
-                            }
-                        }
-                    }
-
-                    if apps.apps.contains_key(&request.app_key) {
-                        if let Some(package_info) = &request.installed_package_info {
-                            let mut package_tracking =
-                                request.installed_package_tracking.write().unwrap();
-                            let owns_package = ensure_package_owner_claim(
-                                &mut package_tracking,
-                                &apps,
-                                &package_info.package_family_name,
+                    apps.mutate_membership(|apps| {
+                        if !outcome.managed_pids.is_empty()
+                            && !apps.apps.contains_key(&request.app_key)
+                        {
+                            runtime_changed = true;
+                            apps.add_app(
                                 &request.app_key,
+                                outcome.managed_pids[0],
+                                request.group_id.clone(),
+                                request.rule_id.clone(),
                             );
+                            if let Some(app) = apps.apps.get_mut(&request.app_key) {
+                                if let Some(&token) =
+                                    outcome.instance_tokens.get(&outcome.managed_pids[0])
+                                {
+                                    app.pid_instance_tokens
+                                        .insert(outcome.managed_pids[0], token);
+                                }
+                            }
+                        }
 
-                            if owns_package {
-                                for &pid in &outcome.no_identity_package_pids {
-                                    if let Some(app) = apps.apps.get_mut(&request.app_key) {
-                                        if !app.pids.contains(&pid) {
-                                            let Some(&instance_token) =
-                                                outcome.instance_tokens.get(&pid)
-                                            else {
-                                                continue;
-                                            };
-                                            app.pids.push(pid);
-                                            app.pid_instance_tokens.insert(pid, instance_token);
-                                            attached_no_identity_pids.push(pid);
-                                            runtime_changed = true;
-                                            if let Ok(mask) =
-                                                affinity_mask_from_cores(&request.group_cores)
-                                            {
-                                                let _ = os.apply_process_settings_if_instance(
-                                                    pid,
-                                                    instance_token,
-                                                    mask,
-                                                    request.priority,
-                                                );
-                                                newly_attached_package_pids += 1;
+                        if let Some(app) = apps.apps.get_mut(&request.app_key) {
+                            runtime_changed |=
+                                app.group_id != request.group_id || app.rule_id != request.rule_id;
+                            app.group_id = request.group_id.clone();
+                            app.rule_id = request.rule_id.clone();
+                        }
+
+                        for &pid in &outcome.managed_pids {
+                            if let Some(app) = apps.apps.get_mut(&request.app_key) {
+                                if !app.pids.contains(&pid) {
+                                    app.pids.push(pid);
+                                    runtime_changed = true;
+                                }
+                                if let Some(&token) = outcome.instance_tokens.get(&pid) {
+                                    runtime_changed |=
+                                        app.pid_instance_tokens.insert(pid, token) != Some(token);
+                                }
+                            }
+                        }
+
+                        if apps.apps.contains_key(&request.app_key) {
+                            if let Some(package_info) = &request.installed_package_info {
+                                let mut package_tracking =
+                                    request.installed_package_tracking.write().unwrap();
+                                let owns_package = ensure_package_owner_claim(
+                                    &mut package_tracking,
+                                    apps,
+                                    &package_info.package_family_name,
+                                    &request.app_key,
+                                );
+
+                                if owns_package {
+                                    for &pid in &outcome.no_identity_package_pids {
+                                        if let Some(app) = apps.apps.get_mut(&request.app_key) {
+                                            if !app.pids.contains(&pid) {
+                                                let Some(&instance_token) =
+                                                    outcome.instance_tokens.get(&pid)
+                                                else {
+                                                    continue;
+                                                };
+                                                app.pids.push(pid);
+                                                app.pid_instance_tokens.insert(pid, instance_token);
+                                                attached_no_identity_pids.push(pid);
+                                                runtime_changed = true;
+                                                if let Ok(mask) =
+                                                    affinity_mask_from_cores(&request.group_cores)
+                                                {
+                                                    let _ = os.apply_process_settings_if_instance(
+                                                        pid,
+                                                        instance_token,
+                                                        mask,
+                                                        request.priority,
+                                                    );
+                                                    newly_attached_package_pids += 1;
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
+                    });
                 }
 
                 // The writer guard is gone before the UI is woken.
@@ -1783,6 +1786,14 @@ mod tests {
         run_app_with_affinity_sync_with_os(&state, &runtime, &mut log_manager, 0, 0, app, &os);
 
         assert_eq!(runtime.get_running_app_pids(&app_key), Some(vec![4242]));
+        assert_eq!(
+            runtime
+                .running_apps_handle()
+                .try_read()
+                .unwrap()
+                .membership_generation(),
+            Some(1)
+        );
         assert!(log_manager
             .entries
             .iter()
@@ -1819,6 +1830,14 @@ mod tests {
         assert!(pids.contains(&41));
         assert!(pids.contains(&5150));
         assert_eq!(pids.iter().filter(|&&pid| pid == 5150).count(), 1);
+        assert_eq!(
+            runtime
+                .running_apps_handle()
+                .try_read()
+                .unwrap()
+                .membership_generation(),
+            Some(2)
+        );
         assert!(log_manager.entries.iter().any(|entry| entry
             .message
             .contains("New instance of existing app started")));
@@ -1841,6 +1860,14 @@ mod tests {
             sample_app(),
             vec![0],
             &os,
+        );
+        assert_eq!(
+            runtime
+                .running_apps_handle()
+                .try_read()
+                .unwrap()
+                .membership_generation(),
+            Some(0)
         );
 
         assert_eq!(

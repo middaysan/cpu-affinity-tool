@@ -10,8 +10,23 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::BOOL;
 
 use super::OS;
+fn qualified_foreground(window: usize, thread: u32, pid: u32) -> Result<(usize, u32), String> {
+    if window == 0 || thread == 0 || pid == 0 {
+        Err("foreground observation unavailable".into())
+    } else {
+        Ok((window, pid))
+    }
+}
 
 impl OS {
+    pub fn foreground_process() -> Result<(usize, u32), String> {
+        unsafe {
+            let window = GetForegroundWindow();
+            let mut pid = 0;
+            let thread = GetWindowThreadProcessId(window, Some(&mut pid));
+            qualified_foreground(window.0 as usize, thread, pid)
+        }
+    }
     pub fn focus_window_by_pid(pid: u32) -> bool {
         #[repr(C)]
         struct Ctx {
@@ -102,5 +117,17 @@ impl OS {
             let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = PostMessageW(None, WM_NULL, WPARAM(0), LPARAM(0));
         }
+    }
+}
+
+#[cfg(test)]
+mod p3_tests {
+    use super::*;
+    #[test]
+    fn p3_foreground_null_invalid_and_zero_pid_are_unknown() {
+        assert_eq!(qualified_foreground(1, 1, 42), Ok((1, 42)));
+        assert!(qualified_foreground(0, 1, 42).is_err());
+        assert!(qualified_foreground(1, 0, 42).is_err());
+        assert!(qualified_foreground(1, 1, 0).is_err());
     }
 }

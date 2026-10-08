@@ -104,10 +104,10 @@ impl ExecutionStore {
         rule_id: RuleId,
     ) -> bool {
         match self.running_apps.try_write() {
-            Ok(mut apps) => {
+            Ok(mut apps) => apps.mutate_membership(|apps| {
                 apps.add_app(app_key, pid, group_id, rule_id);
                 true
-            }
+            }),
             Err(_) => false,
         }
     }
@@ -121,13 +121,13 @@ impl ExecutionStore {
         rule_id: RuleId,
     ) -> bool {
         match self.running_apps.try_write() {
-            Ok(mut apps) => {
+            Ok(mut apps) => apps.mutate_membership(|apps| {
                 apps.add_app(app_key, pid, group_id, rule_id);
                 if let Some(app) = apps.apps.get_mut(app_key) {
                     app.pid_instance_tokens.insert(pid, instance_token);
                 }
                 true
-            }
+            }),
             Err(_) => false,
         }
     }
@@ -146,7 +146,7 @@ impl ExecutionStore {
         instance_token: ProcessInstanceToken,
     ) -> bool {
         match self.running_apps.try_write() {
-            Ok(mut apps) => {
+            Ok(mut apps) => apps.mutate_membership(|apps| {
                 if let Some(app) = apps.apps.get_mut(app_key) {
                     if !app.pids.contains(&pid) {
                         app.pids.push(pid);
@@ -156,7 +156,7 @@ impl ExecutionStore {
                 } else {
                     false
                 }
-            }
+            }),
             Err(_) => false,
         }
     }
@@ -587,6 +587,7 @@ mod tests {
         let second = installed_app("Spotify Launcher", "Pkg!AppB", PriorityClass::Normal).get_key();
         running_apps.add_app(&first, 10, group_id(0), rule_id(0));
         running_apps.add_app(&second, 20, group_id(0), rule_id(1));
+        let before = running_apps.membership_generation();
 
         assert!(ensure_package_owner_claim(
             &mut tracking,
@@ -600,6 +601,7 @@ mod tests {
             "Pkg",
             &second
         ));
+        assert_eq!(running_apps.membership_generation(), before);
     }
 
     #[test]

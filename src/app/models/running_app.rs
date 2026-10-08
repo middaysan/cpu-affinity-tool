@@ -35,13 +35,62 @@ pub struct RunningApp {
 /// Manages a collection of running applications.
 /// This structure provides methods for adding and removing applications
 /// from the collection, indexed by a unique key.
-#[derive(Default)]
 pub struct RunningApps {
     /// Map of application keys to RunningApp instances
     pub apps: HashMap<AppRuntimeKey, RunningApp>,
+    membership_generation: Option<u64>,
+    editing_membership: bool,
+}
+impl Default for RunningApps {
+    fn default() -> Self {
+        Self {
+            apps: HashMap::new(),
+            membership_generation: Some(0),
+            editing_membership: false,
+        }
+    }
 }
 
 impl RunningApps {
+    pub(crate) fn membership_generation(&self) -> Option<u64> {
+        self.membership_generation
+    }
+    pub(crate) fn mutate_membership<R>(&mut self, edit: impl FnOnce(&mut Self) -> R) -> R {
+        if self.editing_membership {
+            return edit(self);
+        }
+        let signature = |apps: &Self| {
+            apps.apps
+                .iter()
+                .map(|(key, app)| {
+                    let mut pids = app.pids.clone();
+                    pids.sort_unstable();
+                    let mut tokens = app
+                        .pid_instance_tokens
+                        .iter()
+                        .map(|(pid, token)| (*pid, *token))
+                        .collect::<Vec<_>>();
+                    tokens.sort_unstable();
+                    (
+                        key.clone(),
+                        (app.group_id.clone(), app.rule_id.clone(), pids, tokens),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let before = signature(self);
+        // A panic leaves uncertainty sticky; it cannot publish a stale generation.
+        let previous = self.membership_generation.take();
+        self.editing_membership = true;
+        let result = edit(self);
+        self.editing_membership = false;
+        self.membership_generation = if before != signature(self) {
+            previous.and_then(|generation| generation.checked_add(1))
+        } else {
+            previous
+        };
+        result
+    }
     /// Adds a new running application to the collection.
     ///
     /// Creates a new RunningApp instance with the specified parameters
@@ -60,17 +109,19 @@ impl RunningApps {
         group_id: GroupId,
         rule_id: RuleId,
     ) {
-        self.apps.insert(
-            app_key.clone(),
-            RunningApp {
-                pids: vec![pid],
-                pid_instance_tokens: HashMap::new(),
-                group_id,
-                rule_id,
-                created_at: std::time::SystemTime::now(),
-                settings_matched: true, // Default to true until checked by monitor
-            },
-        );
+        self.mutate_membership(|apps| {
+            apps.apps.insert(
+                app_key.clone(),
+                RunningApp {
+                    pids: vec![pid],
+                    pid_instance_tokens: HashMap::new(),
+                    group_id,
+                    rule_id,
+                    created_at: std::time::SystemTime::now(),
+                    settings_matched: true, // Default to true until checked by monitor
+                },
+            )
+        });
     }
 
     /// Removes an application from the collection.
@@ -79,7 +130,7 @@ impl RunningApps {
     ///
     /// * `app_key` - The key of the application to remove
     pub fn remove_app(&mut self, app_key: &AppRuntimeKey) {
-        self.apps.remove(app_key);
+        self.mutate_membership(|apps| apps.apps.remove(app_key));
     }
 }
 
@@ -99,6 +150,71 @@ mod tests {
             false,
         )
         .get_key()
+    }
+    #[test]
+    fn p3_membership_token_and_logical_owner_changes_commit_once() {
+        let mut apps = RunningApps::default();
+        let app_key = key("Sample");
+        apps.add_app(&app_key, 42, GroupId("a".into()), RuleId("a".into()));
+        let before = apps.membership_generation().unwrap();
+        apps.mutate_membership(|members| {
+            let app = members.apps.get_mut(&app_key).unwrap();
+            app.pid_instance_tokens.insert(42, 123);
+            app.group_id = GroupId("b".into());
+            app.rule_id = RuleId("b".into());
+        });
+        assert_eq!(apps.membership_generation(), Some(before + 1));
+        apps.mutate_membership(|members| {
+            members
+                .apps
+                .get_mut(&app_key)
+                .unwrap()
+                .pid_instance_tokens
+                .insert(42, 124);
+        });
+        assert_eq!(apps.membership_generation(), Some(before + 2));
+    }
+    #[test]
+    fn p3_membership_noop_settings_and_pid_order_do_not_advance() {
+        let mut apps = RunningApps::default();
+        let app_key = key("Sample");
+        apps.add_app(&app_key, 42, GroupId("a".into()), RuleId("a".into()));
+        apps.mutate_membership(|members| {
+            members.apps.get_mut(&app_key).unwrap().pids.push(43);
+        });
+        let before = apps.membership_generation();
+        apps.mutate_membership(|members| {
+            let app = members.apps.get_mut(&app_key).unwrap();
+            app.settings_matched = false;
+            app.pids.reverse();
+        });
+        apps.mutate_membership(|_| {});
+        assert_eq!(apps.membership_generation(), before);
+        apps.remove_app(&key("Missing"));
+        assert_eq!(apps.membership_generation(), before);
+    }
+    #[test]
+    fn p3_membership_generation_overflow_is_sticky_unknown() {
+        let mut apps = RunningApps::default();
+        apps.membership_generation = Some(u64::MAX);
+        apps.add_app(&key("Sample"), 42, GroupId("a".into()), RuleId("a".into()));
+        assert_eq!(apps.membership_generation(), None);
+        apps.remove_app(&key("Sample"));
+        assert_eq!(apps.membership_generation(), None);
+    }
+    #[test]
+    fn p3_membership_panicking_edit_cannot_leave_a_trusted_revision() {
+        let mut apps = RunningApps::default();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apps.mutate_membership(|apps| {
+                apps.add_app(&key("Sample"), 42, GroupId("a".into()), RuleId("a".into()));
+                panic!("fixture interruption");
+            })
+        }));
+        assert!(result.is_err());
+        assert_eq!(apps.membership_generation(), None);
+        apps.remove_app(&key("Sample"));
+        assert_eq!(apps.membership_generation(), None);
     }
 
     #[test]

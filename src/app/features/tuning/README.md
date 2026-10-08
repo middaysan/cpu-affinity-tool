@@ -310,6 +310,16 @@ persistence. Optional bounded v2 acknowledgement metadata retains the pending tu
 until its own save succeeds. Pruning requires fresh retained-worker corroboration
 against the current journal; deserialized acknowledgement fields supply no authority.
 
+The dormant execution bridge copies bounded membership and relevant configuration,
+inspects native process facts outside application locks, and rechecks both revisions
+before publishing an immutable Complete/Unknown observation. Membership generation
+changes with exact PID/token or logical-owner changes; no-op/settings edits do not
+advance it. Scheduled refresh and coalesced requests allow convergence without every
+monitor notification. Windows foreground HWND/PID observations are bracketed, retained
+process guards are rechecked, and incomplete enumeration remains Unknown. This
+refresh primitive is not yet composed into AppState or shell polling and supplies
+no Game/logon/boot or resource mutation permit.
+
 Production native admission remains closed even for an absent journal: the
 default configured producer is Unavailable, and an explicit staged gate also
 blocks native mutations after the private revision handoff. Matching update

@@ -3,7 +3,8 @@ use std::mem::size_of;
 use std::path::PathBuf;
 
 use windows::Win32::Foundation::{
-    APPMODEL_ERROR_NO_APPLICATION, ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, STILL_ACTIVE,
+    APPMODEL_ERROR_NO_APPLICATION, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, FILETIME,
+    HANDLE, STILL_ACTIVE,
 };
 use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -24,6 +25,13 @@ pub struct ProcessTree {
     pub parent_of: HashMap<u32, u32>,
     pub children_of: HashMap<u32, Vec<u32>>,
     pub names: HashMap<u32, String>,
+}
+fn enumeration_end(error: windows::core::Error) -> Result<(), OsError> {
+    if error.code() == windows::core::HRESULT::from_win32(ERROR_NO_MORE_FILES.0) {
+        Ok(())
+    } else {
+        Err(OsError::Win(error))
+    }
 }
 
 fn process_instance_token_from_handle(handle: HANDLE) -> Result<u64, OsError> {
@@ -120,13 +128,17 @@ fn snapshot_process_tree_internal() -> Result<ProcessTree, OsError> {
                 parent_of.insert(pid, ppid);
                 children_of.entry(ppid).or_default().push(pid);
                 names.insert(pid, exe_file);
+                if names.len() > 65_536 {
+                    return Err(OsError::Msg("process snapshot capacity".into()));
+                }
             }
 
             let mut next: PROCESSENTRY32W = std::mem::zeroed();
             next.dwSize = size_of::<PROCESSENTRY32W>() as u32;
             pe = next;
 
-            if Process32NextW(snap, &mut pe).is_err() {
+            if let Err(error) = Process32NextW(snap, &mut pe) {
+                enumeration_end(error)?;
                 break;
             }
         }
@@ -425,5 +437,18 @@ mod tests {
         OS::find_all_descendants_with_tree(1, &mut descendants, &tree);
 
         assert_eq!(descendants, vec![4, 2, 3, 5]);
+    }
+}
+
+#[cfg(test)]
+mod p3_tests {
+    use super::*;
+    #[test]
+    fn p3_enumeration_only_actual_end_is_complete() {
+        let error =
+            |code| windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(code));
+        assert!(enumeration_end(error(18)).is_ok());
+        assert!(enumeration_end(error(5)).is_err());
+        assert!(enumeration_end(error(87)).is_err());
     }
 }

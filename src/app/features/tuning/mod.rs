@@ -3,6 +3,7 @@
 
 pub(crate) mod config;
 pub(crate) mod configured_source;
+pub(crate) mod execution_bridge;
 pub mod platform;
 mod service;
 pub(crate) use service::{HeadlessTuning, StatePersistence};

@@ -5,6 +5,16 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 const TEMP_SHORTCUT_ATTEMPTS: usize = 100;
+pub(crate) fn foreground_process() -> Result<(usize, u32), String> {
+    #[cfg(windows)]
+    {
+        os_api::OS::foreground_process()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("foreground observation unavailable".into())
+    }
+}
 
 pub fn set_current_process_priority(priority: PriorityClass) -> Result<(), String> {
     os_api::OS::set_current_process_priority(priority)

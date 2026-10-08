@@ -567,84 +567,172 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
     installed_package_tracking: &Arc<RwLock<InstalledPackageTrackingState>>,
     os: &O,
 ) -> RunningAppsIterationOutcome {
-    let mut processed_keys = HashSet::new();
-    let mut outcome = RunningAppsIterationOutcome::default();
+    apps.mutate_membership(|apps| {
+        let mut processed_keys = HashSet::new();
+        let mut outcome = RunningAppsIterationOutcome::default();
 
-    for configured in configured_programs {
-        let key = configured.key.clone();
-        processed_keys.insert(key.clone());
-        let was_tracked = apps.apps.contains_key(&key);
+        for configured in configured_programs {
+            let key = configured.key.clone();
+            processed_keys.insert(key.clone());
+            let was_tracked = apps.apps.contains_key(&key);
 
-        let verified_path_roots = match &configured.matcher {
-            ConfiguredProgramMatcher::Path { .. } => {
-                collect_path_verified_pids(&configured.matcher, name_to_pids, os)
-            }
-            ConfiguredProgramMatcher::Installed { .. } => Vec::new(),
-        };
-        let mut detected_pids = match &configured.matcher {
-            ConfiguredProgramMatcher::Path { fallback_names, .. } => {
-                let mut pids = verified_path_roots.clone();
-                extend_with_named_processes(&mut pids, fallback_names, name_to_pids, os);
-                pids
-            }
-            ConfiguredProgramMatcher::Installed { aumid } => {
-                aumid_to_seed_pids.get(aumid).cloned().unwrap_or_default()
-            }
-        };
+            let verified_path_roots = match &configured.matcher {
+                ConfiguredProgramMatcher::Path { .. } => {
+                    collect_path_verified_pids(&configured.matcher, name_to_pids, os)
+                }
+                ConfiguredProgramMatcher::Installed { .. } => Vec::new(),
+            };
+            let mut detected_pids = match &configured.matcher {
+                ConfiguredProgramMatcher::Path { fallback_names, .. } => {
+                    let mut pids = verified_path_roots.clone();
+                    extend_with_named_processes(&mut pids, fallback_names, name_to_pids, os);
+                    pids
+                }
+                ConfiguredProgramMatcher::Installed { aumid } => {
+                    aumid_to_seed_pids.get(aumid).cloned().unwrap_or_default()
+                }
+            };
 
-        let installed_package_info = match &configured.matcher {
-            ConfiguredProgramMatcher::Installed { aumid }
-                if was_tracked || !detected_pids.is_empty() =>
-            {
-                resolve_installed_package_runtime_info_cached(
-                    installed_package_tracking,
-                    aumid,
-                    |aumid| os.resolve_installed_package_runtime_info(aumid),
-                )
-                .ok()
-            }
-            _ => None,
-        };
-        let has_auto_managed_installed_evidence = match &configured.matcher {
-            ConfiguredProgramMatcher::Installed { .. } => {
-                detected_pids
-                    .iter()
-                    .any(|candidate| is_known_auto_managed_installed_pid(snapshot, candidate.pid))
-                    || apps.apps.get(&key).is_some_and(|app| {
+            let installed_package_info = match &configured.matcher {
+                ConfiguredProgramMatcher::Installed { aumid }
+                    if was_tracked || !detected_pids.is_empty() =>
+                {
+                    resolve_installed_package_runtime_info_cached(
+                        installed_package_tracking,
+                        aumid,
+                        |aumid| os.resolve_installed_package_runtime_info(aumid),
+                    )
+                    .ok()
+                }
+                _ => None,
+            };
+            let has_auto_managed_installed_evidence = match &configured.matcher {
+                ConfiguredProgramMatcher::Installed { .. } => {
+                    detected_pids.iter().any(|candidate| {
+                        is_known_auto_managed_installed_pid(snapshot, candidate.pid)
+                    }) || apps.apps.get(&key).is_some_and(|app| {
                         app.pids
                             .iter()
                             .any(|&pid| is_known_auto_managed_installed_pid(snapshot, pid))
                     })
-            }
-            ConfiguredProgramMatcher::Path { .. } => false,
-        };
-        let owns_package = installed_package_info
-            .as_ref()
-            .filter(|_| has_auto_managed_installed_evidence)
-            .map(|info| {
-                let mut tracking = installed_package_tracking.write().unwrap();
-                ensure_package_owner_claim(&mut tracking, apps, &info.package_family_name, &key)
-            })
-            .unwrap_or(false);
+                }
+                ConfiguredProgramMatcher::Path { .. } => false,
+            };
+            let owns_package = installed_package_info
+                .as_ref()
+                .filter(|_| has_auto_managed_installed_evidence)
+                .map(|info| {
+                    let mut tracking = installed_package_tracking.write().unwrap();
+                    ensure_package_owner_claim(&mut tracking, apps, &info.package_family_name, &key)
+                })
+                .unwrap_or(false);
 
-        if let Some(app) = apps.apps.get_mut(&key) {
-            app.group_id = configured.group_id.clone();
-            app.rule_id = configured.rule_id.clone();
-            let old_pids = app.pids.clone();
+            if let Some(app) = apps.apps.get_mut(&key) {
+                app.group_id = configured.group_id.clone();
+                app.rule_id = configured.rule_id.clone();
+                let old_pids = app.pids.clone();
+
+                match &configured.matcher {
+                    ConfiguredProgramMatcher::Path { fallback_names, .. } => {
+                        let mut managed_pids = verified_path_roots.clone();
+                        if configured.manage_descendants {
+                            extend_with_descendants(snapshot, &mut managed_pids, os);
+                        }
+                        extend_with_named_processes(
+                            &mut managed_pids,
+                            fallback_names,
+                            name_to_pids,
+                            os,
+                        );
+                        replace_with_current_process_instances(app, managed_pids, snapshot, os);
+                    }
+                    ConfiguredProgramMatcher::Installed { aumid } => {
+                        let explicit_pids = collect_named_process_pids(
+                            &configured.additional_processes_normalized,
+                            name_to_pids,
+                            os,
+                        );
+                        let explicit_pid_set: HashSet<u32> = explicit_pids
+                            .iter()
+                            .map(|candidate| candidate.pid)
+                            .collect();
+                        let mut managed_pids = detected_pids.clone();
+
+                        if let Some(package_info) = installed_package_info.as_ref() {
+                            if let Ok(package_candidates) = collect_package_local_pid_candidates(
+                                &managed_pids,
+                                snapshot,
+                                &package_info.install_root,
+                                aumid,
+                                os,
+                            ) {
+                                for pid in package_candidates.same_aumid_pids {
+                                    push_unique_pid(&mut managed_pids, pid);
+                                }
+                                if owns_package {
+                                    for pid in package_candidates.no_identity_pids {
+                                        push_unique_pid(&mut managed_pids, pid);
+                                    }
+                                }
+                            }
+                        }
+
+                        retain_auto_managed_installed_pids(
+                            snapshot,
+                            &mut managed_pids,
+                            &explicit_pid_set,
+                        );
+                        if configured.manage_descendants {
+                            extend_with_descendants(snapshot, &mut managed_pids, os);
+                        }
+                        for pid in explicit_pids {
+                            push_unique_pid(&mut managed_pids, pid);
+                        }
+                        retain_auto_managed_installed_pids(
+                            snapshot,
+                            &mut managed_pids,
+                            &explicit_pid_set,
+                        );
+                        replace_with_current_process_instances(app, managed_pids, snapshot, os);
+                    }
+                }
+
+                if app.pids != old_pids {
+                    outcome.changed = true;
+                }
+
+                if app.pids.is_empty() {
+                    outcome
+                        .notifications
+                        .push(format!("App stopped: {}", configured.display_name));
+                    apps.remove_app(&key);
+                    outcome.changed = true;
+                }
+
+                continue;
+            }
+
+            let should_track = match &configured.matcher {
+                ConfiguredProgramMatcher::Path { .. } => !detected_pids.is_empty(),
+                ConfiguredProgramMatcher::Installed { .. } => !detected_pids.is_empty(),
+            };
+
+            if !should_track {
+                continue;
+            }
 
             match &configured.matcher {
                 ConfiguredProgramMatcher::Path { fallback_names, .. } => {
-                    let mut managed_pids = verified_path_roots.clone();
+                    detected_pids = verified_path_roots.clone();
                     if configured.manage_descendants {
-                        extend_with_descendants(snapshot, &mut managed_pids, os);
+                        extend_with_descendants(snapshot, &mut detected_pids, os);
                     }
                     extend_with_named_processes(
-                        &mut managed_pids,
+                        &mut detected_pids,
                         fallback_names,
                         name_to_pids,
                         os,
                     );
-                    replace_with_current_process_instances(app, managed_pids, snapshot, os);
                 }
                 ConfiguredProgramMatcher::Installed { aumid } => {
                     let explicit_pids = collect_named_process_pids(
@@ -656,22 +744,21 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                         .iter()
                         .map(|candidate| candidate.pid)
                         .collect();
-                    let mut managed_pids = detected_pids.clone();
 
                     if let Some(package_info) = installed_package_info.as_ref() {
                         if let Ok(package_candidates) = collect_package_local_pid_candidates(
-                            &managed_pids,
+                            &detected_pids,
                             snapshot,
                             &package_info.install_root,
                             aumid,
                             os,
                         ) {
                             for pid in package_candidates.same_aumid_pids {
-                                push_unique_pid(&mut managed_pids, pid);
+                                push_unique_pid(&mut detected_pids, pid);
                             }
                             if owns_package {
                                 for pid in package_candidates.no_identity_pids {
-                                    push_unique_pid(&mut managed_pids, pid);
+                                    push_unique_pid(&mut detected_pids, pid);
                                 }
                             }
                         }
@@ -679,135 +766,62 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
 
                     retain_auto_managed_installed_pids(
                         snapshot,
-                        &mut managed_pids,
+                        &mut detected_pids,
                         &explicit_pid_set,
                     );
                     if configured.manage_descendants {
-                        extend_with_descendants(snapshot, &mut managed_pids, os);
+                        extend_with_descendants(snapshot, &mut detected_pids, os);
                     }
                     for pid in explicit_pids {
-                        push_unique_pid(&mut managed_pids, pid);
+                        push_unique_pid(&mut detected_pids, pid);
                     }
                     retain_auto_managed_installed_pids(
                         snapshot,
-                        &mut managed_pids,
+                        &mut detected_pids,
                         &explicit_pid_set,
                     );
-                    replace_with_current_process_instances(app, managed_pids, snapshot, os);
                 }
             }
 
-            if app.pids != old_pids {
-                outcome.changed = true;
+            if detected_pids.is_empty() {
+                continue;
             }
 
-            if app.pids.is_empty() {
-                outcome
-                    .notifications
-                    .push(format!("App stopped: {}", configured.display_name));
+            let initial_pid = detected_pids[0].pid;
+            apps.add_app(&key, initial_pid, configured.group_id, configured.rule_id);
+
+            if let Some(app) = apps.apps.get_mut(&key) {
+                replace_with_current_process_instances(app, detected_pids, snapshot, os);
+            }
+            let Some(current_pid) = apps
+                .apps
+                .get(&key)
+                .and_then(|app| app.pids.first())
+                .copied()
+            else {
+                apps.remove_app(&key);
+                continue;
+            };
+
+            outcome.notifications.push(format!(
+                "App detected: {} (PID {})",
+                configured.display_name, current_pid
+            ));
+            outcome.changed = true;
+        }
+
+        let app_keys: Vec<AppRuntimeKey> = apps.apps.keys().cloned().collect();
+        for key in app_keys {
+            if !processed_keys.contains(&key) {
                 apps.remove_app(&key);
                 outcome.changed = true;
             }
-
-            continue;
         }
 
-        let should_track = match &configured.matcher {
-            ConfiguredProgramMatcher::Path { .. } => !detected_pids.is_empty(),
-            ConfiguredProgramMatcher::Installed { .. } => !detected_pids.is_empty(),
-        };
+        cleanup_orphaned_package_owners(&mut installed_package_tracking.write().unwrap(), apps);
 
-        if !should_track {
-            continue;
-        }
-
-        match &configured.matcher {
-            ConfiguredProgramMatcher::Path { fallback_names, .. } => {
-                detected_pids = verified_path_roots.clone();
-                if configured.manage_descendants {
-                    extend_with_descendants(snapshot, &mut detected_pids, os);
-                }
-                extend_with_named_processes(&mut detected_pids, fallback_names, name_to_pids, os);
-            }
-            ConfiguredProgramMatcher::Installed { aumid } => {
-                let explicit_pids = collect_named_process_pids(
-                    &configured.additional_processes_normalized,
-                    name_to_pids,
-                    os,
-                );
-                let explicit_pid_set: HashSet<u32> = explicit_pids
-                    .iter()
-                    .map(|candidate| candidate.pid)
-                    .collect();
-
-                if let Some(package_info) = installed_package_info.as_ref() {
-                    if let Ok(package_candidates) = collect_package_local_pid_candidates(
-                        &detected_pids,
-                        snapshot,
-                        &package_info.install_root,
-                        aumid,
-                        os,
-                    ) {
-                        for pid in package_candidates.same_aumid_pids {
-                            push_unique_pid(&mut detected_pids, pid);
-                        }
-                        if owns_package {
-                            for pid in package_candidates.no_identity_pids {
-                                push_unique_pid(&mut detected_pids, pid);
-                            }
-                        }
-                    }
-                }
-
-                retain_auto_managed_installed_pids(snapshot, &mut detected_pids, &explicit_pid_set);
-                if configured.manage_descendants {
-                    extend_with_descendants(snapshot, &mut detected_pids, os);
-                }
-                for pid in explicit_pids {
-                    push_unique_pid(&mut detected_pids, pid);
-                }
-                retain_auto_managed_installed_pids(snapshot, &mut detected_pids, &explicit_pid_set);
-            }
-        }
-
-        if detected_pids.is_empty() {
-            continue;
-        }
-
-        let initial_pid = detected_pids[0].pid;
-        apps.add_app(&key, initial_pid, configured.group_id, configured.rule_id);
-
-        if let Some(app) = apps.apps.get_mut(&key) {
-            replace_with_current_process_instances(app, detected_pids, snapshot, os);
-        }
-        let Some(current_pid) = apps
-            .apps
-            .get(&key)
-            .and_then(|app| app.pids.first())
-            .copied()
-        else {
-            apps.remove_app(&key);
-            continue;
-        };
-
-        outcome.notifications.push(format!(
-            "App detected: {} (PID {})",
-            configured.display_name, current_pid
-        ));
-        outcome.changed = true;
-    }
-
-    let app_keys: Vec<AppRuntimeKey> = apps.apps.keys().cloned().collect();
-    for key in app_keys {
-        if !processed_keys.contains(&key) {
-            apps.remove_app(&key);
-            outcome.changed = true;
-        }
-    }
-
-    cleanup_orphaned_package_owners(&mut installed_package_tracking.write().unwrap(), apps);
-
-    outcome
+        outcome
+    })
 }
 
 #[cfg(test)]
@@ -1800,6 +1814,7 @@ mod tests {
             .unwrap()
             .pid_instance_tokens
             .insert(10, 1);
+        let before = apps.membership_generation().unwrap();
         let os = FakeRunningAppsOs {
             snapshot: Ok(ProcessSnapshot {
                 children_of: HashMap::new(),
@@ -1818,6 +1833,7 @@ mod tests {
             apps.apps[&key].pid_instance_tokens,
             HashMap::from([(10, 2)])
         );
+        assert_eq!(apps.membership_generation(), Some(before + 1));
     }
 
     #[test]

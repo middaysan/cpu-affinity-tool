@@ -72,6 +72,7 @@ Key directories:
 - `src/app/features/tuning/config.rs` - bounded profile/configuration persistence shapes and exact forward-data retention; parsing supplies no module execution or native source authority
 - `src/app/features/tuning/configured_source.rs` - dormant immutable configured-input builder from independently saved sealed proof; its fixture constructor is test-only and production runner composition remains Unavailable
 - `src/app/features/tuning/service.rs` - dormant headless saved transactions over candidate state and logical identities, with the existing worker reservation and separately persisted terminal acknowledgement bookkeeping; application composition remains later work
+- `src/app/features/tuning/execution_bridge.rs` - dormant bounded execution/foreground observation primitive with copy/inspect/recheck publication, scheduled refresh and coalesced refresh requests; application polling/composition remains later work
 - `src/app/adapters/` - seams for persisted state loading, OS helpers, and installed-app discovery
 - `src/app/runtime/` - thin composition-root state facade kept around `AppState`
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
@@ -156,6 +157,7 @@ Current runtime split:
   - package-owner claims for shared package-local helper processes
   - cached app statuses; a contention-time settings mismatch remains visible until a manual or monitor-confirmed successful settings application clears it
   - `monitor_rx`
+- `RunningApps` commits a checked membership generation under the same writer as runtime-key, logical-owner and exact PID/token membership changes. No-op and settings-only edits leave it unchanged; overflow or interrupted membership mutation remains explicit uncertainty
 - runtime process identity stays keyed by opaque `AppRuntimeKey`, but tracked app ownership now also stores logical `GroupId` / `RuleId`
 - shell presenters are owned under `shell::presenters`; their source files still live under `src/app/views/` via path-based module ownership
 - workers emit typed `shell::events::ShellEvent` messages and do not hold `egui::Context`
@@ -187,6 +189,7 @@ Linux entrypoint now reaches the shared `shell::App` shell, startup logging, aut
 
 Tuning foundation status:
 - current production tuning composition registers no modules and performs no Windows mutations
+- the dormant execution bridge publishes immutable bounded Complete/Unknown observations after native process inspection outside runtime/configuration locks and final generation/configuration rechecks. Its cadence and coalesced requests do not depend on every monitor event being delivered. Windows foreground mapping is read-only and bracketed for races; process enumeration accepts only the actual end-of-list error as completion. Retained process guards are rechecked before publication. These facts supply no Game/logon/boot/resource mutation authority; the bridge is not yet polled by AppState or the shell
 - schema v11 optionally retains a separately versioned tuning envelope with lineage, profiles, logical rule associations, monotonic allocation counters and exact activation/withdrawal tuples. Absence is Off; loading or saving never starts the runner. Understood persistence shape does not prove module-codec support, current intent or native source authenticity
 - tuning envelope v1 remains readable; v2 adds explicit same-owner old/new transitions identified by owner and the strictly advancing new configuration generation. Old supplies continuation evidence only; new supplies requested Acquire input. Actor, profile, target and mode transfers are rejected. The dormant saved producer requires exact enabled preferences/associations for active/new tuples and catalog support for every execution-relevant tuple; deleted old preferences do not erase exact withdrawals. Headless transaction and matching recovery seams use it without composing it into the running application
 - optional v2 terminal acknowledgement metadata is bounded and matched to the exact pending owner/generation/kind. Serialized metadata supplies no configured authority or native permit. Pruning requires fresh corroboration from the retained worker and current journal, after the acknowledgement itself has been saved. Headless saves publish candidate state and logical identities only after persistence succeeds; uncertain post-publication handoff retains the same worker and closes further saves

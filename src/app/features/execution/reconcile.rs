@@ -188,64 +188,66 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
     monitoring_enabled: bool,
     os: &mut O,
 ) -> ProcessSettingsIterationOutcome {
-    let mut outcome = ProcessSettingsIterationOutcome::default();
+    apps.mutate_membership(|apps| {
+        let mut outcome = ProcessSettingsIterationOutcome::default();
 
-    for (app_key, app) in apps.apps.iter_mut() {
-        if let Some(settings) = key_to_settings.get(app_key) {
-            app.group_id = settings.group_id.clone();
-            app.rule_id = settings.rule_id.clone();
+        for (app_key, app) in apps.apps.iter_mut() {
+            if let Some(settings) = key_to_settings.get(app_key) {
+                app.group_id = settings.group_id.clone();
+                app.rule_id = settings.rule_id.clone();
 
-            let mut all_matched = true;
+                let mut all_matched = true;
 
-            for &pid in &app.pids {
-                let Some(&instance_token) = app.pid_instance_tokens.get(&pid) else {
-                    all_matched = false;
-                    continue;
-                };
-
-                match os.apply_process_settings_if_instance(
-                    pid,
-                    instance_token,
-                    settings.expected_mask,
-                    settings.expected_priority,
-                    monitoring_enabled,
-                ) {
-                    Ok(applied) if applied.affinity_changed || applied.priority_changed => {
+                for &pid in &app.pids {
+                    let Some(&instance_token) = app.pid_instance_tokens.get(&pid) else {
                         all_matched = false;
-                        if monitoring_enabled {
-                            if applied.affinity_changed {
-                                outcome.notifications.push(format!(
-                                    "Fixed affinity for {} (PID {}): {:X} -> {:X}",
-                                    settings.name,
-                                    pid,
-                                    applied.previous_affinity,
-                                    settings.expected_mask
-                                ));
-                            }
-                            if applied.priority_changed {
-                                outcome.notifications.push(format!(
-                                    "Fixed priority for {} (PID {}): {:?} -> {:?}",
-                                    settings.name,
-                                    pid,
-                                    applied.previous_priority,
-                                    settings.expected_priority
-                                ));
+                        continue;
+                    };
+
+                    match os.apply_process_settings_if_instance(
+                        pid,
+                        instance_token,
+                        settings.expected_mask,
+                        settings.expected_priority,
+                        monitoring_enabled,
+                    ) {
+                        Ok(applied) if applied.affinity_changed || applied.priority_changed => {
+                            all_matched = false;
+                            if monitoring_enabled {
+                                if applied.affinity_changed {
+                                    outcome.notifications.push(format!(
+                                        "Fixed affinity for {} (PID {}): {:X} -> {:X}",
+                                        settings.name,
+                                        pid,
+                                        applied.previous_affinity,
+                                        settings.expected_mask
+                                    ));
+                                }
+                                if applied.priority_changed {
+                                    outcome.notifications.push(format!(
+                                        "Fixed priority for {} (PID {}): {:?} -> {:?}",
+                                        settings.name,
+                                        pid,
+                                        applied.previous_priority,
+                                        settings.expected_priority
+                                    ));
+                                }
                             }
                         }
+                        Ok(_) => {}
+                        Err(_) => all_matched = false,
                     }
-                    Ok(_) => {}
-                    Err(_) => all_matched = false,
+                }
+
+                if app.settings_matched != all_matched {
+                    app.settings_matched = all_matched;
+                    outcome.changed = true;
                 }
             }
-
-            if app.settings_matched != all_matched {
-                app.settings_matched = all_matched;
-                outcome.changed = true;
-            }
         }
-    }
 
-    outcome
+        outcome
+    })
 }
 
 #[cfg(test)]
@@ -415,6 +417,7 @@ mod tests {
             HashMap::from([(77, PriorityClass::High)]),
         );
         seed_tracked_instance(&mut apps, &key, 77, &mut os);
+        let before = apps.membership_generation().unwrap();
 
         let outcome =
             process_settings_iteration_with_os(&mut apps, &reordered_state, false, &mut os);
@@ -423,6 +426,9 @@ mod tests {
         let app = apps.apps.get(&key).unwrap();
         assert_eq!(app.group_id, group_id(0));
         assert_eq!(app.rule_id, rule_id(0));
+        assert_eq!(apps.membership_generation(), Some(before + 1));
+        process_settings_iteration_with_os(&mut apps, &reordered_state, false, &mut os);
+        assert_eq!(apps.membership_generation(), Some(before + 1));
     }
 
     #[test]
