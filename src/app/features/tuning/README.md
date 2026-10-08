@@ -10,7 +10,9 @@ cross-adapter simulators under `testing/` compile only with `cfg(test)`.
 Isolated forced-process recovery is demonstrated at three durable boundaries.
 Controlled canonical publication/rollback and same-worker rehydration have
 explicit same-account elevated lab evidence. Authoritative game/user/boot scope,
-app-state integration and user controls remain staged work. Passing isolated test objects
+runtime app-state integration and user controls remain staged work. Schema v11
+already stores optional bounded configuration without starting the runner.
+Passing isolated test objects
 does not admit a writable module.
 
 The canonical specification is
@@ -21,6 +23,10 @@ The Windows recommendations and exclusions are documented in
 ## Structure
 
 - `mod.rs` is the public feature facade and future shipping catalog composition.
+- `config.rs` owns profile/association/allocation and exact saved-intent persistence
+  shapes. An absent envelope is Off. Exact raw forward data remains read-only;
+  malformed/oversized evidence refuses saves. Known structural data still requires
+  its module codec/catalog and an independently qualified source before execution.
 - `platform/contract.rs` contains validated IDs, targets, setting resources,
   capability and status values, exact canonical tokens, and typed plans.
 - `platform/catalog.rs` contains `Module`, checked registration and preparation,
@@ -50,6 +56,21 @@ The Windows recommendations and exclusions are documented in
 The root `allow(dead_code)` is limited to this dormant staged foundation. Remove
 or narrow it when F4 integrates the public facade; do not add per-module lint
 exceptions to hide unused integrations.
+
+Configuration uses a separately versioned envelope bounded to 4 MiB, depth 32
+and 65536 nodes, including raw metadata. Known records cap profiles/modules per
+profile at 64, associations at 256 and activation/withdrawal tuples together at
+256. Allocation counters exceed every retained used ID/generation. Unknown
+structural fields/versions preserve original JSON through unrelated state saves;
+understood metadata remains validated before an Unknown result, and duplicate
+JSON names are blocked before conversion can discard evidence. Whole-state reads
+and serialized saves have a 16 MiB cap; output admission precedes every backup,
+directory creation, stage write and publication. Raw tuning evidence is guarded
+even when an unrelated base field fails decoding.
+Module payload versions belong to the registered codecs, independently of the
+platform envelope version. File parsing does not authenticate an account, source
+directory, saved producer or journal origin. Native qualification and durable
+intent transactions remain later F4 work; production input stays Unavailable.
 
 ## Adding a module
 

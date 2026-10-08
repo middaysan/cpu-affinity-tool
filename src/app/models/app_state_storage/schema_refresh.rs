@@ -24,6 +24,9 @@ pub(super) fn build_default_state() -> AppStateStorage {
         rule_identities: None,
         loaded_version: CURRENT_APP_STATE_VERSION,
         pending_pre_v6_backup: false,
+        tuning: Default::default(),
+        extensions: Default::default(),
+        save_admission: Default::default(),
     }
 }
 

@@ -69,6 +69,7 @@ Key directories:
 - `src/app/shell/` - the top-level `eframe::App` shell, route enums, transient UI sessions, typed shell events, and presenter module ownership
 - `src/app/features/` - bounded feature modules for `rules`, `execution`, `preferences`, `shortcut`, `topology`, `diagnostics`, and the dormant `tuning` foundation
 - `src/app/features/tuning/platform/` - typed tuning contracts/codecs, static heterogeneous catalog, resource coordinator, bounded serial runner, independent configured-intent consumer, recovery journal/decisions and worker-local scoped writer composition; test-only backend/module shapes live under `tuning/testing/`
+- `src/app/features/tuning/config.rs` - bounded profile/configuration persistence shapes and exact forward-data retention; parsing supplies no module execution or native source authority
 - `src/app/adapters/` - seams for persisted state loading, OS helpers, and installed-app discovery
 - `src/app/runtime/` - thin composition-root state facade kept around `AppState`
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
@@ -115,7 +116,7 @@ Layers:
   - `preferences` owns theme and monitoring toggles
   - `topology` owns CPU model/thread detection helpers
   - `diagnostics` owns startup logging, typed diagnostic event shape, bounded local crash-report formatting/capture, safe report discovery/retention, report-list state, and the Windows-only read-only Event Log lookup
-  - `tuning` currently owns the dormant modular-settings facade, typed contracts/codecs, static catalog, resource coordinator, serial runner, bounded recovery journal and typed recovery decisions; it is not yet composed into `AppState`, persisted state, shell routes, or execution monitoring
+  - `tuning` owns bounded configuration/profile persistence plus the dormant modular-settings facade, typed contracts/codecs, static catalog, resource coordinator, serial runner, bounded recovery journal and typed recovery decisions. Schema v11 stores configuration, while the runtime facade/runner remain uncomposed into `AppState`, shell routes or execution monitoring
 - `adapters` isolate storage loading, OS helper calls, and installed-app discovery
 - `models` hold persisted schema plus domain and runtime-adjacent value types
 - `runtime` is now a thin composition-root facade around `AppState`
@@ -158,7 +159,7 @@ Current runtime split:
 - workers emit typed `shell::events::ShellEvent` messages and do not hold `egui::Context`
 - Windows crash-report discovery uses an initial/on-demand single-flight standard thread plus at most one coalesced follow-up refresh; egui rendering reads only the last completed snapshot and synchronizes its newest validated report into the retained Activity context; the Linux beta does not start this worker or expose the Crash reports route
 - Windows Event Log diagnostics uses a separate single-flight worker. It is never started by construction, focus gain, tray restore, or periodic refresh: after the first rendered UI frame it can run one bounded lookup when the persisted enabled-by-default preference allows it, with at most one delayed retry after a successful empty result.
-- Settings offers a persisted `start_minimized` preference: the next Windows GUI launch hides to the tray only when a usable tray runtime exists. It defaults to false when absent; this additive field remains in schema v10. Changing the preference does not hide the current window. The app does not register Windows login startup or accept `--start-in-tray`.
+- Settings offers a persisted `start_minimized` preference: the next Windows GUI launch hides to the tray only when a usable tray runtime exists. It defaults to false when absent and remains readable in schema v10 and v11. Changing the preference does not hide the current window. The app does not register Windows login startup or accept `--start-in-tray`.
 - Hovering the footer monitor status opens a bounded, scrollable tracked-process list; there is no separate list button. The list stays open while hovered, with a short gap-crossing grace period. It includes only saved rules matching the runtime instance's logical group/rule owner, so duplicate executable rules do not duplicate or mislabel rows. It inspects only token-bearing runtime instances and verifies the current image path and creation token together before displaying the executable filename, PID, and group. Failed inspection or a reused PID is omitted; the popup never enumerates all system processes.
 
 Windows runtime flow:
@@ -184,6 +185,8 @@ Linux entrypoint now reaches the shared `shell::App` shell, startup logging, aut
 
 Tuning foundation status:
 - current production tuning composition registers no modules and performs no Windows mutations
+- schema v11 optionally retains a separately versioned tuning envelope with lineage, profiles, logical rule associations, monotonic allocation counters and exact activation/withdrawal tuples. Absence is Off; loading or saving never starts the runner. Understood persistence shape does not prove module-codec support, current intent or native source authenticity
+- tuning configuration is bounded to 4 MiB including metadata, depth 32 and 65536 aggregate nodes; known records additionally cap profiles at 64, modules per profile at 64, associations at 256 and total activation/withdrawal tuples at 256. Unknown structural versions/fields retain exact raw JSON as unavailable/read-only data; understood metadata is still validated, and ambiguous, malformed or oversized tuning evidence blocks saves without an empty fallback
 - test-only adapters cover two backend shapes: a machine scalar and a multi-step user setting with original absence and restart semantics; a second adapter over the user backend exercises cross-module shared-resource ownership
 - concrete configuration, observation, snapshot, and step values stay typed inside modules; JSON is confined to bounded versioned persistence envelopes
 - catalog validation covers descriptor/codec identity, target/resource projection, exact declared step writes and their canonical resulting values, and target-bound snapshots; resource equality uses exact canonical desired-state tokens
@@ -247,15 +250,17 @@ Persisted state facts:
   - Windows: `%LOCALAPPDATA%\CpuAffinityTool\state.json`
   - Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/cpu-affinity-tool/state.json`
 - there is no automatic migration or copy between the legacy sidecar path and the platform data path
-- current persisted schema version: `10`
+- current persisted schema version: `11`
 - schema `v5` and older formats are dual-read and normalized in memory without eager rewrite on load
 - schema `v6` and older path-target app rules receive an in-memory one-time compatibility backfill that adds the primary executable filename to `additional_processes` when no normalized equivalent already exists
 - schema `v7` treats an empty `additional_processes` list as intentional user state and does not re-add the primary executable filename on load
 - schema `v9` stores `windows_event_log_diagnostics_enabled`; the pre-release schema-v8 disclosure field is ignored, and v8 and older files are effective enabled without an eager rewrite
-- schema `v10` stores each rule's `manage_descendants` policy. Version-aware loading materializes missing values in pre-v10 state as the previous behavior (`true`); missing values in v10, schema-less rule inputs, and new rules use the safer `false` default.
+- schema `v10` stores each rule's `manage_descendants` policy. Version-aware loading materializes missing values in pre-v10 state as the previous behavior (`true`); missing values in v10 and later, schema-less rule inputs, and new rules use the safer `false` default.
+- schema `v11` adds optional bounded tuning configuration. v10 and older inputs without it remain Off and are not rewritten on load. An unexpected tuning extension in an older state blocks an upgrade that could reinterpret it as activation. Unknown v11 top-level fields and tuning structural versions/fields preserve their exact raw values through unrelated saves
+- state reads consume at most 16 MiB plus one detection byte. Oversized input remains on disk with a finite save refusal; bounded unsupported/future or malformed explicit version headers and duplicate top-level names retain raw evidence and a private save block. Tuning evidence is guarded before unrelated base-schema decoding can enter recovery. Clone and explicit schema preparation cannot clear that block. Serialization is bounded to the same 16 MiB before backup, directory creation, staging or publication. Ordinary syntactically invalid JSON below the bound retains the existing copy-before-default recovery path
 - the upgrade from pre-`v6` data or `v6` data to the current schema happens only on an explicit save path
 - before the first current-schema save after loading pre-`v6` state, persistence creates an additional `state.json.pre-v6`, `state.json.pre-v6-1`, and so on backup series
-- loading `v6`, `v7`, `v8`, or `v9` for upgrade to `v10` does not create a `pre-v6` backup
+- loading `v6`, `v7`, `v8`, `v9`, or `v10` for upgrade to `v11` does not create a `pre-v6` backup
 - after the first current-schema save, downgrade to an older binary that only understands earlier state is unsupported
 - backup rotation uses `state.json.old`, `state.json.old1`, `state.json.old2`, and so on
 - persistence loading is split into `state_path`, `storage_io`, `migrations`, and `schema_refresh`; saves stage and sync a same-directory temporary file before an atomic replacement on Windows or an atomic rename plus directory sync on Linux. Windows does not claim parent-directory durability across power loss; recovery and migration backups are copy-and-sync operations that preserve their source before publishing.

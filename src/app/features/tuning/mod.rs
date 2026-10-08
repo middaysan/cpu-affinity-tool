@@ -1,6 +1,7 @@
 // This foundation is intentionally dormant until the F4 application integration.
 #![allow(dead_code)]
 
+pub(crate) mod config;
 pub mod platform;
 
 /// Public feature facade. Concrete shipping registrations belong only in this

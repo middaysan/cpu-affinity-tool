@@ -354,9 +354,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn sample_storage() -> AppStateStorage {
-        AppStateStorage {
-            version: 5,
-            groups: vec![CoreGroup {
+        AppStateStorage::test_fixture(|state| {
+            state.version = 5;
+            state.groups = vec![CoreGroup {
                 name: "Games".into(),
                 cores: vec![0, 1],
                 programs: vec![AppToRun::new_path(
@@ -368,19 +368,20 @@ mod tests {
                 )],
                 is_hidden: false,
                 run_all_button: true,
-            }],
-            cpu_schema: CpuSchema {
+            }];
+            state.cpu_schema = CpuSchema {
                 model: "Test CPU".into(),
                 clusters: Vec::new(),
-            },
-            theme_index: 0,
-            process_monitoring_enabled: false,
-            windows_event_log_diagnostics_enabled: true,
-            start_minimized: false,
-            rule_identities: None,
-            loaded_version: 5,
-            pending_pre_v6_backup: false,
-        }
+            };
+            state.theme_index = 0;
+            state.process_monitoring_enabled = false;
+            state.windows_event_log_diagnostics_enabled = true;
+            state.start_minimized = false;
+            state.rule_identities = None;
+            state.loaded_version = 5;
+            state.pending_pre_v6_backup = false;
+            state.tuning = Default::default();
+        })
     }
 
     fn empty_group(name: &str) -> CoreGroup {

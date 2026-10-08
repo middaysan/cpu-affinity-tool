@@ -1163,9 +1163,9 @@ mod tests {
     }
 
     fn sample_state() -> Arc<RwLock<AppStateStorage>> {
-        Arc::new(RwLock::new(AppStateStorage {
-            version: 5,
-            groups: vec![CoreGroup {
+        Arc::new(RwLock::new(AppStateStorage::test_fixture(|state| {
+            state.version = 5;
+            state.groups = vec![CoreGroup {
                 name: "Games".to_string(),
                 cores: vec![0, 1],
                 programs: vec![
@@ -1186,19 +1186,20 @@ mod tests {
                 ],
                 is_hidden: false,
                 run_all_button: true,
-            }],
-            cpu_schema: CpuSchema {
+            }];
+            state.cpu_schema = CpuSchema {
                 model: "Test CPU".to_string(),
                 clusters: Vec::new(),
-            },
-            theme_index: 0,
-            process_monitoring_enabled: false,
-            windows_event_log_diagnostics_enabled: true,
-            start_minimized: false,
-            rule_identities: None,
-            loaded_version: 5,
-            pending_pre_v6_backup: false,
-        }))
+            };
+            state.theme_index = 0;
+            state.process_monitoring_enabled = false;
+            state.windows_event_log_diagnostics_enabled = true;
+            state.start_minimized = false;
+            state.rule_identities = None;
+            state.loaded_version = 5;
+            state.pending_pre_v6_backup = false;
+            state.tuning = Default::default();
+        })))
     }
 
     fn sample_app() -> AppToRun {

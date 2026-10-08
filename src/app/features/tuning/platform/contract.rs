@@ -705,7 +705,11 @@ impl ActivationBinding {
             Self::Game(game) => Some(game.configured()),
         }
     }
-    pub(super) fn permits(&self, mode: ActivationMode, target: &TargetIdentity) -> bool {
+    pub(in crate::app::features::tuning) fn permits(
+        &self,
+        mode: ActivationMode,
+        target: &TargetIdentity,
+    ) -> bool {
         match self {
             Self::Unknown => true,
             Self::Manual(_) => mode == ActivationMode::Manual,
