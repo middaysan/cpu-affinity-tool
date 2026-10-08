@@ -110,6 +110,32 @@ pub(super) fn open_plan(
         attributes: (OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE).0,
     })
 }
+
+#[cfg(test)]
+mod config_sharing_tests {
+    use super::*;
+    #[test]
+    fn p1b_worker_leaf_excludes_write_and_delete_sharing() {
+        let plan = config_read_plan(false).unwrap();
+        assert_eq!(plan.share, FILE_SHARE_READ);
+    }
+    #[test]
+    fn p1b_old_publication_leaf_allows_delete_but_excludes_writers() {
+        let plan = config_read_plan(true).unwrap();
+        assert_eq!(plan.share, FILE_SHARE_READ | FILE_SHARE_DELETE);
+    }
+}
+
+pub(super) fn config_read_plan(publish_old: bool) -> Result<OpenPlan> {
+    let mut plan = open_plan(Kind::File, OpenMode::Existing, Sharing::Renameable, true)?;
+    plan.share = FILE_SHARE_READ
+        | if publish_old {
+            FILE_SHARE_DELETE
+        } else {
+            FILE_SHARE_MODE(0)
+        };
+    Ok(plan)
+}
 pub(super) fn disposition(information: usize, mode: OpenMode) -> Result<Disposition> {
     match (information, mode) {
         (1, OpenMode::Existing | OpenMode::OpenOrCreate) => Ok(Disposition::Opened),

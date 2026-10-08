@@ -19,7 +19,8 @@ use windows::core::{PCWSTR, PWSTR};
 
 const SYSTEM: &str = "S-1-5-18";
 const ADMINISTRATORS: &str = "S-1-5-32-544";
-const TRUSTED_INSTALLER: &str = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+pub(super) const TRUSTED_INSTALLER: &str =
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
 const DANGEROUS_PARENT_RIGHTS: u32 = 0x000d_0152 | 0x1000_0000 | 0x4000_0000;
 
 fn untrusted_grant_is_unsafe(managed: bool, mask: u32) -> bool {
@@ -44,14 +45,36 @@ impl Drop for LocalAllocation {
 pub(super) struct Descriptor {
     allocation: LocalAllocation,
 }
+fn config_sddl(sid: &str) -> String {
+    format!("O:{sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})")
+}
+#[cfg(test)]
+fn config_characterization_sddl(sid: &str) -> String {
+    format!("{}(A;;FR;;;SY)", config_sddl(sid))
+}
 impl Descriptor {
     pub fn new(test_sid: Option<&str>) -> Result<Self, TuningNativeError> {
         let sddl = match test_sid {
             Some(sid) => format!("O:{sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"),
             None => "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)S:(ML;OICI;NW;;;HI)".to_owned(),
         };
+        Self::from_sddl(&sddl)
+    }
+    pub(super) fn for_config(
+        principal: &super::identity::ConfigPrincipal,
+    ) -> Result<Self, TuningNativeError> {
+        Self::from_sddl(&config_sddl(principal.sid()))
+    }
+    #[cfg(test)]
+    pub(super) fn for_config_characterization(
+        principal: &super::identity::ConfigPrincipal,
+    ) -> Result<Self, TuningNativeError> {
+        principal.verify()?;
+        Self::from_sddl(&config_characterization_sddl(principal.sid()))
+    }
+    fn from_sddl(sddl: &str) -> Result<Self, TuningNativeError> {
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
-        let value = wide(std::ffi::OsStr::new(&sddl))?;
+        let value = wide(std::ffi::OsStr::new(sddl))?;
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 PCWSTR(value.as_ptr()),
@@ -192,11 +215,34 @@ impl SecurityPolicy {
     }
 }
 
-struct Ace {
-    kind: u8,
-    flags: u8,
-    mask: u32,
-    sid: String,
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct Ace {
+    pub kind: u8,
+    pub flags: u8,
+    pub mask: u32,
+    pub sid: String,
+}
+pub(super) fn config_security(handle: HANDLE) -> Result<(String, Vec<Ace>), TuningNativeError> {
+    let mut owner = PSID::default();
+    let mut dacl = ptr::null_mut();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    let code = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            Some(&mut dacl),
+            None,
+            Some(&mut descriptor),
+        )
+    };
+    if code.0 != 0 {
+        return Err(super::code_error("config GetSecurityInfo", code.0));
+    }
+    let _allocation = LocalAllocation(descriptor.0);
+    Ok((sid_string(owner)?, acl_entries(dacl)?))
 }
 fn high_label_ok(labels: &[Ace]) -> bool {
     labels.len() == 1
@@ -261,6 +307,14 @@ pub(super) fn sid_string(sid: PSID) -> Result<String, TuningNativeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn p1b_dacl_characterization_creation_is_distinct_by_one_trusted_read_ace() {
+        const PRINCIPAL: &str = "S-1-5-21-1-2-3-1001";
+        let base = config_sddl(PRINCIPAL);
+        let stage = config_characterization_sddl(PRINCIPAL);
+        assert_ne!(base, stage);
+        assert_eq!(stage.strip_suffix("(A;;FR;;;SY)"), Some(base.as_str()));
+    }
     #[test]
     fn raw_generic_and_destructive_relative_ancestor_grants_are_refused() {
         for mask in [0x40, 0x10000, 0x40000, 0x80000, 0x10000000, 0x40000000] {

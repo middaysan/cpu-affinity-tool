@@ -12,6 +12,10 @@ Controlled canonical publication/rollback and same-worker rehydration have
 explicit same-account elevated lab evidence. Authoritative game/user/boot scope,
 runtime app-state integration and user controls remain staged work. Schema v11
 already stores optional bounded configuration without starting the runner.
+The Windows OS boundary also supplies a retained configuration-source API and
+sealed receipts for exact loaded/published bytes. It is not connected to state
+storage or the configured producer yet; native provenance does not itself provide
+current activation intent or game/logon/boot authority.
 Passing isolated test objects
 does not admit a writable module.
 

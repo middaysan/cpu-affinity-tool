@@ -1,4 +1,6 @@
+mod config_source;
 mod identity;
+pub use config_source::{TuningConfigReceipt, TuningConfigSource};
 pub use identity::TuningProcessLifetimeGuard;
 #[cfg(any(test, feature = "tuning-test-controls"))]
 mod canonical_marker;

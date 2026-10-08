@@ -20,9 +20,10 @@ use windows::{
         Storage::Packaging::Appx::GetCurrentPackageFullName,
         System::{
             Threading::{
-                GetCurrentProcess, GetProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
-                PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-                QueryFullProcessImageNameW, WaitForSingleObject,
+                GetCurrentProcess, GetCurrentThread, GetProcessId, GetProcessTimes, OpenProcess,
+                OpenProcessToken, OpenThreadToken, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
+                WaitForSingleObject,
             },
             WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
         },
@@ -267,6 +268,66 @@ pub(super) fn current_token() -> Result<HandleGuard, TuningNativeError> {
     unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
         .map_err(|e| native_error("OpenProcessToken current", e))?;
     Ok(HandleGuard(token))
+}
+
+fn config_thread_context(opened: bool, error: u32) -> Result<(), TuningNativeError> {
+    if !opened && error == 1008 {
+        Ok(())
+    } else {
+        Err(TuningNativeError::Unsupported(
+            "config thread impersonation/context",
+        ))
+    }
+}
+pub(super) struct ConfigPrincipal(TuningTokenIdentity);
+impl ConfigPrincipal {
+    pub(super) fn observe() -> Result<Self, TuningNativeError> {
+        let mut thread_token = HANDLE::default();
+        let opened =
+            unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut thread_token) };
+        let code = if let Err(error) = &opened {
+            let raw = error.code().0 as u32;
+            if raw & 0xffff0000 == 0x80070000 {
+                raw & 0xffff
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        if opened.is_ok() {
+            drop(HandleGuard(thread_token));
+        }
+        config_thread_context(opened.is_ok(), code)?;
+        let token = current_token()?;
+        let identity = token_identity(token.0)?;
+        if identity.sid().len() > 184 || !identity.sid().starts_with("S-1-") {
+            return Err(TuningNativeError::Unsupported("config principal bounds"));
+        }
+        Ok(Self(identity))
+    }
+    pub(super) fn sid(&self) -> &str {
+        self.0.sid()
+    }
+    pub(super) fn verify(&self) -> Result<(), TuningNativeError> {
+        if Self::observe()?.0 == self.0 {
+            Ok(())
+        } else {
+            Err(TuningNativeError::UnsafeStore("config principal changed"))
+        }
+    }
+}
+#[cfg(test)]
+mod config_principal_tests {
+    use super::*;
+    #[test]
+    fn p1b_only_positive_no_thread_token_allows_primary_context() {
+        assert!(config_thread_context(false, 1008).is_ok());
+        assert!(config_thread_context(true, 0).is_err());
+        for code in [0, 5, 87] {
+            assert!(config_thread_context(false, code).is_err());
+        }
+    }
 }
 
 pub(super) fn elevated() -> Result<bool, TuningNativeError> {

@@ -1,14 +1,16 @@
 //! Owned handle-relative NTFS operations for the production metadata store.
 //! Only bootstrap selects a path. Descendants have no pathname fallback.
 use super::super::{
-    code_error, native_error,
+    code_error,
+    config_source::ConfigSourcePolicy,
+    native_error,
     security::{Descriptor, SecurityPolicy},
     wide,
 };
 use super::{
     CALL_LIMIT, Disposition, ENUM_BYTES, Entry, Kind, NativeProgress, OpenMode, OpenPlan, Result,
-    Sharing, component, disposition, io_progress, observed_attributes, open_plan, parse_records,
-    retain_nonterminal,
+    Sharing, component, config_read_plan, disposition, io_progress, observed_attributes, open_plan,
+    parse_records, retain_nonterminal,
 };
 use crate::tuning::TuningNativeError;
 use std::{
@@ -34,12 +36,12 @@ use windows::{
         Storage::FileSystem::{
             BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
             FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
-            FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_TYPE_DISK,
-            FileDispositionInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-            GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
-            GetFinalPathNameByHandleW, OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE,
-            SetFileInformationByHandle, VOLUME_NAME_GUID,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+            FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FILE_TRAVERSE, FILE_TYPE_DISK, FileDispositionInfo, FileIdBothDirectoryInfo,
+            FileIdBothDirectoryRestartInfo, FileIdInfo, GetDriveTypeW, GetFileInformationByHandle,
+            GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW, OPEN_EXISTING,
+            READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_GUID,
         },
         System::IO::IO_STATUS_BLOCK,
     },
@@ -60,11 +62,77 @@ pub(in crate::windows::tuning) struct Node {
     id: ObjectId,
     kind: Kind,
     descriptor: Rc<Descriptor>,
-    policy: Rc<SecurityPolicy>,
+    policy: NativePolicy,
     scope: Option<bool>,
     // Present only after the actual relative NtCreateFile used this exact plan.
     // Bootstrap handles cannot produce relative-ancestor evidence.
     relative_plan: Option<OpenPlan>,
+}
+#[derive(Clone)]
+enum NativePolicy {
+    Canonical(Rc<SecurityPolicy>),
+    Config(Rc<ConfigSourcePolicy>),
+}
+impl NativePolicy {
+    fn validate(&self, handle: HANDLE, managed: bool) -> Result<()> {
+        match self {
+            Self::Canonical(policy) => policy.validate(handle, managed),
+            Self::Config(policy) => policy.validate(handle, managed),
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::windows::tuning) struct FullObjectId {
+    pub volume: u64,
+    pub id: [u8; 16],
+}
+impl Node {
+    pub(in crate::windows::tuning) fn full_id(&self) -> Result<FullObjectId> {
+        self.verify()?;
+        full_identity(&self.file)
+    }
+    pub(in crate::windows::tuning) fn config_dacl(
+        &self,
+    ) -> Result<Vec<super::super::security::Ace>> {
+        self.verify()?;
+        if !matches!(self.policy, NativePolicy::Config(_)) {
+            return Err(TuningNativeError::Unsupported(
+                "config native policy required",
+            ));
+        }
+        super::super::security::config_security(raw(&self.file)).map(|(_, entries)| entries)
+    }
+    /// Only configuration publication checks its retained old object after the
+    /// final leaf has independently been verified. A retired object is not a
+    /// current qualified source and cannot supply a new receipt.
+    pub(in crate::windows::tuning) fn config_retired_bytes(
+        &mut self,
+        expected: FullObjectId,
+        limit: usize,
+    ) -> Result<Vec<u8>> {
+        if !matches!(self.policy, NativePolicy::Config(_)) || self.kind != Kind::File {
+            return Err(TuningNativeError::Unsupported("config retired object"));
+        }
+        let old_id = self.id;
+        read_file(&mut self.file, limit, |file| {
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            unsafe { GetFileInformationByHandle(raw(file), &mut info) }
+                .map_err(|e| native_error("config retired identity", e))?;
+            observed_attributes(info.dwFileAttributes, Kind::File)?;
+            if unsafe { GetFileType(raw(file)) } != FILE_TYPE_DISK
+                || info.nNumberOfLinks > 1
+                || info.dwVolumeSerialNumber != old_id.volume
+                || ((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
+                    != old_id.index
+                || full_identity(file)? != expected
+            {
+                return Err(TuningNativeError::UnsafeStore(
+                    "config retired object changed",
+                ));
+            }
+            Ok(())
+        })
+    }
 }
 #[cfg(any(test, feature = "tuning-test-controls"))]
 impl Node {
@@ -84,7 +152,7 @@ impl Node {
             id: self.id,
             kind: self.kind,
             descriptor: Rc::clone(&self.descriptor),
-            policy: Rc::clone(&self.policy),
+            policy: self.policy.clone(),
             scope: self.scope,
             relative_plan: self.relative_plan.as_ref().map(|plan| OpenPlan {
                 desired: plan.desired,
@@ -109,7 +177,14 @@ impl Node {
                     .map_err(|e| io_error("owned scalar handle", e))?,
             ),
             id: self.id,
-            policy: (*self.policy).clone(),
+            policy: match &self.policy {
+                NativePolicy::Canonical(policy) => (**policy).clone(),
+                NativePolicy::Config(_) => {
+                    return Err(TuningNativeError::Unsupported(
+                        "config is not lab authority",
+                    ));
+                }
+            },
             creator: std::thread::current().id(),
         })
     }
@@ -199,6 +274,14 @@ impl Directory {
         policy: Rc<SecurityPolicy>,
         scope: Option<bool>,
     ) -> Result<Self> {
+        Self::bootstrap_policy(path, descriptor, NativePolicy::Canonical(policy), scope)
+    }
+    fn bootstrap_policy(
+        path: &Path,
+        descriptor: Rc<Descriptor>,
+        policy: NativePolicy,
+        scope: Option<bool>,
+    ) -> Result<Self> {
         let text = wide(path.as_os_str())?;
         let handle = unsafe {
             CreateFileW(
@@ -240,19 +323,34 @@ impl Directory {
         descriptor: Rc<Descriptor>,
         policy: Rc<SecurityPolicy>,
     ) -> Result<Self> {
+        Self::root_bootstrap(letter, descriptor, NativePolicy::Canonical(policy))
+    }
+    pub(in crate::windows::tuning) fn config_bootstrap(
+        letter: u8,
+        descriptor: Rc<Descriptor>,
+        policy: Rc<ConfigSourcePolicy>,
+    ) -> Result<Self> {
+        Self::root_bootstrap(letter, descriptor, NativePolicy::Config(policy))
+    }
+    fn root_bootstrap(
+        letter: u8,
+        descriptor: Rc<Descriptor>,
+        policy: NativePolicy,
+    ) -> Result<Self> {
         if !letter.is_ascii_alphabetic() {
             return Err(TuningNativeError::UnsafeStore("store global volume root"));
         }
         let letter = char::from(letter.to_ascii_uppercase());
         let global_path = format!("\\\\?\\GLOBALROOT\\Global??\\{letter}:\\");
         let local_path = format!("{letter}:\\");
-        let global = Self::bootstrap(
+        let global = Self::bootstrap_policy(
             Path::new(&global_path),
             Rc::clone(&descriptor),
-            Rc::clone(&policy),
+            policy.clone(),
             Some(false),
         )?;
-        let local = Self::bootstrap(Path::new(&local_path), descriptor, policy, Some(false))?;
+        let local =
+            Self::bootstrap_policy(Path::new(&local_path), descriptor, policy, Some(false))?;
         global.verify()?;
         local.verify()?;
         let global_guid = final_guid_root(&global.node.file)?;
@@ -287,6 +385,63 @@ impl Directory {
     pub(in crate::windows::tuning) fn verify(&self) -> Result<()> {
         self.node.verify()
     }
+    pub(in crate::windows::tuning) fn full_id(&self) -> Result<FullObjectId> {
+        self.verify()?;
+        full_identity(&self.node.file)
+    }
+    pub(in crate::windows::tuning) fn guid_path(&self) -> Result<Vec<u16>> {
+        self.verify()?;
+        final_guid_root(&self.node.file)
+    }
+    pub(in crate::windows::tuning) fn config_leaf(
+        &self,
+        name: &[u16],
+        publish_old: bool,
+    ) -> Result<Node> {
+        if !matches!(self.node.policy, NativePolicy::Config(_)) {
+            return Err(TuningNativeError::Unsupported(
+                "config native policy required",
+            ));
+        }
+        self.open_inner(
+            name,
+            Kind::File,
+            OpenMode::Existing,
+            (Sharing::Renameable, true, Some(publish_old)),
+            Some(true),
+            || Ok(()),
+        )
+        .map(|(node, _)| node)
+    }
+    /// Characterization-only safe descriptor variation at creation. It changes
+    /// no existing ACL and cannot select a caller-supplied policy/descriptor.
+    #[cfg(test)]
+    pub(in crate::windows::tuning) fn create_config_dacl_characterization_stage(
+        &mut self,
+    ) -> Result<(Node, Vec<u16>)> {
+        let descriptor = match &self.node.policy {
+            NativePolicy::Config(policy) => Rc::new(policy.characterization_descriptor()?),
+            _ => {
+                return Err(TuningNativeError::Unsupported(
+                    "config characterization policy",
+                ));
+            }
+        };
+        let name: Vec<_> = ".state.json.tuning-dacl-characterization"
+            .encode_utf16()
+            .collect();
+        let original = std::mem::replace(&mut self.node.descriptor, descriptor);
+        let result = self.open(
+            &name,
+            Kind::File,
+            OpenMode::CreateNew,
+            Sharing::Renameable,
+            false,
+            Some(true),
+        );
+        self.node.descriptor = original;
+        result.map(|(node, _)| (node, name))
+    }
     pub(in crate::windows::tuning) fn open(
         &self,
         name: &[u16],
@@ -296,7 +451,9 @@ impl Directory {
         read_only: bool,
         scope: Option<bool>,
     ) -> Result<(Node, Disposition)> {
-        self.open_inner(name, kind, mode, (sharing, read_only), scope, || Ok(()))
+        self.open_inner(name, kind, mode, (sharing, read_only, None), scope, || {
+            Ok(())
+        })
     }
     #[cfg(test)]
     fn open_after_parent_check(
@@ -308,21 +465,32 @@ impl Directory {
         scope: Option<bool>,
         after_parent_check: impl FnOnce() -> Result<()>,
     ) -> Result<(Node, Disposition)> {
-        self.open_inner(name, kind, mode, access, scope, after_parent_check)
+        self.open_inner(
+            name,
+            kind,
+            mode,
+            (access.0, access.1, None),
+            scope,
+            after_parent_check,
+        )
     }
     fn open_inner(
         &self,
         name: &[u16],
         kind: Kind,
         mode: OpenMode,
-        access: (Sharing, bool),
+        access: (Sharing, bool, Option<bool>),
         scope: Option<bool>,
         after_parent_check: impl FnOnce() -> Result<()>,
     ) -> Result<(Node, Disposition)> {
         component(name)?;
         self.verify()?;
-        let (sharing, read_only) = access;
-        let plan = open_plan(kind, mode, sharing, read_only)?;
+        let (sharing, read_only, config_old) = access;
+        let plan = if let Some(old) = config_old {
+            config_read_plan(old)?
+        } else {
+            open_plan(kind, mode, sharing, read_only)?
+        };
         let bytes = u16::try_from(size_of_val(name))
             .map_err(|_| TuningNativeError::UnsafeStore("store relative component"))?;
         let mut request = Box::new(CreateRequest {
@@ -387,7 +555,7 @@ impl Directory {
             id,
             kind,
             descriptor: Rc::clone(&self.node.descriptor),
-            policy: Rc::clone(&self.node.policy),
+            policy: self.node.policy.clone(),
             scope,
             relative_plan: Some(plan),
         };
@@ -462,9 +630,12 @@ impl Node {
     pub(in crate::windows::tuning) fn verify(&self) -> Result<()> {
         self.verify_identity()?;
         if let Some(managed) = self.scope {
-            if !managed && self.has_relative_ancestor_plan() {
+            if let NativePolicy::Canonical(policy) = &self.policy
+                && !managed
+                && self.has_relative_ancestor_plan()
+            {
                 let capability = self.relative_ancestor_capability()?;
-                self.policy.validate_relative_ancestor(&capability)?;
+                policy.validate_relative_ancestor(&capability)?;
             } else {
                 self.policy.validate(raw(&self.file), managed)?;
             }
@@ -509,7 +680,7 @@ impl Node {
         let policy = self.policy.clone();
         let scope = self.scope;
         read_file(&mut self.file, limit, |file| {
-            verify_file(file, id, &policy, scope)
+            verify_native_file(file, id, &policy, scope)
         })
     }
     pub(in crate::windows::tuning) fn write_synced(
@@ -531,7 +702,7 @@ impl Node {
         let policy = self.policy.clone();
         let scope = self.scope;
         write_file(&mut self.file, bytes, limit, |file| {
-            verify_file(file, id, &policy, scope)
+            verify_native_file(file, id, &policy, scope)
         })
     }
     pub(in crate::windows::tuning) fn rename_no_replace(
@@ -626,6 +797,25 @@ fn identity(file: &File, kind: Kind) -> Result<ObjectId> {
         index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
     })
 }
+fn full_identity(file: &File) -> Result<FullObjectId> {
+    let mut info = FILE_ID_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            raw(file),
+            FileIdInfo,
+            (&mut info as *mut FILE_ID_INFO).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    }
+    .map_err(|e| native_error("config full object ID", e))?;
+    if info.FileId.Identifier == [0; 16] {
+        return Err(TuningNativeError::Unsupported("config full ID unavailable"));
+    }
+    Ok(FullObjectId {
+        volume: info.VolumeSerialNumber,
+        id: info.FileId.Identifier,
+    })
+}
 fn final_guid_root(file: &File) -> Result<Vec<u16>> {
     let mut path = [0_u16; 1024];
     let len = unsafe { GetFinalPathNameByHandleW(raw(file), &mut path, VOLUME_NAME_GUID) };
@@ -654,10 +844,25 @@ fn io_error(operation: &'static str, error: std::io::Error) -> TuningNativeError
     code_error(operation, error.raw_os_error().unwrap_or(-1) as u32)
 }
 
+#[cfg(any(test, feature = "tuning-test-controls"))]
 fn verify_file(
     file: &File,
     id: ObjectId,
     policy: &SecurityPolicy,
+    scope: Option<bool>,
+) -> Result<()> {
+    if identity(file, Kind::File)? != id {
+        return Err(TuningNativeError::UnsafeStore("store held object changed"));
+    }
+    if let Some(managed) = scope {
+        policy.validate(raw(file), managed)?;
+    }
+    Ok(())
+}
+fn verify_native_file(
+    file: &File,
+    id: ObjectId,
+    policy: &NativePolicy,
     scope: Option<bool>,
 ) -> Result<()> {
     if identity(file, Kind::File)? != id {

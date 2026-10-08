@@ -862,6 +862,62 @@ saved-config/session producers, qualified configuration origin and durable
 withdrawal intent. Boot, another-account and power-transition acceptance are
 separate scope gates; no current test promotes them to supported.
 
+## Qualified configuration-source characterization
+
+The dormant Windows configuration-source API is separate from the canonical
+journal store. It retains the selected local absolute `state.json` directory
+chain, checks its actual primary-token principal and supplies sealed receipts
+for exact bytes with complete volume-GUID and 64-bit-volume/128-bit object IDs.
+Impersonation, unsafe mutation grants, unsupported paths and unresolved relevant
+stage evidence supply no receipt. In particular, pending stage evidence remains
+Poisoned even if a partial publication removed the final leaf. Application
+storage, journal-origin binding and the configured producer are not connected to
+this API yet; a receipt supplies no game/logon/boot authority.
+
+The explicitly ignored normal-token test exercises the production publication
+primitive on its own newly created protected temporary directory:
+
+```powershell
+cargo test --locked --manifest-path libs/os_api/Cargo.toml windows::tuning::config_source::tests::p1b_owned_temp_atomic_source_characterization -- --exact --ignored --nocapture --test-threads=1
+```
+
+Existing-file publication uses `ReplaceFileW` with flags zero, a retained old
+READ/DELETE-sharing handle and a closed stage handle. Microsoft documents a
+no-sharing replacement open, preserved original DACL and the replacement file's
+ID at the final name. [ReplaceFileW reference](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew).
+The characterization deliberately keeps the stage open to establish sharing
+refusal, verifies unchanged owned evidence, then exercises the normal operation.
+Its old and stage DACLs must differ while both satisfy the managed policy. Final
+comparison preserves ordered ACE count, SID, type, access mask and all flags,
+except the observed clearing of OBJECT_INHERIT/CONTAINER_INHERIT on a verified
+regular file. These flags govern children; INHERIT_ONLY controls current-object
+access and remains exact, along with every other flag. [ACE_HEADER reference](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-ace_header).
+The distinct stage is rejected even under that narrow comparison, so final
+preservation of old entries establishes transfer. Exact final and retired-old
+identity/bytes, stable directory origin and independently checked cleanup/root
+absence remain required postconditions. API success or new bytes alone are
+insufficient.
+
+An unsafe default temporary-directory ancestor is a valid source refusal, not
+permission to trust another principal or rewrite ACLs. A separately selected
+supported fixture location may change TEMP/TMP only in its test shell/process;
+it cannot qualify the application's default source or supply a production
+fallback. This test performs no canonical, UAC, gaming-setting or existing ACL
+operation and never runs implicitly in CI or application startup.
+
+On 2026-10-08 the corrected characterization passed at normal token on a new
+protected owned fixture below the inspected local drive root, with TEMP/TMP set
+only for that shell and child. The actual test returned exit 0: first no-replace
+publication, distinct qualified stage DACL, deliberate sharing refusal, verified
+ReplaceFile final identity/bytes, retained-old identity/bytes and stable origin
+all passed. Complete-set-authenticated file cleanup, original creation-ID root
+cleanup and positive directory absence were verified. The actual file-only OI/CI
+normalization above was observed; no other ACE field was changed or ignored.
+The default TEMP ancestor chain had independently observed untrusted mutation
+grants and remains refused. This accepts only the stated owned-source operation;
+it does not qualify that default path, application storage/producer integration,
+canonical recovery, another account, game/boot/logon scope or a real setting.
+
 ## Remaining acceptance gates
 
 The probe supplies a concrete way to inspect canonical metadata and lease
