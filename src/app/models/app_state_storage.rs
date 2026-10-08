@@ -241,6 +241,13 @@ impl AppStateStorage {
         }
         self.save_admission = SaveAdmission::SourceBlocked;
     }
+    fn save_expectation(&self) -> storage_io::StateExpectation {
+        #[cfg(windows)]
+        if let SaveAdmission::Qualified { receipt, .. } = &self.save_admission {
+            return storage_io::StateExpectation::Receipt(receipt.clone());
+        }
+        storage_io::StateExpectation::Unavailable
+    }
     #[cfg(test)]
     pub(crate) fn test_fixture(configure: impl FnOnce(&mut Self)) -> Self {
         let mut state = schema_refresh::build_default_state();
@@ -267,6 +274,21 @@ impl AppStateStorage {
             let mut blocked = schema_refresh::build_default_state();
             blocked.block_source();
             return blocked;
+        }
+        #[cfg(any(windows, test))]
+        if matches!(
+            &qualification,
+            storage_io::StateQualification::QualifiedAbsent
+        ) {
+            // Positive absence belongs only to this retained synchronous source.
+            // Never perform an ordinary read or adopt a newly appeared leaf.
+            return Self::recover_default_state(
+                schema_refresh::build_default_state(),
+                path,
+                filesystem,
+                storage_io::StateExpectation::Absent,
+                false,
+            );
         }
         #[cfg(windows)]
         let receipt = match qualification {
@@ -349,45 +371,47 @@ impl AppStateStorage {
         if let Some(receipt) = receipt {
             let mut qualified_default = default_state;
             qualified_default.accept_receipt(path, receipt);
-            return Self::recover_corrupt_state(qualified_default, path, filesystem, true);
+            let expected = qualified_default.save_expectation();
+            return Self::recover_default_state(
+                qualified_default,
+                path,
+                filesystem,
+                expected,
+                true,
+            );
         }
-        Self::recover_corrupt_state(default_state, path, filesystem, false)
+        Self::recover_default_state(
+            default_state,
+            path,
+            filesystem,
+            storage_io::StateExpectation::Unavailable,
+            true,
+        )
     }
 
-    fn recover_corrupt_state(
+    fn recover_default_state(
         mut default_state: Self,
         path: &Path,
         filesystem: &mut impl storage_io::StateFilesystem,
-        requires_qualified: bool,
+        expected: storage_io::StateExpectation,
+        backup_original: bool,
     ) -> Self {
-        #[cfg(windows)]
-        let expected = match &default_state.save_admission {
-            SaveAdmission::Qualified { receipt, .. } => Some(receipt.clone()),
-            _ => None,
-        };
         let recovered = (|| -> Result<(), Box<dyn std::error::Error>> {
             let serialized = storage_io::serialize_state_bounded(&default_state)?;
-            if requires_qualified {
-                filesystem.prepare_save(
-                    path,
-                    #[cfg(windows)]
-                    expected.as_ref(),
-                )?;
+            if expected.is_qualified() {
+                filesystem.prepare_save(path, &expected)?;
             }
-            storage_io::backup_state_file_with_filesystem(path, filesystem)?;
-            if requires_qualified {
-                match filesystem.publish_qualified(
-                    path,
-                    &serialized,
-                    #[cfg(windows)]
-                    expected.as_ref(),
-                )? {
+            if backup_original {
+                storage_io::backup_state_file_with_filesystem(path, filesystem)?;
+            }
+            if expected.is_qualified() {
+                match filesystem.publish_qualified(path, &serialized, &expected)? {
                     #[cfg(windows)]
                     storage_io::StatePublication::Receipt(receipt) => {
                         default_state.accept_receipt(path, receipt);
                     }
                     storage_io::StatePublication::Unavailable => {
-                        return Err("qualified corrupt recovery source unavailable".into());
+                        return Err("qualified default publication source unavailable".into());
                     }
                 }
             } else {
@@ -396,7 +420,7 @@ impl AppStateStorage {
             Ok(())
         })();
         if let Err(error) = recovered {
-            if requires_qualified {
+            if expected.is_qualified() {
                 // Keep the original sealed receipt, even when publication is
                 // uncertain; Clone and schema readiness cannot reopen admission.
                 default_state.block_source();
@@ -434,36 +458,22 @@ impl AppStateStorage {
             return Err("state evidence is blocked; save refused".into());
         }
         let serialized = storage_io::serialize_state_bounded(self)?;
-        #[cfg(windows)]
-        let expected = match &self.save_admission {
-            SaveAdmission::Qualified { receipt, .. } => Some(receipt.clone()),
-            _ => None,
-        };
-        if let Err(error) = filesystem.prepare_save(
-            path,
-            #[cfg(windows)]
-            expected.as_ref(),
-        ) {
+        let expected = self.save_expectation();
+        if let Err(error) = filesystem.prepare_save(path, &expected) {
             self.block_source();
             return Err(error);
         }
         if self.pending_pre_v6_backup {
             storage_io::backup_pre_v6_state_file_with_filesystem(path, filesystem)?;
         }
-        let qualified = filesystem.publish_qualified(
-            path,
-            &serialized,
-            #[cfg(windows)]
-            expected.as_ref(),
-        );
+        let qualified = filesystem.publish_qualified(path, &serialized, &expected);
         match qualified {
             #[cfg(windows)]
             Ok(storage_io::StatePublication::Receipt(receipt)) => {
                 self.accept_receipt(path, receipt)
             }
             Ok(storage_io::StatePublication::Unavailable) => {
-                #[cfg(windows)]
-                if expected.is_some() {
+                if expected.is_qualified() {
                     self.block_source();
                     return Err("qualified state source became unavailable; save refused".into());
                 }

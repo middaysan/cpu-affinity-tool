@@ -14,9 +14,37 @@ pub(crate) enum StateRead {
 pub(crate) enum StateQualification {
     Unavailable,
     #[cfg(any(windows, test))]
+    QualifiedAbsent,
+    #[cfg(any(windows, test))]
     Blocked,
     #[cfg(windows)]
     Receipt(os_api::tuning::TuningConfigReceipt),
+}
+
+// Shared decision only: test revisions are never native receipt authority.
+#[cfg(any(windows, test))]
+fn original_revision_matches<T: PartialEq>(expected: Option<&T>, current: Option<&T>) -> bool {
+    current == expected
+}
+// An operation-local expectation, never persisted or cloned as an absence permit.
+pub(crate) enum StateExpectation {
+    Unavailable,
+    #[cfg(any(windows, test))]
+    Absent,
+    #[cfg(windows)]
+    Receipt(os_api::tuning::TuningConfigReceipt),
+}
+impl StateExpectation {
+    pub(super) fn is_qualified(&self) -> bool {
+        !matches!(self, Self::Unavailable)
+    }
+    #[cfg(windows)]
+    fn receipt(&self) -> Option<&os_api::tuning::TuningConfigReceipt> {
+        match self {
+            Self::Receipt(receipt) => Some(receipt),
+            _ => None,
+        }
+    }
 }
 impl StateQualification {
     pub(super) fn is_blocked(&self) -> bool {
@@ -41,13 +69,12 @@ pub(crate) trait StateFilesystem {
     fn prepare_save(
         &mut self,
         path: &Path,
-        #[cfg(windows)] expected: Option<&os_api::tuning::TuningConfigReceipt>,
+        expected: &StateExpectation,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.qualify_read(path).is_blocked() {
             return Err("qualified state evidence is blocked; save refused".into());
         }
-        #[cfg(windows)]
-        if expected.is_some() {
+        if expected.is_qualified() {
             return Err("qualified state source unavailable; save refused".into());
         }
         Ok(())
@@ -56,7 +83,7 @@ pub(crate) trait StateFilesystem {
         &mut self,
         _path: &Path,
         _bytes: &[u8],
-        #[cfg(windows)] _expected: Option<&os_api::tuning::TuningConfigReceipt>,
+        _expected: &StateExpectation,
     ) -> Result<StatePublication, Box<dyn std::error::Error>> {
         Ok(StatePublication::Unavailable)
     }
@@ -114,7 +141,7 @@ impl StateFilesystem for RealStateFilesystem {
         }
         match source.read() {
             Ok(Some(receipt)) => StateQualification::Receipt(receipt),
-            Ok(None) => StateQualification::Unavailable,
+            Ok(None) => StateQualification::QualifiedAbsent,
             Err(_) => {
                 self.blocked.set(true);
                 StateQualification::Blocked
@@ -125,16 +152,31 @@ impl StateFilesystem for RealStateFilesystem {
     fn prepare_save(
         &mut self,
         path: &Path,
-        expected: Option<&os_api::tuning::TuningConfigReceipt>,
+        expected: &StateExpectation,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let current = match self.qualify_read(path) {
+        let qualification = self.qualify_read(path);
+        if qualification.is_blocked() {
+            return Err("qualified state evidence is blocked; save refused".into());
+        }
+        if !expected.is_qualified() {
+            // An originally unqualified base state stays ordinary, including a
+            // first run whose missing parent was created by its default save.
+            // Release a freshly acquired no-delete leaf before ordinary I/O.
+            self.source.borrow_mut().take();
+            return Ok(());
+        }
+        let current = match qualification {
             StateQualification::Receipt(receipt) => Some(receipt),
-            StateQualification::Unavailable => None,
+            StateQualification::QualifiedAbsent => None,
+            StateQualification::Unavailable => {
+                self.blocked.set(true);
+                return Err("qualified state source unavailable; save refused".into());
+            }
             StateQualification::Blocked => {
                 return Err("qualified state evidence is blocked; save refused".into());
             }
         };
-        if expected.is_some() && current.as_ref() != expected {
+        if !original_revision_matches(expected.receipt(), current.as_ref()) {
             self.blocked.set(true);
             return Err("qualified state revision changed; save refused".into());
         }
@@ -146,24 +188,37 @@ impl StateFilesystem for RealStateFilesystem {
         &mut self,
         path: &Path,
         bytes: &[u8],
-        expected: Option<&os_api::tuning::TuningConfigReceipt>,
+        expected: &StateExpectation,
     ) -> Result<StatePublication, Box<dyn std::error::Error>> {
-        let current = match self.qualify_read(path) {
+        let qualification = self.qualify_read(path);
+        if qualification.is_blocked() {
+            return Err("qualified state evidence is blocked; publication refused".into());
+        }
+        if !expected.is_qualified() {
+            self.source.borrow_mut().take();
+            return Ok(StatePublication::Unavailable);
+        }
+        let current = match qualification {
             StateQualification::Receipt(receipt) => Some(receipt),
-            StateQualification::Unavailable => None,
+            StateQualification::QualifiedAbsent => None,
+            StateQualification::Unavailable => {
+                self.blocked.set(true);
+                return Err("qualified state source unavailable; publication refused".into());
+            }
             StateQualification::Blocked => {
                 return Err("qualified state evidence is blocked; publication refused".into());
             }
         };
-        if expected.is_some() && current.as_ref() != expected {
+        if !original_revision_matches(expected.receipt(), current.as_ref()) {
             self.blocked.set(true);
             return Err("qualified state revision changed; save refused".into());
         }
         let mut retained = self.source.borrow_mut();
         let Some((_, source)) = retained.as_mut() else {
-            return Ok(StatePublication::Unavailable);
+            self.blocked.set(true);
+            return Err("qualified state source not retained; publication refused".into());
         };
-        match source.publish(current.as_ref(), bytes) {
+        match source.publish(expected.receipt(), bytes) {
             Ok(receipt) => Ok(StatePublication::Receipt(receipt)),
             Err(error) => {
                 self.blocked.set(true);
@@ -488,10 +543,13 @@ mod tests {
         fail_publish: bool,
         fail_copy: bool,
         blocked_qualification: bool,
+        qualified_absence: bool,
         fail_qualified_publish: bool,
         qualified_publishes: usize,
+        foreign_at_qualified_publish: Option<Vec<u8>>,
         fail_save_guard: bool,
         save_guards: usize,
+        qualified_expectations: Vec<bool>,
     }
 
     impl FakeFilesystem {
@@ -509,9 +567,10 @@ mod tests {
         fn prepare_save(
             &mut self,
             _path: &Path,
-            #[cfg(windows)] _expected: Option<&os_api::tuning::TuningConfigReceipt>,
+            expected: &super::StateExpectation,
         ) -> Result<(), Box<dyn std::error::Error>> {
             self.save_guards += 1;
+            self.qualified_expectations.push(expected.is_qualified());
             if self.fail_save_guard || self.blocked_qualification {
                 Err("original qualified revision changed".into())
             } else {
@@ -520,11 +579,16 @@ mod tests {
         }
         fn publish_qualified(
             &mut self,
-            _path: &Path,
+            path: &Path,
             _bytes: &[u8],
-            #[cfg(windows)] _expected: Option<&os_api::tuning::TuningConfigReceipt>,
+            expected: &super::StateExpectation,
         ) -> Result<super::StatePublication, Box<dyn std::error::Error>> {
             self.qualified_publishes += 1;
+            self.qualified_expectations.push(expected.is_qualified());
+            if let Some(foreign) = self.foreign_at_qualified_publish.take() {
+                self.write_file(path, foreign);
+                return Err("foreign leaf appeared before no-replace publication".into());
+            }
             if self.fail_qualified_publish {
                 Err("uncertain qualified publication".into())
             } else {
@@ -534,6 +598,8 @@ mod tests {
         fn qualify_read(&self, _path: &Path) -> super::StateQualification {
             if self.blocked_qualification {
                 super::StateQualification::Blocked
+            } else if self.qualified_absence {
+                super::StateQualification::QualifiedAbsent
             } else {
                 super::StateQualification::Unavailable
             }
@@ -646,6 +712,168 @@ mod tests {
     fn p1_config() -> String {
         serde_json::to_string(&json!({"version":1,"lineage":vec![1;32],"profiles":[],"associations":[],"allocations":{"next_profile":1,"next_owner":1,"next_config_generation":1},"activations":[],"withdrawals":[]})).unwrap()
     }
+    #[test]
+    fn p2b_original_absence_and_receipt_comparison_never_adopts_current() {
+        assert!(super::original_revision_matches::<u8>(None, None));
+        assert!(super::original_revision_matches(Some(&1), Some(&1)));
+        assert!(!super::original_revision_matches::<u8>(None, Some(&2)));
+        assert!(!super::original_revision_matches(Some(&1), Some(&2)));
+        assert!(!super::original_revision_matches(Some(&1), None));
+    }
+
+    #[test]
+    fn p2b_qualified_absence_refuses_foreign_leaf_at_load_before_backup() {
+        let path = state_path();
+        let foreign = p1_state("11", Some(&p1_config()), None);
+        let mut fs = FakeFilesystem {
+            qualified_absence: true,
+            fail_save_guard: true,
+            ..Default::default()
+        };
+        fs.write_file(&path, &foreign);
+        let state = super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(state.save_blocked());
+        assert_eq!(fs.save_guards, 1);
+        assert_eq!(fs.qualified_publishes, 0);
+        assert_eq!(fs.mutation_count, 0);
+        assert_eq!(fs.read_file(&path), foreign);
+        assert_eq!(fs.files.len(), 1);
+        let mut clone = state.clone();
+        clone.mark_ready_for_current_schema_save(
+            crate::app::features::rules::PersistedRuleIdentities::default(),
+        );
+        assert!(clone
+            .try_save_to_path_with_filesystem(&path, &mut fs)
+            .is_err());
+        assert_eq!(fs.save_guards, 1);
+    }
+
+    #[test]
+    fn p2b_qualified_absence_publication_failure_or_unavailability_stays_blocked() {
+        for fail in [false, true] {
+            let path = state_path();
+            let mut fs = FakeFilesystem {
+                qualified_absence: true,
+                fail_qualified_publish: fail,
+                ..Default::default()
+            };
+            let state =
+                super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+            assert!(state.save_blocked());
+            assert_eq!(fs.save_guards, 1);
+            assert_eq!(fs.qualified_publishes, 1);
+            assert_eq!(fs.mutation_count, 0);
+            assert!(fs.files.is_empty());
+            assert!(fs.staged_paths.is_empty());
+            let mut clone = state.clone();
+            clone.mark_ready_for_current_schema_save(
+                crate::app::features::rules::PersistedRuleIdentities::default(),
+            );
+            assert!(clone
+                .try_save_to_path_with_filesystem(&path, &mut fs)
+                .is_err());
+            assert_eq!(fs.save_guards, 1);
+            assert_eq!(fs.qualified_publishes, 1);
+        }
+    }
+    #[test]
+    fn p2b_qualified_absence_refuses_foreign_leaf_at_publication_without_backup() {
+        let path = state_path();
+        let foreign = p1_state("11", Some(&p1_config()), None);
+        let mut fs = FakeFilesystem {
+            qualified_absence: true,
+            foreign_at_qualified_publish: Some(foreign.as_bytes().to_vec()),
+            ..Default::default()
+        };
+        let state = super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(state.save_blocked());
+        assert_eq!(fs.save_guards, 1);
+        assert_eq!(fs.qualified_publishes, 1);
+        assert_eq!(fs.mutation_count, 0);
+        assert_eq!(fs.read_file(&path), foreign);
+        assert_eq!(fs.files.len(), 1);
+        assert!(fs.staged_paths.is_empty());
+    }
+    #[test]
+    fn p2b_qualified_absence_serialization_bound_precedes_every_source_or_backup_operation() {
+        let path = state_path();
+        let mut candidate = super::super::schema_refresh::build_default_state();
+        candidate.extensions.insert(
+            "future_state".into(),
+            std::sync::Arc::from(
+                serde_json::value::RawValue::from_string(
+                    serde_json::to_string(&"x".repeat(super::MAX_STATE_BYTES)).unwrap(),
+                )
+                .unwrap(),
+            ),
+        );
+        let mut fs = FakeFilesystem {
+            qualified_absence: true,
+            ..Default::default()
+        };
+        let state = super::super::AppStateStorage::recover_default_state(
+            candidate,
+            &path,
+            &mut fs,
+            super::StateExpectation::Absent,
+            false,
+        );
+        assert!(state.save_blocked());
+        assert_eq!(fs.save_guards, 0);
+        assert_eq!(fs.qualified_publishes, 0);
+        assert_eq!(fs.mutation_count, 0);
+        assert!(fs.files.is_empty());
+    }
+
+    #[test]
+    fn p2b_unavailable_first_default_and_later_qualifiable_save_stay_base_only() {
+        let path = state_path();
+        let mut fs = FakeFilesystem::default();
+        // Missing parent supplies no qualified absence. Ordinary default I/O
+        // creates it; the fake cannot mint a receipt for any subsequent read.
+        let mut state =
+            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(!state.save_blocked());
+        assert!(state.tuning.is_off());
+        assert_eq!(fs.files.len(), 1);
+        #[cfg(windows)]
+        assert!(state.native_configuration().is_none());
+        fs.qualified_absence = true;
+        state.theme_index = 2;
+        state
+            .try_save_to_path_with_filesystem(&path, &mut fs)
+            .unwrap();
+        assert!(!state.save_blocked());
+        #[cfg(windows)]
+        assert!(state.native_configuration().is_none());
+        assert_eq!(fs.qualified_expectations, [false, false]);
+        let saved: super::super::AppStateStorage =
+            serde_json::from_str(&fs.read_file(&path)).unwrap();
+        assert_eq!(saved.theme_index, 2);
+        #[cfg(windows)]
+        assert!(saved.native_configuration().is_none());
+        assert_eq!(fs.files.len(), 1);
+    }
+
+    #[test]
+    fn p2b_unavailable_base_state_fresh_poisoned_source_still_refuses_save() {
+        let path = state_path();
+        let mut fs = FakeFilesystem::default();
+        let mut state =
+            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        let original = fs.read_file(&path);
+        fs.blocked_qualification = true;
+        fs.mutation_count = 0;
+        state.theme_index = 2;
+        assert!(state
+            .try_save_to_path_with_filesystem(&path, &mut fs)
+            .is_err());
+        assert!(state.save_blocked());
+        assert_eq!(fs.qualified_expectations, [false]);
+        assert_eq!(fs.mutation_count, 0);
+        assert_eq!(fs.qualified_publishes, 0);
+        assert_eq!(fs.read_file(&path), original);
+    }
     // These exercise the production recovery/order seam with refusal results.
     // The fake cannot construct a native receipt, proof or successful publication.
     #[test]
@@ -657,10 +885,11 @@ mod tests {
             ..Default::default()
         };
         fs.write_file(&path, &replacement);
-        let state = super::super::AppStateStorage::recover_corrupt_state(
+        let state = super::super::AppStateStorage::recover_default_state(
             super::super::schema_refresh::build_default_state(),
             &path,
             &mut fs,
+            super::StateExpectation::Absent,
             true,
         );
         assert!(state.save_blocked());
@@ -688,10 +917,11 @@ mod tests {
             ..Default::default()
         };
         fs.write_file(&path, original);
-        let state = super::super::AppStateStorage::recover_corrupt_state(
+        let state = super::super::AppStateStorage::recover_default_state(
             super::super::schema_refresh::build_default_state(),
             &path,
             &mut fs,
+            super::StateExpectation::Absent,
             true,
         );
         assert!(state.save_blocked());

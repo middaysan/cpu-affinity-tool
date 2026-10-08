@@ -19,6 +19,12 @@ FORMAT2 matches the independently expected original source before hydration or
 owner matching; legacy or foreign evidence remains blocked and retained. Worker
 source guards are scoped to bounded operations. The live configured producer is
 still Unavailable; provenance supplies no game/logon/boot authority.
+Positively qualified state absence is published only inside the retained initial
+load call, with bounded defaults, no backup and checked no-replace against original
+absence. The actual resulting base receipt is retained even when tuning is Off.
+Later qualified saves use their original receipt, never a freshly adopted leaf;
+uncertain or changed evidence blocks saves without ordinary fallback. An originally
+unavailable source remains base-only even if a later save can open its directory.
 The dormant saved-input builder accepts sealed proof and derives immutable tuples
 from its exact bytes. Envelope v2 separates a same-owner old continuation from
 the new requested value; explicit withdrawals alone supply Disabled. Drafts,

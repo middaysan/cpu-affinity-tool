@@ -267,6 +267,7 @@ Persisted state facts:
 - after the first current-schema save, downgrade to an older binary that only understands earlier state is unsupported
 - backup rotation uses `state.json.old`, `state.json.old1`, `state.json.old2`, and so on
 - persistence loading is split into `state_path`, `storage_io`, `migrations`, and `schema_refresh`; saves stage and sync a same-directory temporary file before an atomic replacement on Windows or an atomic rename plus directory sync on Linux. Windows does not claim parent-directory durability across power loss; recovery and migration backups are copy-and-sync operations that preserve their source before publishing.
+- qualified Windows state absence stays inside the initial synchronous retained-source call: bounded defaults skip backup and publish against original absence with checked no-replace, retaining the actual resulting base receipt even when tuning is Off. Qualified later saves compare and publish against the original sealed receipt; a changed leaf or unavailable/uncertain qualified publication blocks saving without an ordinary fallback. Originally unavailable source provenance remains base-only, including a first run with a missing parent; later source availability does not silently qualify that state.
 
 Key entities:
 - `CoreGroup` - CPU core group plus assigned apps
