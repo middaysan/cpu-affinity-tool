@@ -90,10 +90,12 @@ pub(super) fn start_saved_fixture(
     }
     Runner::start_test_writer(limits, move || {
         let saved = read_state(&state).unwrap();
-        let source =
-            SavedConfiguredSource::from_fixture(&saved, ConfigurationOrigin::fixture(), &catalog);
+        let origin = super::super::configured_intent::saved_configuration(&saved)
+            .map(|config| ConfigurationOrigin::fixture_lineage(config.lineage))
+            .unwrap_or_else(ConfigurationOrigin::fixture);
+        let source = SavedConfiguredSource::from_fixture(&saved, origin.clone(), &catalog);
         let mut scope = ScopeEvidence::fixture_saved(
-            ConfigurationOrigin::fixture(),
+            origin,
             || Ok(machine()),
             saved,
             move || read_state(&state),

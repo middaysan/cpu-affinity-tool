@@ -1,3 +1,5 @@
+mod app_flow;
+pub(in crate::app) mod editors;
 pub(super) mod scalar;
 pub(super) mod user_setting;
 pub(super) mod value_setting;

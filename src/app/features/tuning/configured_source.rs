@@ -1,4 +1,4 @@
-//! Immutable independently saved input; it is not composed into the runner yet.
+//! Immutable independently saved input for the worker's scoped authority.
 use super::platform::configured_intent::{ConfiguredIntentSource, ConfiguredSnapshot};
 
 pub(crate) struct SavedConfiguredSource {
@@ -6,7 +6,7 @@ pub(crate) struct SavedConfiguredSource {
     // Keep sealed rejected input as well; Unavailable never discards its native
     // saved evidence or substitutes caller-owned configuration entries.
     #[cfg(windows)]
-    proof: Option<super::platform::configured_intent::NativeConfigurationProof>,
+    _proof: Option<super::platform::configured_intent::NativeConfigurationProof>,
 }
 impl ConfiguredIntentSource for SavedConfiguredSource {
     fn snapshot(&self) -> ConfiguredSnapshot {
@@ -21,7 +21,7 @@ impl SavedConfiguredSource {
     ) -> Self {
         Self {
             snapshot: ConfiguredSnapshot::from_saved_native(proof.clone(), catalog),
-            proof: Some(proof),
+            _proof: Some(proof),
         }
     }
     #[cfg(test)]
@@ -33,7 +33,7 @@ impl SavedConfiguredSource {
         Self {
             snapshot: ConfiguredSnapshot::from_saved_fixture(bytes, origin, catalog),
             #[cfg(windows)]
-            proof: None,
+            _proof: None,
         }
     }
 }
@@ -456,7 +456,7 @@ mod tests {
             IntentDecision::Enabled
         );
         #[cfg(windows)]
-        assert!(producer.proof.is_none());
+        assert!(producer._proof.is_none());
         for field in [
             "lineage",
             "principal",

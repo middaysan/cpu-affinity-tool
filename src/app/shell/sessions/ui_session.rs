@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// Transient UI state owned by the shell layer.
 pub struct UiSession {
+    pub(crate) tuning: crate::app::features::tuning::presentation::TuningUiSession,
     pub current_window: WindowRoute,
     pub group_form: GroupFormSession,
     pub app_edit_state: RuleEditorSession,
@@ -32,6 +33,7 @@ pub struct UiSession {
 impl UiSession {
     pub fn new(total_threads: usize) -> Self {
         Self {
+            tuning: Default::default(),
             current_window: WindowRoute::Groups(GroupRoute::List),
             group_form: GroupFormSession {
                 editing_group_id: None,

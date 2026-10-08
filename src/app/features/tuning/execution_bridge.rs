@@ -73,6 +73,25 @@ pub(crate) enum ExecutionObservation {
     },
     Unknown(UnknownReason),
 }
+impl ExecutionObservation {
+    pub(crate) fn matches_state(&self, state: &AppStateStorage) -> bool {
+        matches!(self, Self::Complete { config, .. } if configuration(state).is_ok_and(|actual| &actual == config.as_ref()))
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        state: &AppStateStorage,
+        generation: u64,
+        members: Vec<Member>,
+        foreground: ProcessFacts,
+    ) -> Self {
+        Self::Complete {
+            generation,
+            config: Arc::new(configuration(state).unwrap()),
+            members,
+            foreground,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ForegroundSample {
     pub window: usize,

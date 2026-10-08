@@ -323,11 +323,11 @@ trait ErasedModule: Send + Sync {
     fn descriptor(&self) -> &ModuleDescriptor;
     fn validate_config(&self, envelope: &ModuleEnvelope) -> Result<(), CatalogError>;
     fn observe(&self, target: &TargetIdentity) -> Result<ObservationSummary, CatalogError>;
-    fn observe_resources(
+    fn observe_with_resources(
         &self,
         target: &TargetIdentity,
         resources: &[ResourceKey],
-    ) -> Result<Vec<ResourceObservation>, CatalogError>;
+    ) -> Result<(ObservationSummary, Vec<ResourceObservation>), CatalogError>;
     fn prepare(
         &self,
         envelope: &ModuleEnvelope,
@@ -422,11 +422,11 @@ impl<M: Module> ErasedModule for ModuleAdapter<M> {
             .module
             .observation_summary(&self.module.observe(target)?))
     }
-    fn observe_resources(
+    fn observe_with_resources(
         &self,
         target: &TargetIdentity,
         resources: &[ResourceKey],
-    ) -> Result<Vec<ResourceObservation>, CatalogError> {
+    ) -> Result<(ObservationSummary, Vec<ResourceObservation>), CatalogError> {
         check_target(&self.descriptor, target)?;
         if resources.is_empty()
             || !distinct(resources.iter())
@@ -440,11 +440,12 @@ impl<M: Module> ErasedModule for ModuleAdapter<M> {
             return Err(CatalogError::InvalidResourceSubset);
         }
         check_capability(self.module.as_ref(), target)?;
-        let observed =
-            self.module
-                .observation_states(target, &self.module.observe(target)?, resources)?;
+        let observation = self.module.observe(target)?;
+        let observed = self
+            .module
+            .observation_states(target, &observation, resources)?;
         check_observations(&observed, resources)?;
-        Ok(observed)
+        Ok((self.module.observation_summary(&observation), observed))
     }
     fn prepare(
         &self,
@@ -578,7 +579,18 @@ impl Catalog {
         target: &TargetIdentity,
         resources: &[ResourceKey],
     ) -> Result<Vec<ResourceObservation>, CatalogError> {
-        self.module(feature)?.observe_resources(target, resources)
+        self.observe_with_resources(feature, target, resources)
+            .map(|(_, observed)| observed)
+    }
+    /// Both projections borrow one concrete module observation; no second read.
+    pub fn observe_with_resources(
+        &self,
+        feature: &FeatureId,
+        target: &TargetIdentity,
+        resources: &[ResourceKey],
+    ) -> Result<(ObservationSummary, Vec<ResourceObservation>), CatalogError> {
+        self.module(feature)?
+            .observe_with_resources(target, resources)
     }
     pub fn prepare(
         &self,

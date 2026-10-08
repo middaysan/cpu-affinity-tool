@@ -220,6 +220,12 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                     )));
                 }
 
+                // Association saving uses its own explicit saved transaction.
+                // Release the rule draft borrow before borrowing the facade.
+                let _ = selected_app;
+                draw_profile_association(app, ui);
+                let selected_app = app.ui.app_edit_state.current_edit.as_mut().expect("loaded rule draft");
+
                 ui.add_space(6.0);
                 if ui
                     .checkbox(
@@ -425,6 +431,111 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     } else if is_close {
         app.close_app_run_settings();
     }
+}
+
+fn draw_profile_association(app: &mut AppState, ui: &mut egui::Ui) {
+    use crate::app::features::tuning::{
+        platform::contract::ActivationEligibility, presentation::AssociationDraft,
+        TuningConfigurationState, TuningOperationState, TuningRequest,
+    };
+    let Some(target) = app.ui.app_edit_state.target.clone() else {
+        return;
+    };
+    let snapshot = app.tuning_snapshot();
+    let expected = snapshot
+        .associations
+        .iter()
+        .find(|a| a.group == target.group_id && a.rule == target.rule_id)
+        .cloned();
+    if app
+        .ui
+        .tuning
+        .association
+        .as_ref()
+        .is_none_or(|draft| draft.target != target)
+    {
+        app.ui.tuning.association = Some(AssociationDraft {
+            target: target.clone(),
+            profile: expected.as_ref().map(|a| a.profile),
+            eligibility: expected
+                .as_ref()
+                .map_or(ActivationEligibility::Running, |a| a.eligibility),
+            expected: expected.clone(),
+        });
+    }
+    let Some(mut draft) = app.ui.tuning.association.take() else {
+        return;
+    };
+    let stale = draft.expected != expected;
+    let editable = matches!(
+        snapshot.configuration,
+        TuningConfigurationState::Off | TuningConfigurationState::Known
+    ) && !matches!(
+        snapshot.operation,
+        TuningOperationState::Pending { .. } | TuningOperationState::Recovering
+    );
+    ui.add_space(6.0);
+    ui.label(RichText::new("Module profile").strong());
+    if stale {
+        ui.label("The saved association changed. Reload it before saving.");
+        if ui.button("Reload association").clicked() {
+            draft.profile = expected.as_ref().map(|a| a.profile);
+            draft.eligibility = expected
+                .as_ref()
+                .map_or(ActivationEligibility::Running, |a| a.eligibility);
+            draft.expected = expected;
+        }
+    }
+    let mut save = false;
+    ui.add_enabled_ui(editable && !stale, |ui| {
+        let selected = snapshot
+            .profiles
+            .iter()
+            .find(|p| Some(p.id) == draft.profile)
+            .map_or("None", |p| p.name.as_str());
+        ComboBox::from_id_salt("rule-module-profile")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut draft.profile, None, "None");
+                for profile in &snapshot.profiles {
+                    ui.selectable_value(&mut draft.profile, Some(profile.id), &profile.name);
+                }
+            });
+        if draft.profile.is_some() {
+            ui.horizontal(|ui| {
+                ui.selectable_value(
+                    &mut draft.eligibility,
+                    ActivationEligibility::Running,
+                    "While running",
+                );
+                ui.selectable_value(
+                    &mut draft.eligibility,
+                    ActivationEligibility::Foreground,
+                    "In foreground",
+                );
+            });
+        }
+        save = ui.button("Save profile association").clicked();
+    });
+    if let Some(error) = app.ui.tuning.error {
+        ui.colored_label(ui.visuals().error_fg_color, error);
+    }
+    if save {
+        let request = match draft.profile {
+            Some(profile) => TuningRequest::BindRule {
+                group: target.group_id,
+                rule: target.rule_id,
+                profile,
+                eligibility: draft.eligibility,
+            },
+            None => TuningRequest::UnbindRule {
+                group: target.group_id,
+                rule: target.rule_id,
+            },
+        };
+        crate::app::shell::presenters::tuning::submit(app, request);
+    }
+    app.ui.tuning.association = Some(draft);
 }
 
 #[cfg(test)]

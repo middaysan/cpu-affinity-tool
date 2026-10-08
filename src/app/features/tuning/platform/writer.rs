@@ -366,18 +366,16 @@ pub(super) fn open_native(
     })();
     match opened {
         Ok((machine, store)) => {
+            let configured: Arc<dyn ConfiguredIntentSource> = match configuration.as_ref() {
+                Some(proof) => Arc::new(crate::app::features::tuning::configured_source::SavedConfiguredSource::from_native(proof.clone(), &catalog)),
+                None => Arc::new(super::configured_intent::UnavailableConfiguredIntent),
+            };
             let scope = ScopeEvidence::Native(Box::new(NativeScope {
                 machine: machine.clone(),
                 configuration,
                 guard: None,
             }));
-            bootstrap_configured(
-                catalog,
-                machine,
-                Box::new(store),
-                Arc::new(super::configured_intent::UnavailableConfiguredIntent),
-                scope,
-            )
+            bootstrap_configured(catalog, machine, Box::new(store), configured, scope)
         }
         Err(reason) => (Coordinator::new(catalog), WorkerAuthority::Blocked(reason)),
     }
@@ -404,7 +402,7 @@ fn native_error(error: os_api::tuning::TuningNativeError) -> super::journal::Jou
 }
 
 #[cfg(windows)]
-pub(super) fn native_machine(
+pub(in crate::app::features::tuning) fn native_machine(
     source: os_api::tuning::TuningMachineSource,
     bytes: &[u8],
 ) -> Result<super::contract::MachineIdentity, super::journal::JournalError> {

@@ -1,3 +1,7 @@
+// Existing adapter/lifetime contracts remain available for module contributions
+// and isolated tests; the shipping catalog currently registers no adapters.
+#![allow(dead_code)]
+
 pub mod catalog;
 pub mod codec;
 pub(crate) mod configured_intent;

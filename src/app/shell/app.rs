@@ -13,7 +13,7 @@ use crate::app::runtime::{AppState, RunRuleOutcome};
 #[cfg(all(target_os = "windows", feature = "windows"))]
 use crate::app::shell::presenters::crash_reports;
 use crate::app::shell::presenters::{
-    central, footer, group_editor, header, installed_app_picker, logs, run_settings,
+    central, footer, group_editor, header, installed_app_picker, logs, run_settings, tuning,
 };
 #[cfg(all(target_os = "windows", feature = "windows"))]
 use crate::app::shell::sessions::ShortcutCreationRole;
@@ -438,8 +438,31 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.handle_tray_events(ctx) {
+        if ctx.input(|input| input.viewport().close_requested()) {
+            self.begin_close(ctx);
+            if self.state.tuning_shutdown_outcome().is_none() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+        }
+        self.handle_tray_events(ctx);
+        if self.closing_requested {
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            self.handle_local_ipc_requests(ctx);
+            #[cfg(test)]
+            self.handle_forwarded_commands(ctx);
+            self.state.poll_tuning();
+            if self.state.tuning_shutdown_outcome().is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
             return;
+        }
+        if self.state.poll_tuning() {
+            ctx.request_repaint();
+        }
+        if let Some(interval) = self.state.tuning_poll_interval() {
+            ctx.request_repaint_after(interval);
         }
         self.handle_monitor_events(ctx);
         #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -628,6 +651,36 @@ mod tests {
 
         assert!(app.handle_tray_commands(&ctx, [TrayCmd::Show]));
         assert!(app.is_hidden);
+    }
+
+    #[test]
+    fn p5_tray_quit_enters_draining_before_viewport_close() {
+        let mut app = App::new_for_test(sample_state());
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(app.handle_tray_commands(ui.ctx(), [TrayCmd::Quit]));
+            assert!(app.closing_requested);
+        });
+        assert!(
+            output.viewport_output.values().all(|viewport| {
+                !viewport
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::Close))
+            }),
+            "Quit must first close admission and begin worker draining"
+        );
+    }
+
+    #[test]
+    fn p5_forwarded_rule_is_rejected_after_quit_latches() {
+        let mut app = App::new_for_test(sample_state());
+        app.closing_requested = true;
+        let response = app.handle_ipc_command(IpcCommand::RunRule {
+            group_id: crate::app::shared::ids::GroupId("missing-group".into()),
+            rule_id: crate::app::shared::ids::RuleId("missing-rule".into()),
+        });
+        assert_eq!(response.code, IpcResponseCode::LaunchRejected);
     }
 
     fn sample_state() -> AppState {
@@ -1062,6 +1115,14 @@ mod tests {
 }
 
 impl App {
+    fn begin_close(&mut self, ctx: &egui::Context) {
+        if !self.closing_requested {
+            self.closing_requested = true;
+            self.state.begin_tuning_shutdown();
+        }
+        ctx.request_repaint();
+    }
+
     fn handle_tray_events(&mut self, ctx: &egui::Context) -> bool {
         let commands = self
             .tray_runtime
@@ -1084,8 +1145,7 @@ impl App {
                 false
             }
             TrayCommandAction::Quit => {
-                self.closing_requested = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.begin_close(ctx);
                 true
             }
         }
@@ -1108,6 +1168,9 @@ impl App {
                     } else {
                         self.state.log_manager.add_entry(message.to_string());
                     }
+                }
+                if let Some(message) = event.tuning_log_message() {
+                    self.state.log_manager.add_important_entry(message);
                 }
 
                 repaint_requested |= event.needs_repaint();
@@ -1191,6 +1254,12 @@ impl App {
 
     #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
     fn handle_ipc_command(&mut self, command: IpcCommand) -> IpcResponse {
+        if self.closing_requested {
+            return IpcResponse {
+                code: IpcResponseCode::LaunchRejected,
+                detail: None,
+            };
+        }
         match command {
             IpcCommand::RunRule { group_id, rule_id } => {
                 run_rule_outcome_to_response(self.state.run_group_program(group_id, rule_id))
@@ -1300,6 +1369,7 @@ impl App {
                 GroupRoute::Edit => group_editor::edit_group_window(app_state, ui),
             },
             WindowRoute::Logs => logs::draw_logs_window(app_state, ui),
+            WindowRoute::Tuning => tuning::draw_tuning(app_state, ui),
             #[cfg(all(target_os = "windows", feature = "windows"))]
             WindowRoute::CrashReports => crash_reports::draw_crash_reports_window(app_state, ui),
             WindowRoute::AppRunSettings => run_settings::draw_app_run_settings(app_state, ui),

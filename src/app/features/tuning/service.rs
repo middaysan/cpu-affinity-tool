@@ -29,7 +29,7 @@ pub(crate) enum SaveError {
 }
 
 /// The selected state storage is invoked outside application/runtime locks.
-pub(crate) trait StatePersistence {
+pub(crate) trait StatePersistence: Send {
     fn save(&mut self, candidate: &mut AppStateStorage) -> Result<SavedState, SaveError>;
 }
 pub(crate) enum SavedState {
@@ -59,6 +59,11 @@ pub(crate) struct HeadlessTuning {
     tickets: std::collections::BTreeMap<(OwnerId, u64, bool), Ticket>,
     recovering: bool,
     catalog: Catalog,
+    saved_revision: u64,
+    #[cfg(test)]
+    fixture_paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    #[cfg(test)]
+    fixture_targets: Vec<TargetIdentity>,
 }
 impl HeadlessTuning {
     pub(super) fn new(
@@ -75,13 +80,213 @@ impl HeadlessTuning {
             tickets: std::collections::BTreeMap::new(),
             recovering: false,
             catalog,
+            saved_revision: 0,
+            #[cfg(test)]
+            fixture_paths: None,
+            #[cfg(test)]
+            fixture_targets: vec![],
         }
     }
     pub(crate) fn state(&self) -> &AppStateStorage {
         &self.state
     }
+    pub(crate) fn create_profile(
+        &mut self,
+        name: String,
+        modules: Vec<ModulePreference>,
+    ) -> Result<ProfileId, SaveError> {
+        if name.trim().is_empty()
+            || name.len() > 128
+            || name.chars().any(char::is_control)
+            || modules.len() > 64
+        {
+            return Err(SaveError::Invalid);
+        }
+        let mut config = match self.state.tuning.decode() {
+            TuningLoad::Off => TuningConfig {
+                version: 2,
+                lineage: fresh_lineage()?,
+                profiles: vec![],
+                associations: vec![],
+                allocations: Allocations {
+                    next_profile: 1,
+                    next_owner: 1,
+                    next_config_generation: 1,
+                },
+                activations: vec![],
+                withdrawals: vec![],
+                transitions: Some(vec![]),
+                acknowledgements: None,
+            },
+            TuningLoad::Known(config) => *config,
+            _ => return Err(SaveError::Invalid),
+        };
+        if config.profiles.len() >= 64 {
+            return Err(SaveError::Invalid);
+        }
+        let id = ProfileId::new(take_id(&mut config.allocations.next_profile)?)
+            .map_err(|_| SaveError::Invalid)?;
+        config.profiles.push(Profile {
+            version: 1,
+            id,
+            name,
+            modules,
+        });
+        self.save_config(config)?;
+        Ok(id)
+    }
     pub(crate) fn rules(&self) -> &RulesContext {
         &self.rules
+    }
+    pub(crate) fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+    pub(crate) fn saved_revision(&self) -> u64 {
+        self.saved_revision
+    }
+    #[cfg(test)]
+    pub(in crate::app::features::tuning) fn configure_fixture(
+        &mut self,
+        state: std::path::PathBuf,
+        journal: std::path::PathBuf,
+        targets: Vec<TargetIdentity>,
+    ) {
+        self.fixture_paths = Some((state, journal));
+        self.fixture_targets = targets;
+    }
+    pub(in crate::app::features::tuning) fn start_saved_worker(&mut self) -> Result<(), SaveError> {
+        if self.runner.is_some() {
+            return Ok(());
+        }
+        #[cfg(test)]
+        if let Some((state, journal)) = &self.fixture_paths {
+            self.runner = Some(
+                Runner::start_saved_fixture(
+                    Default::default(),
+                    self.catalog.clone(),
+                    state.clone(),
+                    journal.clone(),
+                )
+                .map_err(|_| SaveError::Pending)?,
+            );
+            return Ok(());
+        }
+        #[cfg(windows)]
+        if self.state.native_configuration().is_some() {
+            return self.start_worker();
+        }
+        Err(SaveError::Pending)
+    }
+    pub(in crate::app::features::tuning) fn available_targets(&self) -> Vec<TargetIdentity> {
+        #[cfg(test)]
+        if self.fixture_paths.is_some() {
+            return self.fixture_targets.clone();
+        }
+        #[cfg(windows)]
+        if self.catalog.descriptors().next().is_some()
+            && self.state.native_configuration().is_some()
+        {
+            if let Ok(identity) = os_api::OS::tuning_machine_identity() {
+                if let Ok(machine) =
+                    super::platform::writer::native_machine(identity.source(), identity.bytes())
+                {
+                    return vec![TargetIdentity::Machine(machine)];
+                }
+            }
+        }
+        vec![]
+    }
+    pub(crate) fn set_module_preference(
+        &mut self,
+        profile: ProfileId,
+        preference: ModulePreference,
+        expected: Option<ModulePreference>,
+    ) -> Result<(), SaveError> {
+        let mut config = self.configured()?;
+        let descriptor = self
+            .catalog
+            .descriptors()
+            .find(|d| d.id == preference.feature)
+            .ok_or(SaveError::Invalid)?;
+        if preference.feature != preference.config.feature
+            || !descriptor.activation_modes.contains(&preference.mode)
+            || self.catalog.validate_config(&preference.config).is_err()
+        {
+            return Err(SaveError::Invalid);
+        }
+        let selected = config
+            .profiles
+            .iter()
+            .find(|p| p.id == profile)
+            .ok_or(SaveError::Invalid)?;
+        let old = selected
+            .modules
+            .iter()
+            .find(|m| m.feature == preference.feature)
+            .cloned();
+        if old != expected || (old.is_none() && selected.modules.len() >= 64) {
+            return Err(SaveError::Invalid);
+        }
+        if old.as_ref().is_some_and(|old| {
+            old.enabled == preference.enabled
+                && old.mode == preference.mode
+                && old.config != preference.config
+        }) {
+            return self.edit_profile(profile, preference.config);
+        }
+        if old
+            .as_ref()
+            .is_some_and(|old| old.enabled && (!preference.enabled || old.mode != preference.mode))
+        {
+            withdraw(&mut config, |intent| {
+                intent
+                    .binding
+                    .configured()
+                    .is_some_and(|b| b.profile == profile)
+                    && intent.config.feature == preference.feature
+            })?;
+        }
+        let selected = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile)
+            .unwrap();
+        selected.modules.retain(|m| m.feature != preference.feature);
+        selected.modules.push(preference);
+        self.save_config(config)
+    }
+    pub(crate) fn edit_rule(
+        &mut self,
+        group: &GroupId,
+        rule: &RuleId,
+        app: crate::app::models::AppToRun,
+    ) -> Result<(), SaveError> {
+        let group_index = self
+            .rules
+            .group_index_for_id(group)
+            .ok_or(SaveError::Invalid)?;
+        let index = self
+            .rules
+            .rule_index_for_id(group_index, rule)
+            .ok_or(SaveError::Invalid)?;
+        let mut candidate = self.state.clone();
+        if candidate.groups[group_index].programs[index] == app {
+            return Ok(());
+        }
+        if let TuningLoad::Known(mut config) = candidate.tuning.decode() {
+            withdraw(
+                &mut config,
+                |intent| matches!(&intent.binding, ActivationBinding::Game(game) if game.rule().group() == group && game.rule().rule() == rule),
+            )?;
+            candidate.tuning = encode_config(*config)?;
+        } else if !candidate.tuning.is_off() {
+            return Err(SaveError::Invalid);
+        }
+        candidate.groups[group_index].programs[index] = app;
+        self.publish(candidate)
+    }
+    pub(crate) fn poll_shutdown(&mut self) -> Option<ShutdownResult> {
+        self.runner.as_mut().map(|r| r.shutdown(Duration::ZERO))
     }
     #[cfg(windows)]
     pub(crate) fn start_worker(&mut self) -> Result<(), SaveError> {
@@ -132,7 +337,23 @@ impl HeadlessTuning {
                 }
             }
         }
-        self.publish(candidate)
+        let rules = if candidate.rule_identities != self.state.rule_identities {
+            let rules = RulesContext::from_storage(&candidate);
+            let old = self.rules.to_persisted_identities();
+            let next = rules.to_persisted_identities();
+            if next.next_group_id < old.next_group_id
+                || next.next_rule_id < old.next_rule_id
+                || candidate.rule_identities.as_ref() != Some(&next)
+            {
+                return Err(SaveError::Invalid);
+            }
+            rules
+        } else {
+            let mut rules = self.rules.clone();
+            rules.reconcile_with_storage(&candidate);
+            rules
+        };
+        self.publish_with_rules(candidate, rules, AckAction::None)
     }
     fn publish(&mut self, candidate: AppStateStorage) -> Result<(), SaveError> {
         self.publish_with_ack(candidate, AckAction::None)
@@ -155,6 +376,10 @@ impl HeadlessTuning {
         if self.recovering {
             return Err(SaveError::Recovering);
         }
+        let revision = self
+            .saved_revision
+            .checked_add(1)
+            .ok_or(SaveError::Invalid)?;
         candidate.mark_ready_for_current_schema_save(rules.to_persisted_identities());
         let mut reservation = match &self.runner {
             Some(runner) => {
@@ -255,13 +480,17 @@ impl HeadlessTuning {
                 reservation.install_native(*proof, WAIT).is_ok()
             }
             #[cfg(test)]
-            (Some(reservation), SavedState::Fixture(bytes)) => reservation
-                .install_fixture(&bytes, ConfigurationOrigin::fixture(), WAIT)
-                .is_ok(),
+            (Some(reservation), SavedState::Fixture(bytes)) => {
+                let origin = super::platform::configured_intent::saved_configuration(&bytes)
+                    .map(|config| ConfigurationOrigin::fixture_lineage(config.lineage));
+                origin
+                    .is_some_and(|origin| reservation.install_fixture(&bytes, origin, WAIT).is_ok())
+            }
             (None, _) => true,
         };
         self.state = candidate;
         self.rules = rules;
+        self.saved_revision = revision;
         if !installed {
             self.recovering = true;
             return Err(SaveError::Recovering);
@@ -280,7 +509,7 @@ impl HeadlessTuning {
         self.publish(candidate)
     }
     #[cfg(test)]
-    fn attach_fixture(&mut self, runner: Runner) {
+    pub(in crate::app::features::tuning) fn attach_fixture(&mut self, runner: Runner) {
         self.runner = Some(runner);
     }
     pub(crate) fn activate_manual(
@@ -373,17 +602,12 @@ impl HeadlessTuning {
                 match &mut new.binding {
                     ActivationBinding::Manual(binding) => binding.generation = generation,
                     ActivationBinding::Game(game) => {
-                        *game = GameActivation::new(
-                            ConfiguredIntent {
+                        *game = game
+                            .with_configured(ConfiguredIntent {
                                 profile: game.configured().profile,
                                 generation,
-                            },
-                            game.rule().clone(),
-                            game.eligibility(),
-                            game.session().clone(),
-                            game.processes().to_vec(),
-                        )
-                        .map_err(|_| SaveError::Invalid)?;
+                            })
+                            .map_err(|_| SaveError::Invalid)?;
                     }
                     ActivationBinding::Unknown => return Err(SaveError::Invalid),
                 }
@@ -457,6 +681,13 @@ impl HeadlessTuning {
             .rules
             .rule_index_for_id(group_index, rule)
             .ok_or(SaveError::Invalid)?;
+        let mut candidate = self.state.clone();
+        if candidate.tuning.is_off() {
+            candidate.groups[group_index].programs.remove(rule_index);
+            let mut rules = self.rules.clone();
+            rules.remove_rule(group_index, rule_index);
+            return self.publish_with_rules(candidate, rules, AckAction::None);
+        }
         let mut config = self.configured()?;
         withdraw(
             &mut config,
@@ -465,7 +696,6 @@ impl HeadlessTuning {
         config
             .associations
             .retain(|a| &a.group != group || &a.rule != rule);
-        let mut candidate = self.state.clone();
         candidate.groups[group_index].programs.remove(rule_index);
         candidate.tuning = encode_config(config)?;
         let mut rules = self.rules.clone();
@@ -477,28 +707,50 @@ impl HeadlessTuning {
             .rules
             .group_index_for_id(group)
             .ok_or(SaveError::Invalid)?;
+        let mut candidate = self.state.clone();
+        if candidate.tuning.is_off() {
+            candidate.groups.remove(index);
+            let mut rules = self.rules.clone();
+            rules.remove_group(index);
+            return self.publish_with_rules(candidate, rules, AckAction::None);
+        }
         let mut config = self.configured()?;
         withdraw(
             &mut config,
             |i| matches!(&i.binding,ActivationBinding::Game(game) if game.rule().group()==group),
         )?;
         config.associations.retain(|a| &a.group != group);
-        let mut candidate = self.state.clone();
         candidate.groups.remove(index);
         candidate.tuning = encode_config(config)?;
         let mut rules = self.rules.clone();
         rules.remove_group(index);
         self.publish_with_rules(candidate, rules, AckAction::None)
     }
+    #[cfg(test)]
     pub(crate) fn move_rule(
         &mut self,
         group: &GroupId,
         rule: &RuleId,
         destination: &GroupId,
     ) -> Result<(), SaveError> {
-        if group == destination {
-            return Ok(());
-        }
+        let target = self
+            .rules
+            .group_index_for_id(destination)
+            .ok_or(SaveError::Invalid)?;
+        self.move_rule_at(
+            group,
+            rule,
+            destination,
+            self.state.groups[target].programs.len(),
+        )
+    }
+    pub(crate) fn move_rule_at(
+        &mut self,
+        group: &GroupId,
+        rule: &RuleId,
+        destination: &GroupId,
+        insert: usize,
+    ) -> Result<(), SaveError> {
         let source = self
             .rules
             .group_index_for_id(group)
@@ -511,19 +763,46 @@ impl HeadlessTuning {
             .rules
             .group_index_for_id(destination)
             .ok_or(SaveError::Invalid)?;
-        let mut config = self.configured()?;
-        withdraw(
-            &mut config,
-            |i| matches!(&i.binding,ActivationBinding::Game(game) if game.rule().group()==group&&game.rule().rule()==rule),
-        )?;
-        config
-            .associations
-            .retain(|a| &a.group != group || &a.rule != rule);
         let mut candidate = self.state.clone();
-        let app = candidate.groups[source].programs.remove(index);
-        let insert = candidate.groups[target].programs.len();
-        candidate.groups[target].programs.push(app);
-        candidate.tuning = encode_config(config)?;
+        if !self
+            .rules
+            .can_move_rule_between_groups_at(source, index, target, insert)
+        {
+            return Err(SaveError::Invalid);
+        }
+        if source == target && (insert == index || insert == index + 1) {
+            return Ok(());
+        }
+        if source != target
+            && candidate.groups[target]
+                .programs
+                .iter()
+                .any(|app| app.get_key() == candidate.groups[source].programs[index].get_key())
+        {
+            return Err(SaveError::Invalid);
+        }
+        if source != target {
+            if let TuningLoad::Known(mut config) = candidate.tuning.decode() {
+                withdraw(
+                    &mut config,
+                    |i| matches!(&i.binding,ActivationBinding::Game(game) if game.rule().group()==group&&game.rule().rule()==rule),
+                )?;
+                config
+                    .associations
+                    .retain(|a| &a.group != group || &a.rule != rule);
+                candidate.tuning = encode_config(*config)?;
+            } else if !candidate.tuning.is_off() {
+                return Err(SaveError::Invalid);
+            }
+        }
+        super::super::rules::move_rule_between_groups_at(
+            &mut candidate,
+            source,
+            index,
+            target,
+            insert,
+        )
+        .ok_or(SaveError::Invalid)?;
         let mut rules = self.rules.clone();
         rules
             .move_rule_between_groups_at(source, index, target, insert)
@@ -582,6 +861,24 @@ impl HeadlessTuning {
         });
         self.save_config(config)
     }
+    pub(crate) fn unbind_rule(&mut self, group: &GroupId, rule: &RuleId) -> Result<(), SaveError> {
+        let mut config = self.configured()?;
+        if !config
+            .associations
+            .iter()
+            .any(|a| &a.group == group && &a.rule == rule)
+        {
+            return Err(SaveError::Invalid);
+        }
+        withdraw(
+            &mut config,
+            |intent| matches!(&intent.binding, ActivationBinding::Game(game) if game.rule().group() == group && game.rule().rule() == rule),
+        )?;
+        config
+            .associations
+            .retain(|a| &a.group != group || &a.rule != rule);
+        self.save_config(config)
+    }
     pub(crate) fn activate_game(
         &mut self,
         game: GameActivation,
@@ -597,7 +894,10 @@ impl HeadlessTuning {
             .find(|p| p.id == configured.profile)
             .and_then(|p| p.modules.iter_mut().find(|m| m.feature == feature))
             .ok_or(SaveError::Invalid)?;
-        if preference.mode != ActivationMode::Session {
+        if preference.mode != ActivationMode::Session
+            && !(preference.mode == ActivationMode::ForegroundSession
+                && game.eligibility() == ActivationEligibility::Foreground)
+        {
             return Err(SaveError::Invalid);
         }
         preference.enabled = true;
@@ -618,6 +918,67 @@ impl HeadlessTuning {
         config.activations.push(intent);
         self.save_config(config)?;
         Ok(owner)
+    }
+    pub(in crate::app::features::tuning) fn withdraw_owner(
+        &mut self,
+        owner: OwnerId,
+    ) -> Result<(), SaveError> {
+        let mut config = self.configured()?;
+        if !config
+            .activations
+            .iter()
+            .any(|intent| intent.owner == owner)
+        {
+            return Err(SaveError::Pending);
+        }
+        withdraw(&mut config, |intent| intent.owner == owner)?;
+        self.save_config(config)
+    }
+    pub(crate) fn update_game_membership(
+        &mut self,
+        owner: OwnerId,
+        game: GameActivation,
+    ) -> Result<(), SaveError> {
+        let mut config = self.configured()?;
+        if config
+            .transitions
+            .iter()
+            .flatten()
+            .any(|t| t.owner == owner)
+            || config.withdrawals.iter().any(|i| i.owner == owner)
+        {
+            return Err(SaveError::Pending);
+        }
+        let index = config
+            .activations
+            .iter()
+            .position(|i| i.owner == owner)
+            .ok_or(SaveError::Invalid)?;
+        let old = config.activations[index].clone();
+        let ActivationBinding::Game(before) = &old.binding else {
+            return Err(SaveError::Invalid);
+        };
+        if !game.membership_succeeds(before) {
+            return Err(SaveError::Invalid);
+        }
+        let mut new = old.clone();
+        new.binding = ActivationBinding::Game(game);
+        if !config.request_matches(&new) {
+            return Err(SaveError::Invalid);
+        }
+        config.activations.remove(index);
+        config.version = 2;
+        config
+            .transitions
+            .get_or_insert_with(Vec::new)
+            .push(SavedTransition {
+                version: 2,
+                owner,
+                generation: before.configured().generation,
+                old,
+                new,
+            });
+        self.save_config(config)
     }
     pub(crate) fn reconcile(&mut self) -> Result<(), SaveError> {
         self.tickets.retain(|_,ticket|!matches!(ticket.result(),Some(ref result) if matches!(result.outcome,super::platform::runner::TerminalOutcome::Completed(ref command) if command.error.is_none())));
@@ -644,12 +1005,24 @@ impl HeadlessTuning {
             let ticket = runner
                 .client()
                 .submit(
-                    Command::Acquire {
-                        owner: intent.owner,
-                        binding: intent.binding.clone(),
-                        config: intent.config.clone(),
-                        target: intent.target.clone(),
-                        mode: intent.mode,
+                    if config
+                        .transitions
+                        .iter()
+                        .flatten()
+                        .any(|t| t.owner == intent.owner && t.version == 2)
+                    {
+                        Command::UpdateMembership {
+                            owner: intent.owner,
+                            binding: intent.binding.clone(),
+                        }
+                    } else {
+                        Command::Acquire {
+                            owner: intent.owner,
+                            binding: intent.binding.clone(),
+                            config: intent.config.clone(),
+                            target: intent.target.clone(),
+                            mode: intent.mode,
+                        }
                     },
                     generation,
                 )
@@ -728,16 +1101,33 @@ impl HeadlessTuning {
     pub(crate) fn shutdown(&mut self) -> Option<ShutdownResult> {
         self.runner.as_mut().map(|r| r.shutdown(WAIT))
     }
+    pub(in crate::app::features::tuning) fn drain_sessions(&mut self) -> Result<(), SaveError> {
+        let TuningLoad::Known(config) = self.state.tuning.decode() else {
+            return Ok(());
+        };
+        let session = |intent: &SavedIntent| matches!(intent.binding, ActivationBinding::Game(_));
+        if !config.activations.iter().any(session)
+            && !config.withdrawals.iter().any(session)
+            && !config
+                .transitions
+                .iter()
+                .flatten()
+                .any(|transition| session(&transition.old) || session(&transition.new))
+        {
+            return Ok(());
+        }
+        self.reconcile()?;
+        self.wait()?;
+        let mut config = self.configured()?;
+        if config.activations.iter().any(session) {
+            withdraw(&mut config, session)?;
+            self.save_config(config)?;
+        }
+        self.reconcile()?;
+        self.wait()
+    }
     pub(crate) fn snapshot(&self) -> Option<super::platform::runner::RunnerSnapshot> {
         self.runner.as_ref().map(Runner::snapshot)
-    }
-    pub(crate) fn catalog_check(
-        catalog: &Catalog,
-        config: &ModuleEnvelope,
-    ) -> Result<(), SaveError> {
-        catalog
-            .validate_config(config)
-            .map_err(|_| SaveError::Invalid)
     }
 }
 fn withdraw(
@@ -784,6 +1174,30 @@ fn take_id(counter: &mut u64) -> Result<u64, SaveError> {
         return Err(SaveError::Invalid);
     }
     Ok(value)
+}
+fn fresh_lineage() -> Result<[u8; 32], SaveError> {
+    let mut bytes = [0u8; 32];
+    #[cfg(windows)]
+    unsafe {
+        windows::Win32::Security::Cryptography::BCryptGenRandom(
+            None,
+            &mut bytes,
+            windows::Win32::Security::Cryptography::BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+        .ok()
+        .map_err(|_| SaveError::Invalid)?;
+    }
+    #[cfg(not(windows))]
+    {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(&mut bytes))
+            .map_err(|_| SaveError::Invalid)?;
+    }
+    if bytes == [0; 32] {
+        return Err(SaveError::Invalid);
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -901,6 +1315,7 @@ mod tests {
         limits: super::super::platform::runner::RunnerLimits,
     ) -> (HeadlessTuning, OwnedFile, OwnedFile, Arc<AtomicBool>) {
         let (mut facade, file, fail) = fixture();
+        facade.catalog = catalog.clone();
         facade.state.tuning=serde_json::from_value(serde_json::json!({"version":2,"lineage":vec![1;32],"profiles":[{"version":1,"id":1,"name":"P","modules":[{"feature":config.feature,"enabled":false,"mode":"Manual","config":config}]}],"associations":[],"allocations":{"next_profile":2,"next_owner":1,"next_config_generation":1},"activations":[],"withdrawals":[],"transitions":[]})).unwrap();
         facade.persistence.save(&mut facade.state).unwrap();
         let journal = OwnedFile(file.0.with_extension("journal"));
@@ -1546,6 +1961,51 @@ mod tests {
         assert_eq!(facade.shutdown(), Some(ShutdownResult::Complete));
     }
     #[test]
+    fn p4_same_owner_membership_preserves_first_baseline_and_sources() {
+        let (mut facade, module, file, _journal) = active_game_fixture();
+        let old = facade.configured().unwrap().activations[0].clone();
+        let ActivationBinding::Game(before) = &old.binding else {
+            panic!("Game owner")
+        };
+        let mut processes = before.processes().to_vec();
+        processes.push(
+            ProcessIdentity::new(
+                before.session().clone(),
+                102,
+                124,
+                ImagePath::new("C:\\fixture\\descendant.exe").unwrap(),
+            )
+            .unwrap(),
+        );
+        let next = before.with_membership(processes).unwrap();
+        let retained = facade.snapshot().unwrap().coordinator;
+        let writes = module.writes();
+        assert_eq!(
+            facade.update_game_membership(old.owner, next.clone()),
+            Ok(())
+        );
+        assert_eq!(saved(&file.0).tuning.decode(), facade.state.tuning.decode());
+        facade.reconcile().unwrap();
+        facade.wait().unwrap();
+        let current = facade.snapshot().unwrap().coordinator;
+        assert_eq!(current.owners.len(), 1);
+        assert_eq!(current.owners[0].owner, old.owner);
+        assert_eq!(current.owners[0].binding, ActivationBinding::Game(next));
+        assert_eq!(current.owners[0].config, retained.owners[0].config);
+        assert_eq!(current.resources, retained.resources);
+        assert_eq!(module.value(), 12);
+        assert_eq!(
+            module.writes(),
+            writes,
+            "membership update performs no target writes"
+        );
+        facade.disable_profile(before.configured().profile).unwrap();
+        facade.reconcile().unwrap();
+        facade.wait().unwrap();
+        assert_eq!(module.value(), 7);
+        assert_eq!(facade.shutdown(), Some(ShutdownResult::Complete));
+    }
+    #[test]
     fn p2b_review_game_edit_preserves_actor_owner_and_first_baseline() {
         use super::super::testing::scalar::ScalarConfig;
         let (mut facade, module, file, _journal) = active_game_fixture();
@@ -1951,6 +2411,687 @@ mod tests {
             facade.shutdown(),
             Some(ShutdownResult::RecoveryRequired | ShutdownResult::TimedOut)
         ));
+    }
+    #[test]
+    fn p4_profile_bootstrap_is_explicit_saved_fresh_and_monotonic() {
+        let (mut facade, file, fail) = fixture();
+        assert_eq!(facade.state.tuning.decode(), TuningLoad::Off);
+        let raw = std::fs::read(&file.0).unwrap();
+        fail.store(true, Ordering::Release);
+        assert_eq!(
+            facade.create_profile("First".into(), vec![]),
+            Err(SaveError::Storage)
+        );
+        assert_eq!(facade.state.tuning.decode(), TuningLoad::Off);
+        assert_eq!(std::fs::read(&file.0).unwrap(), raw);
+        fail.store(false, Ordering::Release);
+        let first = facade.create_profile("First".into(), vec![]).unwrap();
+        assert_eq!(first.get(), 1);
+        let config = facade.configured().unwrap();
+        assert_ne!(config.lineage, [0; 32]);
+        assert_eq!(config.allocations.next_profile, 2);
+        assert_eq!(config.allocations.next_owner, 1);
+        assert_eq!(config.allocations.next_config_generation, 1);
+        assert_eq!(saved(&file.0).tuning.decode(), facade.state.tuning.decode());
+        facade.remove_profile(first).unwrap();
+        let second = facade.create_profile("Next".into(), vec![]).unwrap();
+        assert_eq!(second.get(), 2);
+        assert_eq!(facade.configured().unwrap().lineage, config.lineage);
+        let (mut other, _other_file, _) = fixture();
+        other.create_profile("Other".into(), vec![]).unwrap();
+        assert_ne!(other.configured().unwrap().lineage, config.lineage);
+        assert_eq!(
+            other.create_profile("".into(), vec![]),
+            Err(SaveError::Invalid)
+        );
+    }
+    #[test]
+    fn p4_public_worker_saves_profile_off_caller_and_reports_failure() {
+        use super::super::{TuningOperationState, TuningRequest, TuningRuntime};
+        let (facade, file, fail) = fixture();
+        let runtime = TuningRuntime::start(
+            facade,
+            Arc::new(tokio::sync::RwLock::new(Default::default())),
+        );
+        let id = runtime
+            .request(TuningRequest::CreateProfile {
+                name: "Saved".into(),
+            })
+            .unwrap();
+        let until = std::time::Instant::now() + WAIT;
+        while runtime.snapshot().revision == 0 && std::time::Instant::now() < until {
+            std::thread::yield_now();
+        }
+        let first = runtime.snapshot();
+        assert_eq!(first.profiles[0].name, "Saved");
+        assert_eq!(saved(&file.0).tuning.decode(), first.state.tuning.decode());
+        let raw = std::fs::read(&file.0).unwrap();
+        fail.store(true, Ordering::Release);
+        let failed = runtime
+            .request(TuningRequest::CreateProfile {
+                name: "Failed".into(),
+            })
+            .unwrap();
+        let until = std::time::Instant::now() + WAIT;
+        while matches!(
+            runtime.snapshot().operation,
+            TuningOperationState::Pending { .. }
+        ) && std::time::Instant::now() < until
+        {
+            std::thread::yield_now();
+        }
+        let last = runtime.snapshot();
+        assert!(failed > id);
+        assert_eq!(
+            last.operation,
+            TuningOperationState::Refused {
+                id: failed,
+                error: SaveError::Storage
+            }
+        );
+        assert_eq!(last.profiles.len(), 1);
+        assert_eq!(last.revision, first.revision);
+        assert_eq!(std::fs::read(&file.0).unwrap(), raw);
+        runtime.begin_shutdown();
+        let until = std::time::Instant::now() + WAIT;
+        while !runtime.snapshot().shutdown_complete && std::time::Instant::now() < until {
+            std::thread::yield_now();
+        }
+        assert!(runtime.snapshot().shutdown_complete);
+    }
+    #[test]
+    fn p4_worker_panic_keeps_saved_state_and_closes_admission_with_fault_outcome() {
+        use super::super::{TuningOperationState, TuningRequest, TuningRuntime};
+        struct Panicking;
+        impl StatePersistence for Panicking {
+            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                panic!("fixture storage panic")
+            }
+        }
+        let runtime = TuningRuntime::start(
+            Tuning::default().headless(AppStateStorage::test_fixture(|_| {}), Box::new(Panicking)),
+            Arc::new(tokio::sync::RwLock::new(Default::default())),
+        );
+        runtime
+            .request(TuningRequest::CreateProfile {
+                name: "Never saved".into(),
+            })
+            .unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(1);
+        while matches!(
+            runtime.snapshot().operation,
+            TuningOperationState::Pending { .. }
+        ) && std::time::Instant::now() < until
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            runtime.snapshot().operation,
+            TuningOperationState::Recovering
+        );
+        assert_eq!(runtime.snapshot().revision, 0);
+        assert!(runtime.snapshot().profiles.is_empty());
+        assert_eq!(
+            runtime.request(TuningRequest::CreateProfile {
+                name: "Retry".into()
+            }),
+            Err(SaveError::Recovering)
+        );
+        runtime.begin_shutdown();
+        let until = std::time::Instant::now() + Duration::from_secs(1);
+        while runtime.snapshot().shutdown_outcome.is_none() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            runtime.snapshot().shutdown_outcome,
+            Some(ShutdownResult::Faulted)
+        );
+    }
+    #[test]
+    fn p4_review_card_summary_and_resource_status_share_one_observation() {
+        use super::super::session_reducer::{observe_cards, snapshot, TuningOperationState};
+        let (mut facade, module, file, journal) = active_game_fixture();
+        facade.configure_fixture(
+            file.0.clone(),
+            journal.0.clone(),
+            vec![TargetIdentity::Machine(MachineIdentity {
+                id: MachineId::new([1; 16]).unwrap(),
+            })],
+        );
+        let before = facade.snapshot().unwrap().coordinator;
+        let journal_before = std::fs::read(&journal.0).unwrap();
+        let writes = module.writes();
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let read_count = reads.clone();
+        let changing = module.clone();
+        module.set_observe_hook(Arc::new(move || {
+            if read_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                changing.external_change(99);
+            }
+        }));
+        let observation = Arc::new(
+            super::super::execution_bridge::ExecutionObservation::Unknown(
+                super::super::execution_bridge::UnknownReason::Unavailable,
+            ),
+        );
+        let mut cards = snapshot(
+            &facade,
+            facade.saved_revision(),
+            TuningOperationState::Idle,
+            observation.clone(),
+            false,
+        );
+        observe_cards(&mut cards, &facade);
+        module.clear_observe_hook();
+        let card = &cards.profiles[0].modules[0];
+        assert_eq!(card.observed.as_ref().unwrap().summary, "12");
+        assert_eq!(
+            card.status,
+            Some(ModuleStatus::VerifiedActive(Effect::Immediate))
+        );
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(module.writes(), writes);
+        assert_eq!(facade.snapshot().unwrap().coordinator, before);
+        assert_eq!(before.resources[0].baseline.bytes(), &7i32.to_le_bytes());
+        assert_eq!(std::fs::read(&journal.0).unwrap(), journal_before);
+
+        module.external_change(99);
+        let mut cards = snapshot(
+            &facade,
+            facade.saved_revision(),
+            TuningOperationState::Idle,
+            observation,
+            false,
+        );
+        observe_cards(&mut cards, &facade);
+        assert_eq!(
+            cards.profiles[0].modules[0]
+                .observed
+                .as_ref()
+                .unwrap()
+                .summary,
+            "99"
+        );
+        assert_eq!(
+            cards.profiles[0].modules[0].status,
+            Some(ModuleStatus::ExternalChange)
+        );
+        assert_eq!(module.writes(), writes);
+        assert_eq!(facade.snapshot().unwrap().coordinator, before);
+        assert_eq!(std::fs::read(&journal.0).unwrap(), journal_before);
+        module.external_change(12);
+        assert_eq!(facade.shutdown(), Some(ShutdownResult::Complete));
+    }
+    #[test]
+    fn p4_review_fresh_card_observation_refuses_cached_verified_after_drift_or_denial() {
+        use super::super::session_reducer::{observe_cards, snapshot, TuningOperationState};
+        let (mut facade, module, file, journal) = active_game_fixture();
+        let target = TargetIdentity::Machine(MachineIdentity {
+            id: MachineId::new([1; 16]).unwrap(),
+        });
+        facade.configure_fixture(file.0.clone(), journal.0.clone(), vec![target]);
+        let before = facade.snapshot().unwrap().coordinator;
+        let journal_before = std::fs::read(&journal.0).unwrap();
+        let writes = module.writes();
+        assert_eq!(module.value(), 12);
+        assert_eq!(before.resources[0].baseline.bytes(), &7i32.to_le_bytes());
+        module.external_change(99);
+        let observation = Arc::new(
+            super::super::execution_bridge::ExecutionObservation::Unknown(
+                super::super::execution_bridge::UnknownReason::Unavailable,
+            ),
+        );
+        for (capability, status) in [
+            (Capability::Available, ModuleStatus::ExternalChange),
+            (
+                Capability::Denied("fixture read refusal".into()),
+                ModuleStatus::PermissionDenied,
+            ),
+            (
+                Capability::Unsupported("fixture unavailable".into()),
+                ModuleStatus::Unsupported,
+            ),
+        ] {
+            module.set_capability(capability.clone());
+            let mut cards = snapshot(
+                &facade,
+                facade.saved_revision(),
+                TuningOperationState::Idle,
+                observation.clone(),
+                false,
+            );
+            observe_cards(&mut cards, &facade);
+            let card = &cards.profiles[0].modules[0];
+            assert_eq!(card.status, Some(status));
+            if capability == Capability::Available {
+                assert_eq!(card.observed.as_ref().unwrap().summary, "99");
+            } else {
+                assert!(card.observed.is_none());
+                assert!(card.targets.is_empty());
+            }
+            assert_eq!(facade.snapshot().unwrap().coordinator, before);
+            assert_eq!(std::fs::read(&journal.0).unwrap(), journal_before);
+            assert_eq!(module.value(), 99);
+            assert_eq!(module.writes(), writes);
+        }
+        // Exact evidence remains retained; read-only cards do not perform recovery.
+        module.set_capability(Capability::Available);
+        module.external_change(12);
+        assert_eq!(facade.shutdown(), Some(ShutdownResult::Complete));
+    }
+    #[test]
+    fn p4_card_does_not_label_saved_edit_or_withdrawal_as_verified_current() {
+        use super::super::session_reducer::{observe_cards, snapshot, TuningOperationState};
+        let (mut facade, module, file, journal) = active_game_fixture();
+        facade.configure_fixture(
+            file.0.clone(),
+            journal.0.clone(),
+            vec![TargetIdentity::Machine(MachineIdentity {
+                id: MachineId::new([1; 16]).unwrap(),
+            })],
+        );
+        let profile = ProfileId::new(1).unwrap();
+        facade
+            .edit_profile(
+                profile,
+                module
+                    .config_envelope(&super::super::testing::scalar::ScalarConfig { value: 13 })
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut cards = snapshot(
+            &facade,
+            facade.saved_revision(),
+            TuningOperationState::Idle,
+            Arc::new(
+                super::super::execution_bridge::ExecutionObservation::Unknown(
+                    super::super::execution_bridge::UnknownReason::Unavailable,
+                ),
+            ),
+            false,
+        );
+        observe_cards(&mut cards, &facade);
+        assert_eq!(
+            cards.profiles[0].modules[0].status,
+            Some(ModuleStatus::Applying)
+        );
+        assert_eq!(module.value(), 12);
+        facade.reconcile().unwrap();
+        facade.wait().unwrap();
+        facade.disable_profile(profile).unwrap();
+        let mut cards = snapshot(
+            &facade,
+            facade.saved_revision(),
+            TuningOperationState::Idle,
+            cards.observation.clone(),
+            false,
+        );
+        observe_cards(&mut cards, &facade);
+        assert_eq!(
+            cards.profiles[0].modules[0].status,
+            Some(ModuleStatus::Restoring)
+        );
+        assert!(!cards.profiles[0].modules[0].enabled);
+        facade.reconcile().unwrap();
+        facade.wait().unwrap();
+        assert_eq!(module.value(), 7);
+        assert_eq!(facade.shutdown(), Some(ShutdownResult::Complete));
+    }
+    #[test]
+    fn p4_session_worker_saves_membership_then_drains_only_session_intent() {
+        use super::super::{
+            execution_bridge::{ExecutionObservation, Member, ProcessFacts},
+            session_reducer::SessionFacts,
+            TuningRuntime,
+        };
+        let (facade, module, file, _journal) = active_game_fixture();
+        let old = facade.configured().unwrap().activations[0].clone();
+        let original = facade.snapshot().unwrap().coordinator.resources[0].clone();
+        let ActivationBinding::Game(game) = old.binding.clone() else {
+            panic!("Game")
+        };
+        let mut processes = game.processes().to_vec();
+        processes.push(
+            ProcessIdentity::new(
+                game.session().clone(),
+                102,
+                124,
+                ImagePath::new("C:\\fixture\\child.exe").unwrap(),
+            )
+            .unwrap(),
+        );
+        let facts = |p: &ProcessIdentity| ProcessFacts {
+            pid: p.pid(),
+            token: p.creation_token(),
+            image: Arc::from(p.image_path.as_str()),
+            #[cfg(windows)]
+            native: None,
+        };
+        let member = Member {
+            key: facade.state.groups[0].programs[0].get_key(),
+            group: game.rule().group().clone(),
+            rule: game.rule().rule().clone(),
+            instances: processes.iter().map(facts).collect(),
+        };
+        let observation =
+            ExecutionObservation::fixture(facade.state(), 2, vec![member], facts(&processes[0]));
+        let runtime = TuningRuntime::start(
+            facade,
+            Arc::new(tokio::sync::RwLock::new(Default::default())),
+        );
+        let writes = module.writes();
+        runtime.observe_session_fixture(
+            observation,
+            SessionFacts::Fixture {
+                session: game.session().clone(),
+                processes,
+                targets: vec![old.target],
+                exited: vec![],
+            },
+        );
+        let until = std::time::Instant::now() + WAIT;
+        while runtime
+            .snapshot()
+            .runner
+            .as_ref()
+            .unwrap()
+            .coordinator
+            .owners[0]
+            .binding
+            == old.binding
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let updated = runtime.snapshot();
+        let ActivationBinding::Game(new_game) =
+            &updated.runner.as_ref().unwrap().coordinator.owners[0].binding
+        else {
+            panic!("Game")
+        };
+        assert!(new_game.membership_succeeds(&game));
+        assert_eq!(
+            updated.runner.as_ref().unwrap().coordinator.resources[0].baseline,
+            original.baseline
+        );
+        assert_eq!(
+            updated.runner.as_ref().unwrap().coordinator.resources[0].baseline_snapshot,
+            original.baseline_snapshot
+        );
+        assert_eq!(module.writes(), writes);
+        assert_eq!(
+            saved(&file.0).tuning.decode(),
+            updated.state.tuning.decode()
+        );
+        runtime.begin_shutdown();
+        let until = std::time::Instant::now() + WAIT;
+        while runtime.snapshot().shutdown_outcome.is_none() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            runtime.snapshot().shutdown_outcome,
+            Some(ShutdownResult::Complete)
+        );
+        let TuningLoad::Known(saved_config) = saved(&file.0).tuning.decode() else {
+            panic!("Known")
+        };
+        assert!(
+            saved_config.activations.is_empty()
+                && saved_config.withdrawals.is_empty()
+                && saved_config.transitions.unwrap().is_empty()
+        );
+        assert_eq!(module.value(), 7);
+    }
+    #[test]
+    fn p4_public_profile_module_add_is_catalog_validated_and_stale_refused() {
+        use super::super::testing::scalar::{ScalarConfig, ScalarModule};
+        let (mut facade, file, _) = fixture();
+        let module = ScalarModule::new(7);
+        facade.catalog.register(module.clone()).unwrap();
+        let profile = facade.create_profile("Public".into(), vec![]).unwrap();
+        let preference = ModulePreference {
+            feature: module
+                .config_envelope(&ScalarConfig { value: 12 })
+                .unwrap()
+                .feature,
+            enabled: true,
+            mode: ActivationMode::Manual,
+            config: module.config_envelope(&ScalarConfig { value: 12 }).unwrap(),
+        };
+        assert_eq!(
+            facade.set_module_preference(profile, preference.clone(), None),
+            Ok(())
+        );
+        assert_eq!(
+            facade.configured().unwrap().profiles[0].modules,
+            vec![preference.clone()]
+        );
+        assert_eq!(saved(&file.0).tuning.decode(), facade.state.tuning.decode());
+        let raw = std::fs::read(&file.0).unwrap();
+        let mut changed = preference.clone();
+        changed.config = module.config_envelope(&ScalarConfig { value: 13 }).unwrap();
+        assert_eq!(
+            facade.set_module_preference(profile, changed.clone(), None),
+            Err(SaveError::Invalid)
+        );
+        assert_eq!(std::fs::read(&file.0).unwrap(), raw);
+        facade
+            .set_module_preference(profile, changed, Some(preference))
+            .unwrap();
+        assert_eq!(module.value(), 7);
+        assert_eq!(module.writes(), 0);
+    }
+    #[test]
+    fn p4_public_unbind_saves_exact_withdrawal_without_disabling_profile() {
+        let (mut facade, module, file, _journal) = active_game_fixture();
+        let old = facade.configured().unwrap().activations[0].clone();
+        let ActivationBinding::Game(game) = &old.binding else {
+            panic!("Game")
+        };
+        let groups = serde_json::to_value(&facade.state.groups).unwrap();
+        facade
+            .unbind_rule(game.rule().group(), game.rule().rule())
+            .unwrap();
+        let saved_config = facade.configured().unwrap();
+        assert!(saved_config.associations.is_empty());
+        assert!(saved_config.activations.is_empty());
+        assert_eq!(saved_config.withdrawals, vec![old]);
+        assert!(saved_config.profiles[0].modules[0].enabled);
+        assert_eq!(serde_json::to_value(&facade.state.groups).unwrap(), groups);
+        assert_eq!(saved(&file.0).tuning.decode(), facade.state.tuning.decode());
+        assert_eq!(module.value(), 12);
+        facade.reconcile().unwrap();
+        facade.wait().unwrap();
+        assert_eq!(module.value(), 7);
+        assert_eq!(facade.shutdown(), Some(ShutdownResult::Complete));
+    }
+    #[test]
+    fn p4_membership_drift_retains_first_baseline_and_pending_saved_intent() {
+        let (mut facade, module, file, _journal) = active_game_fixture();
+        let before = facade.snapshot().unwrap().coordinator;
+        let old = facade.configured().unwrap().activations[0].clone();
+        let ActivationBinding::Game(game) = &old.binding else {
+            panic!("Game")
+        };
+        let mut processes = game.processes().to_vec();
+        processes.push(
+            ProcessIdentity::new(
+                game.session().clone(),
+                102,
+                124,
+                ImagePath::new("C:\\fixture\\descendant.exe").unwrap(),
+            )
+            .unwrap(),
+        );
+        facade
+            .update_game_membership(old.owner, game.with_membership(processes).unwrap())
+            .unwrap();
+        let saved_raw = std::fs::read(&file.0).unwrap();
+        let writes = module.writes();
+        module.external_change(99);
+        facade.reconcile().unwrap();
+        assert_eq!(facade.wait(), Err(SaveError::Recovering));
+        assert_eq!(module.value(), 99);
+        assert_eq!(module.writes(), writes);
+        assert_eq!(std::fs::read(&file.0).unwrap(), saved_raw);
+        let retained = facade.snapshot().unwrap().coordinator;
+        assert_eq!(retained.owners[0].binding, old.binding);
+        assert_eq!(retained.resources[0].baseline, before.resources[0].baseline);
+        assert_eq!(
+            retained.resources[0].baseline_snapshot,
+            before.resources[0].baseline_snapshot
+        );
+        assert_eq!(
+            retained.resources[0].current_snapshot,
+            before.resources[0].current_snapshot
+        );
+        assert_eq!(
+            retained.resources[0].confirmed,
+            before.resources[0].confirmed
+        );
+        assert_eq!(facade.shutdown(), Some(ShutdownResult::RecoveryRequired));
+    }
+    #[test]
+    fn p4_session_reducer_requires_complete_current_independent_actor_facts() {
+        use super::super::{
+            execution_bridge::{ExecutionObservation, Member, ProcessFacts, UnknownReason},
+            session_reducer::{session_decision, SessionDecision, SessionFacts},
+        };
+        let (mut facade, module, _file, _journal) = active_game_fixture();
+        let old = facade.configured().unwrap().activations[0].clone();
+        let ActivationBinding::Game(game) = old.binding.clone() else {
+            panic!("Game")
+        };
+        let mut processes = game.processes().to_vec();
+        processes.push(
+            ProcessIdentity::new(
+                game.session().clone(),
+                102,
+                124,
+                ImagePath::new("C:\\fixture\\child.exe").unwrap(),
+            )
+            .unwrap(),
+        );
+        let facts = |p: &ProcessIdentity| ProcessFacts {
+            pid: p.pid(),
+            token: p.creation_token(),
+            image: Arc::from(p.image_path.as_str()),
+            #[cfg(windows)]
+            native: None,
+        };
+        let member = Member {
+            key: facade.state.groups[0].programs[0].get_key(),
+            group: game.rule().group().clone(),
+            rule: game.rule().rule().clone(),
+            instances: processes.iter().map(facts).collect(),
+        };
+        let observed = ExecutionObservation::fixture(
+            &facade.state,
+            2,
+            vec![member.clone()],
+            facts(&processes[0]),
+        );
+        let independent = SessionFacts::Fixture {
+            session: game.session().clone(),
+            processes: processes.clone(),
+            targets: vec![old.target.clone()],
+            exited: vec![],
+        };
+        assert!(observed.matches_state(&facade.state));
+        assert!(facade.configured().unwrap().profiles[0].modules[0].enabled);
+        assert!(facade.catalog.validate_config(&old.config).is_ok());
+        assert!(game.with_membership(processes.clone()).is_ok());
+        let mut foreground_state = facade.state.clone();
+        let mut foreground_config = facade.configured().unwrap();
+        foreground_config.profiles[0].modules[0].mode = ActivationMode::ForegroundSession;
+        foreground_config.associations[0].eligibility = ActivationEligibility::Foreground;
+        let foreground_game = GameActivation::new(
+            game.configured(),
+            game.rule().clone(),
+            ActivationEligibility::Foreground,
+            game.session().clone(),
+            game.processes().to_vec(),
+        )
+        .unwrap();
+        foreground_config.activations[0].binding = ActivationBinding::Game(foreground_game);
+        foreground_config.activations[0].mode = ActivationMode::ForegroundSession;
+        foreground_state.tuning = encode_config(foreground_config).unwrap();
+        let mut descriptor = super::super::testing::scalar::descriptor();
+        descriptor
+            .activation_modes
+            .push(ActivationMode::ForegroundSession);
+        let mut foreground_catalog = Catalog::default();
+        foreground_catalog
+            .register(super::super::testing::scalar::ScalarModule::with_descriptor(descriptor))
+            .unwrap();
+        let other = ProcessFacts {
+            pid: 999,
+            token: 77,
+            image: Arc::from("C:\\fixture\\other.exe"),
+            #[cfg(windows)]
+            native: None,
+        };
+        let foreground_lost = ExecutionObservation::fixture(
+            &foreground_state,
+            4,
+            vec![Member {
+                instances: vec![facts(&processes[0])],
+                ..member.clone()
+            }],
+            other.clone(),
+        );
+        assert!(
+            matches!(session_decision(&foreground_state, &foreground_lost, &independent, &foreground_catalog), Some(SessionDecision::Withdraw(owner)) if owner == old.owner)
+        );
+        let running_other = ExecutionObservation::fixture(
+            &facade.state,
+            4,
+            vec![Member {
+                instances: vec![facts(&processes[0])],
+                ..member.clone()
+            }],
+            other,
+        );
+        assert!(
+            session_decision(&facade.state, &running_other, &independent, &facade.catalog)
+                .is_none(),
+            "other focus does not release Running intent"
+        );
+        let Some(SessionDecision::Membership { owner, game: next }) =
+            session_decision(&facade.state, &observed, &independent, &facade.catalog)
+        else {
+            panic!("same-owner churn must produce a saved membership update")
+        };
+        assert_eq!(owner, old.owner);
+        assert!(next.membership_succeeds(&game));
+        assert_eq!(next.configured(), game.configured());
+        assert!(session_decision(
+            &facade.state,
+            &observed,
+            &SessionFacts::Unavailable,
+            &facade.catalog
+        )
+        .is_none());
+        assert!(session_decision(
+            &facade.state,
+            &ExecutionObservation::Unknown(UnknownReason::Denied),
+            &independent,
+            &facade.catalog
+        )
+        .is_none());
+        let absent = ExecutionObservation::fixture(&facade.state, 3, vec![], facts(&processes[0]));
+        assert!(
+            session_decision(&facade.state, &absent, &independent, &facade.catalog).is_none(),
+            "missing membership is not positive expiry"
+        );
+        let writes = module.writes();
+        facade.update_game_membership(owner, next).unwrap();
+        assert!(
+            session_decision(&facade.state, &observed, &independent, &facade.catalog).is_none(),
+            "old config observation is stale"
+        );
+        assert_eq!(module.writes(), writes);
+        assert_eq!(facade.shutdown(), Some(ShutdownResult::Complete));
     }
     #[test]
     fn p2b_headless_save_success_publishes_candidate_and_logical_ids() {

@@ -21,6 +21,11 @@ pub enum Command {
     Release {
         owner: OwnerId,
     },
+    /// Exact saved same-owner Game membership only; never prepares or writes a target.
+    UpdateMembership {
+        owner: OwnerId,
+        binding: ActivationBinding,
+    },
     Observe {
         feature: FeatureId,
         target: TargetIdentity,
@@ -489,13 +494,16 @@ impl Coordinator {
         control: &mut dyn ExecutionControl,
     ) -> CommandResult {
         self.handle_mode(
-            Command::Acquire {
+            if self.owners.get(&request.owner).is_some_and(|old|
+                matches!((&old.binding, &request.binding), (ActivationBinding::Game(before), ActivationBinding::Game(after)) if after.membership_succeeds(before))) {
+                Command::UpdateMembership { owner: request.owner, binding: request.binding.clone() }
+            } else { Command::Acquire {
                 owner: request.owner,
                 binding: request.binding.clone(),
                 config: request.config.clone(),
                 target: request.target.clone(),
                 mode: request.mode,
-            },
+            } },
             control,
             true,
         )
@@ -546,6 +554,9 @@ impl Coordinator {
         match command {
             request @ Command::Acquire { .. } => self.acquire(request, control, pending),
             Command::Release { owner } => self.release(owner, control),
+            Command::UpdateMembership { owner, binding } => {
+                self.update_membership(owner, binding, control)
+            }
             Command::Observe { feature, target } => {
                 if control.cancellation_requested() {
                     return self.result(Outcome::Cancelled, None, control);
@@ -920,6 +931,56 @@ impl Coordinator {
         } else {
             self.owners.remove(&owner);
         }
+    }
+    fn update_membership(
+        &mut self,
+        owner: OwnerId,
+        binding: ActivationBinding,
+        control: &mut dyn ExecutionControl,
+    ) -> CommandResult {
+        let Some(retained) = self.owners.get(&owner).cloned() else {
+            return self.result(
+                Outcome::Rejected,
+                Some(CoordinatorError::Gate(GateError::Rejected(
+                    "membership owner absent",
+                ))),
+                control,
+            );
+        };
+        if binding != retained.binding
+            && !matches!((&retained.binding, &binding),
+            (ActivationBinding::Game(old), ActivationBinding::Game(new)) if new.membership_succeeds(old))
+        {
+            return self.result(
+                Outcome::Rejected,
+                Some(CoordinatorError::Gate(GateError::Rejected(
+                    "membership actor or revision changed",
+                ))),
+                control,
+            );
+        }
+        if retained.resources.iter().any(|key| {
+            self.resources.get(key).is_none_or(|r| {
+                !r.possible.is_empty()
+                    || r.confirmed != r.desired
+                    || !matches!(
+                        r.status,
+                        ModuleStatus::VerifiedActive(_) | ModuleStatus::StoredRestartRequired
+                    )
+            })
+        }) {
+            return self.result(
+                Outcome::Rejected,
+                Some(CoordinatorError::Verification),
+                control,
+            );
+        }
+        if let Err(error) = self.proof(&retained.source, &retained.resources, false) {
+            self.mark_pending(owner, &retained.resources, &error);
+            return self.result(Outcome::RecoveryRequired, Some(error), control);
+        }
+        self.owners.get_mut(&owner).unwrap().binding = binding;
+        self.result(Outcome::Unchanged, None, control)
     }
     fn proof(
         &self,

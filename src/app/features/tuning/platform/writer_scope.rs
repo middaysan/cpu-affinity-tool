@@ -336,10 +336,10 @@ impl ScopedWriter {
                 native.configuration = Some(proof.clone());
                 native.guard = Some(guard);
                 self.source = Arc::new(source);
-                // B3 must teach both admission and recovery old/new roles before
-                // a saved producer can enable native mutations. This closes
-                // actual capture independently of factory/source availability.
-                self.staged_native = true;
+                // The sealed source and original-origin ledger were validated
+                // together above. Supported Manual/PersistentMachine admission
+                // still requires every fresh configured/resource scope gate.
+                self.staged_native = false;
             }
             #[cfg(test)]
             SavedRevision::Fixture { bytes, origin } => {
@@ -557,6 +557,40 @@ impl ScopedWriter {
                 }
                 Ok(())
             }
+            Command::UpdateMembership { owner, binding } => {
+                if !self.scope.fixture_lifetime_enabled() {
+                    return Err(GateError::Rejected("native Game membership is unsupported"));
+                }
+                let recorded = before
+                    .owners
+                    .iter()
+                    .find(|entry| entry.owner == *owner)
+                    .ok_or(GateError::Rejected("membership owner absent"))?;
+                let requested = captured
+                    .configured
+                    .pending_update_for_origin(
+                        self.session
+                            .origin()
+                            .ok_or(GateError::Rejected("membership origin absent"))?,
+                        recorded,
+                    )
+                    .ok_or(GateError::Rejected(
+                        "independent membership transition absent",
+                    ))?;
+                if &requested.binding != binding
+                    || requested.config
+                        != *recorded
+                            .config
+                            .as_ref()
+                            .ok_or(GateError::Rejected("membership config absent"))?
+                            .as_ref()
+                    || requested.target != recorded.target
+                    || requested.mode != recorded.mode
+                {
+                    return Err(GateError::Rejected("membership tuple changed"));
+                }
+                Ok(())
+            }
             Command::Release { owner } => {
                 if !before.owners.iter().any(|entry| entry.owner == *owner) {
                     let entry = captured
@@ -731,6 +765,9 @@ impl ExecutionControl for BootstrapControl<'_> {
         before: &CoordinatorSnapshot,
     ) -> Result<(), GateError> {
         self.0.admit_command(command, before)?;
+        if matches!(command, Command::UpdateMembership { .. }) {
+            return Ok(());
+        }
         let Command::Acquire {
             owner,
             binding,

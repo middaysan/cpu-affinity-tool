@@ -274,6 +274,12 @@ impl ConfigurationOrigin {
         }
         wire.try_into().unwrap()
     }
+    #[cfg(test)]
+    pub(in crate::app::features::tuning) fn fixture_lineage(lineage: [u8; 32]) -> Self {
+        let mut wire = Self::fixture().0;
+        wire.lineage = lineage;
+        wire.try_into().unwrap()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -754,6 +760,17 @@ struct GameActivationWire {
     eligibility: ActivationEligibility,
     session: SessionIdentity,
     processes: Vec<ProcessIdentity>,
+    #[serde(
+        default = "initial_lifecycle_revision",
+        skip_serializing_if = "is_initial_lifecycle_revision"
+    )]
+    lifecycle_revision: u64,
+}
+fn initial_lifecycle_revision() -> u64 {
+    1
+}
+fn is_initial_lifecycle_revision(revision: &u64) -> bool {
+    *revision == 1
 }
 /// Durable shape only. Native authenticity and complete eligibility must come
 /// from the execution/foreground producer; deserialization grants no authority.
@@ -774,6 +791,7 @@ impl GameActivation {
             eligibility,
             session,
             processes,
+            lifecycle_revision: 1,
         }
         .try_into()
     }
@@ -792,11 +810,57 @@ impl GameActivation {
     pub fn processes(&self) -> &[ProcessIdentity] {
         &self.0.processes
     }
+    pub fn lifecycle_revision(&self) -> u64 {
+        self.0.lifecycle_revision
+    }
+    pub(in crate::app::features::tuning) fn with_membership(
+        &self,
+        processes: Vec<ProcessIdentity>,
+    ) -> Result<Self, InvalidIdentity> {
+        let mut wire = (*self.0).clone();
+        wire.lifecycle_revision = wire
+            .lifecycle_revision
+            .checked_add(1)
+            .ok_or(InvalidIdentity)?;
+        wire.processes = processes;
+        let next: Self = wire.try_into()?;
+        if next.membership_succeeds(self) {
+            Ok(next)
+        } else {
+            Err(InvalidIdentity)
+        }
+    }
+    pub(in crate::app::features::tuning) fn with_configured(
+        &self,
+        configured: ConfiguredIntent,
+    ) -> Result<Self, InvalidIdentity> {
+        let mut wire = (*self.0).clone();
+        wire.configured = configured;
+        wire.try_into()
+    }
+    pub(in crate::app::features::tuning) fn membership_succeeds(&self, old: &Self) -> bool {
+        self.configured() == old.configured()
+            && self.rule() == old.rule()
+            && self.eligibility() == old.eligibility()
+            && self.session() == old.session()
+            && old.lifecycle_revision().checked_add(1) == Some(self.lifecycle_revision())
+            && self.processes() != old.processes()
+            && self
+                .processes()
+                .iter()
+                .any(|process| old.processes().contains(process))
+            && self.processes().iter().all(|process| {
+                old.processes()
+                    .iter()
+                    .all(|before| before.pid() != process.pid() || before == process)
+            })
+    }
 }
 impl TryFrom<GameActivationWire> for GameActivation {
     type Error = InvalidIdentity;
     fn try_from(mut wire: GameActivationWire) -> Result<Self, Self::Error> {
-        if wire.processes.is_empty()
+        if wire.lifecycle_revision == 0
+            || wire.processes.is_empty()
             || wire.processes.len() > 64
             || wire
                 .processes
@@ -861,17 +925,23 @@ impl ActivationBinding {
         match self {
             Self::Unknown => true,
             Self::Manual(_) => mode == ActivationMode::Manual,
-            Self::Game(game) if mode == ActivationMode::Session => match target {
-                TargetIdentity::Machine(machine)
-                | TargetIdentity::PnpDevice { machine, .. }
-                | TargetIdentity::Gpu { machine, .. }
-                | TargetIdentity::Display { machine, .. } => {
-                    game.session().user.machine == *machine
+            Self::Game(game)
+                if mode == ActivationMode::Session
+                    || (mode == ActivationMode::ForegroundSession
+                        && game.eligibility() == ActivationEligibility::Foreground) =>
+            {
+                match target {
+                    TargetIdentity::Machine(machine)
+                    | TargetIdentity::PnpDevice { machine, .. }
+                    | TargetIdentity::Gpu { machine, .. }
+                    | TargetIdentity::Display { machine, .. } => {
+                        game.session().user.machine == *machine
+                    }
+                    TargetIdentity::User(user) => game.session().user == *user,
+                    TargetIdentity::Session(session) => game.session() == session,
+                    TargetIdentity::Process(process) => game.processes().contains(process),
                 }
-                TargetIdentity::User(user) => game.session().user == *user,
-                TargetIdentity::Session(session) => game.session() == session,
-                TargetIdentity::Process(process) => game.processes().contains(process),
-            },
+            }
             _ => false,
         }
     }
@@ -885,6 +955,7 @@ impl ActivationBinding {
                     && new.eligibility() == old.eligibility()
                     && new.session() == old.session()
                     && new.processes() == old.processes()
+                    && new.lifecycle_revision() == old.lifecycle_revision()
             }
             _ => false,
         };
@@ -937,6 +1008,59 @@ mod activation_binding_tests {
             session(),
             processes,
         )
+    }
+    #[test]
+    fn p4_foreground_session_requires_explicit_foreground_eligibility() {
+        let running = game(vec![process(1)]).unwrap();
+        let foreground = GameActivation::new(
+            running.configured(),
+            running.rule().clone(),
+            ActivationEligibility::Foreground,
+            running.session().clone(),
+            running.processes().to_vec(),
+        )
+        .unwrap();
+        let target = TargetIdentity::Machine(running.session().user.machine.clone());
+        assert!(
+            ActivationBinding::Game(foreground).permits(ActivationMode::ForegroundSession, &target)
+        );
+        assert!(
+            !ActivationBinding::Game(running).permits(ActivationMode::ForegroundSession, &target)
+        );
+    }
+    #[test]
+    fn p4_membership_revision_is_separate_and_cannot_transfer_or_reuse_pid() {
+        let old = game(vec![process(10), process(11)]).unwrap();
+        let next = old.with_membership(vec![process(11), process(12)]).unwrap();
+        assert_eq!(next.configured(), old.configured());
+        assert_eq!(next.lifecycle_revision(), 2);
+        assert!(next.membership_succeeds(&old));
+        assert!(
+            !ActivationBinding::Game(next.clone()).succeeds(&ActivationBinding::Game(old.clone())),
+            "ordinary Acquire remains strict"
+        );
+        assert!(old.with_membership(vec![process(12)]).is_err());
+        assert!(old.with_membership(old.processes().to_vec()).is_err());
+        let reused = ProcessIdentity::new(
+            session(),
+            10,
+            999,
+            ImagePath::new("C:\\Games\\game.exe").unwrap(),
+        )
+        .unwrap();
+        assert!(old.with_membership(vec![reused, process(11)]).is_err());
+        let mut wire = serde_json::to_value(&next).unwrap();
+        assert_eq!(
+            serde_json::from_value::<GameActivation>(wire.clone()).unwrap(),
+            next
+        );
+        wire["lifecycle_revision"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<GameActivation>(wire.clone()).is_err());
+        wire["lifecycle_revision"] = serde_json::json!(u64::MAX);
+        let exhausted: GameActivation = serde_json::from_value(wire).unwrap();
+        assert!(exhausted
+            .with_membership(vec![process(10), process(11)])
+            .is_err());
     }
     #[test]
     fn explicit_manual_and_exact_game_binding_round_trip() {

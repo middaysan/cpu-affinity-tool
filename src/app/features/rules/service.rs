@@ -98,15 +98,6 @@ pub fn update_group_properties(
     }
 }
 
-pub fn remove_group(persistent_state: &Arc<RwLock<AppStateStorage>>, index: usize) -> bool {
-    let mut state = persistent_state.write().unwrap();
-    if index < state.groups.len() {
-        state.groups.remove(index);
-        return true;
-    }
-    false
-}
-
 pub fn load_group_for_edit(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     group_index: usize,
@@ -185,7 +176,8 @@ pub fn load_rule(
         .cloned()
 }
 
-pub fn update_rule(
+#[cfg(test)]
+fn update_rule(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     group_index: usize,
     program_index: usize,
@@ -201,7 +193,8 @@ pub fn update_rule(
     false
 }
 
-pub fn remove_rule_from_group(
+#[cfg(test)]
+fn remove_rule_from_group(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     group_index: usize,
     program_index: usize,

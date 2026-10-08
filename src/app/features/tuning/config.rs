@@ -387,7 +387,10 @@ fn forward_shape(v: &serde_json::Value) -> Result<bool, ()> {
         return Err(());
     }
     for record in transitions {
-        if version_forward(record)? {
+        if !matches!(
+            record.get("version").and_then(serde_json::Value::as_u64),
+            Some(1 | 2)
+        ) {
             forward = true;
             continue;
         }
@@ -435,16 +438,24 @@ fn forward_shape(v: &serde_json::Value) -> Result<bool, ()> {
         if let (Some(old), Some(new)) = (tuples[0].take(), tuples[1].take()) {
             // Understood actor/generation metadata validates even when a module
             // shape is opaque; Unknown cannot erase these constraints.
-            if !same_actor(&old.binding, &new.binding)
-                || old.target != new.target
+            let membership = record.get("version").and_then(serde_json::Value::as_u64) == Some(2);
+            if !(if membership {
+                same_membership_actor(&old.binding, &new.binding)
+            } else {
+                same_actor(&old.binding, &new.binding)
+            }) || old.target != new.target
                 || old.mode != new.mode
-                || new.configured.generation <= old.configured.generation
+                || (if membership {
+                    new.configured.generation != old.configured.generation
+                } else {
+                    new.configured.generation <= old.configured.generation
+                })
             {
                 return Err(());
             }
             if let (Some(old), Some(new)) = (old.intent, new.intent) {
                 let transition = SavedTransition {
-                    version: 1,
+                    version: if membership { 2 } else { 1 },
                     owner: OwnerId::new(owner).map_err(|_| ())?,
                     generation: ConfigGeneration::new(generation).map_err(|_| ())?,
                     old,
@@ -665,14 +676,21 @@ impl SavedTransition {
         else {
             return false;
         };
-        self.version == 1
+        let actor = if self.version == 2 {
+            new == old
+                && self.old.config == self.new.config
+                && same_membership_actor(&self.old.binding, &self.new.binding)
+        } else {
+            self.version == 1
+                && new.generation > old.generation
+                && same_actor(&self.old.binding, &self.new.binding)
+        };
+        actor
             && self.old.version == 1
             && self.new.version == 1
             && self.owner == self.old.owner
             && self.owner == self.new.owner
             && self.generation == new.generation
-            && new.generation > old.generation
-            && same_actor(&self.old.binding, &self.new.binding)
             && self.old.target == self.new.target
             && self.old.mode == self.new.mode
             && self.old.config.feature == self.new.config.feature
@@ -698,9 +716,13 @@ fn same_actor(old: &ActivationBinding, new: &ActivationBinding) -> bool {
                 && old.eligibility() == new.eligibility()
                 && old.session() == new.session()
                 && old.processes() == new.processes()
+                && old.lifecycle_revision() == new.lifecycle_revision()
         }
         _ => false,
     }
+}
+fn same_membership_actor(old: &ActivationBinding, new: &ActivationBinding) -> bool {
+    matches!((old, new), (ActivationBinding::Game(old), ActivationBinding::Game(new)) if new.membership_succeeds(old))
 }
 impl TuningConfig {
     pub(in crate::app::features::tuning) fn request_matches(&self, intent: &SavedIntent) -> bool {

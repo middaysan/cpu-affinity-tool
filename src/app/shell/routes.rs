@@ -9,6 +9,7 @@ pub enum GroupRoute {
 pub enum WindowRoute {
     Groups(GroupRoute),
     Logs,
+    Tuning,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     CrashReports,
     AppRunSettings,

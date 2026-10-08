@@ -196,6 +196,221 @@ fn open(
     )
 }
 
+#[test]
+fn p4_saved_membership_recovery_keeps_original_source_at_both_crash_boundaries() {
+    use super::super::recovery::{OwnerAttachment, RecoveryResolver, ResourceLifetime};
+    use crate::app::{
+        features::{
+            rules::RulesContext,
+            tuning::{config::TuningLoad, configured_source::SavedConfiguredSource},
+        },
+        models::{AppStateStorage, AppToRun, CoreGroup},
+    };
+    struct Actor(Vec<ProcessIdentity>);
+    impl RecoveryResolver for Actor {
+        fn owner(&mut self, owner: &JournalOwner, _: &JournalSource) -> OwnerAttachment {
+            let ActivationBinding::Game(game) = &owner.binding else {
+                return OwnerAttachment::Unknown;
+            };
+            let live: Vec<_> = game
+                .processes()
+                .iter()
+                .filter(|p| self.0.contains(p))
+                .cloned()
+                .collect();
+            if live.is_empty() {
+                OwnerAttachment::Unknown
+            } else {
+                OwnerAttachment::VerifiedLive {
+                    owner: owner.owner,
+                    binding: game.clone(),
+                    live_processes: live,
+                }
+            }
+        }
+        fn resource(&mut self, _: &ResourceKey) -> ResourceLifetime {
+            ResourceLifetime::VerifiedLive
+        }
+    }
+    for durable_new in [false, true] {
+        let module = module(false);
+        let mut state = AppStateStorage::test_fixture(|state| {
+            state.groups = vec![CoreGroup {
+                name: "G".into(),
+                cores: vec![],
+                programs: vec![AppToRun::new_installed(
+                    "fixture".into(),
+                    "fixture".into(),
+                    os_api::PriorityClass::Normal,
+                    false,
+                )],
+                is_hidden: false,
+                run_all_button: false,
+            }]
+        });
+        let rules = RulesContext::from_storage(&state);
+        state.mark_ready_for_current_schema_save(rules.to_persisted_identities());
+        let session = SessionIdentity {
+            user: UserIdentity {
+                machine: machine(),
+                sid: UserSid::new("S-1-5-21-10-20-30-1000").unwrap(),
+            },
+            session_id: 1,
+            logon: LogonId::new(17).unwrap(),
+            boot: BootId::new([2; 16]).unwrap(),
+        };
+        let old_process = ProcessIdentity::new(
+            session.clone(),
+            101,
+            123,
+            ImagePath::new("C:\\fixture\\game.exe").unwrap(),
+        )
+        .unwrap();
+        let child = ProcessIdentity::new(
+            session.clone(),
+            102,
+            124,
+            ImagePath::new("C:\\fixture\\child.exe").unwrap(),
+        )
+        .unwrap();
+        let old_game = GameActivation::new(
+            ConfiguredIntent {
+                profile: ProfileId::new(1).unwrap(),
+                generation: ConfigGeneration::new(1).unwrap(),
+            },
+            RuleActivation::new(
+                rules.group_id_for_index(0).unwrap(),
+                rules.rule_id_for_index(0, 0).unwrap(),
+            )
+            .unwrap(),
+            ActivationEligibility::Running,
+            session,
+            vec![old_process.clone()],
+        )
+        .unwrap();
+        let new_game = old_game
+            .with_membership(vec![old_process.clone(), child.clone()])
+            .unwrap();
+        let config = module.config_envelope(&ScalarConfig { value: 12 }).unwrap();
+        let old = crate::app::features::tuning::config::SavedIntent {
+            version: 1,
+            owner: OwnerId::new(1).unwrap(),
+            binding: ActivationBinding::Game(old_game.clone()),
+            config: config.clone(),
+            target: TargetIdentity::Machine(machine()),
+            mode: ActivationMode::Session,
+        };
+        let mut new = old.clone();
+        new.binding = ActivationBinding::Game(new_game.clone());
+        state.tuning = serde_json::from_value(serde_json::json!({ "version":2,"lineage":vec![1;32],"profiles":[{"version":1,"id":1,"name":"P","modules":[{"feature":config.feature,"enabled":true,"mode":"Session","config":config}]}],"associations":[{"version":1,"group":old_game.rule().group(),"rule":old_game.rule().rule(),"profile":1,"eligibility":"Running"}],"allocations":{"next_profile":2,"next_owner":2,"next_config_generation":2},"activations":[],"withdrawals":[],"transitions":[{"version":2,"owner":1,"generation":1,"old":old,"new":new}]})).unwrap();
+        assert!(matches!(state.tuning.decode(), TuningLoad::Known(_)));
+        // These are independently saved and reread ordinary fixture bytes.
+        let path = std::path::PathBuf::from("target").join(format!(
+            "p4-membership-state-{}-{durable_new}.json",
+            std::process::id()
+        ));
+        let bytes = serde_json::to_vec(&state).unwrap();
+        let mut saved_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        use std::io::Write;
+        saved_file.write_all(&bytes).unwrap();
+        saved_file.sync_all().unwrap();
+        drop(saved_file);
+        let saved: Arc<[u8]> = Arc::from(std::fs::read(&path).unwrap());
+        let mut coordinator = Coordinator::new(catalog(&module));
+        assert_eq!(
+            coordinator
+                .handle(
+                    Command::Acquire {
+                        owner: old.owner,
+                        binding: old.binding.clone(),
+                        config: old.config.clone(),
+                        target: old.target.clone(),
+                        mode: old.mode
+                    },
+                    &mut FixtureControl
+                )
+                .outcome,
+            Outcome::Applied(Effect::Immediate)
+        );
+        if durable_new {
+            assert_eq!(
+                coordinator
+                    .handle(
+                        Command::UpdateMembership {
+                            owner: old.owner,
+                            binding: new.binding.clone()
+                        },
+                        &mut FixtureControl
+                    )
+                    .outcome,
+                Outcome::Unchanged
+            );
+        }
+        let origin = ConfigurationOrigin::fixture();
+        let mut original = JournalDocument::capture(
+            machine(),
+            3,
+            JournalStamp::Recovery,
+            JournalPhase::Transition,
+            &coordinator.snapshot(),
+        )
+        .unwrap();
+        original.origin = Some(origin.clone());
+        let memory = memory(Some(&original));
+        let read_back = saved.clone();
+        let mut scope = ScopeEvidence::fixture_saved(
+            origin.clone(),
+            || Ok(machine()),
+            saved.clone(),
+            move || Ok(read_back.clone()),
+        );
+        if let ScopeEvidence::Fixture { lifetime, .. } = &mut scope {
+            *lifetime = Some(Box::new(Actor(vec![old_process, child])));
+        }
+        let writes = module.writes();
+        let (recovered, authority) = bootstrap_configured(
+            catalog(&module),
+            machine(),
+            Box::new(Store(memory.clone())),
+            Arc::new(SavedConfiguredSource::from_fixture(
+                &saved,
+                origin,
+                &catalog(&module),
+            )),
+            scope,
+        );
+        assert!(
+            !matches!(authority.status(), WriterStatus::Blocked(_)),
+            "saved membership recovery must attach without recapture"
+        );
+        let recovered = recovered.snapshot();
+        assert_eq!(recovered.owners[0].binding, new.binding);
+        assert_eq!(recovered.resources[0].baseline.bytes(), 7i32.to_le_bytes());
+        let retained = loaded(&memory);
+        assert_eq!(retained.origin, original.origin);
+        assert_eq!(retained.sources, original.sources);
+        assert_eq!(
+            retained.resources[0].baseline,
+            original.resources[0].baseline
+        );
+        assert_eq!(
+            retained.resources[0].confirmed,
+            original.resources[0].confirmed
+        );
+        assert_eq!(module.value(), 12);
+        assert_eq!(module.writes(), writes);
+        assert_eq!(std::fs::read(&path).unwrap(), saved.as_ref());
+        drop(authority);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!path.exists());
+    }
+}
+
 #[cfg(all(windows, feature = "tuning-test-controls"))]
 #[test]
 fn p1b_fixture_cleanup_recaptures_after_idle_and_preserves_original_baseline() {

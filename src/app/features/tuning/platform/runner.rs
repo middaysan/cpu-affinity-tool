@@ -689,7 +689,7 @@ impl RunnerClient {
         if config_generation == 0 {
             return Err(SubmitError::InvalidGeneration);
         }
-        if matches!(&command, Command::Acquire { binding, .. } if binding
+        if matches!(&command, Command::Acquire { binding, .. } | Command::UpdateMembership { binding, .. } if binding
                 .configured()
                 .is_some_and(|intent| intent.generation.get() != config_generation))
         {
@@ -698,7 +698,9 @@ impl RunnerClient {
             return Err(SubmitError::InvalidGeneration);
         }
         let generation_owner = match &command {
-            Command::Acquire { owner, .. } | Command::Release { owner } => Some(*owner),
+            Command::Acquire { owner, .. }
+            | Command::Release { owner }
+            | Command::UpdateMembership { owner, .. } => Some(*owner),
             _ => None,
         };
         if let Some(owner) = generation_owner {

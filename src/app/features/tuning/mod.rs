@@ -1,12 +1,19 @@
-// This foundation is intentionally dormant until the F4 application integration.
-#![allow(dead_code)]
+// Saved transactions and immutable snapshots are composed into AppState. The
+// shipping catalog remains empty and no native Game/logon/boot producer exists.
 
 pub(crate) mod config;
 pub(crate) mod configured_source;
 pub(crate) mod execution_bridge;
 pub mod platform;
-mod service;
-pub(crate) use service::{HeadlessTuning, StatePersistence};
+pub(crate) mod presentation;
+pub(crate) mod service;
+mod session_reducer;
+pub(crate) use service::{HeadlessTuning, SaveError, StatePersistence};
+#[cfg(test)]
+pub(crate) use session_reducer::ModuleCard;
+pub(crate) use session_reducer::{
+    TuningConfigurationState, TuningOperationState, TuningRequest, TuningRuntime, TuningSnapshot,
+};
 
 /// Public feature facade. Concrete shipping registrations belong only in this
 /// composition function; the staged foundation registers no fake or OS module.
@@ -25,7 +32,7 @@ impl Tuning {
         state: crate::app::models::AppStateStorage,
         persistence: Box<dyn StatePersistence>,
     ) -> HeadlessTuning {
-        HeadlessTuning::new(state, persistence, self.catalog.clone())
+        HeadlessTuning::new(state, persistence, self.catalog().clone())
     }
     pub(crate) fn headless_selected(
         &self,

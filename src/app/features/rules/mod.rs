@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub use service::{
     add_apps_to_group, add_installed_app_to_group, create_group, load_group_for_edit, load_rule,
-    move_group_to_index, move_rule_between_groups_at, remove_group, remove_rule_from_group,
-    set_group_is_hidden, update_group_properties, update_rule,
+    move_group_to_index, move_rule_between_groups_at, set_group_is_hidden, update_group_properties,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -17,6 +17,9 @@ use crate::app::features::shortcut::{
     create_saved_rule_shortcut, CreateRuleShortcutError, RuleShortcutPlatform,
     SystemRuleShortcutPlatform,
 };
+use crate::app::features::tuning::{
+    SaveError, Tuning, TuningRequest, TuningRuntime, TuningSnapshot,
+};
 use crate::app::models::cpu_schema::CpuSchema;
 use crate::app::models::{
     effective_total_threads, AddAppsOutcome, AppRuntimeKey, AppStateStorage, AppStatus, AppToRun,
@@ -134,6 +137,30 @@ pub(crate) struct TrackedProcessSnapshot {
     pub process_name: String,
     pub pid: u32,
 }
+#[cfg(test)]
+struct TestStatePersistence;
+#[cfg(test)]
+impl crate::app::features::tuning::StatePersistence for TestStatePersistence {
+    fn save(
+        &mut self,
+        _candidate: &mut AppStateStorage,
+    ) -> Result<crate::app::features::tuning::service::SavedState, SaveError> {
+        Ok(crate::app::features::tuning::service::SavedState::Unavailable)
+    }
+}
+
+enum LegacyCompletion {
+    Rule(
+        crate::app::shell::sessions::RuleEditorTarget,
+        Option<AppToRun>,
+    ),
+    Group(Option<GroupId>, String, Vec<bool>, bool),
+}
+struct PendingLegacy {
+    id: u64,
+    revision: u64,
+    completion: Option<LegacyCompletion>,
+}
 
 /// Facade combining persisted, transient UI, and runtime tracking state.
 pub struct AppState {
@@ -155,6 +182,13 @@ pub struct AppState {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     windows_event_log_disabled_for_session: bool,
     shortcut_creation_role: ShortcutCreationRole,
+    tuning: TuningRuntime,
+    tuning_editors: crate::app::features::tuning::presentation::EditorRegistry,
+    tuning_adopted_revision: u64,
+    tuning_seen: Option<Arc<TuningSnapshot>>,
+    pending_legacy: Option<PendingLegacy>,
+    tuning_shutdown_reported:
+        Option<crate::app::features::tuning::platform::runner::ShutdownResult>,
     #[cfg(test)]
     save_count: usize,
 }
@@ -178,11 +212,26 @@ impl AppState {
                 state.rule_identities = Some(rules.to_persisted_identities());
             }
         }
+        let runtime = RuntimeRegistry::new();
+        let saved = persistent_state
+            .read()
+            .expect("newly created state lock")
+            .clone();
+        let tuning = TuningRuntime::start(
+            Tuning::default().headless_selected(saved),
+            runtime.running_apps_handle(),
+        );
         Self {
             persistent_state,
             rules,
             ui: UiSession::new(effective_total_threads()),
-            runtime: RuntimeRegistry::new(),
+            runtime,
+            tuning,
+            tuning_editors: Default::default(),
+            tuning_adopted_revision: 0,
+            tuning_seen: None,
+            pending_legacy: None,
+            tuning_shutdown_reported: None,
             log_manager: LogManager::default(),
             #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
             crash_reports,
@@ -210,11 +259,26 @@ impl AppState {
                 state.rule_identities = Some(rules.to_persisted_identities());
             }
         }
+        let runtime = RuntimeRegistry::new();
+        let saved = persistent_state
+            .read()
+            .expect("newly created state lock")
+            .clone();
+        let tuning = TuningRuntime::start(
+            Tuning::default().headless(saved, Box::new(TestStatePersistence)),
+            runtime.running_apps_handle(),
+        );
         Self {
             persistent_state,
             rules,
             ui: UiSession::new(total_threads),
-            runtime: RuntimeRegistry::new(),
+            runtime,
+            tuning,
+            tuning_editors: Default::default(),
+            tuning_adopted_revision: 0,
+            tuning_seen: None,
+            pending_legacy: None,
+            tuning_shutdown_reported: None,
             log_manager: LogManager::default(),
             #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
             crash_reports: CrashReportManager::new_idle(PathBuf::new()),
@@ -231,6 +295,91 @@ impl AppState {
     pub(crate) fn set_shortcut_creation_role(&mut self, role: ShortcutCreationRole) {
         self.shortcut_creation_role = role;
     }
+    pub(crate) fn tuning_snapshot(&self) -> Arc<TuningSnapshot> {
+        self.tuning.snapshot()
+    }
+    pub(crate) fn tuning_editors(
+        &self,
+    ) -> &crate::app::features::tuning::presentation::EditorRegistry {
+        &self.tuning_editors
+    }
+    #[cfg(test)]
+    pub(crate) fn replace_tuning_for_test(
+        &mut self,
+        runtime: TuningRuntime,
+        editors: crate::app::features::tuning::presentation::EditorRegistry,
+    ) {
+        let snapshot = runtime.snapshot();
+        *self.persistent_state.write().unwrap() = (*snapshot.state).clone();
+        self.rules = snapshot.rules.clone();
+        self.tuning_adopted_revision = snapshot.revision;
+        self.tuning_seen = None;
+        self.tuning = runtime;
+        self.tuning_editors = editors;
+    }
+    pub(crate) fn request_tuning(&mut self, request: TuningRequest) -> Result<u64, SaveError> {
+        self.tuning.request(request)
+    }
+    pub(crate) fn poll_tuning(&mut self) -> bool {
+        let snapshot = self.tuning.snapshot();
+        let changed = self
+            .tuning_seen
+            .as_ref()
+            .is_none_or(|seen| !Arc::ptr_eq(seen, &snapshot));
+        if snapshot.revision > self.tuning_adopted_revision {
+            let Ok(mut projection) = self.persistent_state.try_write() else {
+                return false;
+            };
+            *projection = (*snapshot.state).clone();
+            self.rules = snapshot.rules.clone();
+            self.tuning_adopted_revision = snapshot.revision;
+            #[cfg(test)]
+            {
+                self.save_count += 1;
+            }
+        }
+        if let Some(outcome) = snapshot.shutdown_outcome {
+            if self.tuning_shutdown_reported != Some(outcome) {
+                if let Some(message) = crate::app::shell::events::ShellEvent::Tuning(
+                    crate::app::shell::events::TuningDiagnostic::shutdown(outcome),
+                )
+                .tuning_log_message()
+                {
+                    self.log_manager.add_important_sticky_once(message);
+                }
+                self.tuning_shutdown_reported = Some(outcome);
+            }
+        }
+        if self.pending_legacy.as_ref().is_some_and(|pending| !matches!(snapshot.operation, crate::app::features::tuning::TuningOperationState::Pending { id } if id == pending.id)) {
+            let pending = self.pending_legacy.take().unwrap();
+            if matches!(snapshot.operation, crate::app::features::tuning::TuningOperationState::Idle) && snapshot.revision > pending.revision {
+                match pending.completion {
+                    Some(LegacyCompletion::Rule(target, draft)) if self.ui.app_edit_state.target.as_ref() == Some(&target) && self.ui.app_edit_state.current_edit == draft => self.close_app_run_settings(),
+                    Some(LegacyCompletion::Group(target, name, selection, run_all)) if self.ui.group_form.editing_group_id == target && self.ui.group_form.group_name == name && self.ui.group_form.core_selection == selection && self.ui.group_form.run_all_enabled == run_all => self.cancel_group_form_session(),
+                    _ => {},
+                }
+            } else {
+                self.log_manager.add_important_sticky_once("Settings were not saved. The draft and saved values were retained.".into());
+            }
+        }
+        self.tuning_seen = Some(snapshot);
+        changed
+    }
+    pub(crate) fn tuning_poll_interval(&self) -> Option<std::time::Duration> {
+        self.tuning.poll_interval()
+    }
+    pub(crate) fn begin_tuning_shutdown(&mut self) {
+        self.tuning.begin_shutdown();
+    }
+    #[cfg(test)]
+    pub(crate) fn tuning_shutdown_complete(&self) -> bool {
+        self.tuning.snapshot().shutdown_complete
+    }
+    pub(crate) fn tuning_shutdown_outcome(
+        &self,
+    ) -> Option<crate::app::features::tuning::platform::runner::ShutdownResult> {
+        self.tuning.snapshot().shutdown_outcome
+    }
 
     #[cfg(test)]
     #[cfg_attr(not(feature = "windows"), allow(dead_code))]
@@ -243,41 +392,76 @@ impl AppState {
         self.save_count
     }
 
-    fn persist_state(&mut self) -> bool {
-        self.reconcile_rules();
-
-        if let Ok(mut state) = self.persistent_state.write() {
-            state.mark_ready_for_current_schema_save(self.rules.to_persisted_identities());
-        } else {
-            self.log_manager
-                .add_sticky_once("WARNING: persistent_state lock poisoned during save".into());
-            return false;
-        }
-
-        #[cfg(test)]
-        {
-            self.save_count += 1;
-            true
-        }
-
-        #[cfg(not(test))]
-        {
-            let save_result = match self.persistent_state.write() {
-                Ok(mut state) => state.try_save_state(),
-                Err(_) => {
-                    self.log_manager.add_sticky_once(
-                        "WARNING: persistent_state lock poisoned during save".into(),
-                    );
-                    return false;
-                }
+    fn base_draft(&self) -> Option<(Arc<RwLock<AppStateStorage>>, u64)> {
+        self.persistent_state.try_read().ok().map(|saved| {
+            (
+                Arc::new(RwLock::new(saved.clone())),
+                self.tuning_adopted_revision,
+            )
+        })
+    }
+    fn persist_draft(
+        &mut self,
+        draft: Arc<RwLock<AppStateStorage>>,
+        expected_revision: u64,
+        mut identities: RulesContext,
+        completion: Option<LegacyCompletion>,
+    ) -> bool {
+        let candidate = {
+            let Ok(projection) = draft.read() else {
+                return false;
             };
-
-            if let Err(err) = save_result {
-                self.log_manager
-                    .add_important_sticky_once(format!("ERROR: Failed to save state: {err}"));
+            identities.reconcile_with_storage(&projection);
+            let mut candidate = projection.clone();
+            candidate.mark_ready_for_current_schema_save(identities.to_persisted_identities());
+            candidate
+        };
+        self.enqueue_legacy(
+            TuningRequest::SaveBase {
+                candidate: Box::new(candidate),
+                expected_revision,
+            },
+            completion,
+        )
+    }
+    fn enqueue_legacy(
+        &mut self,
+        request: TuningRequest,
+        completion: Option<LegacyCompletion>,
+    ) -> bool {
+        let revision = self.tuning.snapshot().revision;
+        let id = match self.tuning.request(request) {
+            Ok(id) => id,
+            Err(error) => {
+                self.log_manager.add_important_sticky_once(format!("Settings were not queued: {error:?}. Saved values and the draft were retained."));
                 return false;
             }
-
+        };
+        self.pending_legacy = Some(PendingLegacy {
+            id,
+            revision,
+            completion,
+        });
+        #[cfg(test)]
+        {
+            // Existing state-level unit tests wait for the same authority. Real
+            // application requests and public fixture flows remain nonblocking.
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while matches!(
+                self.tuning.snapshot().operation,
+                crate::app::features::tuning::TuningOperationState::Pending { .. }
+            ) && std::time::Instant::now() < until
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            self.poll_tuning();
+            return matches!(
+                self.tuning.snapshot().operation,
+                crate::app::features::tuning::TuningOperationState::Idle
+            );
+        }
+        #[cfg(not(test))]
+        {
             true
         }
     }
@@ -354,8 +538,11 @@ impl AppState {
             return;
         };
 
-        if rules::set_group_is_hidden(&self.persistent_state, group_index, is_hidden) {
-            let _ = self.persist_state();
+        let Some((draft, revision)) = self.base_draft() else {
+            return;
+        };
+        if rules::set_group_is_hidden(&draft, group_index, is_hidden) {
+            let _ = self.persist_draft(draft, revision, self.rules.clone(), None);
         }
     }
 
@@ -386,10 +573,14 @@ impl AppState {
             return false;
         };
 
-        let moved = rules::move_group_to_index(&self.persistent_state, source_index, target_index);
+        let Some((draft, revision)) = self.base_draft() else {
+            return false;
+        };
+        let moved = rules::move_group_to_index(&draft, source_index, target_index);
         if moved {
-            self.rules.move_group_to_index(source_index, target_index);
-            let _ = self.persist_state();
+            let mut identities = self.rules.clone();
+            identities.move_group_to_index(source_index, target_index);
+            return self.persist_draft(draft, revision, identities, None);
         }
         moved
     }
@@ -465,7 +656,7 @@ impl AppState {
             }
         };
 
-        let (moving_key, moving_name, target_group_name) = match read_result {
+        let (_moving_key, moving_name, target_group_name) = match read_result {
             Ok(values) => values,
             Err(message) => {
                 self.log_manager.add_entry(message);
@@ -473,55 +664,17 @@ impl AppState {
             }
         };
 
-        let moved = match self.persistent_state.write() {
-            Ok(mut state) => {
-                let duplicate_exists = source_group_index != target_group_index
-                    && state
-                        .groups
-                        .get(target_group_index)
-                        .map(|group| {
-                            group
-                                .programs
-                                .iter()
-                                .any(|program| program.get_key() == moving_key)
-                        })
-                        .unwrap_or(false);
-                if duplicate_exists {
-                    return MoveRuleToGroupOutcome::DuplicateInTarget;
-                }
-
-                rules::move_rule_between_groups_at(
-                    &mut state,
-                    source_group_index,
-                    source_rule_index,
-                    target_group_index,
-                    target_rule_index,
-                )
-            }
-            Err(_) => return MoveRuleToGroupOutcome::LockFailed,
-        };
-
-        if moved.is_none() {
-            return MoveRuleToGroupOutcome::MissingRule;
-        }
-        if self
-            .rules
-            .move_rule_between_groups_at(
-                source_group_index,
-                source_rule_index,
-                target_group_index,
-                target_rule_index,
-            )
-            .is_none()
-        {
-            self.reconcile_rules();
-            self.log_manager.add_important_sticky_once(
-                "ERROR: Failed to move rule identity after moving app rule".to_string(),
-            );
+        if !self.enqueue_legacy(
+            TuningRequest::MoveRule {
+                group: source_group_id,
+                rule: rule_id,
+                target: target_group_id,
+                index: target_rule_index,
+            },
+            None,
+        ) {
             return MoveRuleToGroupOutcome::LockFailed;
         }
-
-        let _ = self.persist_state();
         let message = if source_group_index == target_group_index {
             format!("Reordered app '{moving_name}' in group '{target_group_name}'")
         } else {
@@ -546,8 +699,18 @@ impl AppState {
             "Adding app targets to group: {group_name}, paths: {paths:?}"
         ));
 
-        let outcome = rules::add_apps_to_group(&self.persistent_state, group_index, paths);
-        self.handle_add_apps_outcome(group_index, &group_name, attempted_count, outcome);
+        let Some((draft, revision)) = self.base_draft() else {
+            return;
+        };
+        let outcome = rules::add_apps_to_group(&draft, group_index, paths);
+        self.handle_add_apps_outcome(
+            draft,
+            revision,
+            group_index,
+            &group_name,
+            attempted_count,
+            outcome,
+        );
     }
 
     pub fn add_installed_app_to_group(
@@ -561,12 +724,15 @@ impl AppState {
 
         let group_name = self.get_group_name(group_index).unwrap_or_default();
         let app_name = entry.name.clone();
-        let outcome = rules::add_installed_app_to_group(&self.persistent_state, group_index, entry);
+        let Some((draft, revision)) = self.base_draft() else {
+            return;
+        };
+        let outcome = rules::add_installed_app_to_group(&draft, group_index, entry);
 
         if outcome.added_count > 0 {
-            self.rules
-                .append_rules_to_group(group_index, outcome.added_count);
-            let _ = self.persist_state();
+            let mut identities = self.rules.clone();
+            identities.append_rules_to_group(group_index, outcome.added_count);
+            let _ = self.persist_draft(draft, revision, identities, None);
             self.log_manager.add_entry(format!(
                 "Added installed app '{app_name}' to group: {group_name}"
             ));
@@ -595,23 +761,35 @@ impl AppState {
         let files_count = files.len();
         let group_name = self.get_group_name(group_index).unwrap_or_default();
 
-        let outcome = rules::add_apps_to_group(&self.persistent_state, group_index, files);
-        self.handle_add_apps_outcome(group_index, &group_name, files_count, outcome);
+        let Some((draft, revision)) = self.base_draft() else {
+            return false;
+        };
+        let outcome = rules::add_apps_to_group(&draft, group_index, files);
+        self.handle_add_apps_outcome(
+            draft,
+            revision,
+            group_index,
+            &group_name,
+            files_count,
+            outcome,
+        );
 
         true
     }
 
     fn handle_add_apps_outcome(
         &mut self,
+        draft: Arc<RwLock<AppStateStorage>>,
+        revision: u64,
         group_index: usize,
         group_name: &str,
         attempted_count: usize,
         outcome: AddAppsOutcome,
     ) {
         if outcome.added_count > 0 {
-            self.rules
-                .append_rules_to_group(group_index, outcome.added_count);
-            let _ = self.persist_state();
+            let mut identities = self.rules.clone();
+            identities.append_rules_to_group(group_index, outcome.added_count);
+            let _ = self.persist_draft(draft, revision, identities, None);
 
             if outcome.added_count == attempted_count {
                 self.log_manager
@@ -643,14 +821,20 @@ impl AppState {
     }
 
     pub fn set_theme_index(&mut self, theme_index: usize) {
-        if preferences::set_theme_index(&self.persistent_state, theme_index) {
-            let _ = self.persist_state();
+        let Some((draft, revision)) = self.base_draft() else {
+            return;
+        };
+        if preferences::set_theme_index(&draft, theme_index) {
+            let _ = self.persist_draft(draft, revision, self.rules.clone(), None);
         }
     }
 
     pub fn toggle_process_monitoring(&mut self) {
-        preferences::toggle_process_monitoring(&self.persistent_state);
-        let _ = self.persist_state();
+        let Some((draft, revision)) = self.base_draft() else {
+            return;
+        };
+        preferences::toggle_process_monitoring(&draft);
+        let _ = self.persist_draft(draft, revision, self.rules.clone(), None);
     }
 
     pub fn is_process_monitoring_enabled(&self) -> bool {
@@ -661,6 +845,15 @@ impl AppState {
     }
 
     pub fn commit_group_form_session(&mut self) {
+        let Some((draft, revision)) = self.base_draft() else {
+            return;
+        };
+        let completion = LegacyCompletion::Group(
+            self.ui.group_form.editing_group_id.clone(),
+            self.ui.group_form.group_name.clone(),
+            self.ui.group_form.core_selection.clone(),
+            self.ui.group_form.run_all_enabled,
+        );
         let should_save = if let Some(group_id) = self.ui.group_form.editing_group_id.clone() {
             let Some(index) = self.group_index_for_id(&group_id) else {
                 self.ui.reset_group_form();
@@ -670,7 +863,7 @@ impl AppState {
             };
 
             match rules::update_group_properties(
-                &self.persistent_state,
+                &draft,
                 index,
                 self.ui.group_form.group_name.clone(),
                 &self.ui.group_form.core_selection,
@@ -684,7 +877,7 @@ impl AppState {
             }
         } else {
             match rules::create_group(
-                &self.persistent_state,
+                &draft,
                 &self.ui.group_form.group_name,
                 &self.ui.group_form.core_selection,
                 self.ui.group_form.run_all_enabled,
@@ -698,30 +891,27 @@ impl AppState {
         };
 
         if should_save {
+            let mut identities = self.rules.clone();
             if self.ui.group_form.editing_group_id.is_none() {
-                self.rules.append_group();
+                identities.append_group();
             }
-            let _ = self.persist_state();
+            let _ = self.persist_draft(draft, revision, identities, Some(completion));
         }
-
-        self.ui.reset_group_form();
-        self.ui
-            .set_current_window(WindowRoute::Groups(GroupRoute::List));
     }
 
     pub fn delete_current_group_form_target(&mut self) {
         if let Some(group_id) = self.ui.group_form.editing_group_id.clone() {
-            if let Some(index) = self.group_index_for_id(&group_id) {
-                if rules::remove_group(&self.persistent_state, index) {
-                    self.rules.remove_group(index);
-                    let _ = self.persist_state();
-                }
-            }
+            let completion = LegacyCompletion::Group(
+                Some(group_id.clone()),
+                self.ui.group_form.group_name.clone(),
+                self.ui.group_form.core_selection.clone(),
+                self.ui.group_form.run_all_enabled,
+            );
+            let _ = self.enqueue_legacy(
+                TuningRequest::RemoveGroup { group: group_id },
+                Some(completion),
+            );
         }
-
-        self.ui.reset_group_form();
-        self.ui
-            .set_current_window(WindowRoute::Groups(GroupRoute::List));
     }
 
     pub fn cancel_group_form_session(&mut self) {
@@ -1098,9 +1288,11 @@ impl AppState {
 
     #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
     pub fn set_start_minimized(&mut self, enabled: bool) -> Result<(), String> {
-        let previous = {
-            let mut state = self
-                .persistent_state
+        let (draft, revision) = self
+            .base_draft()
+            .ok_or_else(|| "Could not update the startup preference.".to_string())?;
+        {
+            let mut state = draft
                 .write()
                 .map_err(|_| "Could not update the startup preference.".to_string())?;
             let previous = state.start_minimized;
@@ -1108,12 +1300,8 @@ impl AppState {
                 return Ok(());
             }
             state.start_minimized = enabled;
-            previous
-        };
-        if !self.persist_state() {
-            if let Ok(mut state) = self.persistent_state.write() {
-                state.start_minimized = previous;
-            }
+        }
+        if !self.persist_draft(draft, revision, self.rules.clone(), None) {
             return Err("Could not save Start minimized. Please try again.".to_string());
         }
         Ok(())
@@ -1429,32 +1617,43 @@ impl AppState {
                     updated_app.sync_primary_process_name_after_path_edit(&original);
                 }
 
-                if rules::update_rule(&self.persistent_state, group_idx, prog_idx, updated_app) {
-                    let _ = self.persist_state();
-                }
+                let completion = LegacyCompletion::Rule(
+                    target.clone(),
+                    self.ui.app_edit_state.current_edit.clone(),
+                );
+                let _ = self.enqueue_legacy(
+                    TuningRequest::EditRule {
+                        group: target.group_id,
+                        rule: target.rule_id,
+                        app: Box::new(updated_app),
+                    },
+                    Some(completion),
+                );
             }
         }
-
-        self.close_app_run_settings();
     }
 
     pub fn delete_current_app_edit_target(&mut self) {
         if let Some(target) = self.ui.app_edit_state.target.clone() {
-            if let Some((group_idx, prog_idx)) =
-                self.rule_indices_for_ids(&target.group_id, &target.rule_id)
-            {
-                if let Some(path) =
-                    rules::remove_rule_from_group(&self.persistent_state, group_idx, prog_idx)
-                {
-                    self.rules.remove_rule(group_idx, prog_idx);
-                    let _ = self.persist_state();
+            let label = self
+                .rule_indices_for_ids(&target.group_id, &target.rule_id)
+                .and_then(|(group, rule)| self.get_group_program(group, rule))
+                .map(|app| app.launch_target_label());
+            let completion =
+                LegacyCompletion::Rule(target.clone(), self.ui.app_edit_state.current_edit.clone());
+            if self.enqueue_legacy(
+                TuningRequest::RemoveRule {
+                    group: target.group_id,
+                    rule: target.rule_id,
+                },
+                Some(completion),
+            ) {
+                if let Some(label) = label {
                     self.log_manager
-                        .add_entry(format!("Removing app: {}", path));
+                        .add_entry(format!("Queued app removal: {label}"));
                 }
             }
         }
-
-        self.close_app_run_settings();
     }
 
     pub fn clear_logs(&mut self) {
@@ -1473,7 +1672,7 @@ impl AppState {
             self.windows_event_log.disable();
             self.windows_event_log_disabled_for_session = true;
         }
-        let previous = {
+        {
             let state = match self.persistent_state.read() {
                 Ok(state) => state,
                 Err(_) => {
@@ -1483,19 +1682,17 @@ impl AppState {
                     )
                 }
             };
-            state.windows_event_log_diagnostics_enabled
-        };
-        if let Err(error) =
-            preferences::set_windows_event_log_diagnostics(&self.persistent_state, enabled)
-        {
+            let _ = state.windows_event_log_diagnostics_enabled;
+        }
+        let (draft, revision) = self
+            .base_draft()
+            .ok_or_else(|| "could not read the diagnostics preference".to_string())?;
+        if let Err(error) = preferences::set_windows_event_log_diagnostics(&draft, enabled) {
             return Err(format!(
                 "{error}; diagnostics remain disabled for this session"
             ));
         }
-        if !self.persist_state() {
-            if let Ok(mut state) = self.persistent_state.write() {
-                state.windows_event_log_diagnostics_enabled = previous;
-            }
+        if !self.persist_draft(draft, revision, self.rules.clone(), None) {
             if enabled {
                 return Err("could not save the Windows Event Log diagnostics setting; diagnostics remain disabled for this session".to_string());
             }
@@ -1737,24 +1934,63 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn p4_legacy_save_failure_keeps_saved_values_ids_and_rule_editor() {
+        use crate::app::features::tuning::{
+            service::{SavedState, StatePersistence},
+            SaveError, TuningOperationState, TuningRuntime,
+        };
+        struct Failing;
+        impl StatePersistence for Failing {
+            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                Err(SaveError::Storage)
+            }
+        }
+        let mut app = sample_state();
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = TuningRuntime::start(
+            crate::app::features::tuning::Tuning::default().headless(state, Box::new(Failing)),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        let group = app.rules.group_id_for_index(0).unwrap();
+        let rule = app.rules.rule_id_for_index(0, 0).unwrap();
+        let identities = app.rules.to_persisted_identities();
+        app.open_app_run_settings(group, rule);
+        app.ensure_current_edit_loaded();
+        app.ui.app_edit_state.current_edit.as_mut().unwrap().name = "Unsaved draft".into();
+        app.commit_current_app_edit_session();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while matches!(
+            app.tuning_snapshot().operation,
+            TuningOperationState::Pending { .. }
+        ) && std::time::Instant::now() < deadline
+        {
+            app.poll_tuning();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.poll_tuning();
+        assert_ne!(app.get_group_program(0, 0).unwrap().name, "Unsaved draft");
+        assert_eq!(app.rules.to_persisted_identities(), identities);
+        assert_eq!(
+            app.ui.app_edit_state.current_edit.as_ref().unwrap().name,
+            "Unsaved draft"
+        );
+        assert!(matches!(app.ui.current_window, WindowRoute::AppRunSettings));
+        app.set_theme_index(2);
+        assert_eq!(app.get_theme_index(), 0);
+    }
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use super::RuleShortcutDisabledReason;
     use super::{AppState, MoveRuleToGroupOutcome, RunRuleOutcome, TrackedProcessSnapshot};
-    use crate::app::features::diagnostics::crash_reports::CrashReportManager;
-    #[cfg(all(target_os = "windows", feature = "windows"))]
-    use crate::app::features::diagnostics::windows_event_log::WindowsEventLogManager;
-    use crate::app::features::execution::RuntimeRegistry;
     use crate::app::features::rules::RulesContext;
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use crate::app::features::shortcut::{
         CreateRuleShortcutError, RuleShortcutPlatform, ShortcutWriteError,
     };
-    use crate::app::models::{
-        AppStateStorage, AppToRun, CoreGroup, CpuSchema, LaunchTarget, LogManager,
-    };
+    use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, LaunchTarget};
     use crate::app::shared::ids::{GroupId, RuleId};
     use crate::app::shell::sessions::{RuleEditorTarget, RuleShortcutResult, ShortcutCreationRole};
-    use crate::app::shell::UiSession;
     use crate::app::shell::{GroupRoute, WindowRoute};
     use os_api::PriorityClass;
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -1852,20 +2088,8 @@ mod tests {
             .map(|state| RulesContext::from_storage(&state))
             .unwrap();
 
-        AppState {
-            persistent_state,
-            rules,
-            ui: UiSession::new(4),
-            runtime: RuntimeRegistry::new(),
-            log_manager: LogManager::default(),
-            crash_reports: CrashReportManager::new_idle(PathBuf::new()),
-            #[cfg(all(target_os = "windows", feature = "windows"))]
-            windows_event_log: WindowsEventLogManager::new_idle(),
-            #[cfg(all(target_os = "windows", feature = "windows"))]
-            windows_event_log_disabled_for_session: false,
-            shortcut_creation_role: ShortcutCreationRole::Primary,
-            save_count: 0,
-        }
+        let _ = rules;
+        AppState::new_for_test(persistent_state, 4)
     }
 
     fn group_id(app: &AppState, index: usize) -> GroupId {
@@ -1891,6 +2115,17 @@ mod tests {
                 run_all_button: false,
             });
         app.reconcile_rules();
+        rebase_sample_fixture(app);
+    }
+    fn rebase_sample_fixture(app: &mut AppState) {
+        let mut saved = app.persistent_state.read().unwrap().clone();
+        saved.mark_ready_for_current_schema_save(app.rules.to_persisted_identities());
+        let runtime = crate::app::features::tuning::TuningRuntime::start(
+            crate::app::features::tuning::Tuning::default()
+                .headless(saved, Box::new(super::TestStatePersistence)),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
     }
 
     fn sample_app(name: &str) -> AppToRun {
@@ -2173,7 +2408,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_group_form_session_preserves_invalid_create_closeout() {
+    fn test_commit_group_form_session_keeps_invalid_create_draft_visible() {
         let mut app = sample_state();
         app.ui.current_window = WindowRoute::Groups(GroupRoute::Create);
 
@@ -2181,7 +2416,7 @@ mod tests {
 
         assert!(matches!(
             app.ui.current_window,
-            WindowRoute::Groups(GroupRoute::List)
+            WindowRoute::Groups(GroupRoute::Create)
         ));
         assert!(app.ui.group_form.group_name.is_empty());
         assert!(app
@@ -2351,6 +2586,7 @@ mod tests {
         app.persistent_state.write().unwrap().groups[1].programs =
             vec![sample_app("TargetFirst"), sample_app("TargetSecond")];
         app.reconcile_rules();
+        rebase_sample_fixture(&mut app);
 
         let source_group_id = group_id(&app, 0);
         let target_group_id = group_id(&app, 1);
@@ -2378,6 +2614,7 @@ mod tests {
             .programs
             .extend([sample_app("Second"), sample_app("Third")]);
         app.reconcile_rules();
+        rebase_sample_fixture(&mut app);
         let group_id = group_id(&app, 0);
         let first_rule_id = rule_id(&app, 0, 0);
         let second_rule_id = rule_id(&app, 0, 1);

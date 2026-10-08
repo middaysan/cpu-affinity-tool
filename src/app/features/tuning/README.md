@@ -1,36 +1,39 @@
 # Tuning module contribution contract
 
-The dormant platform supplies typed contracts, a catalog, a resource coordinator,
+The platform supplies typed contracts, a catalog, a resource coordinator,
 a bounded serial runner, an independent configured-intent consumer, a bounded
 recovery journal and scoped durable recovery. The production catalog is empty;
-the dormant native factory supplies Unavailable configured input, so write
-admission remains closed. The Windows boundary supplies store/lease and identity
-primitives. The two backend shapes and
+test fixtures never supply native mutation authority. The Windows boundary supplies
+store/lease and identity primitives. The two backend shapes and
 cross-adapter simulators under `testing/` compile only with `cfg(test)`.
 Isolated forced-process recovery is demonstrated at three durable boundaries.
 Controlled canonical publication/rollback and same-worker rehydration have
-explicit same-account elevated lab evidence. Authoritative game/user/boot scope,
-runtime app-state integration and user controls remain staged work. Schema v11
-already stores optional bounded configuration without starting the runner.
+explicit same-account elevated lab evidence. Authoritative game/user/boot scope
+and integrated canonical process-restart acceptance remain separate requirements.
+Schema v11 stores optional bounded configuration. AppState composes background
+saved transactions and immutable profile/card snapshots; the Modules presenter
+and explicit rule-association control issue requests through that facade.
 The Windows OS boundary supplies a retained configuration-source API and sealed
 receipts for exact loaded/published bytes. Storage derives nonserialized proof
 from those same bounded v11 bytes; a draft cannot supply saved authority. Journal
 FORMAT2 matches the independently expected original source before hydration or
 owner matching; legacy or foreign evidence remains blocked and retained. Worker
 source guards are scoped to bounded operations. The live configured producer is
-still Unavailable; provenance supplies no game/logon/boot authority.
+qualified only from independent saved proof; provenance supplies no game/logon/boot
+authority.
 Positively qualified state absence is published only inside the retained initial
 load call, with bounded defaults, no backup and checked no-replace against original
 absence. The actual resulting base receipt is retained even when tuning is Off.
 Later qualified saves use their original receipt, never a freshly adopted leaf;
 uncertain or changed evidence blocks saves without ordinary fallback. An originally
 unavailable source remains base-only even if a later save can open its directory.
-The dormant saved-input builder accepts sealed proof and derives immutable tuples
+The saved-input builder accepts sealed proof and derives immutable tuples
 from its exact bytes. Envelope v2 separates a same-owner old continuation from
 the new requested value; explicit withdrawals alone supply Disabled. Drafts,
-missing records and journal ownership do not supply intent. Dormant headless
-transactions and matching recovery use this producer; application composition
-and native mutation admission remain separate requirements.
+missing records and journal ownership do not supply intent. Saved transactions
+and matching recovery use this producer. Native mutation admission additionally
+requires the original source, actual supported resource lifetime and fresh
+native evidence; a clean journal or an understood profile is insufficient.
 Passing isolated test objects
 does not admit a writable module.
 
@@ -41,14 +44,21 @@ The Windows recommendations and exclusions are documented in
 
 ## Structure
 
-- `mod.rs` is the public feature facade and future shipping catalog composition.
+- `mod.rs` is the public feature facade and shipping catalog composition.
 - `config.rs` owns profile/association/allocation and exact saved-intent persistence
   shapes. An absent envelope is Off. Exact raw forward data remains read-only;
   malformed/oversized evidence refuses saves. Known structural data still requires
   its module codec/catalog and an independently qualified source before execution.
 - `configured_source.rs` builds immutable input from saved sealed proof. Its
   ordinary saved-file fixtures supply explicit test origin and no native proof;
-  production runner composition remains Unavailable.
+  unavailable native authority stays closed.
+- `session_reducer.rs` owns bounded application requests, background transaction/
+  execution observation composition and immutable saved/pending/refused/recovery/
+  shutdown snapshots. Native Game/logon/boot facts remain unavailable; session
+  fixtures are test-only and do not promote execution facts into native authority.
+- `presentation.rs` owns pure card decisions, expected/candidate editor drafts and
+  typed module-owned editor registration. The Modules presenter reads snapshots
+  and dispatches adapters without matching feature IDs or parsing payload JSON.
 - `platform/contract.rs` contains validated IDs, targets, setting resources,
   capability and status values, exact canonical tokens, and typed plans.
 - `platform/catalog.rs` contains `Module`, checked registration and preparation,
@@ -58,7 +68,7 @@ The Windows recommendations and exclusions are documented in
   first baselines, step verification, compensation and last-owner restoration.
 - `platform/runner.rs` owns bounded serial dispatch, generations, cancellation,
   terminal tickets, immutable snapshots and bounded shutdown.
-- `service.rs` owns dormant headless saved transactions over candidate state and
+- `service.rs` owns saved transactions over candidate state and
   logical identities, exact withdrawals and terminal acknowledgement bookkeeping.
 - `platform/journal.rs` owns aggregate limits, deduplicated typed source envelopes,
   exact unknown input retention and durable intent/progress/ownership transitions.
@@ -67,7 +77,7 @@ The Windows recommendations and exclusions are documented in
 - `platform/configured_intent.rs` consumes immutable complete current intent
   independently of the journal; F4 supplies the saved-config/session producer.
 - `platform/writer.rs` creates worker-local storage authority, seals native scope
-  to canonical opening and maps bounded native errors. Its factory is dormant.
+  to canonical opening and maps bounded native errors.
 - `platform/writer_scope.rs` applies durable bootstrap recovery and checks exact
   configured and resource evidence throughout commands and publication.
 - `testing/scalar.rs` demonstrates a scalar machine setting.
@@ -77,9 +87,9 @@ The Windows recommendations and exclusions are documented in
 - `testing/value_setting.rs` uses the user backend through a separate typed
   adapter to exercise sharing and edits across modules with different snapshots.
 
-The root `allow(dead_code)` is limited to this dormant staged foundation. Remove
-or narrow it when F4 integrates the public facade; do not add per-module lint
-exceptions to hide unused integrations.
+Unused staged native/platform seams may retain a narrow dormant lint allowance.
+Used facade, session and presentation code must not gain per-module lint exceptions
+to hide unused integration.
 
 Configuration uses a separately versioned envelope bounded to 4 MiB, depth 32
 and 65536 nodes, including raw metadata. Known records cap profiles/modules per
@@ -101,8 +111,8 @@ even when an unrelated base field fails decoding.
 Module payload versions belong to the registered codecs, independently of the
 platform envelope version. File parsing does not authenticate an account, source
 directory, saved producer or journal origin. Receipt qualification and origin
-binding are present; durable transactions and recovery composition remain later
-F4 work, and production input stays Unavailable.
+binding are present. Saved transactions and application composition use that
+independent evidence; missing native authority remains Unavailable.
 
 ## Adding a module
 
@@ -296,35 +306,34 @@ durable intent before execution, and at each publication. Changed authority
 retains original/proposed evidence rather than compensating blindly. Observe
 remains available when mutation is blocked.
 
-The dormant runner reserves configuration publication through one non-clonable
+The runner reserves configuration publication through one non-clonable
 permit in the existing bounded FIFO. It settles prior work and releases only the
 idle configuration leaf, retaining the same coordinator/store/lease and origin.
 Save requires an exact worker acknowledgement; only a fresh verified abort before
 publication may restore the old input. Started uncertainty, timeout and caller
 Drop retain that worker context. A matching sealed saved revision and its producer
 are installed together after current source and actual machine checks; rejected
-handoffs retain saved evidence and the original journal. Application saves are
-not yet composed through this seam, and fixture handoffs supply no native permit.
+handoffs retain saved evidence and the original journal. Application saves use
+this seam; fixture handoffs supply no native permit.
 Headless transactions adopt candidate state and logical identities after successful
 persistence. Optional bounded v2 acknowledgement metadata retains the pending tuple
 until its own save succeeds. Pruning requires fresh retained-worker corroboration
 against the current journal; deserialized acknowledgement fields supply no authority.
 
-The dormant execution bridge copies bounded membership and relevant configuration,
+The execution bridge copies bounded membership and relevant configuration,
 inspects native process facts outside application locks, and rechecks both revisions
 before publishing an immutable Complete/Unknown observation. Membership generation
 changes with exact PID/token or logical-owner changes; no-op/settings edits do not
 advance it. Scheduled refresh and coalesced requests allow convergence without every
 monitor notification. Windows foreground HWND/PID observations are bracketed, retained
 process guards are rechecked, and incomplete enumeration remains Unknown. This
-refresh primitive is not yet composed into AppState or shell polling and supplies
-no Game/logon/boot or resource mutation permit.
+refresh runs on the background application worker. The shell polls immutable
+results even while hidden. It supplies no Game/logon/boot or resource mutation permit.
 
-Production native admission remains closed even for an absent journal: the
-default configured producer is Unavailable, and an explicit staged gate also
-blocks native mutations after the private revision handoff. Matching update
-recovery and saved transactions remain prerequisites. A Clean store is
-insufficient authority.
+Native admission requires independently qualified saved input, matching update
+recovery and supported actual resource evidence. Unavailable scope remains closed;
+the empty production catalog registers no setting writer. A Clean store is
+insufficient authority. Ordinary fixture origins cannot mint a native permit.
 Native scope, elevated
 cross-user and power-transition evidence plus Linux integration checks remain
 explicit gates. The nonshipping Windows recovery script verifies
