@@ -8,8 +8,8 @@ use super::{
     },
     contract::*,
     coordinator::{
-        Command, Coordinator, CoordinatorSnapshot, ExecutionControl, GateError, Outcome,
-        WriteIntent,
+        Command, CommandResult, Coordinator, CoordinatorSnapshot, ExecutionControl, GateError,
+        Outcome, WriteIntent,
     },
     journal::{
         DurableSession, JournalDocument, JournalIoError, JournalIoKind, JournalLoad, JournalOwner,
@@ -1061,12 +1061,8 @@ fn native_actor_recovery_child(root: PathBuf, target: PathBuf, unknown: bool) {
                 RecoveryPlan::resolve(&attached, &mut SharedNativeFixtureActor(resolver.clone()));
             assert!(!expired.blocked() && expired.reattach.is_empty() && expired.retire.is_empty());
             assert_eq!(expired.release, [OwnerId::new(1).unwrap()]);
-            let result = coordinator.apply_recovery(
-                &expired,
-                &mut RecoveryControl {
-                    authority: &mut authority,
-                },
-            );
+            let result =
+                apply_fixture_recovery(&mut coordinator, &mut authority, &expired).unwrap();
             assert_eq!(result.outcome, Outcome::Released);
             assert!(result.error.is_none());
             assert_eq!(
@@ -1095,6 +1091,18 @@ fn native_actor_recovery_child(root: PathBuf, target: PathBuf, unknown: bool) {
     loop {
         waiting = pause.wake.wait(waiting).unwrap();
     }
+}
+// This direct fixture callback starts a separate operation after bootstrap
+// returns idle. It is also exercised without native I/O by the state regression.
+pub(super) fn apply_fixture_recovery(
+    coordinator: &mut Coordinator,
+    authority: &mut WorkerAuthority,
+    plan: &RecoveryPlan,
+) -> Result<CommandResult, GateError> {
+    authority.begin_shutdown(&coordinator.snapshot())?;
+    let result = coordinator.apply_recovery(plan, &mut RecoveryControl { authority });
+    authority.finish_operation();
+    Ok(result)
 }
 impl ExecutionControl for RecoveryControl<'_> {
     fn cancellation_requested(&self) -> bool {

@@ -11,7 +11,7 @@ pub const MAX_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RESOURCES: usize = 4096;
 const MAX_OWNERS: usize = 256;
 const MAX_SOURCES: usize = 8448;
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JournalStamp {
@@ -66,6 +66,8 @@ pub struct JournalResource {
 #[serde(deny_unknown_fields)]
 pub struct JournalDocument {
     pub format: u32,
+    #[serde(default)]
+    pub origin: Option<ConfigurationOrigin>,
     pub machine: MachineIdentity,
     pub revision: u64,
     pub stamp: JournalStamp,
@@ -139,6 +141,7 @@ impl<T: JournalStore + ?Sized> JournalStore for Box<T> {
 pub(super) struct DurableSession<S: JournalStore> {
     store: S,
     machine: MachineIdentity,
+    origin: Option<ConfigurationOrigin>,
     load: JournalLoad,
     last: Option<JournalDocument>,
     raw: Option<Arc<[u8]>>,
@@ -246,8 +249,26 @@ fn add_source(
 }
 
 impl JournalDocument {
+    #[cfg(test)]
     pub(super) fn capture(
         machine: MachineIdentity,
+        revision: u64,
+        stamp: JournalStamp,
+        phase: JournalPhase,
+        snapshot: &CoordinatorSnapshot,
+    ) -> Result<Self, JournalError> {
+        Self::capture_bound(
+            machine,
+            ConfigurationOrigin::fixture(),
+            revision,
+            stamp,
+            phase,
+            snapshot,
+        )
+    }
+    pub(super) fn capture_bound(
+        machine: MachineIdentity,
+        origin: ConfigurationOrigin,
         revision: u64,
         stamp: JournalStamp,
         phase: JournalPhase,
@@ -258,6 +279,7 @@ impl JournalDocument {
         }
         let mut document = Self {
             format: FORMAT,
+            origin: Some(origin),
             machine,
             revision,
             stamp,
@@ -321,6 +343,9 @@ impl JournalDocument {
         let invalid = JournalError::InvalidEvidence;
         if self.format != FORMAT {
             return Err(JournalError::UnsupportedFormat(self.format));
+        }
+        if self.origin.is_none() {
+            return Err(invalid("missing configuration origin"));
         }
         if self.revision == 0 {
             return Err(invalid("zero revision"));
@@ -460,7 +485,15 @@ impl JournalDocument {
         self.validate()?;
         Ok(encode_bounded(self, true)?.bytes)
     }
+    #[cfg(test)]
     pub fn load(bytes: Vec<u8>, machine: &MachineIdentity) -> JournalLoad {
+        Self::load_bound(bytes, machine, Some(&ConfigurationOrigin::fixture()))
+    }
+    pub(super) fn load_bound(
+        bytes: Vec<u8>,
+        machine: &MachineIdentity,
+        expected: Option<&ConfigurationOrigin>,
+    ) -> JournalLoad {
         let size = bytes.len() as u64;
         if bytes.len() > MAX_JOURNAL_BYTES {
             return JournalLoad::Blocked(JournalBlock {
@@ -474,12 +507,19 @@ impl JournalDocument {
         #[derive(Deserialize)]
         struct Header {
             format: u32,
+            #[serde(default)]
+            origin: Option<ConfigurationOrigin>,
         }
         let decoded = (|| {
             let header: Header =
                 serde_json::from_slice(&raw).map_err(|_| JournalError::InvalidData)?;
             if header.format != FORMAT {
                 return Err(JournalError::UnsupportedFormat(header.format));
+            }
+            if header.origin.as_ref().is_none() || header.origin.as_ref() != expected {
+                return Err(JournalError::InvalidEvidence(
+                    "configuration origin mismatch or unavailable",
+                ));
             }
             let document: Self =
                 serde_json::from_slice(&raw).map_err(|_| JournalError::InvalidData)?;
@@ -501,7 +541,15 @@ impl JournalDocument {
     }
 }
 impl<S: JournalStore> DurableSession<S> {
-    pub(super) fn bootstrap(mut store: S, machine: MachineIdentity) -> Self {
+    #[cfg(test)]
+    pub(super) fn bootstrap(store: S, machine: MachineIdentity) -> Self {
+        Self::bootstrap_bound(store, machine, Some(ConfigurationOrigin::fixture()))
+    }
+    pub(super) fn bootstrap_bound(
+        mut store: S,
+        machine: MachineIdentity,
+        origin: Option<ConfigurationOrigin>,
+    ) -> Self {
         let mut original_raw = None;
         let load = match store.validate_authority().and_then(|_| store.read()) {
             Ok(StoredJournal::Absent) => JournalLoad::Clean,
@@ -509,7 +557,7 @@ impl<S: JournalStore> DurableSession<S> {
                 if bytes.len() <= MAX_JOURNAL_BYTES {
                     original_raw = Some(Arc::from(bytes.clone()));
                 }
-                JournalDocument::load(bytes, &machine)
+                JournalDocument::load_bound(bytes, &machine, origin.as_ref())
             }
             Ok(StoredJournal::Oversized { size }) => JournalLoad::Blocked(JournalBlock {
                 reason: JournalError::TooLarge,
@@ -533,6 +581,7 @@ impl<S: JournalStore> DurableSession<S> {
         Self {
             store,
             machine,
+            origin,
             load,
             last,
             raw,
@@ -544,6 +593,9 @@ impl<S: JournalStore> DurableSession<S> {
     }
     pub(super) fn last_document(&self) -> Option<&JournalDocument> {
         self.last.as_ref()
+    }
+    pub(super) fn origin(&self) -> Option<&ConfigurationOrigin> {
+        self.origin.as_ref()
     }
     pub(super) fn block(&mut self, reason: JournalError) {
         self.blocked = true;
@@ -571,8 +623,17 @@ impl<S: JournalStore> DurableSession<S> {
                 .as_ref()
                 .map_or(Some(1), |last| last.revision.checked_add(1))
                 .ok_or(JournalError::RevisionExhausted)?;
-            let mut document =
-                JournalDocument::capture(self.machine.clone(), revision, stamp, phase, snapshot)?;
+            let origin = self.origin.clone().ok_or(JournalError::InvalidEvidence(
+                "qualified original configuration origin is unavailable",
+            ))?;
+            let mut document = JournalDocument::capture_bound(
+                self.machine.clone(),
+                origin,
+                revision,
+                stamp,
+                phase,
+                snapshot,
+            )?;
             // A later command, readback, or process exit does not prove a
             // required restart occurred. Clearing needs a future explicit,
             // authoritative restart/acknowledgement contract.
@@ -615,6 +676,90 @@ mod tests {
         JournalStamp::Operation {
             operation: OperationId::new(1).unwrap(),
             config_generation: 1,
+        }
+    }
+    #[test]
+    fn p1b_journal_original_origin_must_match_before_known_recovery() {
+        let mut document = JournalDocument::capture(
+            machine(),
+            1,
+            stamp(),
+            JournalPhase::Transition,
+            &CoordinatorSnapshot::default(),
+        )
+        .unwrap();
+        let origin = ConfigurationOrigin::fixture();
+        document.origin = Some(origin.clone());
+        let raw = document.to_bytes().unwrap();
+        for expected in [
+            None,
+            Some(origin.fixture_changed("principal")),
+            Some(origin.fixture_changed("directory")),
+            Some(origin.fixture_changed("lineage")),
+            Some(origin.fixture_changed("volume_guid")),
+            Some(origin.fixture_changed("volume_serial")),
+        ] {
+            let JournalLoad::Blocked(block) =
+                JournalDocument::load_bound(raw.clone(), &machine(), expected.as_ref())
+            else {
+                panic!("foreign or unqualified original origin must block")
+            };
+            assert_eq!(block.raw.as_deref(), Some(raw.as_slice()));
+        }
+    }
+    #[test]
+    fn p1b_legacy_format_one_and_missing_origin_remain_exact_blocked_raw() {
+        let document = JournalDocument::capture(
+            machine(),
+            1,
+            stamp(),
+            JournalPhase::Transition,
+            &CoordinatorSnapshot::default(),
+        )
+        .unwrap();
+        let mut wire = serde_json::to_value(document).unwrap();
+        wire["format"] = serde_json::json!(1);
+        wire.as_object_mut().unwrap().remove("origin");
+        let raw = serde_json::to_vec(&wire).unwrap();
+        let JournalLoad::Blocked(block) = JournalDocument::load_bound(
+            raw.clone(),
+            &machine(),
+            Some(&ConfigurationOrigin::fixture()),
+        ) else {
+            panic!("legacy evidence cannot adopt today's origin")
+        };
+        assert_eq!(block.raw.as_deref(), Some(raw.as_slice()));
+    }
+    #[test]
+    fn p1b_format_two_missing_unknown_origin_or_foreign_leaf_retains_raw() {
+        let document = JournalDocument::capture(
+            machine(),
+            1,
+            stamp(),
+            JournalPhase::Transition,
+            &CoordinatorSnapshot::default(),
+        )
+        .unwrap();
+        let wire = serde_json::to_value(document).unwrap();
+        for variant in 0..3 {
+            let mut bad = wire.clone();
+            match variant {
+                0 => {
+                    bad.as_object_mut().unwrap().remove("origin");
+                }
+                1 => bad["origin"]["version"] = serde_json::json!(2),
+                _ => bad["origin"]["leaf"] = serde_json::json!("copied-state.json"),
+            }
+            let raw = serde_json::to_vec(&bad).unwrap();
+            let JournalLoad::Blocked(block) = JournalDocument::load_bound(
+                raw.clone(),
+                &machine(),
+                Some(&ConfigurationOrigin::fixture()),
+            ) else {
+                panic!("unknown original origin must block")
+            };
+            assert_eq!(block.raw.as_deref(), Some(raw.as_slice()));
+            assert!(block.proposed.is_none());
         }
     }
     #[test]

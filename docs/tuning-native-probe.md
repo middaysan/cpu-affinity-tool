@@ -870,9 +870,25 @@ chain, checks its actual primary-token principal and supplies sealed receipts
 for exact bytes with complete volume-GUID and 64-bit-volume/128-bit object IDs.
 Impersonation, unsafe mutation grants, unsupported paths and unresolved relevant
 stage evidence supply no receipt. In particular, pending stage evidence remains
-Poisoned even if a partial publication removed the final leaf. Application
-storage, journal-origin binding and the configured producer are not connected to
-this API yet; a receipt supplies no game/logon/boot authority.
+Poisoned even if a partial publication removed the final leaf. Application storage
+checks source qualification before parsing or ordinary default recovery. It retains
+sealed receipt evidence outside serialization and derives native proof only from
+those exact bounded v11 bytes. A draft cannot obtain saved authority; unsafe or
+unsupported base paths remain usable without tuning authority. Uncertain qualified
+publication blocks further saves and retains prior receipt evidence without an
+ordinary pathname fallback.
+
+Journal FORMAT2 binds versioned nonzero lineage, actual principal, complete volume
+GUID/64-bit volume/128-bit directory identity and fixed leaf. File identity is a
+separate revision. Independently expected original origin must match before source
+hydration, lifetime resolution or owner matching. FORMAT1, missing, unknown and
+foreign origins retain blocked raw bytes rather than adopting a current origin.
+The existing serial worker constructs a separate local source guard and rechecks
+principal, policy, source IDs and bytes around durable operation boundaries. Guards
+release at terminal idle boundaries while nonterminal workers retain their context
+through timeout and caller Drop. Fixture origins supply no native proof. The live
+configured producer remains Unavailable and the catalog empty; this prepared
+protocol supplies no game/logon/boot authority or integrated restart acceptance.
 
 The explicitly ignored normal-token test exercises the production publication
 primitive on its own newly created protected temporary directory:
@@ -915,7 +931,7 @@ cleanup and positive directory absence were verified. The actual file-only OI/CI
 normalization above was observed; no other ACE field was changed or ignored.
 The default TEMP ancestor chain had independently observed untrusted mutation
 grants and remains refused. This accepts only the stated owned-source operation;
-it does not qualify that default path, application storage/producer integration,
+it does not qualify that default path or establish native acceptance of application storage/producer integration,
 canonical recovery, another account, game/boot/logon scope or a real setting.
 
 ## Remaining acceptance gates

@@ -5,6 +5,8 @@ mod configured_tests;
 #[path = "writer_scope.rs"]
 mod scope;
 use super::configured_intent::ConfiguredIntentSource;
+#[cfg(test)]
+use super::contract::ConfigurationOrigin;
 use super::{
     catalog::Catalog,
     contract::MachineIdentity,
@@ -18,9 +20,10 @@ use std::sync::Arc;
 pub(super) enum ScopeEvidence {
     Unavailable,
     #[cfg(windows)]
-    Native(NativeScope),
+    Native(Box<NativeScope>),
     #[cfg(test)]
     Fixture {
+        origin: ConfigurationOrigin,
         machine: Box<dyn FnMut() -> Result<MachineIdentity, GateError>>,
         lifetime: Option<Box<dyn super::recovery::RecoveryResolver>>,
     },
@@ -30,13 +33,26 @@ pub(super) enum ScopeEvidence {
 #[cfg(windows)]
 pub(super) struct NativeScope {
     machine: MachineIdentity,
+    configuration: Option<super::configured_intent::NativeConfigurationProof>,
+    guard: Option<os_api::tuning::TuningConfigSource>,
 }
 #[cfg(test)]
 impl ScopeEvidence {
+    pub(super) fn fixture_origin(
+        origin: ConfigurationOrigin,
+        machine: impl FnMut() -> Result<MachineIdentity, GateError> + 'static,
+    ) -> Self {
+        Self::Fixture {
+            origin,
+            machine: Box::new(machine),
+            lifetime: None,
+        }
+    }
     pub(super) fn fixture(
         machine: impl FnMut() -> Result<MachineIdentity, GateError> + 'static,
     ) -> Self {
         Self::Fixture {
+            origin: ConfigurationOrigin::fixture(),
             machine: Box::new(machine),
             lifetime: None,
         }
@@ -46,6 +62,7 @@ impl ScopeEvidence {
         lifetime: Box<dyn super::recovery::RecoveryResolver>,
     ) -> Self {
         Self::Fixture {
+            origin: ConfigurationOrigin::fixture(),
             machine: Box::new(machine),
             lifetime: Some(lifetime),
         }
@@ -100,6 +117,11 @@ pub enum WriterStatus {
 }
 
 impl WorkerAuthority {
+    pub(super) fn finish_operation(&mut self) {
+        if let Self::Scoped(writer) = self {
+            writer.finish_operation();
+        }
+    }
     pub(super) fn admit_command(
         &mut self,
         command: &super::coordinator::Command,
@@ -237,7 +259,10 @@ impl JournalStore for NativeJournalStore {
 /// This dormant factory has no caller-selected path or permissive authority
 /// injection. F4 supplies actual lifetime/attachment producers before admission.
 #[cfg(windows)]
-pub(super) fn open_native(catalog: Catalog) -> (Coordinator, WorkerAuthority) {
+pub(super) fn open_native(
+    catalog: Catalog,
+    configuration: Option<super::configured_intent::NativeConfigurationProof>,
+) -> (Coordinator, WorkerAuthority) {
     let opened = (|| {
         let identity = os_api::OS::tuning_machine_identity()
             .map_err(|error| super::journal::JournalError::Io(native_error(error)))?;
@@ -247,9 +272,11 @@ pub(super) fn open_native(catalog: Catalog) -> (Coordinator, WorkerAuthority) {
     })();
     match opened {
         Ok((machine, store)) => {
-            let scope = ScopeEvidence::Native(NativeScope {
+            let scope = ScopeEvidence::Native(Box::new(NativeScope {
                 machine: machine.clone(),
-            });
+                configuration,
+                guard: None,
+            }));
             bootstrap_configured(
                 catalog,
                 machine,
@@ -489,7 +516,7 @@ mod bootstrap_tests {
         assert_eq!(memory.lock().unwrap().publishes, 0);
     }
     #[test]
-    fn bootstrap_uncertain_lifetime_imports_original_ledger_and_blocks_mutation() {
+    fn bootstrap_unavailable_origin_preserves_raw_before_any_ledger_hydration() {
         let module = ScalarModule::new(7);
         let document = record(&module);
         let raw = document.to_bytes().unwrap();
@@ -500,15 +527,12 @@ mod bootstrap_tests {
         }));
         let (coordinator, authority) =
             bootstrap(catalog(&module), machine(), Box::new(Store(memory.clone())));
-        assert_eq!(coordinator.snapshot().resources.len(), 1);
-        assert_eq!(
-            coordinator.snapshot().resources[0].baseline,
-            document.resources[0].baseline
-        );
+        assert!(coordinator.snapshot().resources.is_empty());
+        assert!(coordinator.snapshot().owners.is_empty());
         assert_eq!(
             module.reads(),
             reads,
-            "hydration and Unknown lifetime do not observe/recapture native values"
+            "unavailable original origin blocks before hydration and native values"
         );
         assert!(matches!(authority.status(), WriterStatus::Blocked(_)));
         assert_eq!(memory.lock().unwrap().bytes.as_ref().unwrap(), &raw);

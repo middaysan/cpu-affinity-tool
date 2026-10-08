@@ -12,10 +12,13 @@ Controlled canonical publication/rollback and same-worker rehydration have
 explicit same-account elevated lab evidence. Authoritative game/user/boot scope,
 runtime app-state integration and user controls remain staged work. Schema v11
 already stores optional bounded configuration without starting the runner.
-The Windows OS boundary also supplies a retained configuration-source API and
-sealed receipts for exact loaded/published bytes. It is not connected to state
-storage or the configured producer yet; native provenance does not itself provide
-current activation intent or game/logon/boot authority.
+The Windows OS boundary supplies a retained configuration-source API and sealed
+receipts for exact loaded/published bytes. Storage derives nonserialized proof
+from those same bounded v11 bytes; a draft cannot supply saved authority. Journal
+FORMAT2 matches the independently expected original source before hydration or
+owner matching; legacy or foreign evidence remains blocked and retained. Worker
+source guards are scoped to bounded operations. The live configured producer is
+still Unavailable; provenance supplies no game/logon/boot authority.
 Passing isolated test objects
 does not admit a writable module.
 

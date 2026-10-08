@@ -6,10 +6,95 @@ use std::sync::Arc;
 pub(crate) const MAX_CONFIGURED_OWNERS: usize = 256;
 const MAX_CONFIGURED_BYTES: usize = 4 * 1024 * 1024;
 
+pub(crate) fn saved_configuration(bytes: &[u8]) -> Option<super::super::config::TuningConfig> {
+    if bytes.len() > 16 * 1024 * 1024 {
+        return None;
+    }
+    let state: crate::app::models::AppStateStorage = serde_json::from_slice(bytes).ok()?;
+    if state.version != 11 || state.save_blocked() {
+        return None;
+    }
+    match state.tuning.decode() {
+        super::super::config::TuningLoad::Known(config) => Some(config),
+        _ => None,
+    }
+}
+
+/// A parsed wire origin never constructs this evidence. Only sealed native
+/// receipt bytes from the selected storage seam can supply it.
+#[cfg(windows)]
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct NativeConfigurationProof {
+    receipt: os_api::tuning::TuningConfigReceipt,
+    selected_path: std::path::PathBuf,
+    origin: ConfigurationOrigin,
+    tuning_raw: Arc<str>,
+}
+#[cfg(windows)]
+impl std::fmt::Debug for NativeConfigurationProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeConfigurationProof(redacted)")
+    }
+}
+#[cfg(windows)]
+impl NativeConfigurationProof {
+    pub(crate) fn from_receipt(
+        selected_path: &std::path::Path,
+        receipt: os_api::tuning::TuningConfigReceipt,
+    ) -> Option<Self> {
+        let config = saved_configuration(receipt.bytes())?;
+        let state: crate::app::models::AppStateStorage =
+            serde_json::from_slice(receipt.bytes()).ok()?;
+        let origin = ConfigurationOrigin::from_source(
+            config.lineage,
+            UserSid::new(receipt.principal_sid()).ok()?,
+            receipt.volume_guid().to_vec(),
+            receipt.volume_serial(),
+            *receipt.directory_id(),
+            receipt.leaf(),
+        )
+        .ok()?;
+        Some(Self {
+            tuning_raw: Arc::from(state.tuning.raw()?),
+            receipt,
+            selected_path: selected_path.into(),
+            origin,
+        })
+    }
+    pub(crate) fn origin(&self) -> &ConfigurationOrigin {
+        &self.origin
+    }
+    pub(crate) fn matches_tuning(&self, tuning: &super::super::config::TuningEnvelope) -> bool {
+        saved_tuning_matches(&self.tuning_raw, tuning)
+    }
+    pub(super) fn open_guard(
+        &self,
+    ) -> Result<os_api::tuning::TuningConfigSource, os_api::tuning::TuningNativeError> {
+        let mut source = os_api::tuning::TuningConfigSource::open(&self.selected_path)?;
+        self.verify_guard(&mut source)?;
+        Ok(source)
+    }
+    pub(super) fn verify_guard(
+        &self,
+        source: &mut os_api::tuning::TuningConfigSource,
+    ) -> Result<(), os_api::tuning::TuningNativeError> {
+        if source.read()?.as_ref() == Some(&self.receipt) {
+            Ok(())
+        } else {
+            Err(os_api::tuning::TuningNativeError::UnsafeStore(
+                "configured source revision changed",
+            ))
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum ConfiguredDecision {
     Enabled,
     Disabled,
+}
+fn saved_tuning_matches(saved: &str, current: &super::super::config::TuningEnvelope) -> bool {
+    current.raw() == Some(saved)
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IntentDecision {
@@ -28,6 +113,10 @@ pub(crate) struct ConfiguredEntry {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct ConfiguredSet {
+    origin: ConfigurationOrigin,
+    #[cfg(windows)]
+    #[serde(skip)]
+    native: Option<NativeConfigurationProof>,
     revision: u64,
     entries: Vec<ConfiguredEntry>,
 }
@@ -47,6 +136,7 @@ impl ConfiguredIntentSource for UnavailableConfiguredIntent {
     }
 }
 impl ConfiguredSnapshot {
+    #[cfg(test)]
     pub(crate) fn complete(
         revision: u64,
         mut entries: Vec<ConfiguredEntry>,
@@ -70,7 +160,13 @@ impl ConfiguredSnapshot {
                 .map_err(|_| "invalid configured envelope")?;
         }
         entries.sort_by_key(|entry| entry.owner);
-        let set = ConfiguredSet { revision, entries };
+        let set = ConfiguredSet {
+            origin: ConfigurationOrigin::fixture(),
+            #[cfg(windows)]
+            native: None,
+            revision,
+            entries,
+        };
         struct Budget(usize);
         impl std::io::Write for Budget {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -91,7 +187,7 @@ impl ConfiguredSnapshot {
             .map_err(|_| "configured snapshot bytes exceeded")?;
         Ok(Self::Complete(Arc::new(set)))
     }
-    pub(crate) fn decision(
+    fn decision(
         &self,
         owner: OwnerId,
         binding: &ActivationBinding,
@@ -115,6 +211,46 @@ impl ConfiguredSnapshot {
             },
             None => IntentDecision::Unknown,
         }
+    }
+    pub(crate) fn decision_for_origin(
+        &self,
+        expected: &ConfigurationOrigin,
+        owner: OwnerId,
+        binding: &ActivationBinding,
+        config: &ModuleEnvelope,
+        target: &TargetIdentity,
+        mode: ActivationMode,
+    ) -> IntentDecision {
+        if self.origin() != Some(expected) {
+            return IntentDecision::Unknown;
+        }
+        self.decision(owner, binding, config, target, mode)
+    }
+    pub(crate) fn origin(&self) -> Option<&ConfigurationOrigin> {
+        match self {
+            Self::Complete(set) => Some(&set.origin),
+            Self::Unavailable => None,
+        }
+    }
+    #[cfg(windows)]
+    pub(super) fn native_proof(&self) -> Option<&NativeConfigurationProof> {
+        match self {
+            Self::Complete(set) => set.native.as_ref(),
+            Self::Unavailable => None,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn complete_fixture(
+        origin: ConfigurationOrigin,
+        revision: u64,
+        entries: Vec<ConfiguredEntry>,
+    ) -> Result<Self, &'static str> {
+        let Self::Complete(set) = Self::complete(revision, entries)? else {
+            unreachable!()
+        };
+        let mut set = (*set).clone();
+        set.origin = origin;
+        Ok(Self::Complete(Arc::new(set)))
     }
 }
 
@@ -171,6 +307,32 @@ mod tests {
         snapshot.decision(e.owner, &e.binding, &e.config, &e.target, e.mode)
     }
     #[test]
+    fn p1b_configured_origin_precedes_identical_numeric_owner_tuple() {
+        let e = entry(ConfiguredDecision::Enabled);
+        let snapshot = ConfiguredSnapshot::complete(1, vec![e.clone()]).unwrap();
+        let origin = ConfigurationOrigin::fixture();
+        for field in [
+            "lineage",
+            "principal",
+            "volume_guid",
+            "volume_serial",
+            "directory",
+        ] {
+            assert_eq!(
+                snapshot.decision_for_origin(
+                    &origin.fixture_changed(field),
+                    e.owner,
+                    &e.binding,
+                    &e.config,
+                    &e.target,
+                    e.mode
+                ),
+                IntentDecision::Unknown,
+                "{field}"
+            );
+        }
+    }
+    #[test]
     fn configured_consumer_exact_enabled_and_disabled_are_distinct_from_unknown() {
         for (decision, expected) in [
             (ConfiguredDecision::Enabled, IntentDecision::Enabled),
@@ -188,6 +350,20 @@ mod tests {
                 IntentDecision::Unknown
             );
         }
+    }
+    #[test]
+    fn p1b_saved_configuration_raw_cannot_authorize_an_in_memory_draft_or_byte_disagreement() {
+        let saved = r#"{"version":1,"lineage":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"profiles":[],"associations":[],"allocations":{"next_profile":1,"next_owner":1,"next_config_generation":1},"activations":[],"withdrawals":[]}"#;
+        let parsed: super::super::super::config::TuningEnvelope =
+            serde_json::from_str(saved).unwrap();
+        assert!(saved_tuning_matches(saved, &parsed));
+        let mut draft: serde_json::Value = serde_json::from_str(saved).unwrap();
+        draft["allocations"]["next_owner"] = serde_json::json!(2);
+        let draft = serde_json::from_value(draft).unwrap();
+        assert!(!saved_tuning_matches(saved, &draft));
+        assert!(!saved_tuning_matches(saved, &Default::default()));
+        let whitespace = format!(" {saved} ");
+        assert!(!saved_tuning_matches(&whitespace, &parsed));
     }
     #[test]
     fn configured_consumer_changed_tuple_never_becomes_disabled_evidence() {

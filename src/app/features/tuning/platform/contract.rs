@@ -128,6 +128,151 @@ numeric_identity!(LogonId, u64, NonZeroU64);
 numeric_identity!(SchemaVersion, u32, NonZeroU32);
 numeric_identity!(ConfigGeneration, u64, NonZeroU64);
 
+/// Bounded persistence identity only. This wire value supplies no native proof.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ConfigurationOriginWire", into = "ConfigurationOriginWire")]
+pub struct ConfigurationOrigin(ConfigurationOriginWire);
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigurationOriginWire {
+    version: u32,
+    lineage: [u8; 32],
+    principal: UserSid,
+    volume_guid: Vec<u16>,
+    volume_serial: u64,
+    directory: [u8; 16],
+    leaf: String,
+}
+impl std::fmt::Debug for ConfigurationOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConfigurationOrigin(redacted)")
+    }
+}
+impl TryFrom<ConfigurationOriginWire> for ConfigurationOrigin {
+    type Error = InvalidIdentity;
+    fn try_from(wire: ConfigurationOriginWire) -> Result<Self, Self::Error> {
+        if wire.volume_guid.len() != 49 {
+            return Err(InvalidIdentity);
+        }
+        let guid = String::from_utf16(&wire.volume_guid).map_err(|_| InvalidIdentity)?;
+        if wire.version != 1
+            || wire.lineage.iter().all(|byte| *byte == 0)
+            || wire.principal.as_str().len() > 184
+            || guid.len() != 49
+            || !guid.starts_with(r"\\?\Volume{")
+            || !guid.ends_with("}\\")
+            || !guid.as_bytes()[11..47]
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| {
+                    if matches!(index, 8 | 13 | 18 | 23) {
+                        *byte == b'-'
+                    } else {
+                        byte.is_ascii_hexdigit()
+                    }
+                })
+            || wire.leaf != "state.json"
+        {
+            return Err(InvalidIdentity);
+        }
+        Ok(Self(wire))
+    }
+}
+
+#[cfg(test)]
+mod configuration_origin_tests {
+    use super::*;
+    #[test]
+    fn p1b_origin_wire_is_bounded_exact_and_has_no_file_revision() {
+        let origin = ConfigurationOrigin::fixture();
+        let wire = serde_json::to_value(&origin).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ConfigurationOrigin>(wire.clone()).unwrap(),
+            origin
+        );
+        assert!(wire.get("file").is_none() && wire.get("revision").is_none());
+        for field in [
+            "lineage",
+            "principal",
+            "volume_guid",
+            "volume_serial",
+            "directory",
+        ] {
+            assert_ne!(origin, origin.fixture_changed(field));
+        }
+        for (field, invalid) in [
+            ("version", serde_json::json!(2)),
+            ("lineage", serde_json::json!(vec![0u8; 32])),
+            ("leaf", serde_json::json!("copied-state.json")),
+            ("principal", serde_json::json!("S-1-5-021-1")),
+            ("volume_guid", serde_json::json!(vec![1u16; 50])),
+        ] {
+            let mut bad = wire.clone();
+            bad[field] = invalid;
+            assert!(
+                serde_json::from_value::<ConfigurationOrigin>(bad).is_err(),
+                "{field}"
+            );
+        }
+        let mut future = wire;
+        future["future"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ConfigurationOrigin>(future).is_err());
+    }
+}
+impl From<ConfigurationOrigin> for ConfigurationOriginWire {
+    fn from(origin: ConfigurationOrigin) -> Self {
+        origin.0
+    }
+}
+impl ConfigurationOrigin {
+    pub(crate) fn from_source(
+        lineage: [u8; 32],
+        principal: UserSid,
+        volume_guid: Vec<u16>,
+        volume_serial: u64,
+        directory: [u8; 16],
+        leaf: &str,
+    ) -> Result<Self, InvalidIdentity> {
+        ConfigurationOriginWire {
+            version: 1,
+            lineage,
+            principal,
+            volume_guid,
+            volume_serial,
+            directory,
+            leaf: leaf.into(),
+        }
+        .try_into()
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture() -> Self {
+        Self::from_source(
+            [1; 32],
+            UserSid::new("S-1-5-21-1").unwrap(),
+            r"\\?\Volume{11111111-1111-1111-1111-111111111111}\"
+                .encode_utf16()
+                .collect(),
+            1,
+            [1; 16],
+            "state.json",
+        )
+        .unwrap()
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_changed(&self, field: &str) -> Self {
+        let mut wire = self.0.clone();
+        match field {
+            "lineage" => wire.lineage = [2; 32],
+            "principal" => wire.principal = UserSid::new("S-1-5-21-2").unwrap(),
+            "volume_guid" => wire.volume_guid[11] = b'2' as u16,
+            "volume_serial" => wire.volume_serial = 2,
+            "directory" => wire.directory = [2; 16],
+            _ => panic!("unknown fixture field"),
+        }
+        wire.try_into().unwrap()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 enum ContinuityProducer {
     #[serde(rename = "windows_hklm_software_volatile_marker")]

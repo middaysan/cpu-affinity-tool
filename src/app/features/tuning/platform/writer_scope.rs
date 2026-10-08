@@ -24,11 +24,67 @@ struct Captured {
 }
 
 impl ScopeEvidence {
+    fn origin(&self) -> Option<&ConfigurationOrigin> {
+        match self {
+            Self::Unavailable => None,
+            #[cfg(windows)]
+            Self::Native(native) => native.configuration.as_ref().map(|proof| proof.origin()),
+            #[cfg(test)]
+            Self::Fixture { origin, .. } => Some(origin),
+        }
+    }
+    fn begin_configuration_guard(&mut self) -> Result<(), GateError> {
+        match self {
+            Self::Unavailable => Err(GateError::Rejected("configuration origin is unavailable")),
+            #[cfg(windows)]
+            Self::Native(native) => {
+                let proof = native.configuration.as_ref().ok_or(GateError::Rejected(
+                    "native configuration proof is unavailable",
+                ))?;
+                if native.guard.is_none() {
+                    native.guard = Some(proof.open_guard().map_err(|error| {
+                        GateError::Durability(JournalError::Io(native_error(error)))
+                    })?);
+                }
+                Ok(())
+            }
+            #[cfg(test)]
+            Self::Fixture { .. } => Ok(()),
+        }
+    }
+    fn finish_configuration_guard(&mut self) {
+        #[cfg(windows)]
+        if let Self::Native(native) = self {
+            native.guard = None;
+        }
+    }
+    fn configured_origin_matches(&self, configured: &ConfiguredSnapshot) -> bool {
+        if self.origin().is_none() || self.origin() != configured.origin() {
+            return false;
+        }
+        match self {
+            #[cfg(windows)]
+            Self::Native(native) => native.configuration.as_ref() == configured.native_proof(),
+            #[cfg(test)]
+            Self::Fixture { .. } => true,
+            _ => false,
+        }
+    }
     fn verify(&mut self, _expected: &MachineIdentity) -> Result<(), GateError> {
         match self {
             Self::Unavailable => Err(GateError::Rejected("resource scope is unavailable")),
             #[cfg(windows)]
             Self::Native(original) => {
+                let proof = original.configuration.as_ref().ok_or(GateError::Rejected(
+                    "native configuration proof is unavailable",
+                ))?;
+                let guard = original
+                    .guard
+                    .as_mut()
+                    .ok_or(GateError::Rejected("native configuration guard is absent"))?;
+                proof.verify_guard(guard).map_err(|error| {
+                    GateError::Durability(JournalError::Io(native_error(error)))
+                })?;
                 if &original.machine != _expected {
                     return Err(GateError::Rejected("native machine scope mismatch"));
                 }
@@ -84,6 +140,10 @@ impl ScopeEvidence {
     }
 }
 impl ScopedWriter {
+    pub(super) fn finish_operation(&mut self) {
+        self.captured = None;
+        self.scope.finish_configuration_guard();
+    }
     fn check_operation(&self, operation: &PreparedOperation) -> Result<(), GateError> {
         let keys = operation
             .resources()
@@ -128,7 +188,11 @@ impl ScopedWriter {
         {
             return IntentDecision::Unknown;
         }
-        input.decision(
+        let Some(origin) = self.session.origin() else {
+            return IntentDecision::Unknown;
+        };
+        input.decision_for_origin(
+            origin,
             owner.owner,
             &owner.binding,
             config,
@@ -170,6 +234,12 @@ impl ScopedWriter {
         if matches!(configured, ConfiguredSnapshot::Unavailable) {
             return Err(GateError::Rejected("configured input is unavailable"));
         }
+        if !self.scope.configured_origin_matches(&configured)
+            || configured.origin() != self.session.origin()
+        {
+            return Err(GateError::Rejected("configured origin is unverified"));
+        }
+        self.scope.begin_configuration_guard()?;
         self.scope.verify(&self.machine)?;
         self.check_ledger(&configured, before)?;
         self.captured = Some(Captured {
@@ -204,10 +274,16 @@ impl ScopedWriter {
                 {
                     return Err(GateError::Rejected("activation scope is unsupported"));
                 }
-                if captured
-                    .configured
-                    .decision(*owner, binding, config, target, *mode)
-                    != IntentDecision::Enabled
+                if captured.configured.decision_for_origin(
+                    self.session
+                        .origin()
+                        .ok_or(GateError::Rejected("configuration origin is unavailable"))?,
+                    *owner,
+                    binding,
+                    config,
+                    target,
+                    *mode,
+                ) != IntentDecision::Enabled
                 {
                     return Err(GateError::Rejected("configured request is unverified"));
                 }
@@ -269,6 +345,11 @@ impl ScopedWriter {
             if self.source.snapshot() != captured.configured {
                 return Err(GateError::Rejected("configured input changed"));
             }
+            if !self.scope.configured_origin_matches(&captured.configured)
+                || captured.configured.origin() != self.session.origin()
+            {
+                return Err(GateError::Rejected("configured origin changed"));
+            }
             self.scope.verify(&self.machine)?;
             self.check_ledger(&captured.configured, &captured.before)
         })();
@@ -310,6 +391,7 @@ impl ScopedWriter {
 struct Resolver<'a> {
     scope: &'a mut ScopeEvidence,
     configured: &'a ConfiguredSnapshot,
+    origin: &'a ConfigurationOrigin,
 }
 impl RecoveryResolver for Resolver<'_> {
     fn owner(&mut self, owner: &JournalOwner, source: &JournalSource) -> OwnerAttachment {
@@ -319,10 +401,14 @@ impl RecoveryResolver for Resolver<'_> {
         let Some(target) = source.snapshot.target.as_ref() else {
             return OwnerAttachment::Unknown;
         };
-        if self
-            .configured
-            .decision(owner.owner, &owner.binding, config, target, owner.mode)
-            == IntentDecision::Unknown
+        if self.configured.decision_for_origin(
+            self.origin,
+            owner.owner,
+            &owner.binding,
+            config,
+            target,
+            owner.mode,
+        ) == IntentDecision::Unknown
         {
             return OwnerAttachment::Unknown;
         }
@@ -394,7 +480,8 @@ pub(super) fn bootstrap(
     source: Arc<dyn ConfiguredIntentSource>,
     scope: ScopeEvidence,
 ) -> (Coordinator, WorkerAuthority) {
-    let session = DurableSession::bootstrap(store, machine.clone());
+    let expected_origin = scope.origin().cloned();
+    let session = DurableSession::bootstrap_bound(store, machine.clone(), expected_origin);
     let mut writer = ScopedWriter {
         session,
         catalog: catalog.clone(),
@@ -404,70 +491,83 @@ pub(super) fn bootstrap(
         captured: None,
     };
     let coordinator = match writer.session.load().clone() {
-        JournalLoad::Known(document) => match Coordinator::recover(catalog.clone(), &document) {
-            Ok(mut recovered) => {
-                let result = (|| {
-                    writer.capture(&recovered.snapshot())?;
-                    let captured = writer
-                        .captured
-                        .as_ref()
-                        .ok_or(GateError::Rejected("configured capture is absent"))?;
-                    let configured = captured.configured.clone();
-                    let mut resolver = Resolver {
-                        scope: &mut writer.scope,
-                        configured: &configured,
-                    };
-                    let plan = RecoveryPlan::resolve_configured(
-                        &document,
-                        &mut resolver,
-                        &mut |owner, source| {
-                            let Some(config) = source.config.as_ref() else {
-                                return IntentDecision::Unknown;
-                            };
-                            let Some(target) = source.snapshot.target.as_ref() else {
-                                return IntentDecision::Unknown;
-                            };
-                            configured.decision(
-                                owner.owner,
-                                &owner.binding,
-                                config,
-                                target,
-                                owner.mode,
+        JournalLoad::Known(document) => {
+            match writer.scope.begin_configuration_guard().and_then(|_| {
+                Coordinator::recover(catalog.clone(), &document)
+                    .map_err(|_| GateError::Rejected("journal source hydration failed"))
+            }) {
+                Ok(mut recovered) => {
+                    let result = (|| {
+                        writer.capture(&recovered.snapshot())?;
+                        let captured = writer
+                            .captured
+                            .as_ref()
+                            .ok_or(GateError::Rejected("configured capture is absent"))?;
+                        let configured = captured.configured.clone();
+                        let origin =
+                            writer.session.origin().cloned().ok_or(GateError::Rejected(
+                                "configuration origin is unavailable",
+                            ))?;
+                        let mut resolver = Resolver {
+                            scope: &mut writer.scope,
+                            configured: &configured,
+                            origin: &origin,
+                        };
+                        let plan = RecoveryPlan::resolve_configured(
+                            &document,
+                            &mut resolver,
+                            &mut |owner, source| {
+                                let Some(config) = source.config.as_ref() else {
+                                    return IntentDecision::Unknown;
+                                };
+                                let Some(target) = source.snapshot.target.as_ref() else {
+                                    return IntentDecision::Unknown;
+                                };
+                                configured.decision_for_origin(
+                                    &origin,
+                                    owner.owner,
+                                    &owner.binding,
+                                    config,
+                                    target,
+                                    owner.mode,
+                                )
+                            },
+                        );
+                        if plan.blocked() {
+                            return Err(GateError::Rejected("recovery lifetime is unverified"));
+                        }
+                        let result =
+                            recovered.apply_recovery(&plan, &mut BootstrapControl(&mut writer));
+                        if result.error.is_some()
+                            || !matches!(
+                                result.outcome,
+                                super::super::coordinator::Outcome::Unchanged
+                                    | super::super::coordinator::Outcome::Released
                             )
-                        },
-                    );
-                    if plan.blocked() {
-                        return Err(GateError::Rejected("recovery lifetime is unverified"));
-                    }
-                    let result =
-                        recovered.apply_recovery(&plan, &mut BootstrapControl(&mut writer));
-                    if result.error.is_some()
-                        || !matches!(
-                            result.outcome,
-                            super::super::coordinator::Outcome::Unchanged
-                                | super::super::coordinator::Outcome::Released
-                        )
+                        {
+                            return Err(GateError::Rejected("durable recovery did not complete"));
+                        }
+                        Ok(())
+                    })();
+                    if result.is_err() && !matches!(writer.session.load(), JournalLoad::Blocked(_))
                     {
-                        return Err(GateError::Rejected("durable recovery did not complete"));
+                        writer.session.block(JournalError::InvalidEvidence(
+                            "configured recovery is unverified",
+                        ));
                     }
-                    Ok(())
-                })();
-                if result.is_err() && !matches!(writer.session.load(), JournalLoad::Blocked(_)) {
-                    writer.session.block(JournalError::InvalidEvidence(
-                        "configured recovery is unverified",
-                    ));
+                    recovered
                 }
-                recovered
+                Err(_) => {
+                    writer.session.block(JournalError::InvalidEvidence(
+                        "journal source hydration failed",
+                    ));
+                    Coordinator::new(catalog)
+                }
             }
-            Err(_) => {
-                writer.session.block(JournalError::InvalidEvidence(
-                    "journal source hydration failed",
-                ));
-                Coordinator::new(catalog)
-            }
-        },
+        }
         JournalLoad::Clean | JournalLoad::Blocked(_) => Coordinator::new(catalog),
     };
+    writer.finish_operation();
     // Keep the same worker-local session/lease even after a blocked bootstrap.
     (coordinator, WorkerAuthority::Scoped(Box::new(writer)))
 }

@@ -196,6 +196,157 @@ fn open(
     )
 }
 
+#[cfg(all(windows, feature = "tuning-test-controls"))]
+#[test]
+fn p1b_fixture_cleanup_recaptures_after_idle_and_preserves_original_baseline() {
+    let original = record();
+    let module = module(true);
+    module.external_change(12);
+    let memory = memory(Some(&original));
+    let (mut coordinator, mut authority) = open(
+        &module,
+        &memory,
+        input(vec![entry(&module, 1, ConfiguredDecision::Enabled)]),
+    );
+    assert!(!matches!(authority.status(), WriterStatus::Blocked(_)));
+    let attached = loaded(&memory);
+    assert_eq!(attached.sources, original.sources);
+    assert_eq!(
+        coordinator.snapshot().resources[0].baseline.bytes(),
+        7i32.to_le_bytes()
+    );
+    assert_eq!(module.value(), 12);
+    assert_eq!(module.writes(), 0, "bootstrap reattachment is read only");
+    // The plan is explicitly fixture-domain positive expiry. It supplies no
+    // native process proof; the actual actor test retains its SAME real guard.
+    let expired = super::super::recovery::RecoveryPlan {
+        release: vec![OwnerId::new(1).unwrap()],
+        ..Default::default()
+    };
+    let result = super::super::native_recovery_tests::apply_fixture_recovery(
+        &mut coordinator,
+        &mut authority,
+        &expired,
+    )
+    .unwrap();
+    assert_eq!(
+        result.outcome,
+        Outcome::Released,
+        "fresh capture at the next cleanup operation is required: {:?}",
+        result.error
+    );
+    assert!(result.error.is_none());
+    assert_eq!(module.value(), 7);
+    assert_eq!(
+        module.writes(),
+        1,
+        "restore the retained first baseline once"
+    );
+    let released = loaded(&memory);
+    assert!(released.owners.is_empty() && released.resources.is_empty());
+    assert!(released.revision > attached.revision);
+    assert!(!matches!(authority.status(), WriterStatus::Blocked(_)));
+    // A completed callback must release its capture again at the terminal
+    // boundary, while the same durable authority and original store survive.
+    assert_eq!(
+        authority.after_intent(),
+        Err(GateError::Rejected("configured capture is absent"))
+    );
+    assert_eq!(loaded(&memory), released);
+    assert_eq!(module.writes(), 1);
+}
+
+#[test]
+fn p1b_foreign_original_origin_blocks_before_hydration_scope_resolver_or_owners() {
+    for field in [
+        "lineage",
+        "principal",
+        "volume_guid",
+        "volume_serial",
+        "directory",
+    ] {
+        let document = record();
+        let module = module(true);
+        module.external_change(12);
+        let memory = memory(Some(&document));
+        let raw = memory.lock().unwrap().bytes.clone();
+        let expected = ConfigurationOrigin::fixture().fixture_changed(field);
+        let e = entry(&module, 1, ConfiguredDecision::Disabled);
+        let source = Input(Arc::new(Mutex::new(
+            ConfiguredSnapshot::complete_fixture(expected.clone(), 1, vec![e]).unwrap(),
+        )));
+        let scope_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = scope_calls.clone();
+        let (coordinator, authority) = bootstrap_configured(
+            catalog(&module),
+            machine(),
+            Box::new(Store(memory.clone())),
+            Arc::new(source),
+            ScopeEvidence::fixture_origin(expected, move || {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(machine())
+            }),
+        );
+        assert!(matches!(
+            authority.status(),
+            WriterStatus::Blocked(JournalError::InvalidEvidence(
+                "configuration origin mismatch or unavailable"
+            ))
+        ));
+        assert!(
+            coordinator.snapshot().resources.is_empty() && coordinator.snapshot().owners.is_empty()
+        );
+        assert_eq!(scope_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(module.reads(), 0);
+        assert_eq!(module.writes(), 0);
+        assert_eq!(memory.lock().unwrap().bytes, raw);
+        assert_eq!(memory.lock().unwrap().publishes, 0);
+    }
+}
+
+#[test]
+fn p1b_matching_original_origin_with_unavailable_producer_cannot_publish_or_mutate() {
+    let document = record();
+    let module = module(true);
+    module.external_change(12);
+    let memory = memory(Some(&document));
+    let raw = memory.lock().unwrap().bytes.clone();
+    let (_, authority) = open(
+        &module,
+        &memory,
+        Input(Arc::new(Mutex::new(ConfiguredSnapshot::Unavailable))),
+    );
+    assert!(matches!(authority.status(), WriterStatus::Blocked(_)));
+    assert_eq!(module.reads(), 0);
+    assert_eq!(module.writes(), 0);
+    assert_eq!(memory.lock().unwrap().publishes, 0);
+    assert_eq!(memory.lock().unwrap().bytes, raw);
+}
+
+#[cfg(windows)]
+#[test]
+fn p1b_fixture_origin_cannot_enter_native_scope_even_with_identical_owner_tuple() {
+    let module = module(true);
+    let e = entry(&module, 1, ConfiguredDecision::Enabled);
+    let memory = memory(None);
+    let (mut coordinator, mut authority) = bootstrap_configured(
+        catalog(&module),
+        machine(),
+        Box::new(Store(memory.clone())),
+        Arc::new(input(vec![e.clone()])),
+        ScopeEvidence::Native(Box::new(NativeScope {
+            machine: machine(),
+            configuration: None,
+            guard: None,
+        })),
+    );
+    let result = coordinator.handle(acquire(&e), &mut Control(&mut authority));
+    assert_eq!(result.outcome, Outcome::Rejected);
+    assert_eq!(module.reads(), 0);
+    assert_eq!(module.writes(), 0);
+    assert_eq!(memory.lock().unwrap().publishes, 0);
+}
+
 #[test]
 fn production_bootstrap_applies_authoritative_manual_attachment_without_recapturing_baseline() {
     let document = record();

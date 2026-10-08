@@ -584,10 +584,12 @@ impl Runner {
     #[cfg(windows)]
     pub(super) fn start_native(
         catalog: super::catalog::Catalog,
+        storage: &crate::app::models::AppStateStorage,
         limits: RunnerLimits,
     ) -> Result<Self, StartError> {
+        let configuration = storage.native_configuration();
         Self::spawn_factory(CoordinatorSnapshot::default(), limits, move || {
-            super::writer::open_native(catalog)
+            super::writer::open_native(catalog, configuration)
         })
     }
     #[cfg(test)]
@@ -827,6 +829,7 @@ fn worker_body(
             Ok(mut result) => {
                 let snapshot = coordinator.snapshot();
                 result.snapshot = snapshot.clone();
+                control.authority.finish_operation();
                 shared.complete(
                     &item.ticket,
                     TerminalOutcome::Completed(Arc::new(result)),
@@ -882,6 +885,7 @@ fn worker_body(
                         super::coordinator::Outcome::RecoveryRequired
                     );
                 shared.runtime.lock().unwrap().shutdown_result = Some(Arc::new(result));
+                control.authority.finish_operation();
             }
             Err(_) => {
                 faulted = true;
