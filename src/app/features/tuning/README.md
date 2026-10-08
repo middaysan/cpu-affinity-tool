@@ -8,8 +8,9 @@ admission remains closed. The Windows boundary supplies store/lease and identity
 primitives. The two backend shapes and
 cross-adapter simulators under `testing/` compile only with `cfg(test)`.
 Isolated forced-process recovery is demonstrated at three durable boundaries.
-Canonical/elevated/boot validation, authoritative game attachment, app-state
-integration and user controls remain staged work. Passing isolated test objects
+Controlled canonical publication/rollback and same-worker rehydration have
+explicit same-account elevated lab evidence. Authoritative game/user/boot scope,
+app-state integration and user controls remain staged work. Passing isolated test objects
 does not admit a writable module.
 
 The canonical specification is

@@ -733,8 +733,8 @@ preserved; gaming settings were unchanged. Shipping writer admission remains clo
 
 ## Opt-in same-worker canonical manual recovery helper
 
-This source helper is prepared for independent review and explicit host
-acceptance. It has **not** been run canonically. Ordinary tests exercise the same
+This independently reviewed helper passed explicit same-account canonical host
+execution on 2026-10-08, as recorded below. Ordinary tests exercise the same
 codec/coordinator/rehydration path on isolated fixtures without promoting them to
 Canonical. The previously accepted publication helper and its fixed two-record
 limit remain unchanged.
@@ -788,11 +788,39 @@ booleans true and process exit 0 pass. Failure labels are `pending`, `refused`,
 timeout retains the same worker until real completion/join; a late rollback
 still fails. Reports contain no raw paths, native tuples or journal bytes.
 
-This proves only the intended **same-worker native canonical rehydration** when
-the explicit host run passes. It is not process restart, forced host exit,
+This proves only the tested **same-worker native canonical rehydration** scope.
+It is not process restart, forced host exit,
 power-loss rollback, production bootstrap recovery/admission, another account,
 boot/logon/game attachment or a real gaming-setting writer. Existing isolated
 forced-process tests supply their separate bounded interruption evidence.
+
+## Accepted controlled host manual recovery — 2026-10-08
+
+The original reviewed source checkpoint `576d381` ran once through the retained
+same-account elevated wrapper. Test EXE SHA256 was
+`ED9F5E5E45CE7AAFA7DC4E5FFF1E0B6E75F3D52F5B41CB1A3D6607A7A44DC5A6`
+(16,987,136 bytes). Run tag was `af0372201d1d474c8772b337cdc01de3`;
+the original launcher and wrapper actually terminated with exit 0.
+
+The exact one-record report was `verified_rolled_back`, with `worker_terminal`,
+`verified` and `rollback_verified` all true. Its separate tag-bound status was
+`manual-round-trip`, `passed`, `parent_terminal=true`, `exit=0`. No timeout,
+replacement worker or repeated launch supplied acceptance.
+
+The fixed native transcript verified 7 -> 12, actual disk rehydration and
+zero-write reattachment on the same worker/lease, then explicit restoration to 7.
+Independent exact-target restoration/readback preceded owned target cleanup and
+journal rollback. Existing-only fresh canonical reopening proved Absent and the
+original root/lease IDs and Opened provenance. Original directories, lease and
+ACLs were preserved; gaming settings were not involved. Sanitized reports remain
+under ignored `target/host-manual-recovery-lab`; the frozen EXE is retained under
+`target/host-manual-recovery-source/576d381`.
+
+This accepts that controlled same-worker canonical recovery/rollback scope.
+It does not certify canonical process restart, forced host exit, power-loss
+rollback, another account, boot/logon/game attachment or a real setting adapter.
+The later common consumer/bootstrap packet `f6685e9` has its separate source,
+fixture and required-check evidence; this native run exercised `576d381`.
 
 ## Common configured recovery machinery
 
@@ -824,8 +852,9 @@ The existing three forced writer boundaries and two retained-actor cases use
 this common bootstrap/control path with independently supplied **fixture** intent.
 The actual retained process guard still determines actor lifetime. These cases
 exercise owned isolated scalar/metadata files, not canonical restart or shipping
-game authority. The same-worker host lab above has its separate frozen source
-and pending actual acceptance; it does not certify this later production packet.
+game authority. The accepted same-worker host lab above has its separate frozen
+source; it does not certify this later production packet merely by sharing
+journal primitives.
 
 The production catalog remains empty and the dormant native factory supplies
 Unavailable configured input, so shipping writes remain closed. F4 supplies
