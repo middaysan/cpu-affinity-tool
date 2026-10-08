@@ -11,7 +11,7 @@ if ($env:OS -ne "Windows_NT") {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$testPrefix = "app::features::tuning::platform::native_recovery_tests::"
+$testPrefix = "app::features::tuning::recovery_tests::"
 $requiredTests = @(
     "${testPrefix}forced_exit_after_intent_recovers_without_a_target_write",
     "${testPrefix}forced_exit_after_physical_write_restores_exact_original_baseline",
@@ -40,7 +40,7 @@ try {
     }
 
     # Rust fixtures own their fresh native objects and child handles, including cleanup.
-    & cargo @cargoArguments "--" "--test-threads=1" "--nocapture"
+    & cargo @cargoArguments "--" "--ignored" "--test-threads=1" "--nocapture"
     if ($LASTEXITCODE -ne 0) {
         throw "The native tuning recovery probes failed."
     }

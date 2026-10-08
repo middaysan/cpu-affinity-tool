@@ -1,4 +1,6 @@
 mod catalog;
+pub mod gaming;
+pub mod gaming_diagnostics;
 mod process;
 mod shortcut;
 pub mod tuning;

@@ -38,6 +38,10 @@ pub struct RunningApp {
 pub struct RunningApps {
     /// Map of application keys to RunningApp instances
     pub apps: HashMap<AppRuntimeKey, RunningApp>,
+    /// Runtime-only two-field handoff shared with the registered scheduling modules.
+    pub(crate) scheduling: std::sync::Arc<
+        crate::app::features::tuning::modules::managed::scheduling::SchedulingHandoff,
+    >,
     membership_generation: Option<u64>,
     editing_membership: bool,
 }
@@ -45,6 +49,7 @@ impl Default for RunningApps {
     fn default() -> Self {
         Self {
             apps: HashMap::new(),
+            scheduling: Default::default(),
             membership_generation: Some(0),
             editing_membership: false,
         }

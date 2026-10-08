@@ -68,17 +68,7 @@ pub struct AppStateStorage {
 enum SaveAdmission {
     #[default]
     Writable,
-    #[cfg(windows)]
-    Qualified {
-        receipt: os_api::tuning::TuningConfigReceipt,
-        proof: Option<
-            Box<
-                crate::app::features::tuning::platform::configured_intent::NativeConfigurationProof,
-            >,
-        >,
-        blocked: bool,
-    },
-    SourceBlocked,
+
     Blocked {
         raw: Option<Arc<str>>,
         size: usize,
@@ -202,22 +192,8 @@ impl Serialize for AppStateStorage {
 
 impl AppStateStorage {
     pub(crate) fn save_blocked(&self) -> bool {
-        matches!(
-            self.save_admission,
-            SaveAdmission::Blocked { .. } | SaveAdmission::SourceBlocked
-        ) || {
-            #[cfg(windows)]
-            {
-                matches!(
-                    self.save_admission,
-                    SaveAdmission::Qualified { blocked: true, .. }
-                )
-            }
-            #[cfg(not(windows))]
-            {
-                false
-            }
-        } || self.version > CURRENT_APP_STATE_VERSION
+        matches!(self.save_admission, SaveAdmission::Blocked { .. })
+            || self.version > CURRENT_APP_STATE_VERSION
             || matches!(
                 self.tuning.decode(),
                 crate::app::features::tuning::config::TuningLoad::Blocked
@@ -233,21 +209,6 @@ impl AppStateStorage {
     fn block_save(&mut self, raw: Option<Arc<str>>, size: usize) {
         self.save_admission = SaveAdmission::Blocked { raw, size };
     }
-    fn block_source(&mut self) {
-        #[cfg(windows)]
-        if let SaveAdmission::Qualified { blocked, .. } = &mut self.save_admission {
-            *blocked = true;
-            return;
-        }
-        self.save_admission = SaveAdmission::SourceBlocked;
-    }
-    fn save_expectation(&self) -> storage_io::StateExpectation {
-        #[cfg(windows)]
-        if let SaveAdmission::Qualified { receipt, .. } = &self.save_admission {
-            return storage_io::StateExpectation::Receipt(receipt.clone());
-        }
-        storage_io::StateExpectation::Unavailable
-    }
     #[cfg(test)]
     pub(crate) fn test_fixture(configure: impl FnOnce(&mut Self)) -> Self {
         let mut state = schema_refresh::build_default_state();
@@ -261,7 +222,7 @@ impl AppStateStorage {
     }
 
     pub(crate) fn load_from_path(path: &Path) -> AppStateStorage {
-        let mut filesystem = storage_io::RealStateFilesystem::default();
+        let mut filesystem = storage_io::RealStateFilesystem;
         Self::load_from_path_with_filesystem(path, &mut filesystem)
     }
 
@@ -269,46 +230,6 @@ impl AppStateStorage {
         path: &Path,
         filesystem: &mut impl storage_io::StateFilesystem,
     ) -> AppStateStorage {
-        let qualification = filesystem.qualify_read(path);
-        if qualification.is_blocked() {
-            let mut blocked = schema_refresh::build_default_state();
-            blocked.block_source();
-            return blocked;
-        }
-        #[cfg(any(windows, test))]
-        if matches!(
-            &qualification,
-            storage_io::StateQualification::QualifiedAbsent
-        ) {
-            // Positive absence belongs only to this retained synchronous source.
-            // Never perform an ordinary read or adopt a newly appeared leaf.
-            return Self::recover_default_state(
-                schema_refresh::build_default_state(),
-                path,
-                filesystem,
-                storage_io::StateExpectation::Absent,
-                false,
-            );
-        }
-        #[cfg(windows)]
-        let receipt = match qualification {
-            storage_io::StateQualification::Receipt(receipt) => Some(receipt),
-            _ => None,
-        };
-        #[cfg(windows)]
-        let read = if let Some(receipt) = &receipt {
-            match String::from_utf8(receipt.bytes().to_vec()) {
-                Ok(data) => Ok(storage_io::StateRead::Text(data)),
-                Err(_) => {
-                    let mut blocked = schema_refresh::build_default_state();
-                    blocked.block_save(None, receipt.bytes().len());
-                    return blocked;
-                }
-            }
-        } else {
-            storage_io::read_state_file_with_filesystem(path, filesystem)
-        };
-        #[cfg(not(windows))]
         let read = storage_io::read_state_file_with_filesystem(path, filesystem);
         let data = match read {
             Ok(storage_io::StateRead::Text(data)) => Some(data),
@@ -348,12 +269,6 @@ impl AppStateStorage {
                         {
                             state.block_save(Some(Arc::from(data.as_str())), data.len());
                         }
-                        #[cfg(windows)]
-                        if !state.save_blocked() {
-                            if let Some(receipt) = receipt {
-                                state.accept_receipt(path, receipt);
-                            }
-                        }
                         return state;
                     }
                     if tuning_present {
@@ -366,81 +281,31 @@ impl AppStateStorage {
                 }
             }
         }
-        let default_state = schema_refresh::build_default_state();
-        #[cfg(windows)]
-        if let Some(receipt) = receipt {
-            let mut qualified_default = default_state;
-            qualified_default.accept_receipt(path, receipt);
-            let expected = qualified_default.save_expectation();
-            return Self::recover_default_state(
-                qualified_default,
-                path,
-                filesystem,
-                expected,
-                true,
-            );
-        }
-        Self::recover_default_state(
-            default_state,
-            path,
-            filesystem,
-            storage_io::StateExpectation::Unavailable,
-            true,
-        )
-    }
-
-    fn recover_default_state(
-        mut default_state: Self,
-        path: &Path,
-        filesystem: &mut impl storage_io::StateFilesystem,
-        expected: storage_io::StateExpectation,
-        backup_original: bool,
-    ) -> Self {
+        let mut default_state = schema_refresh::build_default_state();
         let recovered = (|| -> Result<(), Box<dyn std::error::Error>> {
             let serialized = storage_io::serialize_state_bounded(&default_state)?;
-            if expected.is_qualified() {
-                filesystem.prepare_save(path, &expected)?;
-            }
-            if backup_original {
-                storage_io::backup_state_file_with_filesystem(path, filesystem)?;
-            }
-            if expected.is_qualified() {
-                match filesystem.publish_qualified(path, &serialized, &expected)? {
-                    #[cfg(windows)]
-                    storage_io::StatePublication::Receipt(receipt) => {
-                        default_state.accept_receipt(path, receipt);
-                    }
-                    storage_io::StatePublication::Unavailable => {
-                        return Err("qualified default publication source unavailable".into());
-                    }
-                }
-            } else {
-                storage_io::publish_state_bytes_with_filesystem(&serialized, path, filesystem)?;
-            }
-            Ok(())
+            storage_io::backup_state_file_with_filesystem(path, filesystem)?;
+            storage_io::publish_state_bytes_with_filesystem(&serialized, path, filesystem)
         })();
         if let Err(error) = recovered {
-            if expected.is_qualified() {
-                // Keep the original sealed receipt, even when publication is
-                // uncertain; Clone and schema readiness cannot reopen admission.
-                default_state.block_source();
-            }
             eprintln!("ERROR: Failed to recover unreadable state: {error}");
         }
+        default_state.loaded_version = default_state.version;
         default_state
     }
-
     #[cfg_attr(test, allow(dead_code))]
     pub fn try_save_state(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let path = state_path::get_state_path();
         self.try_save_to_path(&path)
     }
 
-    fn try_save_to_path(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let mut filesystem = storage_io::RealStateFilesystem::default();
+    pub(crate) fn try_save_to_path(
+        &mut self,
+        path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut filesystem = storage_io::RealStateFilesystem;
         self.try_save_to_path_with_filesystem(path, &mut filesystem)
     }
-
     fn try_save_to_path_with_filesystem(
         &mut self,
         path: &Path,
@@ -458,62 +323,39 @@ impl AppStateStorage {
             return Err("state evidence is blocked; save refused".into());
         }
         let serialized = storage_io::serialize_state_bounded(self)?;
-        let expected = self.save_expectation();
-        if let Err(error) = filesystem.prepare_save(path, &expected) {
-            self.block_source();
-            return Err(error);
-        }
         if self.pending_pre_v6_backup {
             storage_io::backup_pre_v6_state_file_with_filesystem(path, filesystem)?;
         }
-        let qualified = filesystem.publish_qualified(path, &serialized, &expected);
-        match qualified {
-            #[cfg(windows)]
-            Ok(storage_io::StatePublication::Receipt(receipt)) => {
-                self.accept_receipt(path, receipt)
-            }
-            Ok(storage_io::StatePublication::Unavailable) => {
-                if expected.is_qualified() {
-                    self.block_source();
-                    return Err("qualified state source became unavailable; save refused".into());
-                }
-                storage_io::publish_state_bytes_with_filesystem(&serialized, path, filesystem)?;
-            }
-            Err(error) => {
-                self.block_source();
-                return Err(error);
-            }
-        }
+        storage_io::publish_state_bytes_with_filesystem(&serialized, path, filesystem)?;
         self.loaded_version = self.version;
         self.pending_pre_v6_backup = false;
         Ok(())
     }
 
-    #[cfg(windows)]
-    fn accept_receipt(&mut self, path: &Path, receipt: os_api::tuning::TuningConfigReceipt) {
-        let proof = crate::app::features::tuning::platform::configured_intent::NativeConfigurationProof::from_receipt(path, receipt.clone());
-        self.save_admission = SaveAdmission::Qualified {
-            receipt,
-            proof: proof.map(Box::new),
-            blocked: false,
-        };
-    }
-    #[cfg(windows)]
-    pub(crate) fn native_configuration(
-        &self,
-    ) -> Option<crate::app::features::tuning::platform::configured_intent::NativeConfigurationProof>
-    {
-        let SaveAdmission::Qualified {
-            proof: Some(proof), ..
-        } = &self.save_admission
-        else {
-            return None;
-        };
-        (!self.save_blocked() && proof.matches_tuning(&self.tuning)).then(|| proof.as_ref().clone())
-    }
-
     pub fn active_data_dir() -> PathBuf {
         state_path::get_state_dir()
+    }
+    pub(crate) fn selected_state_path() -> PathBuf {
+        state_path::get_state_path()
+    }
+    /// Independent recovery input: never repairs, migrates or replaces unreadable evidence.
+    pub(crate) fn read_saved_for_tuning(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let filesystem = storage_io::RealStateFilesystem;
+        let storage_io::StateRead::Text(raw) =
+            storage_io::read_state_file_with_filesystem(path, &filesystem)?
+        else {
+            return Err("saved state exceeds read limit".into());
+        };
+        let mut state: Self = serde_json::from_str(&raw)?;
+        if state.version != CURRENT_APP_STATE_VERSION || state.save_blocked() {
+            return Err("saved state unavailable for tuning".into());
+        }
+        state.loaded_version = state.version;
+        Ok(state)
+    }
+    pub(crate) fn publish_recovery_file(staging: &Path, destination: &Path) -> std::io::Result<()> {
+        storage_io::publish_staged_file(staging, destination)?;
+        storage_io::sync_parent_directory(destination)
     }
 
     pub fn active_storage_mode() -> StateStorageMode {

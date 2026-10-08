@@ -1,8 +1,13 @@
-//! Application-facing bounded requests over the existing saved transaction authority.
+//! One application worker saves candidates, reads tracked-process observations and dispatches modules.
 use super::{
     config::*,
     execution_bridge::*,
-    platform::{codec::ModuleEnvelope, contract::*, runner::RunnerSnapshot},
+    persistence::ActivationFacts,
+    platform::{
+        codec::ModuleEnvelope,
+        contract::*,
+        controller::{LifetimeEvidence, OwnerKey, RecoveryIntent, ShutdownResult},
+    },
     service::{HeadlessTuning, SaveError},
 };
 use crate::app::{
@@ -11,6 +16,7 @@ use crate::app::{
     shared::ids::{GroupId, RuleId},
 };
 use std::{
+    collections::BTreeMap,
     sync::{
         mpsc::{self, SyncSender, TrySendError},
         Arc, Mutex, RwLock,
@@ -18,8 +24,11 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-
 pub(crate) enum TuningRequest {
+    ModuleAction {
+        feature: FeatureId,
+        action: super::presentation::ModuleAction,
+    },
     CreateProfile {
         name: String,
     },
@@ -112,10 +121,11 @@ pub(crate) struct TuningSnapshot {
     pub associations: Vec<Association>,
     pub catalog: Vec<ModuleDescriptor>,
     pub operation: TuningOperationState,
-    pub runner: Option<RunnerSnapshot>,
-    pub observation: Arc<ExecutionObservation>,
+    pub readonly_cards: Vec<ModuleCard>,
+    pub restoration_effect: Option<Effect>,
+    pub operation_error: Option<ModuleError>,
     pub shutdown_complete: bool,
-    pub shutdown_outcome: Option<super::platform::runner::ShutdownResult>,
+    pub shutdown_outcome: Option<ShutdownResult>,
     pub(crate) state: Arc<AppStateStorage>,
     pub(crate) rules: RulesContext,
 }
@@ -134,254 +144,24 @@ struct Shared {
     admission: Mutex<Admission>,
     latest: Mutex<Arc<TuningSnapshot>>,
     #[cfg(test)]
-    session: Arc<Mutex<Option<(Arc<ExecutionObservation>, SessionFacts)>>>,
+    fixture: Mutex<Option<(Arc<ExecutionObservation>, Vec<(u32, u64)>)>>,
 }
 pub(crate) struct TuningRuntime {
     shared: Arc<Shared>,
-    _worker: Option<JoinHandle<()>>,
-}
-
-pub(super) enum SessionDecision {
-    Activate {
-        game: GameActivation,
-        feature: FeatureId,
-        target: TargetIdentity,
-    },
-    Membership {
-        owner: OwnerId,
-        game: GameActivation,
-    },
-    Withdraw(OwnerId),
-}
-#[derive(Clone)]
-pub(crate) enum SessionFacts {
-    Unavailable,
-    #[cfg(test)]
-    Fixture {
-        session: SessionIdentity,
-        processes: Vec<ProcessIdentity>,
-        targets: Vec<TargetIdentity>,
-        exited: Vec<ProcessIdentity>,
-    },
-}
-struct ResolvedSession<'a> {
-    session: &'a SessionIdentity,
-    processes: &'a [ProcessIdentity],
-    targets: &'a [TargetIdentity],
-    exited: &'a [ProcessIdentity],
-}
-impl SessionFacts {
-    fn resolved(&self) -> Option<ResolvedSession<'_>> {
-        match self {
-            Self::Unavailable => None,
-            #[cfg(test)]
-            Self::Fixture {
-                session,
-                processes,
-                targets,
-                exited,
-            } => Some(ResolvedSession {
-                session,
-                processes,
-                targets,
-                exited,
-            }),
-        }
-    }
-}
-pub(super) fn session_decision(
-    state: &AppStateStorage,
-    observation: &ExecutionObservation,
-    facts: &SessionFacts,
-    catalog: &super::platform::catalog::Catalog,
-) -> Option<SessionDecision> {
-    if !observation.matches_state(state) {
-        return None;
-    }
-    // Complete process facts do not qualify a native boot/logon/Game producer.
-    let ResolvedSession {
-        session,
-        processes,
-        targets,
-        exited,
-    } = facts.resolved()?;
-    if processes.len() > 256 || targets.len() > 64 || exited.len() > 256 {
-        return None;
-    }
-    let ExecutionObservation::Complete {
-        members,
-        foreground,
-        ..
-    } = observation
-    else {
-        return None;
-    };
-    let TuningLoad::Known(config) = state.tuning.decode() else {
-        return None;
-    };
-    for association in &config.associations {
-        let profile = config
-            .profiles
-            .iter()
-            .find(|profile| profile.id == association.profile)?;
-        for preference in &profile.modules {
-            if !preference.enabled
-                || !matches!(
-                    preference.mode,
-                    ActivationMode::Session | ActivationMode::ForegroundSession
-                )
-                || catalog.validate_config(&preference.config).is_err()
-            {
-                continue;
-            }
-            if preference.mode == ActivationMode::ForegroundSession
-                && association.eligibility != ActivationEligibility::Foreground
-            {
-                continue;
-            }
-            let matches = |intent: &SavedIntent| {
-                intent.config.feature == preference.feature
-                    && matches!(&intent.binding, ActivationBinding::Game(game) if game.rule().group() == &association.group && game.rule().rule() == &association.rule)
-            };
-            if config.withdrawals.iter().any(matches)
-                || config
-                    .transitions
-                    .iter()
-                    .flatten()
-                    .any(|t| matches(&t.old) || matches(&t.new))
-            {
-                continue;
-            }
-            let active = config.activations.iter().find(|intent| matches(intent));
-            let member = members
-                .iter()
-                .find(|m| m.group == association.group && m.rule == association.rule);
-            let typed = member.and_then(|member| {
-                member
-                    .instances
-                    .iter()
-                    .map(|facts| {
-                        processes
-                            .iter()
-                            .find(|process| {
-                                process.session == *session
-                                    && process.pid() == facts.pid
-                                    && process.creation_token() == facts.token
-                                    && process.image_path.as_str() == facts.image.as_ref()
-                            })
-                            .cloned()
-                    })
-                    .collect::<Option<Vec<_>>>()
-            });
-            let Some(mut typed) = typed.filter(|typed| !typed.is_empty() && typed.len() <= 64)
-            else {
-                if let Some(active) = active {
-                    let ActivationBinding::Game(game) = &active.binding else {
-                        continue;
-                    };
-                    if game.processes().iter().all(|p| exited.contains(p)) {
-                        return Some(SessionDecision::Withdraw(active.owner));
-                    }
-                }
-                continue;
-            };
-            typed.sort();
-            let focused = typed.iter().any(|p| {
-                p.pid() == foreground.pid
-                    && p.creation_token() == foreground.token
-                    && p.image_path.as_str() == foreground.image.as_ref()
-            });
-            if association.eligibility == ActivationEligibility::Foreground && !focused {
-                if let Some(active) = active {
-                    return Some(SessionDecision::Withdraw(active.owner));
-                }
-                continue;
-            }
-            if let Some(active) = active {
-                let ActivationBinding::Game(game) = &active.binding else {
-                    continue;
-                };
-                if game.session() != session
-                    || game.configured().profile != association.profile
-                    || game.eligibility() != association.eligibility
-                {
-                    continue;
-                }
-                if typed != game.processes() {
-                    if let Ok(next) = game.with_membership(typed) {
-                        return Some(SessionDecision::Membership {
-                            owner: active.owner,
-                            game: next,
-                        });
-                    }
-                }
-            } else {
-                let descriptor = catalog.descriptors().find(|d| d.id == preference.feature)?;
-                let target = targets
-                    .iter()
-                    .find(|target| {
-                        descriptor.target_scopes.contains(&target.scope())
-                            && preference
-                                .config
-                                .target
-                                .as_ref()
-                                .is_none_or(|expected| expected == *target)
-                    })?
-                    .clone();
-                let game = GameActivation::new(
-                    ConfiguredIntent {
-                        profile: association.profile,
-                        generation: ConfigGeneration::new(
-                            config.allocations.next_config_generation,
-                        )
-                        .ok()?,
-                    },
-                    RuleActivation::new(association.group.clone(), association.rule.clone())
-                        .ok()?,
-                    association.eligibility,
-                    session.clone(),
-                    typed,
-                )
-                .ok()?;
-                return Some(SessionDecision::Activate {
-                    game,
-                    feature: preference.feature.clone(),
-                    target,
-                });
-            }
-        }
-    }
-    None
+    worker: Option<JoinHandle<()>>,
 }
 impl TuningRuntime {
-    #[cfg(test)]
-    pub(crate) fn observe_session_fixture(
-        &self,
-        observation: ExecutionObservation,
-        facts: SessionFacts,
-    ) {
-        *self.shared.session.lock().unwrap() = Some((Arc::new(observation), facts));
-    }
-    #[cfg(test)]
-    pub(crate) fn start_fixture(
-        mut service: HeadlessTuning,
-        running: Arc<tokio::sync::RwLock<RunningApps>>,
-        state_path: std::path::PathBuf,
-        journal_path: std::path::PathBuf,
-        targets: Vec<TargetIdentity>,
-    ) -> Self {
-        service.configure_fixture(state_path, journal_path, targets);
-        Self::start(service, running)
-    }
     pub(crate) fn start(
         mut service: HeadlessTuning,
         running: Arc<tokio::sync::RwLock<RunningApps>>,
     ) -> Self {
+        let observation = Arc::new(ExecutionObservation::Unknown(UnknownReason::Unavailable));
         let initial = Arc::new(snapshot(
             &service,
-            0,
             TuningOperationState::Idle,
-            Arc::new(ExecutionObservation::Unknown(UnknownReason::Unavailable)),
+            observation,
+            false,
+            None,
             false,
         ));
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -394,287 +174,175 @@ impl TuningRuntime {
             }),
             latest: Mutex::new(initial),
             #[cfg(test)]
-            session: Default::default(),
+            fixture: Mutex::new(None),
         });
         let owned = shared.clone();
         let worker = thread::Builder::new()
-            .name("tuning-session".into())
+            .name("tuning".into())
             .spawn(move || {
-                let observed_state = Arc::new(RwLock::new(service.state().clone()));
-                let mut bridge = ExecutionBridge::default();
-                let mut operation = TuningOperationState::Idle;
-                let mut shutting_down = false;
-                let mut faulted = false;
-                let mut drain_failed = false;
-                if matches!(service.state().tuning.decode(), TuningLoad::Known(_)) {
-                    let _ = service.start_saved_worker();
-                }
-                loop {
-                    let closing = owned.admission.lock().unwrap().closing.is_some();
-                    if closing {
-                        use super::platform::runner::ShutdownResult;
-                        if !shutting_down {
-                            if let Ok(queued) = receiver.try_recv() {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    #[cfg(windows)]
+                    {
+                        if !service.native_admitted {
+                            match os_api::OS::tuning_legacy_evidence_exists() {
+                                Ok(legacy) => service.legacy_recovery = legacy,
+                                Err(error) => {
+                                    service.legacy_recovery = true;
+                                    service.native_failure(super::persistence::failure(
+                                        "legacy recovery check",
+                                        error,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    service.start_selected_recovery();
+                    let observed_state = Arc::new(RwLock::new(service.state().clone()));
+                    let mut bridge = ExecutionBridge::default();
+                    let mut operation = TuningOperationState::Idle;
+                    let mut actors = retained_actors(&service);
+                    let mut next_cards = Instant::now();
+                    loop {
+                        if owned.admission.lock().unwrap().closing.is_some() {
+                            while let Ok(queued) = receiver.try_recv() {
                                 operation = TuningOperationState::Refused {
                                     id: queued.id,
                                     error: SaveError::Pending,
                                 };
-                                owned.admission.lock().unwrap().pending = false;
                             }
-                            if !faulted {
-                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    service.drain_sessions()
-                                })) {
-                                    Ok(Ok(())) => {}
-                                    Ok(Err(_)) => {
-                                        drain_failed = true;
-                                        operation = TuningOperationState::Recovering;
-                                    }
-                                    Err(_) => {
-                                        faulted = true;
-                                        operation = TuningOperationState::Recovering;
+                            let saved_verified =
+                                !service.has_saved_source() || service.verify_saved().is_ok();
+                            let may_restore = service.native_admitted
+                                && !service.legacy_recovery
+                                && saved_verified;
+                            let mut failed = service.legacy_recovery || !saved_verified;
+                            for owner in service
+                                .controller
+                                .owners()
+                                .into_iter()
+                                .filter(OwnerKey::is_session)
+                            {
+                                if !may_restore {
+                                    failed = true;
+                                    continue;
+                                }
+                                let exited = actors.get_mut(&owner).is_some_and(|actor| {
+                                    actor.lifetime() == LifetimeEvidence::Exited
+                                });
+                                failed |= if exited {
+                                    service
+                                        .controller
+                                        .release_if_exited(&owner, LifetimeEvidence::Exited)
+                                        .is_err()
+                                } else {
+                                    service
+                                        .controller
+                                        .recover_owner(&owner, RecoveryIntent::Restore)
+                                        .is_err()
+                                };
+                            }
+                            service.controller.inspect();
+                            let outcome = if failed
+                                || !service.controller.can_admit()
+                                || service.controller.owners().iter().any(OwnerKey::is_session)
+                            {
+                                ShutdownResult::RecoveryRequired
+                            } else {
+                                ShutdownResult::Complete
+                            };
+                            let completed = Arc::new(snapshot(
+                                &service,
+                                operation,
+                                bridge.latest(),
+                                true,
+                                Some(outcome),
+                                true,
+                            ));
+                            let mut admission = owned.admission.lock().unwrap();
+                            *owned.latest.lock().unwrap() = completed;
+                            admission.pending = false;
+                            break;
+                        }
+                        match receiver.recv_timeout(Duration::from_millis(25)) {
+                            Ok(queued) => {
+                                let result = if queued.revision != service.saved_revision() {
+                                    Err(SaveError::Invalid)
+                                } else {
+                                    apply(&mut service, queued.request)
+                                };
+                                operation = match result {
+                                    Ok(()) => TuningOperationState::Idle,
+                                    Err(error) => TuningOperationState::Refused {
+                                        id: queued.id,
+                                        error,
+                                    },
+                                };
+                                *observed_state.write().unwrap() = service.state().clone();
+                                bridge.request_refresh();
+                                // Keep the pending latch until the completed snapshot has been published.
+                                bridge.refresh(Instant::now(), &running, &observed_state);
+                                let observation = worker_observation(&owned, &bridge, &mut actors);
+                                reconcile_sessions(&mut service, observation.as_ref(), &mut actors);
+                                service.controller.inspect();
+                                next_cards = Instant::now() + Duration::from_secs(1);
+                                let completed = Arc::new(snapshot(
+                                    &service,
+                                    operation.clone(),
+                                    observation,
+                                    false,
+                                    None,
+                                    true,
+                                ));
+                                let mut admission = owned.admission.lock().unwrap();
+                                *owned.latest.lock().unwrap() = completed;
+                                admission.pending = false;
+                            }
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                bridge.refresh(Instant::now(), &running, &observed_state);
+                                let observation = worker_observation(&owned, &bridge, &mut actors);
+                                reconcile_sessions(&mut service, observation.as_ref(), &mut actors);
+                                let idle = {
+                                    let admission = owned.admission.lock().unwrap();
+                                    !admission.pending && admission.closing.is_none()
+                                };
+                                if idle && Instant::now() >= next_cards {
+                                    service.controller.inspect();
+                                    next_cards = Instant::now() + Duration::from_secs(1);
+                                    let completed = Arc::new(snapshot(
+                                        &service,
+                                        operation.clone(),
+                                        observation,
+                                        false,
+                                        None,
+                                        true,
+                                    ));
+                                    let admission = owned.admission.lock().unwrap();
+                                    if !admission.pending && admission.closing.is_none() {
+                                        *owned.latest.lock().unwrap() = completed;
                                     }
                                 }
                             }
-                        }
-                        let outcome = if shutting_down {
-                            service.poll_shutdown()
-                        } else {
-                            shutting_down = true;
-                            service.shutdown()
-                        }
-                        .unwrap_or(ShutdownResult::Complete);
-                        let outcome = if faulted && outcome != ShutdownResult::TimedOut {
-                            ShutdownResult::Faulted
-                        } else {
-                            outcome
-                        };
-                        let outcome = if drain_failed && outcome == ShutdownResult::Complete {
-                            ShutdownResult::RecoveryRequired
-                        } else {
-                            outcome
-                        };
-                        let complete = outcome != ShutdownResult::TimedOut;
-                        let mut next = snapshot(
-                            &service,
-                            service.saved_revision(),
-                            operation.clone(),
-                            bridge.latest(),
-                            complete,
-                        );
-                        next.shutdown_outcome = Some(outcome);
-                        *owned.latest.lock().unwrap() = Arc::new(next);
-                        if complete {
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(50));
-                        continue;
-                    }
-                    match receiver.recv_timeout(Duration::from_millis(100)) {
-                        Ok(queued) => {
-                            let result =
-                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    if queued.revision != service.saved_revision() {
-                                        Err(SaveError::Pending)
-                                    } else {
-                                        apply(&mut service, queued.request)
-                                    }
-                                })) {
-                                    Ok(result) => result,
-                                    Err(_) => {
-                                        faulted = true;
-                                        owned
-                                            .admission
-                                            .lock()
-                                            .unwrap()
-                                            .closing
-                                            .get_or_insert_with(Instant::now);
-                                        Err(SaveError::Recovering)
-                                    }
-                                };
-                            operation = match result {
-                                Ok(()) => TuningOperationState::Idle,
-                                Err(SaveError::Recovering) => TuningOperationState::Recovering,
-                                Err(error) => TuningOperationState::Refused {
-                                    id: queued.id,
-                                    error,
-                                },
-                            };
-                            if let Ok(mut projection) = observed_state.write() {
-                                *projection = service.state().clone();
-                            }
-                            bridge.request_refresh();
-                            let mut next = snapshot(
-                                &service,
-                                service.saved_revision(),
-                                operation.clone(),
-                                bridge.latest(),
-                                false,
-                            );
-                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                observe_cards(&mut next, &service)
-                            }))
-                            .is_err()
-                            {
-                                faulted = true;
-                                operation = TuningOperationState::Recovering;
-                                next.operation = operation.clone();
-                                owned
-                                    .admission
-                                    .lock()
-                                    .unwrap()
-                                    .closing
-                                    .get_or_insert_with(Instant::now);
-                            }
-                            let mut admission = owned.admission.lock().unwrap();
-                            admission.pending = false;
-                            *owned.latest.lock().unwrap() = Arc::new(next);
-                        }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            owned.admission.lock().unwrap().closing = Some(Instant::now());
-                            continue;
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    }
-                    // Native inspection is outside both application locks and the GUI.
-                    #[cfg(not(test))]
-                    bridge.refresh(Instant::now(), &running, &observed_state);
-                    #[cfg(test)]
-                    let _ = &running;
-                    let observation = bridge.latest();
-                    let facts = SessionFacts::Unavailable;
-                    #[cfg(test)]
-                    let (observation, facts) = owned
-                        .session
-                        .lock()
-                        .unwrap()
-                        .clone()
-                        .unwrap_or((observation, facts));
-                    if let Some(decision) =
-                        session_decision(service.state(), &observation, &facts, service.catalog())
-                    {
-                        let admitted = {
-                            let mut admission = owned.admission.lock().unwrap();
-                            if admission.closing.is_some() || admission.pending {
-                                false
-                            } else {
-                                admission.pending = true;
-                                true
-                            }
-                        };
-                        if admitted {
-                            let result =
-                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    match decision {
-                                        SessionDecision::Activate {
-                                            game,
-                                            feature,
-                                            target,
-                                        } => {
-                                            service.activate_game(game, feature, target).map(|_| ())
-                                        }
-                                        SessionDecision::Membership { owner, game } => {
-                                            service.update_game_membership(owner, game)
-                                        }
-                                        SessionDecision::Withdraw(owner) => {
-                                            service.withdraw_owner(owner)
-                                        }
-                                    }
-                                    .and_then(|()| service.reconcile())
-                                    .and_then(|()| service.wait())
-                                })) {
-                                    Ok(result) => result,
-                                    Err(_) => {
-                                        faulted = true;
-                                        owned
-                                            .admission
-                                            .lock()
-                                            .unwrap()
-                                            .closing
-                                            .get_or_insert_with(Instant::now);
-                                        Err(SaveError::Recovering)
-                                    }
-                                };
-                            operation = match result {
-                                Ok(()) => TuningOperationState::Idle,
-                                Err(SaveError::Recovering) => TuningOperationState::Recovering,
-                                Err(error) => TuningOperationState::Refused { id: 0, error },
-                            };
-                            if let Ok(mut projection) = observed_state.write() {
-                                *projection = service.state().clone();
-                            }
-                            bridge.request_refresh();
-                            let mut next = snapshot(
-                                &service,
-                                service.saved_revision(),
-                                operation.clone(),
-                                observation.clone(),
-                                false,
-                            );
-                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                observe_cards(&mut next, &service)
-                            }))
-                            .is_err()
-                            {
-                                faulted = true;
-                                operation = TuningOperationState::Recovering;
-                                next.operation = operation.clone();
-                                owned
-                                    .admission
-                                    .lock()
-                                    .unwrap()
-                                    .closing
-                                    .get_or_insert_with(Instant::now);
-                            }
-                            let mut admission = owned.admission.lock().unwrap();
-                            admission.pending = false;
-                            *owned.latest.lock().unwrap() = Arc::new(next);
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         }
                     }
-                    let admission = owned.admission.lock().unwrap();
-                    if admission.closing.is_none() && !admission.pending {
-                        let latest = owned.latest.lock().unwrap().clone();
-                        if !Arc::ptr_eq(&latest.observation, &observation) {
-                            drop(admission);
-                            let mut next = snapshot(
-                                &service,
-                                service.saved_revision(),
-                                operation.clone(),
-                                observation,
-                                false,
-                            );
-                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                observe_cards(&mut next, &service)
-                            }))
-                            .is_err()
-                            {
-                                faulted = true;
-                                operation = TuningOperationState::Recovering;
-                                next.operation = operation.clone();
-                                owned
-                                    .admission
-                                    .lock()
-                                    .unwrap()
-                                    .closing
-                                    .get_or_insert_with(Instant::now);
-                            }
-                            let admission = owned.admission.lock().unwrap();
-                            if admission.closing.is_none() && !admission.pending {
-                                *owned.latest.lock().unwrap() = Arc::new(next);
-                            }
-                        }
-                    }
+                }));
+                if result.is_err() {
+                    let mut latest = (**owned.latest.lock().unwrap()).clone();
+                    latest.operation = TuningOperationState::Recovering;
+                    latest.shutdown_outcome = Some(ShutdownResult::Faulted);
+                    latest.shutdown_complete = true;
+                    *owned.latest.lock().unwrap() = Arc::new(latest);
+                    let mut admission = owned.admission.lock().unwrap();
+                    admission.pending = false;
+                    admission.closing.get_or_insert_with(Instant::now);
                 }
             })
             .ok();
-        Self {
-            shared,
-            _worker: worker,
-        }
+        Self { shared, worker }
     }
     pub(crate) fn request(&self, request: TuningRequest) -> Result<u64, SaveError> {
         let mut admission = self.shared.admission.lock().unwrap();
-        if admission.closing.is_some() || self._worker.is_none() {
+        if admission.closing.is_some() || self.worker.is_none() {
             return Err(SaveError::Recovering);
         }
         if admission.pending {
@@ -698,21 +366,20 @@ impl TuningRuntime {
         }
         admission.next = id.checked_add(1);
         admission.pending = true;
-        let mut next = (**self.shared.latest.lock().unwrap()).clone();
-        next.operation = TuningOperationState::Pending { id };
-        *self.shared.latest.lock().unwrap() = Arc::new(next);
+        let mut latest = (**self.shared.latest.lock().unwrap()).clone();
+        latest.operation = TuningOperationState::Pending { id };
+        *self.shared.latest.lock().unwrap() = Arc::new(latest);
         Ok(id)
     }
     pub(crate) fn snapshot(&self) -> Arc<TuningSnapshot> {
         let closing = self.shared.admission.lock().unwrap().closing;
         let latest = self.shared.latest.lock().unwrap().clone();
-        if closing.is_some_and(|started| started.elapsed() >= Duration::from_secs(5))
+        if closing.is_some_and(|t| t.elapsed() >= Duration::from_secs(5))
             && !latest.shutdown_complete
-            && latest.shutdown_outcome.is_none()
         {
-            let mut timed_out = (*latest).clone();
-            timed_out.shutdown_outcome = Some(super::platform::runner::ShutdownResult::TimedOut);
-            Arc::new(timed_out)
+            let mut timed = (*latest).clone();
+            timed.shutdown_outcome = Some(ShutdownResult::TimedOut);
+            Arc::new(timed)
         } else {
             latest
         }
@@ -725,11 +392,24 @@ impl TuningRuntime {
             .closing
             .get_or_insert_with(Instant::now);
     }
+    #[cfg(test)]
+    pub(super) fn expire_shutdown_for_test(&self) {
+        self.shared.admission.lock().unwrap().closing =
+            Some(Instant::now() - Duration::from_secs(6));
+    }
+    #[cfg(test)]
+    pub(super) fn observe_fixture(
+        &self,
+        observation: ExecutionObservation,
+        exited: Vec<(u32, u64)>,
+    ) {
+        *self.shared.fixture.lock().unwrap() = Some((Arc::new(observation), exited));
+    }
     pub(crate) fn poll_interval(&self) -> Option<Duration> {
-        let snapshot = self.snapshot();
-        if snapshot.shutdown_complete {
+        let s = self.snapshot();
+        if s.shutdown_complete {
             None
-        } else if matches!(snapshot.operation, TuningOperationState::Pending { .. })
+        } else if matches!(s.operation, TuningOperationState::Pending { .. })
             || self.shared.admission.lock().unwrap().closing.is_some()
         {
             Some(Duration::from_millis(25))
@@ -745,246 +425,703 @@ impl Drop for TuningRuntime {
 }
 fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), SaveError> {
     match request {
-        TuningRequest::CreateProfile { name } => {
-            service.create_profile(name, vec![])?;
-        }
+        TuningRequest::ModuleAction { feature, action } => service
+            .registry()
+            .get(&feature)
+            .cloned()
+            .ok_or(SaveError::Invalid)?
+            .action(action)
+            .map_err(|e| service.native_failure(e)),
+        TuningRequest::CreateProfile { name } => service.create_profile(name, vec![]).map(|_| ()),
         TuningRequest::SetModulePreference {
             profile,
             preference,
             expected,
-        } => service.set_module_preference(profile, *preference, expected)?,
-        TuningRequest::DisableProfile { profile } => service.disable_profile(profile)?,
-        TuningRequest::RemoveProfile { profile } => service.remove_profile(profile)?,
+        } => service.set_module_preference(profile, *preference, expected),
+        TuningRequest::DisableProfile { profile } => service.disable_profile(profile),
+        TuningRequest::RemoveProfile { profile } => service.remove_profile(profile),
         TuningRequest::BindRule {
             group,
             rule,
             profile,
             eligibility,
-        } => service.bind_rule(group, rule, profile, eligibility)?,
-        TuningRequest::UnbindRule { group, rule } => service.unbind_rule(&group, &rule)?,
+        } => service.bind_rule(group, rule, profile, eligibility),
+        TuningRequest::UnbindRule { group, rule } => service.unbind_rule(&group, &rule),
         TuningRequest::ActivateManual {
             profile,
             feature,
             target,
-        } => {
-            service.activate_manual(profile, feature, target)?;
-        }
+        } => service.activate_manual(profile, feature, target),
         TuningRequest::SaveBase { candidate, .. } => service.save_base(|saved| {
             *saved = *candidate;
             Ok(())
-        })?,
-        TuningRequest::RemoveRule { group, rule } => service.remove_rule(&group, &rule)?,
-        TuningRequest::RemoveGroup { group } => service.remove_group(&group)?,
+        }),
+        TuningRequest::RemoveRule { group, rule } => service.remove_rule(&group, &rule),
+        TuningRequest::RemoveGroup { group } => service.remove_group(&group),
         TuningRequest::MoveRule {
             group,
             rule,
             target,
             index,
-        } => service.move_rule_at(&group, &rule, &target, index)?,
-        TuningRequest::EditRule { group, rule, app } => service.edit_rule(&group, &rule, *app)?,
+        } => service.move_rule_at(&group, &rule, &target, index),
+        TuningRequest::EditRule { group, rule, app } => service.edit_rule(&group, &rule, *app),
     }
-    if matches!(service.state().tuning.decode(), TuningLoad::Known(_)) {
-        let _ = service.start_saved_worker();
-    }
-    if service.snapshot().is_some()
-        && matches!(service.state().tuning.decode(), TuningLoad::Known(_))
+}
+struct Actor {
+    target: TargetIdentity,
+    config: ModuleEnvelope,
+    facts: ProcessFacts,
+    #[cfg(windows)]
+    guard: Option<os_api::tuning::TuningProcessLifetimeGuard>,
+    #[cfg(test)]
+    fixture_lifetime: LifetimeEvidence,
+}
+fn retained_actors(service: &HeadlessTuning) -> BTreeMap<OwnerKey, Actor> {
+    let mut actors = BTreeMap::new();
+    for owner in service
+        .controller
+        .owners()
+        .into_iter()
+        .filter(OwnerKey::is_session)
     {
-        service.reconcile()?;
-        service.wait()?;
-    }
-    Ok(())
-}
-pub(super) fn observe_cards(snapshot: &mut TuningSnapshot, service: &HeadlessTuning) {
-    let targets = service.available_targets();
-    let saved = service.state().tuning.decode();
-    let mut observed = std::collections::BTreeMap::new();
-    for profile in &mut snapshot.profiles {
-        for card in &mut profile.modules {
-            let Some(descriptor) = snapshot.catalog.iter().find(|d| d.id == card.feature) else {
-                continue;
-            };
-            if service.catalog().validate_config(&card.config).is_err() {
-                card.capability =
-                    Capability::Unsupported("Saved configuration codec unavailable".into());
-                continue;
-            }
-            if let TuningLoad::Known(saved) = &saved {
-                let belongs = |intent: &SavedIntent| {
-                    intent.config.feature == card.feature
-                        && intent
-                            .binding
-                            .configured()
-                            .is_some_and(|binding| binding.profile == profile.id)
-                };
-                card.status = if saved.withdrawals.iter().any(belongs) {
-                    Some(ModuleStatus::Restoring)
-                } else if saved
-                    .transitions
-                    .iter()
-                    .flatten()
-                    .any(|transition| belongs(&transition.old) || belongs(&transition.new))
-                {
-                    Some(ModuleStatus::Applying)
-                } else if card.enabled {
-                    snapshot.runner.as_ref().and_then(|runner| {
-                        runner
-                            .coordinator
-                            .owners
-                            .iter()
-                            .find(|owner| {
-                                owner.source == card.feature
-                                    && owner.mode == card.mode
-                                    && owner.config.as_deref() == Some(&card.config)
-                                    && saved.activations.iter().any(|intent| {
-                                        belongs(intent)
-                                            && intent.owner == owner.owner
-                                            && intent.binding == owner.binding
-                                            && intent.target == owner.target
-                                            && intent.mode == owner.mode
-                                            && owner.config.as_deref() == Some(&intent.config)
-                                    })
-                            })
-                            .map(|owner| {
-                                let projection =
-                                    fresh_owner_observation(service, &runner.coordinator, owner);
-                                let status = match &projection {
-                                    Ok((status, _)) => *status,
-                                    Err(super::platform::catalog::CatalogError::Module(error))
-                                        if error.kind == ErrorKind::Denied =>
-                                    {
-                                        ModuleStatus::PermissionDenied
-                                    }
-                                    Err(super::platform::catalog::CatalogError::Module(error))
-                                        if error.kind == ErrorKind::Unsupported =>
-                                    {
-                                        ModuleStatus::Unsupported
-                                    }
-                                    Err(_) => ModuleStatus::RecoveryRequired,
-                                };
-                                observed.insert(
-                                    (owner.source.clone(), owner.target.clone()),
-                                    projection.map(|(_, summary)| summary),
-                                );
-                                status
-                            })
-                    })
-                } else {
-                    None
-                };
-            }
-            for target in &targets {
-                if !descriptor.target_scopes.contains(&target.scope())
-                    || card
-                        .config
-                        .target
-                        .as_ref()
-                        .is_some_and(|expected| expected != target)
-                {
-                    continue;
-                }
-                let result = observed
-                    .entry((card.feature.clone(), target.clone()))
-                    .or_insert_with(|| service.catalog().observe(&card.feature, target));
-                match result {
-                    Ok(summary) => {
-                        card.capability = Capability::Available;
-                        card.targets.push(target.clone());
-                        card.observed = Some(summary.clone());
-                    }
-                    Err(super::platform::catalog::CatalogError::Module(error))
-                        if error.kind == ErrorKind::Denied =>
-                    {
-                        card.capability = Capability::Denied("Observation denied".into());
-                    }
-                    Err(_) => {
-                        card.capability = Capability::Unsupported("Observation unavailable".into());
-                    }
-                }
-            }
-        }
-    }
-}
-fn fresh_owner_observation(
-    service: &HeadlessTuning,
-    retained: &super::platform::coordinator::CoordinatorSnapshot,
-    owner: &super::platform::coordinator::OwnerView,
-) -> Result<(ModuleStatus, ObservationSummary), super::platform::catalog::CatalogError> {
-    let (summary, current) =
-        service
-            .catalog()
-            .observe_with_resources(&owner.source, &owner.target, &owner.resources)?;
-    for observed in current {
-        let Some(expected) = retained.resources.iter().find(|resource| {
-            resource.key == observed.key && resource.owners.contains(&owner.owner)
-        }) else {
-            return Ok((ModuleStatus::RecoveryRequired, summary));
+        let Some(record) = service.controller.owner_record(&owner) else {
+            continue;
         };
-        if observed.value != expected.confirmed {
-            return Ok((ModuleStatus::ExternalChange, summary));
+        let Some(activation) = &record.activation else {
+            continue;
+        };
+        let Some(target) = service.controller.target(&owner) else {
+            continue;
+        };
+        #[cfg(windows)]
+        let native = os_api::OS::tuning_process_identity(activation.pid)
+            .ok()
+            .filter(|native| {
+                native.creation_time() == activation.token
+                    && native.image_path() == activation.image
+            })
+            .map(Arc::new);
+        #[cfg(windows)]
+        let guard = native
+            .as_ref()
+            .and_then(|native| os_api::OS::tuning_open_process_lifetime(native).ok());
+        let facts = ProcessFacts {
+            pid: activation.pid,
+            token: activation.token,
+            image: Arc::from(activation.image.as_str()),
+            #[cfg(windows)]
+            native,
+        };
+        actors.insert(
+            owner,
+            Actor {
+                target,
+                config: record.config.clone(),
+                facts,
+                #[cfg(windows)]
+                guard,
+                #[cfg(test)]
+                fixture_lifetime: LifetimeEvidence::Unknown,
+            },
+        );
+    }
+    actors
+}
+impl Actor {
+    fn lifetime(&mut self) -> LifetimeEvidence {
+        #[cfg(windows)]
+        if let Some(guard) = &mut self.guard {
+            return match guard.poll() {
+                Ok(os_api::tuning::TuningProcessLifetime::VerifiedLive) => LifetimeEvidence::Live,
+                Ok(os_api::tuning::TuningProcessLifetime::PositivelyExited) => {
+                    LifetimeEvidence::Exited
+                }
+                _ => LifetimeEvidence::Unknown,
+            };
         }
-        if !expected.possible.is_empty() {
-            return Ok((ModuleStatus::RecoveryRequired, summary));
+        #[cfg(test)]
+        return self.fixture_lifetime;
+        #[cfg(not(test))]
+        LifetimeEvidence::Unknown
+    }
+}
+fn worker_observation(
+    shared: &Shared,
+    bridge: &ExecutionBridge,
+    actors: &mut BTreeMap<OwnerKey, Actor>,
+) -> Arc<ExecutionObservation> {
+    #[cfg(test)]
+    if let Some((observation, exited)) = shared.fixture.lock().unwrap().as_ref() {
+        for (owner, actor) in actors {
+            actor.fixture_lifetime = if matches!(owner,OwnerKey::Session{pid,token,..} if exited.contains(&(*pid,*token)))
+            {
+                LifetimeEvidence::Exited
+            } else {
+                LifetimeEvidence::Unknown
+            };
+        }
+        return observation.clone();
+    }
+    #[cfg(not(test))]
+    let _ = (shared, actors);
+    bridge.latest()
+}
+fn reconcile_sessions(
+    service: &mut HeadlessTuning,
+    observation: &ExecutionObservation,
+    actors: &mut BTreeMap<OwnerKey, Actor>,
+) {
+    if !service.native_admitted || service.legacy_recovery {
+        return;
+    }
+    let config = match service.state().tuning.decode() {
+        TuningLoad::Known(config) => config,
+        TuningLoad::Off if service.controller.owners().is_empty() => return,
+        TuningLoad::Off => Box::new(TuningConfig::default()),
+        _ => return,
+    };
+    if service.verify_saved().is_err() {
+        return;
+    }
+    let mut desired = BTreeMap::new();
+    let complete = observation.matches_state(service.state());
+    if let ExecutionObservation::Complete {
+        members,
+        foreground,
+        ..
+    } = observation
+    {
+        if complete {
+            for association in &config.associations {
+                let Some(profile) = config.profiles.iter().find(|p| p.id == association.profile)
+                else {
+                    continue;
+                };
+                for member in members
+                    .iter()
+                    .filter(|m| m.group == association.group && m.rule == association.rule)
+                {
+                    for facts in &member.instances {
+                        for preference in profile
+                            .modules
+                            .iter()
+                            .filter(|m| m.enabled && m.mode != ActivationMode::Manual)
+                        {
+                            let foreground_only = preference.mode
+                                == ActivationMode::ForegroundSession
+                                || association.eligibility == ActivationEligibility::Foreground;
+                            if foreground_only
+                                && (foreground.pid != facts.pid
+                                    || foreground.token != facts.token
+                                    || foreground.image != facts.image)
+                            {
+                                continue;
+                            }
+                            let Some(module) = service.registry().get(&preference.feature) else {
+                                continue;
+                            };
+                            let target = if module
+                                .descriptor()
+                                .target_scopes
+                                .contains(&TargetScope::Process)
+                            {
+                                Some(TargetIdentity::Process {
+                                    pid: facts.pid,
+                                    creation_token: facts.token,
+                                    image_path: facts.image.to_string(),
+                                })
+                            } else {
+                                module.targets().into_iter().next()
+                            };
+                            let Some(target) = target else {
+                                continue;
+                            };
+                            let owner = OwnerKey::Session {
+                                profile: profile.id,
+                                feature: preference.feature.clone(),
+                                group: member.group.0.clone(),
+                                rule: member.rule.0.clone(),
+                                pid: facts.pid,
+                                token: facts.token,
+                            };
+                            desired.insert(
+                                owner,
+                                (
+                                    target,
+                                    preference.config.clone(),
+                                    facts.clone(),
+                                    if foreground_only {
+                                        ActivationEligibility::Foreground
+                                    } else {
+                                        ActivationEligibility::Running
+                                    },
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
-    Ok((owner.status, summary))
+    let existing: Vec<_> = actors.keys().cloned().collect();
+    for owner in existing {
+        let actor = actors.get_mut(&owner).unwrap();
+        let preference = config
+            .profiles
+            .iter()
+            .find(|p| p.id == owner.profile())
+            .and_then(|p| {
+                p.modules.iter().find(|m| {
+                    m.enabled && m.mode != ActivationMode::Manual && &m.feature == owner.feature()
+                })
+            });
+        let association=config.associations.iter().find(|a|a.profile==owner.profile() && matches!(&owner,OwnerKey::Session{group,rule,..} if &a.group.0==group && &a.rule.0==rule));
+        let still_configured = preference.is_some() && association.is_some();
+        let foreground_only = preference
+            .is_some_and(|m| m.mode == ActivationMode::ForegroundSession)
+            || association.is_some_and(|a| a.eligibility == ActivationEligibility::Foreground);
+        let foreground_lost = complete
+            && foreground_only
+            && matches!(observation,ExecutionObservation::Complete{foreground,..} if foreground.pid!=actor.facts.pid || foreground.token!=actor.facts.token || foreground.image!=actor.facts.image);
+        let release = !still_configured || foreground_lost;
+        let lifetime = actor.lifetime();
+        let released = if lifetime == LifetimeEvidence::Exited {
+            service.controller.release_if_exited(&owner, lifetime)
+        } else if release {
+            service
+                .controller
+                .recover_owner(&owner, RecoveryIntent::Restore)
+                .map(|_| true)
+        } else {
+            if service.controller.needs_recovery(&owner) {
+                let present = complete
+                    && matches!(observation,ExecutionObservation::Complete{members,..} if members.iter().any(|member|matches!(&owner,OwnerKey::Session{group,rule,..} if &member.group.0==group && &member.rule.0==rule) && member.instances.iter().any(|facts|facts.pid==actor.facts.pid && facts.token==actor.facts.token && facts.image==actor.facts.image)));
+                let matching =
+                    preference.is_some_and(|preference| preference.config == actor.config);
+                let intent = if !matching {
+                    RecoveryIntent::Restore
+                } else if present
+                    && (lifetime == LifetimeEvidence::Live || !service.has_saved_source())
+                {
+                    RecoveryIntent::Keep
+                } else {
+                    RecoveryIntent::Unknown
+                };
+                if let Err(error) = service.controller.recover_owner(&owner, intent) {
+                    service.native_failure(error);
+                }
+                if intent == RecoveryIntent::Restore
+                    && !service.controller.owners().contains(&owner)
+                {
+                    actors.remove(&owner);
+                }
+            }
+            Ok(false)
+        };
+        if released == Ok(true) {
+            actors.remove(&owner);
+        }
+    }
+    if !complete {
+        return;
+    }
+    for (owner, (target, config, facts, trigger)) in desired {
+        if let Some(actor) = actors.get(&owner) {
+            if actor.target == target
+                && actor.config == config
+                && service
+                    .controller
+                    .owner_record(&owner)
+                    .and_then(|record| record.activation.as_ref())
+                    .is_some_and(|activation| activation.trigger == trigger)
+            {
+                continue;
+            }
+        }
+        if !service.controller.can_admit() {
+            continue;
+        }
+        let Some(module) = service.registry().get(owner.feature()).cloned() else {
+            continue;
+        };
+        #[cfg(windows)]
+        let guard = if actors.contains_key(&owner) {
+            None
+        } else {
+            match &facts.native {
+                Some(native) => match os_api::OS::tuning_open_process_lifetime(native) {
+                    Ok(guard) => Some(guard),
+                    Err(_) => continue,
+                },
+                None => None,
+            }
+        };
+        let activation = ActivationFacts {
+            pid: facts.pid,
+            token: facts.token,
+            image: facts.image.to_string(),
+            trigger,
+        };
+        let result = service.controller.acquire_session(
+            owner.clone(),
+            module,
+            target.clone(),
+            config.clone(),
+            activation,
+        );
+        let acquired = result.is_ok();
+        if let Err(error) = result {
+            service.native_failure(error);
+        }
+        if acquired || service.controller.owners().contains(&owner) {
+            if let Some(actor) = actors.get_mut(&owner) {
+                actor.target = target;
+                actor.config = config;
+            } else {
+                actors.insert(
+                    owner,
+                    Actor {
+                        target,
+                        config,
+                        facts,
+                        #[cfg(windows)]
+                        guard,
+                        #[cfg(test)]
+                        fixture_lifetime: LifetimeEvidence::Unknown,
+                    },
+                );
+            }
+        }
+    }
 }
-pub(super) fn snapshot(
+fn snapshot(
     service: &HeadlessTuning,
-    revision: u64,
     operation: TuningOperationState,
     observation: Arc<ExecutionObservation>,
     shutdown_complete: bool,
+    shutdown_outcome: Option<ShutdownResult>,
+    observe: bool,
 ) -> TuningSnapshot {
-    let (configuration, profiles, associations) = match service.state().tuning.decode() {
-        TuningLoad::Off => (TuningConfigurationState::Off, vec![], vec![]),
-        TuningLoad::Unknown => (TuningConfigurationState::Unknown, vec![], vec![]),
-        TuningLoad::Blocked => (TuningConfigurationState::Blocked, vec![], vec![]),
-        TuningLoad::Known(config) => (
-            TuningConfigurationState::Known,
-            config
-                .profiles
+    let load = service.state().tuning.decode();
+    let mut profiles = Vec::new();
+    let mut associations = Vec::new();
+    let configuration = match &load {
+        TuningLoad::Off => TuningConfigurationState::Off,
+        TuningLoad::Known(_) => TuningConfigurationState::Known,
+        TuningLoad::Unknown => TuningConfigurationState::Unknown,
+        TuningLoad::Blocked => TuningConfigurationState::Blocked,
+    };
+    let mut templates = BTreeMap::new();
+    let mut readonly_cards = Vec::new();
+    for descriptor in service.registry().descriptors() {
+        let module = service.registry().get(&descriptor.id).unwrap();
+        let targets = if !observe || descriptor.target_scopes.contains(&TargetScope::Process) {
+            vec![]
+        } else {
+            module
+                .targets()
                 .into_iter()
-                .map(|p| ProfileCard {
-                    id: p.id,
-                    name: p.name,
-                    modules: p
-                        .modules
-                        .into_iter()
-                        .map(|m| ModuleCard {
-                            title: service
-                                .catalog()
-                                .descriptors()
-                                .find(|d| d.id == m.feature)
-                                .map_or_else(|| "Unavailable module".into(), |d| d.title.into()),
-                            feature: m.feature,
-                            enabled: m.enabled,
-                            mode: m.mode,
-                            config: m.config,
-                            status: None,
-                            capability: Capability::Unsupported(
-                                "Verified target unavailable".into(),
-                            ),
-                            targets: vec![],
-                            observed: None,
+                .filter(TargetIdentity::valid)
+                .take(256)
+                .collect()
+        };
+        let observed =
+            observe.then(|| module.observe(targets.first().unwrap_or(&TargetIdentity::Machine)));
+        let capability = observed.as_ref().map_or_else(
+            || Capability::Unsupported("No verified target".into()),
+            |o| o.capability.clone(),
+        );
+        let card = ModuleCard {
+            feature: descriptor.id.clone(),
+            title: descriptor.title.into(),
+            enabled: false,
+            mode: ActivationMode::Manual,
+            config: module.editor().default_config(),
+            status: Some(ModuleStatus::Unmanaged),
+            capability,
+            targets,
+            observed: observed.map(|o| ObservationSummary {
+                summary: o.summary.summary,
+                effect: o.effect,
+            }),
+        };
+        if descriptor.access == ModuleAccess::ReadOnly {
+            readonly_cards.push(card.clone());
+        }
+        templates.insert(descriptor.id, card);
+    }
+    if let TuningLoad::Known(config) = load {
+        associations = config.associations;
+        for profile in config.profiles {
+            let mut modules = Vec::new();
+            for preference in profile.modules {
+                let mut card = templates
+                    .get(&preference.feature)
+                    .cloned()
+                    .unwrap_or(ModuleCard {
+                        feature: preference.feature.clone(),
+                        title: preference.feature.as_str().into(),
+                        enabled: false,
+                        mode: preference.mode,
+                        config: preference.config.clone(),
+                        status: Some(ModuleStatus::Unsupported),
+                        capability: Capability::Unsupported("Module unavailable".into()),
+                        targets: vec![],
+                        observed: None,
+                    });
+                card.enabled = preference.enabled;
+                card.mode = preference.mode;
+                card.config = preference.config;
+                if let (Some(module), ExecutionObservation::Complete { members, .. }) = (
+                    service.registry().get(&card.feature).filter(|module| {
+                        observe
+                            && observation.matches_state(service.state())
+                            && module
+                                .descriptor()
+                                .target_scopes
+                                .contains(&TargetScope::Process)
+                    }),
+                    observation.as_ref(),
+                ) {
+                    card.targets = members
+                        .iter()
+                        .filter(|member| {
+                            associations.iter().any(|association| {
+                                association.profile == profile.id
+                                    && association.group == member.group
+                                    && association.rule == member.rule
+                            })
                         })
-                        .collect(),
-                })
-                .collect(),
-            config.associations,
-        ),
+                        .flat_map(|member| &member.instances)
+                        .take(256)
+                        .map(|facts| TargetIdentity::Process {
+                            pid: facts.pid,
+                            creation_token: facts.token,
+                            image_path: facts.image.to_string(),
+                        })
+                        .collect();
+                    if let Some(target @ TargetIdentity::Process { pid, .. }) = card.targets.first()
+                    {
+                        let observed = module.observe(target);
+                        card.capability = observed.capability;
+                        card.observed = Some(ObservationSummary {
+                            summary: format!("PID {pid}: {}", observed.summary.summary),
+                            effect: observed.effect,
+                        });
+                    }
+                }
+                if service.registry().validate_config(&card.config).is_err() {
+                    card.capability =
+                        Capability::Unsupported("Saved configuration unavailable".into());
+                }
+                let owners = service.controller.owners();
+                if card.enabled
+                    || owners.iter().any(|owner| {
+                        owner.profile() == profile.id && owner.feature() == &card.feature
+                    })
+                {
+                    if let Some(status) = service.controller.status_for(profile.id, &card.feature) {
+                        card.status = Some(status);
+                    }
+                }
+                if service.legacy_recovery {
+                    card.status = Some(ModuleStatus::RecoveryRequired);
+                }
+                modules.push(card);
+            }
+            profiles.push(ProfileCard {
+                id: profile.id,
+                name: profile.name,
+                modules,
+            });
+        }
+    }
+    let operation = if service.legacy_recovery && matches!(operation, TuningOperationState::Idle) {
+        TuningOperationState::Recovering
+    } else {
+        operation
     };
     TuningSnapshot {
-        revision,
+        revision: service.saved_revision(),
         configuration,
         profiles,
         associations,
-        catalog: service.catalog().descriptors().cloned().collect(),
+        catalog: service.registry().descriptors().collect(),
         operation,
-        runner: service.snapshot(),
-        observation,
+        readonly_cards,
+        restoration_effect: service.controller.restoration_effect,
+        operation_error: service
+            .operation_error
+            .clone()
+            .or_else(|| service.controller.error()),
         shutdown_complete,
-        shutdown_outcome: None,
+        shutdown_outcome,
         state: Arc::new(service.state().clone()),
         rules: service.rules().clone(),
+    }
+}
+
+#[cfg(test)]
+mod card_tests {
+    use super::*;
+    use crate::app::features::tuning::{
+        platform::registry::{FieldChange, Module, ModuleObservation, Registry},
+        presentation::ModuleEditor,
+        simple_tests::Setting,
+    };
+
+    struct ProcessCard(Arc<Setting>);
+    impl Module for ProcessCard {
+        fn descriptor(&self) -> ModuleDescriptor {
+            let mut descriptor = self.0.descriptor();
+            descriptor.target_scopes = vec![TargetScope::Process];
+            descriptor
+        }
+        fn editor(&self) -> &dyn ModuleEditor {
+            self.0.editor()
+        }
+        fn targets(&self) -> Vec<TargetIdentity> {
+            vec![]
+        }
+        fn observe(&self, target: &TargetIdentity) -> ModuleObservation {
+            ModuleObservation {
+                capability: if matches!(target, TargetIdentity::Process { .. }) {
+                    Capability::Available
+                } else {
+                    Capability::Unsupported("No process".into())
+                },
+                summary: ObservationSummary {
+                    summary: format!("{target:?}"),
+                    effect: Effect::Immediate,
+                },
+                effect: Effect::Immediate,
+            }
+        }
+        fn fields(
+            &self,
+            target: &TargetIdentity,
+            config: &ModuleEnvelope,
+        ) -> Result<Vec<FieldChange>, ModuleError> {
+            self.0.fields(target, config)
+        }
+        fn read(&self, key: &ResourceKey) -> Result<Vec<u8>, ModuleError> {
+            self.0.read(key)
+        }
+        fn write(
+            &self,
+            key: &ResourceKey,
+            expected: &[u8],
+            desired: &[u8],
+        ) -> Result<(), ModuleError> {
+            self.0.write(key, expected, desired)
+        }
+    }
+    struct NoSave;
+    impl super::super::StatePersistence for NoSave {
+        fn save(
+            &mut self,
+            _: &mut AppStateStorage,
+        ) -> Result<super::super::service::SavedState, SaveError> {
+            Ok(super::super::service::SavedState::Unavailable)
+        }
+    }
+
+    #[test]
+    fn simple_ui_process_card_observes_only_its_profiles_associated_rule() {
+        use crate::app::models::CoreGroup;
+        let setting = Setting::new("process_card", false);
+        let mut registry = Registry::default();
+        registry
+            .register(Arc::new(ProcessCard(setting.clone())))
+            .unwrap();
+        let apps = ["first", "second"].map(|name| {
+            AppToRun::new_installed(
+                name.into(),
+                name.into(),
+                os_api::PriorityClass::Normal,
+                false,
+            )
+        });
+        let state = AppStateStorage::test_fixture(|state| {
+            state.groups = vec![CoreGroup {
+                name: "Games".into(),
+                cores: vec![],
+                programs: apps.to_vec(),
+                is_hidden: false,
+                run_all_button: false,
+            }];
+            state.rule_identities = None;
+        });
+        let mut service =
+            super::super::Tuning::from_registry(registry).headless(state, Box::new(NoSave));
+        let group = service.rules().group_id_for_index(0).unwrap();
+        let rules = [0, 1].map(|index| service.rules().rule_id_for_index(0, index).unwrap());
+        let profile = service
+            .create_profile(
+                "Second game".into(),
+                vec![ModulePreference {
+                    feature: setting.descriptor().id,
+                    enabled: true,
+                    mode: ActivationMode::Session,
+                    config: setting.config(12),
+                }],
+            )
+            .unwrap();
+        service
+            .bind_rule(
+                group.clone(),
+                rules[1].clone(),
+                profile,
+                ActivationEligibility::Running,
+            )
+            .unwrap();
+        let facts = [41, 42].map(|pid| ProcessFacts {
+            pid,
+            token: pid as u64 + 100,
+            image: Arc::from(format!("game{pid}.exe")),
+            #[cfg(windows)]
+            native: None,
+        });
+        let observation = ExecutionObservation::fixture(
+            service.state(),
+            1,
+            (0..2)
+                .map(|index| Member {
+                    key: apps[index].get_key(),
+                    group: group.clone(),
+                    rule: rules[index].clone(),
+                    instances: vec![facts[index].clone()],
+                })
+                .collect(),
+            facts[0].clone(),
+        );
+        let result = snapshot(
+            &service,
+            TuningOperationState::Idle,
+            Arc::new(observation),
+            false,
+            None,
+            true,
+        );
+        let card = &result.profiles[0].modules[0];
+        assert_eq!(
+            card.targets,
+            vec![TargetIdentity::Process {
+                pid: 42,
+                creation_token: 142,
+                image_path: "game42.exe".into(),
+            }],
+            "a profile must not show another game's targets"
+        );
+        assert!(card.observed.as_ref().unwrap().summary.contains("42"));
+        let unknown = snapshot(
+            &service,
+            TuningOperationState::Idle,
+            Arc::new(ExecutionObservation::Unknown(UnknownReason::Unavailable)),
+            false,
+            None,
+            true,
+        );
+        assert!(unknown.profiles[0].modules[0].targets.is_empty());
     }
 }

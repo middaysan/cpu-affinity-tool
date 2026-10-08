@@ -1,9 +1,11 @@
 use crate::app::features::execution::MonitorEventSender;
 use crate::app::features::execution::RunningAppStatusCache;
 use crate::app::features::rules::RulesContext;
+use crate::app::features::tuning::modules::managed::scheduling::fields_for_rule;
 use crate::app::models::{AppRuntimeKey, AppStateStorage, AppStatus, RunningApps};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::events::ShellEvent;
+use os_api::gaming::ProcessSettingsFields;
 use os_api::{PriorityClass, ProcessSettingsApplyOutcome, OS};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -16,6 +18,7 @@ struct ProgramRuntimeSettings {
     rule_id: RuleId,
     expected_mask: usize,
     expected_priority: PriorityClass,
+    fields: ProcessSettingsFields,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -25,12 +28,13 @@ struct ProcessSettingsIterationOutcome {
 }
 
 trait ProcessSettingsOs {
-    fn apply_process_settings_if_instance(
+    fn apply_process_fields_if_instance(
         &mut self,
         pid: u32,
         expected_instance_token: u64,
         mask: usize,
         priority: PriorityClass,
+        fields: ProcessSettingsFields,
         apply_changes: bool,
     ) -> Result<ProcessSettingsApplyOutcome, String>;
 }
@@ -38,19 +42,21 @@ trait ProcessSettingsOs {
 struct RealProcessSettingsOs;
 
 impl ProcessSettingsOs for RealProcessSettingsOs {
-    fn apply_process_settings_if_instance(
+    fn apply_process_fields_if_instance(
         &mut self,
         pid: u32,
         expected_instance_token: u64,
         mask: usize,
         priority: PriorityClass,
+        fields: ProcessSettingsFields,
         apply_changes: bool,
     ) -> Result<ProcessSettingsApplyOutcome, String> {
-        OS::apply_process_settings_if_instance(
+        OS::apply_process_fields_if_instance(
             pid,
             expected_instance_token,
             mask,
             priority,
+            fields,
             apply_changes,
         )
     }
@@ -126,10 +132,6 @@ fn collect_program_settings(
     let mut settings = HashMap::new();
     let rules = RulesContext::from_storage(state);
     for (group_index, group) in state.groups.iter().enumerate() {
-        let Ok(expected_mask) = affinity_mask_from_cores(&group.cores) else {
-            continue;
-        };
-
         let group_id = rules
             .group_id_for_index(group_index)
             .expect("group identity");
@@ -137,6 +139,14 @@ fn collect_program_settings(
             let rule_id = rules
                 .rule_id_for_index(group_index, rule_index)
                 .expect("rule identity");
+            let fields = fields_for_rule(state, &group_id, &rule_id);
+            let Ok(expected_mask) = (if fields.affinity {
+                affinity_mask_from_cores(&group.cores)
+            } else {
+                Ok(0)
+            }) else {
+                continue;
+            };
             settings.insert(
                 app.get_key(),
                 ProgramRuntimeSettings {
@@ -145,6 +155,7 @@ fn collect_program_settings(
                     rule_id,
                     expected_mask,
                     expected_priority: app.priority,
+                    fields,
                 },
             );
         }
@@ -188,6 +199,7 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
     monitoring_enabled: bool,
     os: &mut O,
 ) -> ProcessSettingsIterationOutcome {
+    let scheduling = apps.scheduling.clone();
     apps.mutate_membership(|apps| {
         let mut outcome = ProcessSettingsIterationOutcome::default();
 
@@ -204,11 +216,24 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
                         continue;
                     };
 
-                    match os.apply_process_settings_if_instance(
+                    let fields = match scheduling.select(
+                        pid,
+                        instance_token,
+                        settings.fields,
+                        monitoring_enabled,
+                    ) {
+                        Ok(fields) => fields,
+                        Err(_) => {
+                            all_matched = false;
+                            continue;
+                        }
+                    };
+                    match os.apply_process_fields_if_instance(
                         pid,
                         instance_token,
                         settings.expected_mask,
                         settings.expected_priority,
+                        fields,
                         monitoring_enabled,
                     ) {
                         Ok(applied) if applied.affinity_changed || applied.priority_changed => {
@@ -286,12 +311,13 @@ mod tests {
     }
 
     impl ProcessSettingsOs for FakeProcessSettingsOs {
-        fn apply_process_settings_if_instance(
+        fn apply_process_fields_if_instance(
             &mut self,
             pid: u32,
             expected_instance_token: u64,
             mask: usize,
             priority: PriorityClass,
+            fields: os_api::gaming::ProcessSettingsFields,
             apply_changes: bool,
         ) -> Result<ProcessSettingsApplyOutcome, String> {
             if self.tokens.get(&pid).copied() != Some(expected_instance_token) {
@@ -307,8 +333,8 @@ mod tests {
                 .get(&pid)
                 .copied()
                 .ok_or_else(|| format!("missing priority for pid {pid}"))?;
-            let affinity_changed = previous_affinity != mask;
-            let priority_changed = previous_priority != priority;
+            let affinity_changed = fields.affinity && previous_affinity != mask;
+            let priority_changed = fields.priority && previous_priority != priority;
             if apply_changes && affinity_changed {
                 self.affinity.insert(pid, mask);
                 self.affinity_sets.push((pid, mask));
@@ -397,6 +423,61 @@ mod tests {
             .pid_instance_tokens
             .insert(pid, token);
         os.tokens.insert(pid, token);
+    }
+
+    #[test]
+    fn handoff_monitor_skips_module_fields_before_first_baseline() {
+        use crate::app::features::{
+            rules::RulesContext,
+            tuning::{
+                config::{Association, ModulePreference, Profile, TuningConfig, TuningEnvelope},
+                modules::managed,
+                platform::contract::{ActivationEligibility, ActivationMode, ProfileId},
+            },
+        };
+        let mut state = sample_state();
+        let rules = RulesContext::from_storage(&state);
+        state.rule_identities = Some(rules.to_persisted_identities());
+        let profile = ProfileId::new(1).unwrap();
+        let modules = managed::modules()
+            .into_iter()
+            .filter(|m| ["cpu_sets", "process_priority"].contains(&m.descriptor().id.as_str()))
+            .map(|m| ModulePreference {
+                feature: m.descriptor().id,
+                enabled: true,
+                mode: ActivationMode::ForegroundSession,
+                config: m.editor().default_config(),
+            })
+            .collect();
+        state.tuning = TuningEnvelope::from_config(&TuningConfig {
+            profiles: vec![Profile {
+                version: 1,
+                id: profile,
+                name: "Game".into(),
+                modules,
+            }],
+            associations: vec![Association {
+                version: 1,
+                group: rules.group_id_for_index(1).unwrap(),
+                rule: rules.rule_id_for_index(1, 0).unwrap(),
+                profile,
+                eligibility: ActivationEligibility::Foreground,
+            }],
+            next_profile: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        let key = state.groups[1].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        apps.add_app(&key, 323, group_id(1), rule_id(0));
+        let mut os = FakeProcessSettingsOs::new(
+            HashMap::from([(323, 1)]),
+            HashMap::from([(323, PriorityClass::Normal)]),
+        );
+        seed_tracked_instance(&mut apps, &key, 323, &mut os);
+        process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
+        assert!(os.affinity_sets.is_empty());
+        assert!(os.priority_sets.is_empty());
     }
 
     #[test]

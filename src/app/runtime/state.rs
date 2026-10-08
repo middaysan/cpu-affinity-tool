@@ -183,12 +183,12 @@ pub struct AppState {
     windows_event_log_disabled_for_session: bool,
     shortcut_creation_role: ShortcutCreationRole,
     tuning: TuningRuntime,
-    tuning_editors: crate::app::features::tuning::presentation::EditorRegistry,
+    tuning_editors: crate::app::features::tuning::platform::registry::Registry,
     tuning_adopted_revision: u64,
     tuning_seen: Option<Arc<TuningSnapshot>>,
     pending_legacy: Option<PendingLegacy>,
     tuning_shutdown_reported:
-        Option<crate::app::features::tuning::platform::runner::ShutdownResult>,
+        Option<crate::app::features::tuning::platform::controller::ShutdownResult>,
     #[cfg(test)]
     save_count: usize,
 }
@@ -217,8 +217,14 @@ impl AppState {
             .read()
             .expect("newly created state lock")
             .clone();
+        let registered = Tuning::from_registry(
+            crate::app::features::tuning::modules::registry_with_scheduling(
+                runtime.scheduling_handle(),
+            ),
+        );
+        let tuning_editors = registered.registry().clone();
         let tuning = TuningRuntime::start(
-            Tuning::default().headless_selected(saved),
+            registered.headless_selected(saved),
             runtime.running_apps_handle(),
         );
         Self {
@@ -227,7 +233,7 @@ impl AppState {
             ui: UiSession::new(effective_total_threads()),
             runtime,
             tuning,
-            tuning_editors: Default::default(),
+            tuning_editors,
             tuning_adopted_revision: 0,
             tuning_seen: None,
             pending_legacy: None,
@@ -264,8 +270,10 @@ impl AppState {
             .read()
             .expect("newly created state lock")
             .clone();
+        let registered = Tuning::from_registry(Default::default());
+        let tuning_editors = registered.registry().clone();
         let tuning = TuningRuntime::start(
-            Tuning::default().headless(saved, Box::new(TestStatePersistence)),
+            registered.headless(saved, Box::new(TestStatePersistence)),
             runtime.running_apps_handle(),
         );
         Self {
@@ -274,7 +282,7 @@ impl AppState {
             ui: UiSession::new(total_threads),
             runtime,
             tuning,
-            tuning_editors: Default::default(),
+            tuning_editors,
             tuning_adopted_revision: 0,
             tuning_seen: None,
             pending_legacy: None,
@@ -300,14 +308,14 @@ impl AppState {
     }
     pub(crate) fn tuning_editors(
         &self,
-    ) -> &crate::app::features::tuning::presentation::EditorRegistry {
+    ) -> &crate::app::features::tuning::platform::registry::Registry {
         &self.tuning_editors
     }
     #[cfg(test)]
     pub(crate) fn replace_tuning_for_test(
         &mut self,
         runtime: TuningRuntime,
-        editors: crate::app::features::tuning::presentation::EditorRegistry,
+        editors: crate::app::features::tuning::platform::registry::Registry,
     ) {
         let snapshot = runtime.snapshot();
         *self.persistent_state.write().unwrap() = (*snapshot.state).clone();
@@ -377,7 +385,7 @@ impl AppState {
     }
     pub(crate) fn tuning_shutdown_outcome(
         &self,
-    ) -> Option<crate::app::features::tuning::platform::runner::ShutdownResult> {
+    ) -> Option<crate::app::features::tuning::platform::controller::ShutdownResult> {
         self.tuning.snapshot().shutdown_outcome
     }
 
@@ -1949,7 +1957,8 @@ mod tests {
         let mut app = sample_state();
         let state = app.persistent_state.read().unwrap().clone();
         let runtime = TuningRuntime::start(
-            crate::app::features::tuning::Tuning::default().headless(state, Box::new(Failing)),
+            crate::app::features::tuning::Tuning::from_registry(Default::default())
+                .headless(state, Box::new(Failing)),
             app.runtime.running_apps_handle(),
         );
         app.replace_tuning_for_test(runtime, Default::default());
@@ -2121,7 +2130,7 @@ mod tests {
         let mut saved = app.persistent_state.read().unwrap().clone();
         saved.mark_ready_for_current_schema_save(app.rules.to_persisted_identities());
         let runtime = crate::app::features::tuning::TuningRuntime::start(
-            crate::app::features::tuning::Tuning::default()
+            crate::app::features::tuning::Tuning::from_registry(Default::default())
                 .headless(saved, Box::new(super::TestStatePersistence)),
             app.runtime.running_apps_handle(),
         );

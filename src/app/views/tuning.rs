@@ -4,7 +4,10 @@ use crate::app::{
         platform::contract::{
             ActivationMode, Capability, ModuleAccess, ModuleDescriptor, ModuleStatus, ProfileId,
         },
-        presentation::{card_controls, mode_label, scope_label, status_label, EditorDraft},
+        presentation::{
+            card_controls, edit_configuration, mode_label, preference_with_enabled, scope_label,
+            status_label, EditorDraft,
+        },
         SaveError, TuningConfigurationState, TuningOperationState, TuningRequest,
     },
     runtime::AppState,
@@ -83,6 +86,9 @@ pub(crate) fn draw_tuning(app: &mut AppState, root_ui: &mut egui::Ui) {
         if let Some(error) = app.ui.tuning.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
+        if let Some(error) = &snapshot.operation_error {
+            draw_operation_error(ui, error);
+        }
         if !editable {
             ui.label("Saved module settings cannot be understood by this version. They are retained and read-only.");
             return;
@@ -137,7 +143,7 @@ pub(crate) fn draw_tuning(app: &mut AppState, root_ui: &mut egui::Ui) {
                 }
             }
         });
-        if let Some(effect) = snapshot.runner.as_ref().and_then(|runner| runner.coordinator.restoration_effect) {
+        if let Some(effect) = snapshot.restoration_effect {
             let text = match effect {
                 crate::app::features::tuning::platform::contract::Effect::Immediate => "Restoration verified.",
                 crate::app::features::tuning::platform::contract::Effect::GameRestartRequired => "Original settings restored; restart the game to take effect.",
@@ -157,18 +163,29 @@ fn draw_module(
     let snapshot = app.tuning_snapshot();
     let profile = app.ui.tuning.selected_profile;
     let saved = profile.and_then(|id| current_preference(app, id, descriptor));
-    let card = profile
-        .and_then(|id| snapshot.profiles.iter().find(|p| p.id == id))
-        .and_then(|p| p.modules.iter().find(|m| m.feature == descriptor.id));
-    let fallback = Capability::Unsupported("Choose a profile to configure this module.".into());
+    let card = if descriptor.access == ModuleAccess::ReadOnly {
+        snapshot
+            .readonly_cards
+            .iter()
+            .find(|card| card.feature == descriptor.id)
+    } else {
+        profile
+            .and_then(|id| snapshot.profiles.iter().find(|p| p.id == id))
+            .and_then(|p| p.modules.iter().find(|m| m.feature == descriptor.id))
+    };
+    let fallback = Capability::Unsupported(if profile.is_some() {
+        "Save this module's preferences to observe its target.".into()
+    } else {
+        "Choose a profile to configure this module.".into()
+    });
     let capability = card.map_or(&fallback, |card| &card.capability);
     let status = card
         .and_then(|card| card.status)
         .unwrap_or(ModuleStatus::Unmanaged);
-    let mode = saved.as_ref().map_or(ActivationMode::Manual, |p| p.mode);
+    let mode = selected_mode(descriptor, saved.as_ref());
     let known = app
         .tuning_editors()
-        .get(&descriptor.id)
+        .editor(&descriptor.id)
         .is_some_and(|editor| {
             saved
                 .as_ref()
@@ -189,21 +206,50 @@ fn draw_module(
         ui.label(format!("Scope: {}", descriptor.target_scopes.iter().map(|scope| scope_label(*scope)).collect::<Vec<_>>().join(", ")));
         ui.label(status_label(status));
         if let Capability::Unsupported(reason) | Capability::Denied(reason) = capability {
+            if descriptor.access == ModuleAccess::Managed || card.is_some() {
             ui.label(reason.chars().take(512).collect::<String>());
+            }
         }
         if let Some(saved) = &saved {
             ui.label(format!("Saved: {} · {}", if saved.enabled { "enabled" } else { "disabled" }, mode_label(saved.mode)));
+            if let Some(summary) = app.tuning_editors().editor(&descriptor.id).and_then(|editor| editor.summary(&saved.config)) {
+                ui.label(format!("Desired: {}", summary.chars().take(512).collect::<String>()));
+            }
         }
         if let Some(observed) = card.and_then(|card| card.observed.as_ref()) {
-            ui.label(format!("Observed: {}", observed.summary.chars().take(512).collect::<String>()));
+            draw_observation(ui, &observed.summary);
         } else {
             ui.label("Not observed yet.");
         }
-        if descriptor.access == ModuleAccess::ReadOnly { return; }
+        if descriptor.access == ModuleAccess::ReadOnly {
+            ui.label("Read only · no system settings are changed.");
+            let action = app.tuning_editors().editor(&descriptor.id).and_then(|editor| editor.actions(ui));
+            if let Some(action) = action {
+                submit(app, TuningRequest::ModuleAction { feature: descriptor.id.clone(), action });
+            }
+            return;
+        }
+        if descriptor.target_scopes.contains(&crate::app::features::tuning::platform::contract::TargetScope::Process)
+            && card.is_none_or(|card| card.targets.is_empty()) {
+            ui.label("Configure the trigger now; application waits for a verified process from a saved rule.");
+        }
         if !known { ui.label("Configuration is retained and read-only because its editor is unavailable."); }
         if let Some(profile) = profile {
+            let mut enabled = saved.as_ref().is_some_and(|preference| preference.enabled);
+            let can_toggle = if enabled { controls.disable } else { controls.enable };
+            if ui.add_enabled(can_toggle, egui::Checkbox::new(&mut enabled, "Manage this module")).changed() {
+                if let Some(editor) = app.tuning_editors().editor(&descriptor.id) {
+                    let default = ModulePreference {
+                        feature: descriptor.id.clone(), enabled: false,
+                        mode: descriptor.activation_modes.first().copied().unwrap_or(ActivationMode::Manual),
+                        config: editor.default_config(),
+                    };
+                    let preference = preference_with_enabled(saved.as_ref(), default, enabled);
+                    submit(app, TuningRequest::SetModulePreference { profile, preference: Box::new(preference), expected: saved.clone() });
+                }
+            }
             if ui.add_enabled(controls.configure, egui::Button::new("Configure")).clicked() {
-                if let Some(editor) = app.tuning_editors().get(&descriptor.id) {
+                if let Some(editor) = app.tuning_editors().editor(&descriptor.id) {
                     let candidate = saved.clone().unwrap_or_else(|| ModulePreference {
                         feature: descriptor.id.clone(), enabled: false,
                         mode: descriptor.activation_modes.first().copied().unwrap_or(ActivationMode::Manual),
@@ -218,16 +264,18 @@ fn draw_module(
                     let mut save = false;
                     let mut cancel = false;
                     ui.add_enabled_ui(!pending && !stale, |ui| {
-                        if let Some(editor) = app.tuning_editors().get(&descriptor.id) {
-                            if editor.show(ui, &mut draft.candidate.config).is_err() {
+                        let mut valid = false;
+                        if let Some(editor) = app.tuning_editors().editor(&descriptor.id) {
+                            valid = edit_configuration(editor, ui, &mut draft.candidate.config);
+                            if !valid {
                                 ui.label("This configuration cannot be edited by this version.");
                             }
                         }
                         egui::ComboBox::from_id_salt(("tuning-mode", profile.get(), descriptor.id.as_str())).selected_text(mode_label(draft.candidate.mode)).show_ui(ui, |ui| {
                             for mode in &descriptor.activation_modes { ui.selectable_value(&mut draft.candidate.mode, *mode, mode_label(*mode)); }
                         });
-                        ui.add_enabled_ui(matches!(capability, Capability::Available) || draft.candidate.enabled, |ui| { ui.checkbox(&mut draft.candidate.enabled, "Enabled in this profile"); });
-                        save = ui.button("Save module settings").clicked();
+                        ui.add_enabled_ui(valid, |ui| { ui.checkbox(&mut draft.candidate.enabled, "Enabled in this profile"); });
+                        save = ui.add_enabled(valid, egui::Button::new("Save module settings")).clicked();
                     });
                     if stale { ui.label("Saved settings changed. Reopen the editor before saving."); }
                     cancel |= ui.button("Cancel editor").clicked();
@@ -262,13 +310,52 @@ fn draw_module(
                 }
                 if let Some(target) = target {
                     app.ui.tuning.manual_target = Some((profile, descriptor.id.clone(), target.clone()));
-                    if ui.add_enabled(controls.enable && !matches!(status, ModuleStatus::VerifiedActive(_)), egui::Button::new("Apply manually")).clicked() {
+                    if ui.add_enabled(controls.apply && !matches!(status, ModuleStatus::VerifiedActive(_)), egui::Button::new("Apply manually")).clicked() {
                         submit(app, TuningRequest::ActivateManual { profile, feature: descriptor.id.clone(), target });
                     }
                 }
             }
         }
     });
+}
+
+fn selected_mode(
+    descriptor: &ModuleDescriptor,
+    saved: Option<&ModulePreference>,
+) -> ActivationMode {
+    saved.map_or_else(
+        || {
+            descriptor
+                .activation_modes
+                .first()
+                .copied()
+                .unwrap_or(ActivationMode::Manual)
+        },
+        |preference| preference.mode,
+    )
+}
+
+fn draw_observation(ui: &mut egui::Ui, summary: &str) {
+    egui::ScrollArea::vertical()
+        .id_salt(ui.id().with("observation"))
+        .max_height(180.0)
+        .show(ui, |ui| {
+            ui.label(format!("Observed: {summary}"));
+        });
+}
+
+fn draw_operation_error(
+    ui: &mut egui::Ui,
+    error: &crate::app::features::tuning::platform::contract::ModuleError,
+) {
+    let mut message = format!("{}: {:?}", error.operation, error.kind);
+    if let Some(detail) = error.detail() {
+        message.push_str(&format!(" — {detail}"));
+    }
+    if let Some(native) = &error.native {
+        message.push_str(&format!(" ({}: {})", native.domain.as_str(), native.code));
+    }
+    ui.colored_label(ui.visuals().error_fg_color, message);
 }
 
 #[cfg(test)]
@@ -279,6 +366,120 @@ mod tests {
         sync::{Arc, RwLock},
         time::{Duration, Instant},
     };
+
+    fn simple_descriptor(access: ModuleAccess) -> ModuleDescriptor {
+        use crate::app::features::tuning::platform::contract::*;
+        ModuleDescriptor {
+            id: FeatureId::new("simple_card_test").unwrap(),
+            config_version: SchemaVersion::new(1).unwrap(),
+            title: "Test module",
+            description: "Test card",
+            access,
+            target_scopes: vec![TargetScope::User],
+            activation_modes: vec![ActivationMode::ForegroundSession],
+            effect: Effect::Immediate,
+        }
+    }
+
+    #[test]
+    fn modules_observation_details_keep_last_device_and_omission_count_visible() {
+        let summary = format!(
+            "{}\nLast device: test endpoint\n12 additional devices omitted.",
+            "device row\n".repeat(70)
+        );
+        let context = egui::Context::default();
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            draw_observation(ui, &summary)
+        });
+        let text = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Last device: test endpoint"),
+            "the full inventory must be accessible"
+        );
+        assert!(
+            text.contains("12 additional devices omitted."),
+            "inventory limits must be explicit"
+        );
+    }
+
+    #[test]
+    fn modules_operation_error_exposes_cause_and_native_code() {
+        use crate::app::features::tuning::platform::contract::*;
+        let error = ModuleError::new(ErrorKind::Denied, "read saved recovery")
+            .with_detail("Recovery file cannot be opened.")
+            .unwrap()
+            .with_native(NativeError {
+                domain: ResourceId::new("win32").unwrap(),
+                code: 5,
+            });
+        let context = egui::Context::default();
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            draw_operation_error(ui, &error)
+        });
+        let text = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Recovery file cannot be opened."));
+        assert!(text.contains("read saved recovery"));
+        assert!(text.contains("win32: 5"));
+    }
+
+    #[test]
+    fn simple_ui_unsaved_foreground_card_uses_supported_trigger() {
+        let descriptor = simple_descriptor(ModuleAccess::Managed);
+        let mode = selected_mode(&descriptor, None);
+        let controls = card_controls(
+            descriptor.access,
+            &Capability::Available,
+            true,
+            false,
+            descriptor.activation_modes.contains(&mode),
+            false,
+        );
+        assert!(controls.enable, "first toggle must use a supported trigger");
+        assert_eq!(mode, ActivationMode::ForegroundSession);
+    }
+
+    #[test]
+    fn simple_ui_readonly_card_without_profile_does_not_request_profile() {
+        let state = Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {})));
+        let mut app = AppState::new_for_test(state, 4);
+        let context = egui::Context::default();
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            draw_module(
+                &mut app,
+                ui,
+                &simple_descriptor(ModuleAccess::ReadOnly),
+                false,
+            );
+        });
+        let text = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("Choose a profile"), "{text}");
+        assert!(text.contains("Read only"));
+        finish(&mut app);
+    }
 
     fn rendered_text(app: &mut AppState) -> String {
         let context = egui::Context::default();

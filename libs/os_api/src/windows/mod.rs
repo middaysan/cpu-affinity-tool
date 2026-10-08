@@ -1,6 +1,8 @@
 mod common;
 mod cpu;
 mod event_log;
+pub(crate) mod gaming;
+mod gaming_diagnostics;
 mod ipc;
 mod launch;
 mod processes;

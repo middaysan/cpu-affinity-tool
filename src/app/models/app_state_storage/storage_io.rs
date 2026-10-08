@@ -11,82 +11,9 @@ pub(crate) enum StateRead {
     Text(String),
     Oversized { size: usize },
 }
-pub(crate) enum StateQualification {
-    Unavailable,
-    #[cfg(any(windows, test))]
-    QualifiedAbsent,
-    #[cfg(any(windows, test))]
-    Blocked,
-    #[cfg(windows)]
-    Receipt(os_api::tuning::TuningConfigReceipt),
-}
-
-// Shared decision only: test revisions are never native receipt authority.
-#[cfg(any(windows, test))]
-fn original_revision_matches<T: PartialEq>(expected: Option<&T>, current: Option<&T>) -> bool {
-    current == expected
-}
-// An operation-local expectation, never persisted or cloned as an absence permit.
-pub(crate) enum StateExpectation {
-    Unavailable,
-    #[cfg(any(windows, test))]
-    Absent,
-    #[cfg(windows)]
-    Receipt(os_api::tuning::TuningConfigReceipt),
-}
-impl StateExpectation {
-    pub(super) fn is_qualified(&self) -> bool {
-        !matches!(self, Self::Unavailable)
-    }
-    #[cfg(windows)]
-    fn receipt(&self) -> Option<&os_api::tuning::TuningConfigReceipt> {
-        match self {
-            Self::Receipt(receipt) => Some(receipt),
-            _ => None,
-        }
-    }
-}
-impl StateQualification {
-    pub(super) fn is_blocked(&self) -> bool {
-        #[cfg(any(windows, test))]
-        if matches!(self, Self::Blocked) {
-            return true;
-        }
-        false
-    }
-}
-pub(crate) enum StatePublication {
-    Unavailable,
-    #[cfg(windows)]
-    Receipt(os_api::tuning::TuningConfigReceipt),
-}
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) trait StateFilesystem {
-    fn qualify_read(&self, _path: &Path) -> StateQualification {
-        StateQualification::Unavailable
-    }
-    fn prepare_save(
-        &mut self,
-        path: &Path,
-        expected: &StateExpectation,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.qualify_read(path).is_blocked() {
-            return Err("qualified state evidence is blocked; save refused".into());
-        }
-        if expected.is_qualified() {
-            return Err("qualified state source unavailable; save refused".into());
-        }
-        Ok(())
-    }
-    fn publish_qualified(
-        &mut self,
-        _path: &Path,
-        _bytes: &[u8],
-        _expected: &StateExpectation,
-    ) -> Result<StatePublication, Box<dyn std::error::Error>> {
-        Ok(StatePublication::Unavailable)
-    }
     fn read_bounded(&self, path: &Path) -> io::Result<StateRead>;
     fn create_dir_all(&mut self, path: &Path) -> io::Result<()>;
     fn path_exists(&self, path: &Path) -> io::Result<bool>;
@@ -98,134 +25,9 @@ pub(crate) trait StateFilesystem {
 }
 
 #[derive(Default)]
-pub(super) struct RealStateFilesystem {
-    // This guard belongs to one synchronous load/save call, never shared state.
-    // Its no-write/no-delete leaf stays open across backup and until the native
-    // source releases it at its checked atomic publication boundary.
-    #[cfg(windows)]
-    source: std::cell::RefCell<Option<(PathBuf, os_api::tuning::TuningConfigSource)>>,
-    #[cfg(windows)]
-    unavailable: std::cell::Cell<bool>,
-    #[cfg(windows)]
-    blocked: std::cell::Cell<bool>,
-}
+pub(super) struct RealStateFilesystem;
 
 impl StateFilesystem for RealStateFilesystem {
-    #[cfg(windows)]
-    fn qualify_read(&self, path: &Path) -> StateQualification {
-        use os_api::tuning::TuningConfigSource;
-        if self.blocked.get() {
-            return StateQualification::Blocked;
-        }
-        let mut retained = self.source.borrow_mut();
-        if retained.is_none() {
-            if self.unavailable.get() {
-                return StateQualification::Unavailable;
-            }
-            match TuningConfigSource::open(path) {
-                Ok(source) => *retained = Some((path.to_path_buf(), source)),
-                Err(error) if unavailable_source(&error) => {
-                    self.unavailable.set(true);
-                    return StateQualification::Unavailable;
-                }
-                Err(_) => {
-                    self.blocked.set(true);
-                    return StateQualification::Blocked;
-                }
-            }
-        }
-        let (selected, source) = retained.as_mut().expect("retained source");
-        if selected != path {
-            self.blocked.set(true);
-            return StateQualification::Blocked;
-        }
-        match source.read() {
-            Ok(Some(receipt)) => StateQualification::Receipt(receipt),
-            Ok(None) => StateQualification::QualifiedAbsent,
-            Err(_) => {
-                self.blocked.set(true);
-                StateQualification::Blocked
-            }
-        }
-    }
-    #[cfg(windows)]
-    fn prepare_save(
-        &mut self,
-        path: &Path,
-        expected: &StateExpectation,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let qualification = self.qualify_read(path);
-        if qualification.is_blocked() {
-            return Err("qualified state evidence is blocked; save refused".into());
-        }
-        if !expected.is_qualified() {
-            // An originally unqualified base state stays ordinary, including a
-            // first run whose missing parent was created by its default save.
-            // Release a freshly acquired no-delete leaf before ordinary I/O.
-            self.source.borrow_mut().take();
-            return Ok(());
-        }
-        let current = match qualification {
-            StateQualification::Receipt(receipt) => Some(receipt),
-            StateQualification::QualifiedAbsent => None,
-            StateQualification::Unavailable => {
-                self.blocked.set(true);
-                return Err("qualified state source unavailable; save refused".into());
-            }
-            StateQualification::Blocked => {
-                return Err("qualified state evidence is blocked; save refused".into());
-            }
-        };
-        if !original_revision_matches(expected.receipt(), current.as_ref()) {
-            self.blocked.set(true);
-            return Err("qualified state revision changed; save refused".into());
-        }
-        // The same source/leaf remains retained through every backup and publish.
-        Ok(())
-    }
-    #[cfg(windows)]
-    fn publish_qualified(
-        &mut self,
-        path: &Path,
-        bytes: &[u8],
-        expected: &StateExpectation,
-    ) -> Result<StatePublication, Box<dyn std::error::Error>> {
-        let qualification = self.qualify_read(path);
-        if qualification.is_blocked() {
-            return Err("qualified state evidence is blocked; publication refused".into());
-        }
-        if !expected.is_qualified() {
-            self.source.borrow_mut().take();
-            return Ok(StatePublication::Unavailable);
-        }
-        let current = match qualification {
-            StateQualification::Receipt(receipt) => Some(receipt),
-            StateQualification::QualifiedAbsent => None,
-            StateQualification::Unavailable => {
-                self.blocked.set(true);
-                return Err("qualified state source unavailable; publication refused".into());
-            }
-            StateQualification::Blocked => {
-                return Err("qualified state evidence is blocked; publication refused".into());
-            }
-        };
-        if !original_revision_matches(expected.receipt(), current.as_ref()) {
-            self.blocked.set(true);
-            return Err("qualified state revision changed; save refused".into());
-        }
-        let mut retained = self.source.borrow_mut();
-        let Some((_, source)) = retained.as_mut() else {
-            self.blocked.set(true);
-            return Err("qualified state source not retained; publication refused".into());
-        };
-        match source.publish(expected.receipt(), bytes) {
-            Ok(receipt) => Ok(StatePublication::Receipt(receipt)),
-            Err(error) => {
-                self.blocked.set(true);
-                Err(Box::new(error))
-            }
-        }
-    }
     fn read_bounded(&self, path: &Path) -> io::Result<StateRead> {
         let mut bytes = Vec::new();
         File::open(path)?
@@ -284,18 +86,6 @@ impl StateFilesystem for RealStateFilesystem {
     fn sync_parent(&mut self, path: &Path) -> io::Result<()> {
         sync_parent_directory(path)
     }
-}
-
-#[cfg(windows)]
-fn unavailable_source(error: &os_api::tuning::TuningNativeError) -> bool {
-    use os_api::tuning::TuningNativeError as Native;
-    matches!(
-        error,
-        Native::Unsupported(_)
-            | Native::UnsafeStore(_)
-            | Native::Denied { .. }
-            | Native::Io { code: 2 | 3, .. }
-    )
 }
 
 pub(super) fn read_state_file_with_filesystem(
@@ -459,7 +249,7 @@ fn rotated_backup_path(
 }
 
 #[cfg(target_os = "windows")]
-fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()> {
+pub(super) fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{
@@ -506,19 +296,19 @@ fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()>
 }
 
 #[cfg(not(target_os = "windows"))]
-fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()> {
+pub(super) fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()> {
     // The staged file is in the destination directory, so rename is an atomic same-filesystem
     // replacement on the Linux beta path.
     fs::rename(staged_path, destination)
 }
 
 #[cfg(target_os = "windows")]
-fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+pub(super) fn sync_parent_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn sync_parent_directory(path: &Path) -> io::Result<()> {
+pub(super) fn sync_parent_directory(path: &Path) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     File::open(parent)?.sync_all()
 }
@@ -542,14 +332,6 @@ mod tests {
         fail_stage: bool,
         fail_publish: bool,
         fail_copy: bool,
-        blocked_qualification: bool,
-        qualified_absence: bool,
-        fail_qualified_publish: bool,
-        qualified_publishes: usize,
-        foreign_at_qualified_publish: Option<Vec<u8>>,
-        fail_save_guard: bool,
-        save_guards: usize,
-        qualified_expectations: Vec<bool>,
     }
 
     impl FakeFilesystem {
@@ -564,46 +346,6 @@ mod tests {
     }
 
     impl StateFilesystem for FakeFilesystem {
-        fn prepare_save(
-            &mut self,
-            _path: &Path,
-            expected: &super::StateExpectation,
-        ) -> Result<(), Box<dyn std::error::Error>> {
-            self.save_guards += 1;
-            self.qualified_expectations.push(expected.is_qualified());
-            if self.fail_save_guard || self.blocked_qualification {
-                Err("original qualified revision changed".into())
-            } else {
-                Ok(())
-            }
-        }
-        fn publish_qualified(
-            &mut self,
-            path: &Path,
-            _bytes: &[u8],
-            expected: &super::StateExpectation,
-        ) -> Result<super::StatePublication, Box<dyn std::error::Error>> {
-            self.qualified_publishes += 1;
-            self.qualified_expectations.push(expected.is_qualified());
-            if let Some(foreign) = self.foreign_at_qualified_publish.take() {
-                self.write_file(path, foreign);
-                return Err("foreign leaf appeared before no-replace publication".into());
-            }
-            if self.fail_qualified_publish {
-                Err("uncertain qualified publication".into())
-            } else {
-                Ok(super::StatePublication::Unavailable)
-            }
-        }
-        fn qualify_read(&self, _path: &Path) -> super::StateQualification {
-            if self.blocked_qualification {
-                super::StateQualification::Blocked
-            } else if self.qualified_absence {
-                super::StateQualification::QualifiedAbsent
-            } else {
-                super::StateQualification::Unavailable
-            }
-        }
         fn read_bounded(&self, path: &Path) -> io::Result<super::StateRead> {
             self.files
                 .get(path)
@@ -711,347 +453,6 @@ mod tests {
     }
     fn p1_config() -> String {
         serde_json::to_string(&json!({"version":1,"lineage":vec![1;32],"profiles":[],"associations":[],"allocations":{"next_profile":1,"next_owner":1,"next_config_generation":1},"activations":[],"withdrawals":[]})).unwrap()
-    }
-    #[test]
-    fn p2b_original_absence_and_receipt_comparison_never_adopts_current() {
-        assert!(super::original_revision_matches::<u8>(None, None));
-        assert!(super::original_revision_matches(Some(&1), Some(&1)));
-        assert!(!super::original_revision_matches::<u8>(None, Some(&2)));
-        assert!(!super::original_revision_matches(Some(&1), Some(&2)));
-        assert!(!super::original_revision_matches(Some(&1), None));
-    }
-
-    #[test]
-    fn p2b_qualified_absence_refuses_foreign_leaf_at_load_before_backup() {
-        let path = state_path();
-        let foreign = p1_state("11", Some(&p1_config()), None);
-        let mut fs = FakeFilesystem {
-            qualified_absence: true,
-            fail_save_guard: true,
-            ..Default::default()
-        };
-        fs.write_file(&path, &foreign);
-        let state = super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
-        assert!(state.save_blocked());
-        assert_eq!(fs.save_guards, 1);
-        assert_eq!(fs.qualified_publishes, 0);
-        assert_eq!(fs.mutation_count, 0);
-        assert_eq!(fs.read_file(&path), foreign);
-        assert_eq!(fs.files.len(), 1);
-        let mut clone = state.clone();
-        clone.mark_ready_for_current_schema_save(
-            crate::app::features::rules::PersistedRuleIdentities::default(),
-        );
-        assert!(clone
-            .try_save_to_path_with_filesystem(&path, &mut fs)
-            .is_err());
-        assert_eq!(fs.save_guards, 1);
-    }
-
-    #[test]
-    fn p2b_qualified_absence_publication_failure_or_unavailability_stays_blocked() {
-        for fail in [false, true] {
-            let path = state_path();
-            let mut fs = FakeFilesystem {
-                qualified_absence: true,
-                fail_qualified_publish: fail,
-                ..Default::default()
-            };
-            let state =
-                super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
-            assert!(state.save_blocked());
-            assert_eq!(fs.save_guards, 1);
-            assert_eq!(fs.qualified_publishes, 1);
-            assert_eq!(fs.mutation_count, 0);
-            assert!(fs.files.is_empty());
-            assert!(fs.staged_paths.is_empty());
-            let mut clone = state.clone();
-            clone.mark_ready_for_current_schema_save(
-                crate::app::features::rules::PersistedRuleIdentities::default(),
-            );
-            assert!(clone
-                .try_save_to_path_with_filesystem(&path, &mut fs)
-                .is_err());
-            assert_eq!(fs.save_guards, 1);
-            assert_eq!(fs.qualified_publishes, 1);
-        }
-    }
-    #[test]
-    fn p2b_qualified_absence_refuses_foreign_leaf_at_publication_without_backup() {
-        let path = state_path();
-        let foreign = p1_state("11", Some(&p1_config()), None);
-        let mut fs = FakeFilesystem {
-            qualified_absence: true,
-            foreign_at_qualified_publish: Some(foreign.as_bytes().to_vec()),
-            ..Default::default()
-        };
-        let state = super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
-        assert!(state.save_blocked());
-        assert_eq!(fs.save_guards, 1);
-        assert_eq!(fs.qualified_publishes, 1);
-        assert_eq!(fs.mutation_count, 0);
-        assert_eq!(fs.read_file(&path), foreign);
-        assert_eq!(fs.files.len(), 1);
-        assert!(fs.staged_paths.is_empty());
-    }
-    #[test]
-    fn p2b_qualified_absence_serialization_bound_precedes_every_source_or_backup_operation() {
-        let path = state_path();
-        let mut candidate = super::super::schema_refresh::build_default_state();
-        candidate.extensions.insert(
-            "future_state".into(),
-            std::sync::Arc::from(
-                serde_json::value::RawValue::from_string(
-                    serde_json::to_string(&"x".repeat(super::MAX_STATE_BYTES)).unwrap(),
-                )
-                .unwrap(),
-            ),
-        );
-        let mut fs = FakeFilesystem {
-            qualified_absence: true,
-            ..Default::default()
-        };
-        let state = super::super::AppStateStorage::recover_default_state(
-            candidate,
-            &path,
-            &mut fs,
-            super::StateExpectation::Absent,
-            false,
-        );
-        assert!(state.save_blocked());
-        assert_eq!(fs.save_guards, 0);
-        assert_eq!(fs.qualified_publishes, 0);
-        assert_eq!(fs.mutation_count, 0);
-        assert!(fs.files.is_empty());
-    }
-
-    #[test]
-    fn p2b_unavailable_first_default_and_later_qualifiable_save_stay_base_only() {
-        let path = state_path();
-        let mut fs = FakeFilesystem::default();
-        // Missing parent supplies no qualified absence. Ordinary default I/O
-        // creates it; the fake cannot mint a receipt for any subsequent read.
-        let mut state =
-            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
-        assert!(!state.save_blocked());
-        assert!(state.tuning.is_off());
-        assert_eq!(fs.files.len(), 1);
-        #[cfg(windows)]
-        assert!(state.native_configuration().is_none());
-        fs.qualified_absence = true;
-        state.theme_index = 2;
-        state
-            .try_save_to_path_with_filesystem(&path, &mut fs)
-            .unwrap();
-        assert!(!state.save_blocked());
-        #[cfg(windows)]
-        assert!(state.native_configuration().is_none());
-        assert_eq!(fs.qualified_expectations, [false, false]);
-        let saved: super::super::AppStateStorage =
-            serde_json::from_str(&fs.read_file(&path)).unwrap();
-        assert_eq!(saved.theme_index, 2);
-        #[cfg(windows)]
-        assert!(saved.native_configuration().is_none());
-        assert_eq!(fs.files.len(), 1);
-    }
-
-    #[test]
-    fn p2b_unavailable_base_state_fresh_poisoned_source_still_refuses_save() {
-        let path = state_path();
-        let mut fs = FakeFilesystem::default();
-        let mut state =
-            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
-        let original = fs.read_file(&path);
-        fs.blocked_qualification = true;
-        fs.mutation_count = 0;
-        state.theme_index = 2;
-        assert!(state
-            .try_save_to_path_with_filesystem(&path, &mut fs)
-            .is_err());
-        assert!(state.save_blocked());
-        assert_eq!(fs.qualified_expectations, [false]);
-        assert_eq!(fs.mutation_count, 0);
-        assert_eq!(fs.qualified_publishes, 0);
-        assert_eq!(fs.read_file(&path), original);
-    }
-    // These exercise the production recovery/order seam with refusal results.
-    // The fake cannot construct a native receipt, proof or successful publication.
-    #[test]
-    fn p1b_qualified_corrupt_recovery_refuses_replaced_source_before_backup() {
-        let path = state_path();
-        let replacement = p1_state("11", Some(&p1_config()), None);
-        let mut fs = FakeFilesystem {
-            fail_save_guard: true,
-            ..Default::default()
-        };
-        fs.write_file(&path, &replacement);
-        let state = super::super::AppStateStorage::recover_default_state(
-            super::super::schema_refresh::build_default_state(),
-            &path,
-            &mut fs,
-            super::StateExpectation::Absent,
-            true,
-        );
-        assert!(state.save_blocked());
-        assert_eq!(fs.mutation_count, 0);
-        assert_eq!(fs.qualified_publishes, 0);
-        assert_eq!(fs.read_file(&path), replacement);
-        assert_eq!(fs.files.len(), 1);
-        let mut clone = state.clone();
-        clone.mark_ready_for_current_schema_save(
-            crate::app::features::rules::PersistedRuleIdentities::default(),
-        );
-        assert!(clone
-            .try_save_to_path_with_filesystem(&path, &mut fs)
-            .is_err());
-        assert_eq!(fs.save_guards, 1);
-        assert_eq!(fs.mutation_count, 0);
-    }
-
-    #[test]
-    fn p1b_qualified_corrupt_recovery_uncertainty_is_sticky_without_fallback() {
-        let path = state_path();
-        let original = "{broken json";
-        let mut fs = FakeFilesystem {
-            fail_qualified_publish: true,
-            ..Default::default()
-        };
-        fs.write_file(&path, original);
-        let state = super::super::AppStateStorage::recover_default_state(
-            super::super::schema_refresh::build_default_state(),
-            &path,
-            &mut fs,
-            super::StateExpectation::Absent,
-            true,
-        );
-        assert!(state.save_blocked());
-        assert_eq!(fs.read_file(&path), original);
-        assert_eq!(
-            fs.read_file(&path.with_file_name("state.json.old")),
-            original
-        );
-        assert_eq!(fs.qualified_publishes, 1);
-        assert_eq!(fs.save_guards, 1);
-        assert_eq!(fs.mutation_count, 2); // Only the original backup and its sync.
-        assert!(fs.staged_paths.is_empty());
-        let mut clone = state.clone();
-        clone.mark_ready_for_current_schema_save(
-            crate::app::features::rules::PersistedRuleIdentities::default(),
-        );
-        assert!(clone
-            .try_save_to_path_with_filesystem(&path, &mut fs)
-            .is_err());
-        assert_eq!(fs.qualified_publishes, 1);
-        assert_eq!(fs.save_guards, 1);
-    }
-
-    #[test]
-    fn p1b_pre_v6_revision_refusal_precedes_every_backup_mutation() {
-        let path = state_path();
-        let replacement = p1_state("11", Some(&p1_config()), None);
-        let mut state = super::super::schema_refresh::build_default_state();
-        state.pending_pre_v6_backup = true;
-        let mut fs = FakeFilesystem {
-            fail_save_guard: true,
-            fail_qualified_publish: true,
-            ..Default::default()
-        };
-        fs.write_file(&path, &replacement);
-        assert!(state
-            .try_save_to_path_with_filesystem(&path, &mut fs)
-            .is_err());
-        assert!(state.save_blocked());
-        assert!(state.pending_pre_v6_backup);
-        assert_eq!(fs.mutation_count, 0);
-        assert_eq!(fs.qualified_publishes, 0);
-        assert_eq!(fs.read_file(&path), replacement);
-        assert_eq!(fs.files.len(), 1);
-        assert!(fs.staged_paths.is_empty());
-    }
-    #[test]
-    fn p1b_poisoned_qualification_precedes_missing_leaf_recovery_and_is_sticky() {
-        let path = state_path();
-        let mut fs = FakeFilesystem {
-            blocked_qualification: true,
-            ..Default::default()
-        };
-        let state = super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
-        assert!(state.save_blocked());
-        let mut cloned = state.clone();
-        cloned.mark_ready_for_current_schema_save(
-            crate::app::features::rules::PersistedRuleIdentities::default(),
-        );
-        assert!(cloned
-            .try_save_to_path_with_filesystem(&path, &mut fs)
-            .is_err());
-        assert_eq!(fs.mutation_count, 0);
-        assert!(fs.staged_paths.is_empty());
-        assert!(fs.files.is_empty());
-    }
-    #[test]
-    fn p1b_saved_byte_parser_cannot_promote_legacy_or_unknown_configuration() {
-        use crate::app::features::tuning::platform::configured_intent::saved_configuration;
-        let known = p1_config();
-        assert!(saved_configuration(p1_state("11", Some(&known), None).as_bytes()).is_some());
-        for version in ["10", "12", "20"] {
-            assert!(
-                saved_configuration(p1_state(version, Some(&known), None).as_bytes()).is_none(),
-                "{version}"
-            );
-        }
-        assert!(saved_configuration(p1_state("11", None, None).as_bytes()).is_none());
-        let mut unknown: serde_json::Value = serde_json::from_str(&known).unwrap();
-        unknown["future"] = json!(true);
-        assert!(
-            saved_configuration(p1_state("11", Some(&unknown.to_string()), None).as_bytes())
-                .is_none()
-        );
-    }
-    #[test]
-    fn p1b_uncertain_qualified_publication_never_uses_ordinary_cleanup_or_retry() {
-        let path = state_path();
-        let original = p1_state("11", Some(&p1_config()), None);
-        let mut fs = FakeFilesystem {
-            fail_qualified_publish: true,
-            ..Default::default()
-        };
-        fs.write_file(&path, &original);
-        let mut state =
-            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
-        state.theme_index = 2;
-        assert!(state
-            .try_save_to_path_with_filesystem(&path, &mut fs)
-            .is_err());
-        assert!(state.save_blocked());
-        let mut cloned = state.clone();
-        cloned.mark_ready_for_current_schema_save(
-            crate::app::features::rules::PersistedRuleIdentities::default(),
-        );
-        assert!(cloned
-            .try_save_to_path_with_filesystem(&path, &mut fs)
-            .is_err());
-        assert_eq!(fs.qualified_publishes, 1);
-        assert_eq!(fs.mutation_count, 0);
-        assert!(fs.staged_paths.is_empty());
-        assert_eq!(fs.read_file(&path), original);
-    }
-    #[cfg(windows)]
-    #[test]
-    fn p1b_wire_or_fixture_storage_never_mints_native_receipt_proof() {
-        fn immutable_send_sync<T: Clone + Send + Sync>() {}
-        immutable_send_sync::<
-            crate::app::features::tuning::platform::configured_intent::NativeConfigurationProof,
-        >();
-        let path = state_path();
-        let mut fs = FakeFilesystem::default();
-        fs.write_file(&path, p1_state("11", Some(&p1_config()), None));
-        let state = super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
-        assert!(state.native_configuration().is_none());
-        let text = serde_json::to_string(&state).unwrap();
-        let mut cloned: super::super::AppStateStorage = serde_json::from_str(&text).unwrap();
-        cloned.theme_index = 2;
-        assert!(cloned.native_configuration().is_none());
-        assert!(!text.contains("receipt") && !text.contains("volume_guid"));
     }
     fn assert_blocked_original_without_mutation(original: &str) {
         let path = state_path();

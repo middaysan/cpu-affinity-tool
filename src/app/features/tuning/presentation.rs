@@ -9,13 +9,13 @@ use super::{
         },
     },
 };
-use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CardControls {
     pub configure: bool,
     pub enable: bool,
     pub disable: bool,
+    pub apply: bool,
 }
 
 pub(crate) fn card_controls(
@@ -29,8 +29,9 @@ pub(crate) fn card_controls(
     let editable = access == ModuleAccess::Managed && config_supported && !busy;
     CardControls {
         configure: editable,
-        enable: editable && mode_supported && matches!(capability, Capability::Available),
+        enable: editable && mode_supported,
         disable: editable && saved_enabled,
+        apply: editable && mode_supported && matches!(capability, Capability::Available),
     }
 }
 
@@ -80,34 +81,43 @@ pub(crate) trait ModuleEditor: Send + Sync {
     fn default_config(&self) -> ModuleEnvelope;
     fn accepts_config(&self, config: &ModuleEnvelope) -> bool;
     fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()>;
+    fn summary(&self, _config: &ModuleEnvelope) -> Option<String> {
+        None
+    }
+    fn actions(&self, _ui: &mut eframe::egui::Ui) -> Option<ModuleAction> {
+        None
+    }
 }
 
-#[derive(Default, Clone)]
-pub(crate) struct EditorRegistry {
-    editors: Vec<Arc<dyn ModuleEditor>>,
+#[derive(Clone, Debug)]
+pub(crate) enum ModuleAction {
+    Refresh,
+    OpenSettings,
+    Import(std::path::PathBuf),
 }
-impl EditorRegistry {
-    #[cfg(test)]
-    pub(crate) fn register(&mut self, editor: Arc<dyn ModuleEditor>) -> Result<(), ()> {
-        let feature = editor.feature();
-        let config = editor.default_config();
-        if self.editors.len() >= 64
-            || self.get(&feature).is_some()
-            || config.feature != feature
-            || config.to_bytes().is_err()
-            || !editor.accepts_config(&config)
-        {
-            return Err(());
-        }
-        self.editors.push(editor);
-        Ok(())
+
+pub(crate) fn edit_configuration(
+    editor: &dyn ModuleEditor,
+    ui: &mut eframe::egui::Ui,
+    config: &mut ModuleEnvelope,
+) -> bool {
+    let previous = config.clone();
+    if editor.show(ui, config).is_ok() && editor.accepts_config(config) {
+        true
+    } else {
+        *config = previous;
+        false
     }
-    pub(crate) fn get(&self, feature: &FeatureId) -> Option<&dyn ModuleEditor> {
-        self.editors
-            .iter()
-            .find(|editor| editor.feature() == *feature)
-            .map(Arc::as_ref)
-    }
+}
+
+pub(crate) fn preference_with_enabled(
+    saved: Option<&ModulePreference>,
+    default: ModulePreference,
+    enabled: bool,
+) -> ModulePreference {
+    let mut preference = saved.cloned().unwrap_or(default);
+    preference.enabled = enabled;
+    preference
 }
 
 pub(crate) struct EditorDraft {
@@ -137,6 +147,101 @@ pub(crate) struct AssociationDraft {
 mod tests {
     use super::*;
 
+    fn toggle_default() -> ModulePreference {
+        ModulePreference {
+            feature: FeatureId::new("toggle_test").unwrap(),
+            enabled: false,
+            mode: ActivationMode::ForegroundSession,
+            config: ModuleEnvelope {
+                feature: FeatureId::new("toggle_test").unwrap(),
+                kind: super::super::platform::codec::EnvelopeKind::Config,
+                version: super::super::platform::contract::SchemaVersion::new(1).unwrap(),
+                target: None,
+                payload: serde_json::json!({"value": 7}),
+            },
+        }
+    }
+
+    #[test]
+    fn simple_ui_first_enable_uses_module_defaults_and_supported_trigger() {
+        let default = toggle_default();
+        let actual = preference_with_enabled(None, default.clone(), true);
+        assert!(actual.enabled);
+        assert_eq!(actual.config, default.config);
+        assert_eq!(actual.mode, ActivationMode::ForegroundSession);
+        assert!(
+            !default.enabled,
+            "registration itself never enables management"
+        );
+    }
+
+    #[test]
+    fn simple_ui_disable_keeps_saved_parameters_and_trigger() {
+        let mut saved = toggle_default();
+        saved.enabled = true;
+        saved.mode = ActivationMode::Session;
+        saved.config.payload = serde_json::json!({"value": 12});
+        let actual = preference_with_enabled(Some(&saved), toggle_default(), false);
+        assert!(!actual.enabled);
+        assert_eq!(actual.config, saved.config);
+        assert_eq!(actual.mode, ActivationMode::Session);
+        assert_eq!(actual.feature, saved.feature);
+    }
+
+    #[test]
+    fn simple_ui_editor_failure_blocks_save_and_retains_original_draft() {
+        struct InvalidEditor;
+        impl ModuleEditor for InvalidEditor {
+            fn feature(&self) -> FeatureId {
+                toggle_default().feature
+            }
+            fn default_config(&self) -> ModuleEnvelope {
+                toggle_default().config
+            }
+            fn accepts_config(&self, _: &ModuleEnvelope) -> bool {
+                true
+            }
+            fn show(
+                &self,
+                _: &mut eframe::egui::Ui,
+                config: &mut ModuleEnvelope,
+            ) -> Result<bool, ()> {
+                config.payload = serde_json::json!({"broken": true});
+                Err(())
+            }
+        }
+        let mut draft = toggle_default().config;
+        let original = draft.clone();
+        let ctx = eframe::egui::Context::default();
+        let mut save_allowed = true;
+        let _ = ctx.run_ui(eframe::egui::RawInput::default(), |ui| {
+            save_allowed = edit_configuration(&InvalidEditor, ui, &mut draft);
+        });
+        assert!(!save_allowed);
+        assert_eq!(draft, original);
+    }
+
+    #[test]
+    fn simple_ui_process_intent_can_be_enabled_before_the_game_is_running() {
+        let controls = card_controls(
+            ModuleAccess::Managed,
+            &Capability::Unsupported("Waiting for a verified process".into()),
+            true,
+            false,
+            true,
+            false,
+        );
+        assert!(controls.configure);
+        assert!(
+            controls.enable,
+            "saving an enabled trigger must not require its current target"
+        );
+        assert!(
+            !controls.apply,
+            "a saved trigger is not permission to apply to an unverified target"
+        );
+    }
+
     #[test]
     fn p5_available_managed_card_allows_saved_configuration() {
         assert_eq!(
@@ -151,7 +256,8 @@ mod tests {
             CardControls {
                 configure: true,
                 enable: true,
-                disable: false
+                disable: false,
+                apply: true
             }
         );
     }
@@ -170,7 +276,8 @@ mod tests {
             CardControls {
                 configure: true,
                 enable: false,
-                disable: true
+                disable: true,
+                apply: false
             }
         );
         assert_eq!(status_label(ModuleStatus::Unsupported), "Unavailable");
@@ -188,7 +295,8 @@ mod tests {
                 CardControls {
                     configure: false,
                     enable: false,
-                    disable: false
+                    disable: false,
+                    apply: false
                 }
             );
         }

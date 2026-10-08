@@ -7,11 +7,6 @@ edition = "2024"
 # Explicit nonshipping development/lab probes; never enabled by release builds.
 tuning-test-controls = []
 
-[[example]]
-name = "tuning-canonical-probe"
-path = "examples/tuning_canonical_probe/main.rs"
-required-features = ["tuning-test-controls"]
-
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
@@ -22,6 +17,16 @@ windows = { version = "0.62.2", features = [
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",
     "Win32_System_Threading",
+    "Win32_System_Power",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Accessibility",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_System_Com_StructuredStorage",
     "Win32_Foundation",
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics",
@@ -35,6 +40,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Variant",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_Controls",
     "Win32_Storage_FileSystem",
     "Win32_Storage_Packaging_Appx",

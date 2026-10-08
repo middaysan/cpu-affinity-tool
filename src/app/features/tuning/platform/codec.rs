@@ -58,6 +58,7 @@ fn check_tree(value: &Value, depth: usize, remaining: &mut usize) -> Result<(), 
     Ok(())
 }
 impl ModuleEnvelope {
+    #[cfg(test)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CodecError> {
         if bytes.len() > MAX_BYTES {
             return Err(CodecError::TooLarge);
@@ -84,9 +85,6 @@ impl ModuleEnvelope {
 }
 
 pub trait VersionedCodec<T>: Send + Sync {
-    fn feature(&self) -> &FeatureId;
-    fn kind(&self) -> EnvelopeKind;
-    fn version(&self) -> SchemaVersion;
     fn encode(
         &self,
         value: &T,
@@ -112,15 +110,6 @@ impl<T> JsonCodec<T> {
     }
 }
 impl<T: Serialize + DeserializeOwned> VersionedCodec<T> for JsonCodec<T> {
-    fn feature(&self) -> &FeatureId {
-        &self.feature
-    }
-    fn kind(&self) -> EnvelopeKind {
-        self.kind
-    }
-    fn version(&self) -> SchemaVersion {
-        self.version
-    }
     fn encode(
         &self,
         value: &T,

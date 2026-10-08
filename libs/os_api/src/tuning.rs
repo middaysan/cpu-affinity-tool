@@ -1,7 +1,4 @@
-//! Narrow recovery-storage and identity boundary. No gaming-setting writers.
-
-pub const MAX_TUNING_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_TUNING_MACHINE_BYTES: usize = 4096;
+//! Exact process-instance and caller identity used by module operations.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TuningNativeError {
@@ -20,42 +17,6 @@ impl std::fmt::Display for TuningNativeError {
     }
 }
 impl std::error::Error for TuningNativeError {}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TuningMachineSource {
-    Tpm,
-    Uefi,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TuningMachineDomain {
-    UnpackagedWin32,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct TuningMachineIdentity {
-    pub(super) source: TuningMachineSource,
-    pub(super) bytes: Vec<u8>,
-}
-impl TuningMachineIdentity {
-    pub fn source(&self) -> TuningMachineSource {
-        self.source
-    }
-    pub fn domain(&self) -> TuningMachineDomain {
-        TuningMachineDomain::UnpackagedWin32
-    }
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-impl std::fmt::Debug for TuningMachineIdentity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TuningMachineIdentity")
-            .field("source", &self.source)
-            .field("byte_length", &self.bytes.len())
-            .finish_non_exhaustive()
-    }
-}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct TuningTokenIdentity {
@@ -118,37 +79,5 @@ pub enum TuningProcessLifetime {
     PositivelyExited,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TuningBootContinuity {
-    Unavailable,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TuningStoreAuthority {
-    Canonical,
-    #[cfg(any(test, feature = "tuning-test-controls"))]
-    IsolatedTest,
-}
-
 #[cfg(windows)]
-pub use crate::windows::tuning::{
-    TuningConfigReceipt, TuningConfigSource, TuningProcessLifetimeGuard, TuningPublishPoint,
-    TuningStore,
-};
-#[cfg(all(windows, any(test, feature = "tuning-test-controls")))]
-pub use crate::windows::tuning::{
-    TuningLabArtifact, TuningLabArtifactKind, TuningLabCreation, TuningLabObjectId,
-    TuningLabScalarIo, TuningLabScalarTarget, TuningLabSnapshot,
-};
-
-#[cfg(all(windows, any(test, feature = "tuning-test-controls")))]
-pub use crate::windows::tuning::TuningTemporaryDirectory;
-#[cfg(all(windows, any(test, feature = "tuning-test-controls")))]
-pub use crate::windows::tuning::{
-    TuningCanonicalContinuityCandidate, TuningContinuityCandidateData,
-    TuningContinuityCandidateMode, TuningContinuityCandidateObservation,
-};
-#[cfg(all(windows, any(test, feature = "tuning-test-controls")))]
-pub use crate::windows::tuning::{
-    TuningMarkerNonce, TuningVolatileMarkerFixture, TuningVolatilityEvidence,
-};
+pub use crate::windows::tuning::TuningProcessLifetimeGuard;

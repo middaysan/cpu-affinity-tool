@@ -1,39 +1,44 @@
-mod config_source;
 mod identity;
-pub use config_source::{TuningConfigReceipt, TuningConfigSource};
 pub use identity::TuningProcessLifetimeGuard;
-#[cfg(any(test, feature = "tuning-test-controls"))]
-mod canonical_marker;
-#[cfg(any(test, feature = "tuning-test-controls"))]
-pub use canonical_marker::{
-    TuningCanonicalContinuityCandidate, TuningContinuityCandidateData,
-    TuningContinuityCandidateMode, TuningContinuityCandidateObservation,
-};
-#[cfg(any(test, feature = "tuning-test-controls"))]
-mod marker;
-#[cfg(test)]
-mod relative_io;
-#[cfg(test)]
-mod relative_publication;
-#[cfg(any(test, feature = "tuning-test-controls"))]
-mod scalar_lab;
-mod security;
-mod store;
-mod store_io;
-#[cfg(any(test, feature = "tuning-test-controls"))]
-mod test_support;
-#[cfg(any(test, feature = "tuning-test-controls"))]
-pub use marker::{TuningMarkerNonce, TuningVolatileMarkerFixture, TuningVolatilityEvidence};
-#[cfg(any(test, feature = "tuning-test-controls"))]
-pub use scalar_lab::{TuningLabScalarIo, TuningLabScalarTarget};
-#[cfg(any(test, feature = "tuning-test-controls"))]
-pub use store::{
-    TuningLabArtifact, TuningLabArtifactKind, TuningLabCreation, TuningLabObjectId,
-    TuningLabSnapshot,
-};
-pub use store::{TuningPublishPoint, TuningStore};
-#[cfg(any(test, feature = "tuning-test-controls"))]
-pub use test_support::TuningTemporaryDirectory;
+
+impl crate::windows::OS {
+    /// Existing recovery data is never discarded by the simplified controller.
+    pub fn tuning_legacy_evidence_exists() -> Result<bool, crate::tuning::TuningNativeError> {
+        use windows::Win32::{
+            System::Com::CoTaskMemFree,
+            UI::Shell::{FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
+        };
+        let native = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None) }
+            .map_err(|error| native_error("ProgramData", error))?;
+        let text = unsafe { native.to_string() };
+        unsafe {
+            CoTaskMemFree(Some(native.0.cast()));
+        }
+        let root =
+            std::path::PathBuf::from(text.map_err(|_| {
+                crate::tuning::TuningNativeError::Unsupported("ProgramData encoding")
+            })?)
+            .join("CpuAffinityTool")
+            .join("tuning");
+        for leaf in [
+            "journal-v1.json",
+            "journal-v1.staging",
+            "journal-v1.previous",
+        ] {
+            match std::fs::symlink_metadata(root.join(leaf)) {
+                Ok(_) => return Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(code_error(
+                        "legacy recovery check",
+                        error.raw_os_error().unwrap_or(1) as u32,
+                    ));
+                }
+            }
+        }
+        Ok(false)
+    }
+}
 
 use crate::tuning::TuningNativeError;
 pub(super) fn code_error(operation: &'static str, code: u32) -> TuningNativeError {
@@ -56,12 +61,4 @@ pub(super) fn native_error(
             raw
         },
     )
-}
-pub(super) fn wide(value: &std::ffi::OsStr) -> Result<Vec<u16>, TuningNativeError> {
-    use std::os::windows::ffi::OsStrExt;
-    let bytes: Vec<u16> = value.encode_wide().collect();
-    if bytes.len() > 32760 || bytes.contains(&0) {
-        return Err(TuningNativeError::UnsafeStore("invalid native path"));
-    }
-    Ok(bytes.into_iter().chain([0]).collect())
 }

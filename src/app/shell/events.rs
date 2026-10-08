@@ -1,6 +1,6 @@
 use crate::app::features::tuning::platform::{
     contract::{FeatureId, TargetScope},
-    runner::ShutdownResult,
+    controller::ShutdownResult,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::ptr::null_mut;
 
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{FILETIME, HANDLE};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
 };
 use windows::Win32::System::Threading::{
-    CREATE_SUSPENDED, CreateProcessW, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW,
-    SetPriorityClass, SetProcessAffinityMask, TerminateProcess,
+    CREATE_SUSPENDED, CreateProcessW, GetProcessTimes, PROCESS_INFORMATION, ResumeThread,
+    STARTUPINFOW, SetPriorityClass, SetProcessAffinityMask, TerminateProcess,
 };
 use windows::Win32::UI::Shell::{ApplicationActivationManager, IApplicationActivationManager};
 use windows::core::{PCWSTR, PWSTR};
@@ -160,15 +160,32 @@ impl OS {
         cores: &[usize],
         priority: PriorityClass,
     ) -> Result<u32, String> {
+        Self::run_with_fields(
+            file_path,
+            args,
+            cores,
+            priority,
+            crate::gaming::ProcessSettingsFields::default(),
+        )
+        .map(|launch| launch.pid)
+    }
+
+    pub fn run_with_fields(
+        file_path: PathBuf,
+        args: Vec<String>,
+        cores: &[usize],
+        priority: PriorityClass,
+        fields: crate::gaming::ProcessSettingsFields,
+    ) -> Result<crate::gaming::ProcessLaunch, String> {
         let mut mask = 0usize;
-        for &core in cores {
+        for &core in cores.iter().filter(|_| fields.affinity) {
             let bit = 1usize
                 .checked_shl(core as u32)
                 .ok_or_else(|| format!("core index {} out of range for affinity mask", core))?;
             mask |= bit;
         }
 
-        if mask == 0 {
+        if fields.affinity && mask == 0 {
             return Err("affinity mask is empty".into());
         }
 
@@ -199,11 +216,37 @@ impl OS {
             let _pg = HandleGuard(process);
             let _tg = HandleGuard(thread);
 
+            let mut creation = FILETIME::default();
+            let mut exit = FILETIME::default();
+            let mut kernel = FILETIME::default();
+            let mut user = FILETIME::default();
+            GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user).map_err(
+                |error| {
+                    OsError::Msg(report_failed_suspended_launch(
+                        "GetProcessTimes",
+                        error.to_string(),
+                        || TerminateProcess(process, 1).map_err(|e| e.to_string()),
+                    ))
+                },
+            )?;
+            let creation_token =
+                (creation.dwHighDateTime as u64) << 32 | creation.dwLowDateTime as u64;
+
             complete_suspended_launch(
-                || SetProcessAffinityMask(process, mask).map_err(|error| error.to_string()),
                 || {
-                    SetPriorityClass(process, transform_to_win_priority(priority))
-                        .map_err(|error| error.to_string())
+                    if fields.affinity {
+                        SetProcessAffinityMask(process, mask).map_err(|error| error.to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    if fields.priority {
+                        SetPriorityClass(process, transform_to_win_priority(priority))
+                            .map_err(|error| error.to_string())
+                    } else {
+                        Ok(())
+                    }
                 },
                 || {
                     let result = ResumeThread(thread);
@@ -215,7 +258,10 @@ impl OS {
             )
             .map_err(OsError::Msg)?;
 
-            Ok(pi.dwProcessId)
+            Ok(crate::gaming::ProcessLaunch {
+                pid: pi.dwProcessId,
+                creation_token,
+            })
         })()
         .map_err(|e: OsError| format!("run {:?} failed: {}", file_path, e))
     }

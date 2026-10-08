@@ -24,7 +24,25 @@ impl OS {
         priority: PriorityClass,
         apply_changes: bool,
     ) -> Result<ProcessSettingsApplyOutcome, String> {
-        if mask == 0 {
+        Self::apply_process_fields_if_instance(
+            pid,
+            expected_instance_token,
+            mask,
+            priority,
+            crate::gaming::ProcessSettingsFields::default(),
+            apply_changes,
+        )
+    }
+
+    pub fn apply_process_fields_if_instance(
+        pid: u32,
+        expected_instance_token: u64,
+        mask: usize,
+        priority: PriorityClass,
+        fields: crate::gaming::ProcessSettingsFields,
+        apply_changes: bool,
+    ) -> Result<ProcessSettingsApplyOutcome, String> {
+        if fields.affinity && mask == 0 {
             return Err("affinity mask is empty".to_string());
         }
 
@@ -48,23 +66,29 @@ impl OS {
 
             let mut current_mask = 0usize;
             let mut system_mask = 0usize;
-            GetProcessAffinityMask(handle, &mut current_mask, &mut system_mask).map_err(
-                |error| {
-                    OsError::Msg(format!(
-                        "GetProcessAffinityMask failed for PID {pid}: {error}"
-                    ))
-                },
-            )?;
-            let current_priority = GetPriorityClass(handle);
-            if current_priority == 0 {
+            if fields.affinity {
+                GetProcessAffinityMask(handle, &mut current_mask, &mut system_mask).map_err(
+                    |error| {
+                        OsError::Msg(format!(
+                            "GetProcessAffinityMask failed for PID {pid}: {error}"
+                        ))
+                    },
+                )?;
+            }
+            let current_priority = if fields.priority {
+                GetPriorityClass(handle)
+            } else {
+                windows::Win32::System::Threading::NORMAL_PRIORITY_CLASS.0
+            };
+            if fields.priority && current_priority == 0 {
                 return Err(OsError::Msg(format!(
                     "GetPriorityClass failed for PID {pid}: {}",
                     windows::core::Error::from_thread()
                 )));
             }
             let previous_priority = from_win_priority(current_priority);
-            let affinity_changed = current_mask != mask;
-            let priority_changed = previous_priority != priority;
+            let affinity_changed = fields.affinity && current_mask != mask;
+            let priority_changed = fields.priority && previous_priority != priority;
             if apply_changes && affinity_changed {
                 SetProcessAffinityMask(handle, mask).map_err(|error| {
                     OsError::Msg(format!(

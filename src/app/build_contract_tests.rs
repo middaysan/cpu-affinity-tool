@@ -164,7 +164,7 @@ fn windows_ci_and_stable_release_require_isolated_tuning_recovery() {
     for required in [
         "windows,tuning-test-controls",
         "cpu-affinity-tool",
-        "app::features::tuning::platform::native_recovery_tests::",
+        "app::features::tuning::recovery_tests::",
         "--locked",
         "--test-threads=1",
         "forced_exit_after_intent_recovers_without_a_target_write",
@@ -183,44 +183,9 @@ fn windows_ci_and_stable_release_require_isolated_tuning_recovery() {
 }
 
 #[test]
-fn tuning_canonical_probe_is_opt_in_and_absent_from_shipping_artifacts() {
+fn tuning_controls_are_absent_from_shipping_artifacts() {
     let manifest = include_str!("../../libs/os_api/Cargo.toml");
-    let lines = manifest.lines().collect::<Vec<_>>();
-    let probe = lines
-        .iter()
-        .enumerate()
-        .find_map(|(start, line)| {
-            if strip_unquoted_hash_comment(line).trim() != "[[example]]" {
-                return None;
-            }
-            let end = lines
-                .iter()
-                .enumerate()
-                .skip(start + 1)
-                .find_map(|(index, line)| {
-                    strip_unquoted_hash_comment(line)
-                        .trim()
-                        .starts_with('[')
-                        .then_some(index)
-                })
-                .unwrap_or(lines.len());
-            let block = &lines[start..end];
-            block
-                .iter()
-                .any(|line| {
-                    strip_unquoted_hash_comment(line).trim() == "name = \"tuning-canonical-probe\""
-                })
-                .then(|| block.join("\n"))
-        })
-        .expect("the canonical metadata probe must be an explicitly gated os_api example");
-    assert!(yaml_step_has_active_text(
-        &probe,
-        "required-features = [\"tuning-test-controls\"]"
-    ));
-    assert!(yaml_step_has_active_text(
-        &probe,
-        "path = \"examples/tuning_canonical_probe/main.rs\""
-    ));
+    assert!(!manifest.contains("tuning-canonical-probe"));
     let build = include_str!("../../scripts/build-windows-release.ps1");
     assert!(!build.contains("tuning-test-controls") && !build.contains("tuning-canonical-probe"));
     let release = include_str!("../../.github/workflows/release.yml");
@@ -235,7 +200,6 @@ fn tuning_canonical_probe_is_opt_in_and_absent_from_shipping_artifacts() {
         "tuning-canonical-probe"
     ));
 }
-
 #[test]
 fn contract_parsers_scope_exact_keys_and_named_steps() {
     let cargo_toml = r#"

@@ -1,38 +1,38 @@
-// Saved transactions and immutable snapshots are composed into AppState. The
-// shipping catalog remains empty and no native Game/logon/boot producer exists.
-
+//! Saved profiles, one module registry and one application worker.
 pub(crate) mod config;
-pub(crate) mod configured_source;
 pub(crate) mod execution_bridge;
-pub mod platform;
+pub(crate) mod modules;
+pub(crate) mod persistence;
+pub(crate) mod platform;
 pub(crate) mod presentation;
 pub(crate) mod service;
 mod session_reducer;
-pub(crate) use service::{HeadlessTuning, SaveError, StatePersistence};
-#[cfg(test)]
-pub(crate) use session_reducer::ModuleCard;
+use service::HeadlessTuning;
+pub(crate) use service::{SaveError, StatePersistence};
 pub(crate) use session_reducer::{
     TuningConfigurationState, TuningOperationState, TuningRequest, TuningRuntime, TuningSnapshot,
 };
-
-/// Public feature facade. Concrete shipping registrations belong only in this
-/// composition function; the staged foundation registers no fake or OS module.
-#[derive(Default)]
-pub struct Tuning {
-    catalog: platform::catalog::Catalog,
+pub(crate) struct Tuning {
+    registry: platform::registry::Registry,
 }
-
-impl Tuning {
-    pub fn catalog(&self) -> &platform::catalog::Catalog {
-        &self.catalog
+impl Default for Tuning {
+    fn default() -> Self {
+        Self::from_registry(modules::registry())
     }
-
+}
+impl Tuning {
+    pub(crate) fn registry(&self) -> &platform::registry::Registry {
+        &self.registry
+    }
+    pub(crate) fn from_registry(registry: platform::registry::Registry) -> Self {
+        Self { registry }
+    }
     pub(crate) fn headless(
         &self,
         state: crate::app::models::AppStateStorage,
         persistence: Box<dyn StatePersistence>,
     ) -> HeadlessTuning {
-        HeadlessTuning::new(state, persistence, self.catalog().clone())
+        HeadlessTuning::new(state, persistence, self.registry.clone())
     }
     pub(crate) fn headless_selected(
         &self,
@@ -41,6 +41,9 @@ impl Tuning {
         self.headless(state, Box::new(service::SelectedStatePersistence))
     }
 }
-
+#[cfg(all(test, windows, feature = "tuning-test-controls"))]
+mod native_roundtrip_tests;
 #[cfg(test)]
-mod testing;
+mod recovery_tests;
+#[cfg(test)]
+mod simple_tests;

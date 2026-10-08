@@ -8,12 +8,17 @@ use tokio::sync::RwLock as TokioRwLock;
 
 pub(crate) type RunningAppStatusCache = Arc<RwLock<HashMap<AppRuntimeKey, AppStatus>>>;
 
-#[derive(Default)]
 pub struct ExecutionStore {
     running_apps: Arc<TokioRwLock<RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     running_apps_statuses: RunningAppStatusCache,
     status_read_pending: bool,
+    scheduling: Arc<crate::app::features::tuning::modules::managed::scheduling::SchedulingHandoff>,
+}
+impl Default for ExecutionStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -58,13 +63,16 @@ fn normalize_package_family_key(package_family_name: &str) -> String {
 
 impl ExecutionStore {
     pub fn new() -> Self {
+        let running_apps = RunningApps::default();
+        let scheduling = running_apps.scheduling.clone();
         Self {
-            running_apps: Arc::new(TokioRwLock::new(RunningApps::default())),
+            running_apps: Arc::new(TokioRwLock::new(running_apps)),
             installed_package_tracking: Arc::new(RwLock::new(
                 InstalledPackageTrackingState::default(),
             )),
             running_apps_statuses: Arc::new(RwLock::new(HashMap::new())),
             status_read_pending: false,
+            scheduling,
         }
     }
 
@@ -311,6 +319,11 @@ impl RuntimeRegistry {
             monitor_rx: None,
             wake: None,
         }
+    }
+    pub(crate) fn scheduling_handle(
+        &self,
+    ) -> Arc<crate::app::features::tuning::modules::managed::scheduling::SchedulingHandoff> {
+        self.store.scheduling.clone()
     }
 
     pub(crate) fn set_wake(&mut self, wake: MonitorWake) {
