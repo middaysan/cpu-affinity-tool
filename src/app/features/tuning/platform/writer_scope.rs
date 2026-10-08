@@ -17,6 +17,8 @@ pub(in crate::app::features::tuning::platform) struct ScopedWriter {
     source: Arc<dyn ConfiguredIntentSource>,
     scope: ScopeEvidence,
     captured: Option<Captured>,
+    #[cfg(any(windows, test))]
+    staged_native: bool,
 }
 struct Captured {
     configured: ConfiguredSnapshot,
@@ -85,7 +87,28 @@ impl ScopeEvidence {
                 proof.verify_guard(guard).map_err(|error| {
                     GateError::Durability(JournalError::Io(native_error(error)))
                 })?;
-                if &original.machine != _expected {
+                Ok(())
+            }
+            #[cfg(test)]
+            Self::Fixture { revision, .. } => {
+                if let Some(revision) = revision {
+                    if (revision.observe)()? != revision.bytes {
+                        return Err(GateError::Rejected("fixture saved revision changed"));
+                    }
+                }
+                Ok(())
+            }
+        }?;
+        self.verify_machine(_expected)
+    }
+    fn verify_machine(&mut self, expected: &MachineIdentity) -> Result<(), GateError> {
+        #[cfg(not(any(windows, test)))]
+        let _ = expected;
+        match self {
+            Self::Unavailable => Err(GateError::Rejected("resource scope is unavailable")),
+            #[cfg(windows)]
+            Self::Native(original) => {
+                if &original.machine != expected {
                     return Err(GateError::Rejected("native machine scope mismatch"));
                 }
                 let actual = os_api::OS::tuning_machine_identity().map_err(|error| {
@@ -93,7 +116,7 @@ impl ScopeEvidence {
                 })?;
                 let actual = native_machine(actual.source(), actual.bytes())
                     .map_err(GateError::Durability)?;
-                if &actual == _expected {
+                if &actual == expected {
                     Ok(())
                 } else {
                     Err(GateError::Rejected("machine scope mismatch"))
@@ -101,7 +124,7 @@ impl ScopeEvidence {
             }
             #[cfg(test)]
             Self::Fixture { machine, .. } => {
-                if &machine()? == _expected {
+                if &machine()? == expected {
                     Ok(())
                 } else {
                     Err(GateError::Rejected("machine scope mismatch"))
@@ -140,6 +163,133 @@ impl ScopeEvidence {
     }
 }
 impl ScopedWriter {
+    #[cfg(test)]
+    pub(super) fn stage_configuration_for_test(&mut self) {
+        self.staged_native = true;
+    }
+    pub(super) fn configuration_staged(&self) -> bool {
+        #[cfg(any(windows, test))]
+        {
+            self.staged_native
+        }
+        #[cfg(not(any(windows, test)))]
+        {
+            false
+        }
+    }
+    pub(super) fn reserve_configuration(
+        &mut self,
+        before: &CoordinatorSnapshot,
+    ) -> Result<(), GateError> {
+        let checked = (|| {
+            if matches!(self.session.load(), JournalLoad::Blocked(_)) {
+                return Err(GateError::Durability(JournalError::Blocked));
+            }
+            if self.scope.origin().is_none() || self.scope.origin() != self.session.origin() {
+                return Err(GateError::Rejected(
+                    "original configuration origin is unavailable",
+                ));
+            }
+            let configured = self.source.snapshot();
+            if configured != ConfiguredSnapshot::Unavailable {
+                if !self.scope.configured_origin_matches(&configured) {
+                    return Err(GateError::Rejected("original configured input changed"));
+                }
+                self.check_ledger(&configured, before)?;
+            } else if !before.owners.is_empty() || !before.resources.is_empty() {
+                return Err(GateError::Rejected(
+                    "retained configured input is unavailable",
+                ));
+            }
+            self.scope.begin_configuration_guard()?;
+            self.scope.verify(&self.machine)
+        })();
+        self.finish_operation();
+        checked
+    }
+    pub(super) fn install_saved(
+        &mut self,
+        revision: &SavedRevision,
+        before: &CoordinatorSnapshot,
+    ) -> Result<(), GateError> {
+        #[cfg(not(any(windows, test)))]
+        let _ = before;
+        #[cfg(any(windows, test))]
+        use crate::app::features::tuning::configured_source::SavedConfiguredSource;
+        match revision {
+            SavedRevision::Unavailable => {
+                return Err(GateError::Rejected("saved input is unavailable"))
+            }
+            #[cfg(windows)]
+            SavedRevision::Native(proof) => {
+                let proof = proof.as_ref();
+                if !matches!(self.scope, ScopeEvidence::Native(_))
+                    || self.scope.origin() != Some(proof.origin())
+                    || self.session.origin() != Some(proof.origin())
+                {
+                    return Err(GateError::Rejected("saved original origin mismatch"));
+                }
+                let guard = proof.open_guard().map_err(|error| {
+                    GateError::Durability(JournalError::Io(native_error(error)))
+                })?;
+                self.scope.verify_machine(&self.machine)?;
+                let source = SavedConfiguredSource::from_native(proof.clone(), &self.catalog);
+                let configured = source.snapshot();
+                if configured == ConfiguredSnapshot::Unavailable
+                    || configured.native_proof() != Some(proof)
+                {
+                    return Err(GateError::Rejected("saved configured input is unavailable"));
+                }
+                self.check_ledger(&configured, before)?;
+                let ScopeEvidence::Native(native) = &mut self.scope else {
+                    unreachable!()
+                };
+                native.configuration = Some(proof.clone());
+                native.guard = Some(guard);
+                self.source = Arc::new(source);
+                // B3 must teach both admission and recovery old/new roles before
+                // a saved producer can enable native mutations. This closes
+                // actual capture independently of factory/source availability.
+                self.staged_native = true;
+            }
+            #[cfg(test)]
+            SavedRevision::Fixture { bytes, origin } => {
+                if !matches!(self.scope, ScopeEvidence::Fixture { .. })
+                    || self.scope.origin() != Some(origin)
+                    || self.session.origin() != Some(origin)
+                {
+                    return Err(GateError::Rejected(
+                        "saved fixture original origin mismatch",
+                    ));
+                }
+                let ScopeEvidence::Fixture { revision, .. } = &mut self.scope else {
+                    unreachable!()
+                };
+                if let Some(revision) = revision {
+                    if (revision.observe)()?.as_ref() != bytes.as_ref() {
+                        return Err(GateError::Rejected("fixture handoff revision mismatch"));
+                    }
+                }
+                let source =
+                    SavedConfiguredSource::from_fixture(bytes, origin.clone(), &self.catalog);
+                let configured = source.snapshot();
+                if configured == ConfiguredSnapshot::Unavailable {
+                    return Err(GateError::Rejected("saved configured input is unavailable"));
+                }
+                self.scope.verify_machine(&self.machine)?;
+                self.check_ledger(&configured, before)?;
+                let ScopeEvidence::Fixture { revision, .. } = &mut self.scope else {
+                    unreachable!()
+                };
+                if let Some(revision) = revision {
+                    revision.bytes = Arc::clone(bytes);
+                }
+                self.source = Arc::new(source);
+            }
+        }
+        self.finish_operation();
+        Ok(())
+    }
     pub(super) fn finish_operation(&mut self) {
         self.captured = None;
         self.scope.finish_configuration_guard();
@@ -226,6 +376,9 @@ impl ScopedWriter {
         Ok(())
     }
     pub(super) fn capture(&mut self, before: &CoordinatorSnapshot) -> Result<(), GateError> {
+        if self.configuration_staged() {
+            return Err(GateError::MutationDisabled);
+        }
         if matches!(self.session.load(), JournalLoad::Blocked(_)) {
             return Err(GateError::Durability(JournalError::Blocked));
         }
@@ -489,6 +642,8 @@ pub(super) fn bootstrap(
         source,
         scope,
         captured: None,
+        #[cfg(any(windows, test))]
+        staged_native: false,
     };
     let coordinator = match writer.session.load().clone() {
         JournalLoad::Known(document) => {

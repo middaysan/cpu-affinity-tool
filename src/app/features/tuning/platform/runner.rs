@@ -5,7 +5,10 @@ use super::coordinator::{
     WriteIntent,
 };
 use super::journal::{JournalPhase, JournalStamp};
-use super::writer::{WorkerAuthority, WriterStatus};
+use super::writer::{SavedRevision, WorkerAuthority, WriterStatus};
+#[cfg(test)]
+#[path = "runner_reservation_tests.rs"]
+mod reservation_tests;
 use std::{
     collections::BTreeMap,
     panic::{catch_unwind, AssertUnwindSafe},
@@ -51,6 +54,227 @@ pub enum SubmitError {
     OperationIdExhausted,
     InvalidEnvelope,
     RetiredOwner,
+    Reserved,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReservationError {
+    Closed,
+    Busy,
+    QueueFull,
+    Exhausted,
+    Stale,
+    InvalidPhase,
+    Refused,
+    TimedOut,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SavePhase {
+    Queued,
+    Granted,
+    PublicationStarting,
+    PublicationStarted,
+    Installing,
+    Aborting,
+    Installed,
+    Aborted,
+    Uncertain,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveSnapshot {
+    pub operation: OperationId,
+    pub phase: SavePhase,
+}
+struct ReservationState {
+    phase: SavePhase,
+    saved: Option<Arc<SavedRevision>>,
+}
+impl ReservationState {
+    fn grant(&mut self) {
+        if self.phase == SavePhase::Queued {
+            self.phase = SavePhase::Granted;
+        }
+    }
+}
+struct ReservationData {
+    id: OperationId,
+    state: Mutex<ReservationState>,
+    changed: Condvar,
+    outstanding: AtomicBool,
+    abandoned: AtomicBool,
+}
+impl ReservationData {
+    fn phase(&self) -> SavePhase {
+        self.state.lock().unwrap().phase
+    }
+    fn wait_while(
+        &self,
+        timeout: Duration,
+        pending: impl Fn(SavePhase) -> bool,
+    ) -> Result<SavePhase, ReservationError> {
+        let guard = self.state.lock().unwrap();
+        let (guard, result) = self
+            .changed
+            .wait_timeout_while(guard, timeout, |s| pending(s.phase))
+            .unwrap();
+        if result.timed_out() && pending(guard.phase) {
+            Err(ReservationError::TimedOut)
+        } else if guard.phase == SavePhase::Uncertain {
+            Err(ReservationError::Refused)
+        } else {
+            Ok(guard.phase)
+        }
+    }
+}
+// One non-clonable continuation; its observer state is not publication permission.
+pub(crate) struct SaveReservation {
+    data: Arc<ReservationData>,
+    shared: Weak<Shared>,
+    sender: SyncSender<Dispatch>,
+}
+impl SaveReservation {
+    pub(crate) fn phase(&self) -> SavePhase {
+        self.data.phase()
+    }
+    pub(crate) fn wait(&self, timeout: Duration) -> Result<SavePhase, ReservationError> {
+        self.data
+            .wait_while(timeout, |phase| phase == SavePhase::Queued)
+    }
+    fn enqueue(
+        &self,
+        pending: SavePhase,
+        permitted: impl Fn(SavePhase) -> bool,
+        message: Dispatch,
+    ) -> Result<(), ReservationError> {
+        let shared = self.shared.upgrade().ok_or(ReservationError::Closed)?;
+        let admission = shared.admission.lock().unwrap();
+        if !admission
+            .reservation
+            .as_ref()
+            .is_some_and(|data| Arc::ptr_eq(data, &self.data))
+        {
+            return Err(ReservationError::Stale);
+        }
+        if admission.sender.is_none()
+            && !matches!(pending, SavePhase::Installing | SavePhase::Uncertain)
+        {
+            return Err(ReservationError::Closed);
+        }
+        let mut state = self.data.state.lock().unwrap();
+        if !permitted(state.phase) {
+            return Err(ReservationError::InvalidPhase);
+        }
+        let previous = state.phase;
+        state.phase = pending;
+        if pending == SavePhase::PublicationStarting {
+            self.data.outstanding.store(true, Ordering::Release);
+        }
+        match self.sender.try_send(message) {
+            Ok(()) => {}
+            Err(error) => {
+                state.phase = previous;
+                if pending == SavePhase::PublicationStarting {
+                    self.data.outstanding.store(false, Ordering::Release);
+                }
+                return Err(match error {
+                    TrySendError::Full(_) => ReservationError::QueueFull,
+                    TrySendError::Disconnected(_) => ReservationError::Closed,
+                });
+            }
+        }
+        drop(state);
+        drop(admission);
+        shared.publish_save(&self.data);
+        Ok(())
+    }
+    pub(crate) fn abort(&mut self, timeout: Duration) -> Result<(), ReservationError> {
+        self.enqueue(
+            SavePhase::Aborting,
+            |p| matches!(p, SavePhase::Queued | SavePhase::Granted),
+            Dispatch::Abort(Arc::clone(&self.data)),
+        )?;
+        match self
+            .data
+            .wait_while(timeout, |p| p == SavePhase::Aborting)?
+        {
+            SavePhase::Aborted => Ok(()),
+            _ => Err(ReservationError::Refused),
+        }
+    }
+    pub(crate) fn begin_publication(&mut self, timeout: Duration) -> Result<(), ReservationError> {
+        self.enqueue(
+            SavePhase::PublicationStarting,
+            |p| p == SavePhase::Granted,
+            Dispatch::StartPublication(Arc::clone(&self.data)),
+        )?;
+        match self
+            .data
+            .wait_while(timeout, |p| p == SavePhase::PublicationStarting)?
+        {
+            SavePhase::PublicationStarted => Ok(()),
+            _ => Err(ReservationError::Refused),
+        }
+    }
+    pub(crate) fn publication_uncertain(&mut self) -> Result<(), ReservationError> {
+        self.enqueue(
+            SavePhase::Uncertain,
+            |p| p == SavePhase::PublicationStarted,
+            Dispatch::Uncertain(Arc::clone(&self.data)),
+        )
+    }
+    fn install(
+        &mut self,
+        revision: SavedRevision,
+        timeout: Duration,
+    ) -> Result<(), ReservationError> {
+        self.enqueue(
+            SavePhase::Installing,
+            |p| p == SavePhase::PublicationStarted,
+            Dispatch::Install(Arc::clone(&self.data), Arc::new(revision)),
+        )?;
+        match self
+            .data
+            .wait_while(timeout, |p| p == SavePhase::Installing)?
+        {
+            SavePhase::Installed => Ok(()),
+            _ => Err(ReservationError::Refused),
+        }
+    }
+    #[cfg(windows)]
+    pub(crate) fn install_native(
+        &mut self,
+        proof: super::configured_intent::NativeConfigurationProof,
+        timeout: Duration,
+    ) -> Result<(), ReservationError> {
+        self.install(SavedRevision::Native(Box::new(proof)), timeout)
+    }
+    #[cfg(test)]
+    fn install_fixture(
+        &mut self,
+        bytes: &[u8],
+        origin: super::contract::ConfigurationOrigin,
+        timeout: Duration,
+    ) -> Result<(), ReservationError> {
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(ReservationError::Refused);
+        }
+        self.install(
+            SavedRevision::Fixture {
+                bytes: Arc::from(bytes),
+                origin,
+            },
+            timeout,
+        )
+    }
+}
+impl Drop for SaveReservation {
+    fn drop(&mut self) {
+        if !matches!(self.phase(), SavePhase::Installed | SavePhase::Aborted) {
+            self.data.abandoned.store(true, Ordering::Release);
+            let _ = self
+                .sender
+                .try_send(Dispatch::Abandon(Arc::clone(&self.data)));
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetirementError {
@@ -81,6 +305,7 @@ pub struct RunnerSnapshot {
     pub coordinator: CoordinatorSnapshot,
     pub shutdown_result: Option<Arc<CommandResult>>,
     pub writer: super::writer::WriterStatus,
+    pub save: Option<SaveSnapshot>,
 }
 #[derive(Clone)]
 pub enum TerminalOutcome {
@@ -181,8 +406,19 @@ struct WorkItem {
     command: Command,
     ticket: Arc<TicketData>,
 }
+enum Dispatch {
+    Command(Box<WorkItem>),
+    Reserve(Arc<ReservationData>),
+    StartPublication(Arc<ReservationData>),
+    Abort(Arc<ReservationData>),
+    Install(Arc<ReservationData>, Arc<SavedRevision>),
+    Uncertain(Arc<ReservationData>),
+    Abandon(Arc<ReservationData>),
+    Stop,
+}
 struct Admission {
-    sender: Option<SyncSender<WorkItem>>,
+    sender: Option<SyncSender<Dispatch>>,
+    reservation: Option<Arc<ReservationData>>,
     next_operation: Option<u64>,
     generations: BTreeMap<OwnerId, u64>,
     retired: BTreeMap<u64, u64>,
@@ -239,6 +475,70 @@ struct Shared {
 impl Shared {
     // Admission is always locked before runtime when both are needed. Native
     // work and waits never occur while either shared lock is held.
+    fn publish_save(&self, data: &ReservationData) {
+        let state = data.state.lock().unwrap();
+        let mut runtime = self.runtime.lock().unwrap();
+        if runtime
+            .save
+            .is_none_or(|current| current.operation <= data.id)
+        {
+            runtime.save = Some(SaveSnapshot {
+                operation: data.id,
+                phase: state.phase,
+            });
+        }
+    }
+    fn current_reservation(&self, data: &Arc<ReservationData>) -> bool {
+        self.admission
+            .lock()
+            .unwrap()
+            .reservation
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, data))
+    }
+    fn set_save_phase(&self, data: &ReservationData, phase: SavePhase) {
+        data.state.lock().unwrap().phase = phase;
+        data.changed.notify_all();
+        self.publish_save(data);
+    }
+    fn grant_reservation(&self, data: &ReservationData) {
+        data.state.lock().unwrap().grant();
+        data.changed.notify_all();
+        self.publish_save(data);
+    }
+    fn release_reservation(&self, data: &Arc<ReservationData>, phase: SavePhase) {
+        let mut admission = self.admission.lock().unwrap();
+        if admission
+            .reservation
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, data))
+        {
+            data.outstanding.store(false, Ordering::Release);
+            admission.reservation = None;
+            if data.abandoned.load(Ordering::Acquire) {
+                admission.sender.take();
+            }
+            self.set_save_phase(data, phase);
+        }
+    }
+    fn publication_outstanding(&self) -> bool {
+        self.admission
+            .lock()
+            .unwrap()
+            .reservation
+            .as_ref()
+            .is_some_and(|data| data.outstanding.load(Ordering::Acquire))
+    }
+    fn retain_uncertain_publication(&self) -> ! {
+        if let Some(data) = self.admission.lock().unwrap().reservation.as_ref().cloned() {
+            self.set_save_phase(&data, SavePhase::Uncertain);
+        }
+        // The exact worker stack still owns authority/coordinator. No replacement
+        // or stale-proof shutdown is safe when the caller's publication is unknown.
+        loop {
+            thread::park();
+        }
+    }
     fn update_queue(&self, admission: &Admission) {
         self.runtime.lock().unwrap().queued = admission
             .pending
@@ -249,7 +549,9 @@ impl Shared {
     }
     fn close(&self, faulted: bool) {
         let mut admission = self.admission.lock().unwrap();
-        admission.sender.take();
+        if let Some(sender) = admission.sender.take() {
+            let _ = sender.try_send(Dispatch::Stop);
+        }
         for ticket in admission
             .pending
             .values()
@@ -321,6 +623,42 @@ pub struct RunnerClient {
     shared: Arc<Shared>,
 }
 impl RunnerClient {
+    pub(crate) fn reserve_configuration(&self) -> Result<SaveReservation, ReservationError> {
+        let mut admission = self.shared.admission.lock().unwrap();
+        if admission.sender.is_none() {
+            return Err(ReservationError::Closed);
+        }
+        if admission.reservation.is_some() {
+            return Err(ReservationError::Busy);
+        }
+        let next = admission
+            .next_operation
+            .ok_or(ReservationError::Exhausted)?;
+        let data = Arc::new(ReservationData {
+            id: OperationId::new(next).unwrap(),
+            state: Mutex::new(ReservationState {
+                phase: SavePhase::Queued,
+                saved: None,
+            }),
+            changed: Condvar::new(),
+            outstanding: AtomicBool::new(false),
+            abandoned: AtomicBool::new(false),
+        });
+        let sender = admission.sender.as_ref().unwrap().clone();
+        match sender.try_send(Dispatch::Reserve(Arc::clone(&data))) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(ReservationError::QueueFull),
+            Err(TrySendError::Disconnected(_)) => return Err(ReservationError::Closed),
+        }
+        admission.next_operation = next.checked_add(1);
+        admission.reservation = Some(Arc::clone(&data));
+        self.shared.publish_save(&data);
+        Ok(SaveReservation {
+            data,
+            shared: Arc::downgrade(&self.shared),
+            sender,
+        })
+    }
     /// Acceptance is atomic with generation advancement. Queue rejection never
     /// cancels an already accepted intent or consumes an operation identity.
     pub fn submit(&self, command: Command, config_generation: u64) -> Result<Ticket, SubmitError> {
@@ -334,6 +672,9 @@ impl RunnerClient {
         let mut admission = self.shared.admission.lock().unwrap();
         if admission.sender.is_none() {
             return Err(SubmitError::Closed);
+        }
+        if admission.reservation.is_some() {
+            return Err(SubmitError::Reserved);
         }
         if config_generation == 0 {
             return Err(SubmitError::InvalidGeneration);
@@ -382,7 +723,12 @@ impl RunnerClient {
             command,
             ticket: Arc::clone(&data),
         };
-        match admission.sender.as_ref().unwrap().try_send(item) {
+        match admission
+            .sender
+            .as_ref()
+            .unwrap()
+            .try_send(Dispatch::Command(Box::new(item)))
+        {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => return Err(SubmitError::QueueFull),
             Err(TrySendError::Disconnected(_)) => {
@@ -424,6 +770,9 @@ impl RunnerClient {
         let mut admission = self.shared.admission.lock().unwrap();
         if admission.sender.is_none() {
             return Err(RetirementError::Closed);
+        }
+        if admission.reservation.is_some() {
+            return Err(RetirementError::Busy);
         }
         if admission.is_retired(owner) {
             return Ok(());
@@ -644,6 +993,7 @@ impl Runner {
         let shared = Arc::new(Shared {
             admission: Mutex::new(Admission {
                 sender: Some(sender),
+                reservation: None,
                 next_operation: Some(1),
                 generations: BTreeMap::new(),
                 retired: BTreeMap::new(),
@@ -659,6 +1009,7 @@ impl Runner {
                 coordinator: initial,
                 shutdown_result: None,
                 writer: super::writer::WriterStatus::ReadOnly,
+                save: None,
             }),
         });
         let state = Arc::clone(&shared);
@@ -739,7 +1090,7 @@ impl Drop for Runner {
 
 fn worker_loop(
     factory: impl FnOnce() -> (Coordinator, WorkerAuthority),
-    receiver: Receiver<WorkItem>,
+    receiver: Receiver<Dispatch>,
     shared: Arc<Shared>,
     done: SyncSender<()>,
 ) -> WorkerExit {
@@ -772,6 +1123,9 @@ fn worker_loop(
             (true, true)
         }
     };
+    if shared.publication_outstanding() {
+        shared.retain_uncertain_publication();
+    }
     // The lease is still held while faulted tickets are made terminal. Only the
     // worker releases it, after its last possible publication/native operation.
     drop(authority);
@@ -785,6 +1139,16 @@ fn worker_loop(
 
 fn complete_faulted(shared: &Shared) {
     shared.close(true);
+    let reservation = shared
+        .admission
+        .lock()
+        .unwrap()
+        .reservation
+        .as_ref()
+        .cloned();
+    if let Some(data) = reservation {
+        shared.set_save_phase(&data, SavePhase::Uncertain);
+    }
     let snapshot = shared.runtime.lock().unwrap().coordinator.clone();
     let pending = shared
         .admission
@@ -799,14 +1163,134 @@ fn complete_faulted(shared: &Shared) {
     }
 }
 
+fn handle_save_dispatch(
+    message: Dispatch,
+    before: &CoordinatorSnapshot,
+    shared: &Shared,
+    authority: &mut WorkerAuthority,
+) {
+    if matches!(message, Dispatch::Stop) {
+        let reservation = {
+            let admission = shared.admission.lock().unwrap();
+            admission
+                .reservation
+                .as_ref()
+                .filter(|data| !data.outstanding.load(Ordering::Acquire))
+                .cloned()
+        };
+        if let Some(data) = reservation {
+            // Closing prevents publication start. Only a fresh original check
+            // permits pre-publication terminal shutdown; it never reopens admission.
+            let phase = if authority.reserve_configuration(before).is_ok() {
+                SavePhase::Aborted
+            } else {
+                authority.block_configuration();
+                SavePhase::Uncertain
+            };
+            shared.release_reservation(&data, phase);
+        }
+        return;
+    }
+    let data = match &message {
+        Dispatch::Reserve(data)
+        | Dispatch::StartPublication(data)
+        | Dispatch::Abort(data)
+        | Dispatch::Install(data, _)
+        | Dispatch::Uncertain(data)
+        | Dispatch::Abandon(data) => Arc::clone(data),
+        Dispatch::Command(_) | Dispatch::Stop => unreachable!(),
+    };
+    if !shared.current_reservation(&data) {
+        return;
+    }
+    let checked = match message {
+        Dispatch::Reserve(_) => {
+            if data.abandoned.load(Ordering::Acquire) {
+                shared.close(false);
+                Err(GateError::Rejected(
+                    "reservation abandoned before publication",
+                ))
+            } else {
+                authority
+                    .reserve_configuration(before)
+                    .map(|()| shared.grant_reservation(&data))
+            }
+        }
+        Dispatch::StartPublication(_) => {
+            if data.phase() != SavePhase::PublicationStarting {
+                return;
+            }
+            authority
+                .reserve_configuration(before)
+                .map(|()| shared.set_save_phase(&data, SavePhase::PublicationStarted))
+        }
+        Dispatch::Abort(_) => {
+            if data.outstanding.load(Ordering::Acquire) || data.phase() != SavePhase::Aborting {
+                return;
+            }
+            authority
+                .reserve_configuration(before)
+                .map(|()| shared.release_reservation(&data, SavePhase::Aborted))
+        }
+        Dispatch::Install(_, revision) => {
+            if data.phase() != SavePhase::Installing {
+                return;
+            }
+            data.state.lock().unwrap().saved = Some(Arc::clone(&revision));
+            authority
+                .install_saved(&revision, before)
+                .map(|()| shared.release_reservation(&data, SavePhase::Installed))
+        }
+        Dispatch::Abandon(_) => {
+            shared.close(false);
+            Err(GateError::Rejected("reservation abandoned"))
+        }
+        Dispatch::Uncertain(_) => Err(GateError::Rejected(
+            "configuration publication is unverified",
+        )),
+        Dispatch::Command(_) | Dispatch::Stop => unreachable!(),
+    };
+    if checked.is_err() {
+        // Raw saved proof/input remains in this exact reservation; blocking the
+        // session retains its original journal and native authority on the worker.
+        authority.block_configuration();
+        shared.runtime.lock().unwrap().writer = authority.status();
+        shared.set_save_phase(&data, SavePhase::Uncertain);
+    }
+    shared.runtime.lock().unwrap().writer = authority.status();
+}
+
 fn worker_body(
     coordinator: &mut Coordinator,
-    receiver: &Receiver<WorkItem>,
+    receiver: &Receiver<Dispatch>,
     shared: &Arc<Shared>,
     authority: &mut WorkerAuthority,
 ) -> (bool, bool) {
     let mut faulted = false;
-    while let Ok(item) = receiver.recv() {
+    loop {
+        let settle_closed = {
+            let admission = shared.admission.lock().unwrap();
+            admission.sender.is_none() && admission.pending.is_empty()
+        };
+        if settle_closed {
+            // A full queue may have refused Stop. After all earlier commands
+            // settle, closed admission itself triggers the checked pre-start
+            // shutdown. Outstanding publication is never settled by Stop.
+            handle_save_dispatch(Dispatch::Stop, &coordinator.snapshot(), shared, authority);
+            if shared.admission.lock().unwrap().reservation.is_none() {
+                break;
+            }
+        }
+        let Ok(message) = receiver.recv() else {
+            break;
+        };
+        let item = match message {
+            Dispatch::Command(item) => *item,
+            message => {
+                handle_save_dispatch(message, &coordinator.snapshot(), shared, authority);
+                continue;
+            }
+        };
         shared.start_work(&item.ticket);
         if item.ticket.cancellable && item.ticket.cancelled.load(Ordering::Acquire) {
             shared.complete(
@@ -847,15 +1331,20 @@ fn worker_body(
                 // Admission is closed. Every already accepted queued ticket gets
                 // a terminal failure instead of remaining pending indefinitely.
                 for queued in receiver.try_iter() {
-                    shared.complete(
-                        &queued.ticket,
-                        TerminalOutcome::WorkerPanicked,
-                        coordinator.snapshot(),
-                    );
+                    if let Dispatch::Command(queued) = queued {
+                        shared.complete(
+                            &queued.ticket,
+                            TerminalOutcome::WorkerPanicked,
+                            coordinator.snapshot(),
+                        );
+                    }
                 }
                 break;
             }
         }
+    }
+    if shared.publication_outstanding() {
+        shared.retain_uncertain_publication();
     }
     let mut recovery_required = false;
     if !faulted {
@@ -924,13 +1413,13 @@ mod tests {
     };
 
     const WAIT: Duration = Duration::from_secs(5);
-    struct Block {
+    pub(super) struct Block {
         entered: Mutex<mpsc::Receiver<()>>,
         released: Arc<(Mutex<bool>, Condvar)>,
-        hook: Arc<dyn Fn() + Send + Sync>,
+        pub(super) hook: Arc<dyn Fn() + Send + Sync>,
     }
     impl Block {
-        fn once() -> Self {
+        pub(super) fn once() -> Self {
             let (tx, rx) = mpsc::channel();
             let released = Arc::new((Mutex::new(false), Condvar::new()));
             let release = Arc::clone(&released);
@@ -951,10 +1440,10 @@ mod tests {
                 hook,
             }
         }
-        fn entered(&self) {
+        pub(super) fn entered(&self) {
             self.entered.lock().unwrap().recv_timeout(WAIT).unwrap();
         }
-        fn release(&self) {
+        pub(super) fn release(&self) {
             let (lock, cv) = &*self.released;
             *lock.lock().unwrap() = true;
             cv.notify_all();
@@ -1044,7 +1533,7 @@ mod tests {
             },
         }
     }
-    fn observe() -> Command {
+    pub(super) fn observe() -> Command {
         Command::Observe {
             feature: FeatureId::new("test_scalar").unwrap(),
             target: target(),

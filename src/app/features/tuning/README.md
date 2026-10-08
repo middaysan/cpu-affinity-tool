@@ -293,8 +293,21 @@ durable intent before execution, and at each publication. Changed authority
 retains original/proposed evidence rather than compensating blindly. Observe
 remains available when mutation is blocked.
 
-Production native admission remains closed even for an absent journal because
-its configured producer is Unavailable. A Clean store is insufficient authority.
+The dormant runner reserves configuration publication through one non-clonable
+permit in the existing bounded FIFO. It settles prior work and releases only the
+idle configuration leaf, retaining the same coordinator/store/lease and origin.
+Save requires an exact worker acknowledgement; only a fresh verified abort before
+publication may restore the old input. Started uncertainty, timeout and caller
+Drop retain that worker context. A matching sealed saved revision and its producer
+are installed together after current source and actual machine checks; rejected
+handoffs retain saved evidence and the original journal. Application saves are
+not yet composed through this seam, and fixture handoffs supply no native permit.
+
+Production native admission remains closed even for an absent journal: the
+default configured producer is Unavailable, and an explicit staged gate also
+blocks native mutations after the private revision handoff. Matching update
+recovery and saved transactions remain prerequisites. A Clean store is
+insufficient authority.
 Native scope, elevated
 cross-user and power-transition evidence plus Linux integration checks remain
 explicit gates. The nonshipping Windows recovery script verifies

@@ -17,6 +17,17 @@ use super::{
 use scope::ScopedWriter;
 use std::sync::Arc;
 
+pub(super) enum SavedRevision {
+    Unavailable,
+    #[cfg(windows)]
+    Native(Box<super::configured_intent::NativeConfigurationProof>),
+    #[cfg(test)]
+    Fixture {
+        bytes: Arc<[u8]>,
+        origin: super::contract::ConfigurationOrigin,
+    },
+}
+
 pub(super) enum ScopeEvidence {
     Unavailable,
     #[cfg(windows)]
@@ -26,7 +37,13 @@ pub(super) enum ScopeEvidence {
         origin: ConfigurationOrigin,
         machine: Box<dyn FnMut() -> Result<MachineIdentity, GateError>>,
         lifetime: Option<Box<dyn super::recovery::RecoveryResolver>>,
+        revision: Option<FixtureRevision>,
     },
+}
+#[cfg(test)]
+pub(super) struct FixtureRevision {
+    bytes: Arc<[u8]>,
+    observe: Box<dyn FnMut() -> Result<Arc<[u8]>, GateError>>,
 }
 /// No sibling can construct, clone or extract this token. It is created only
 /// after the actual canonical lease and native machine query have succeeded.
@@ -46,6 +63,7 @@ impl ScopeEvidence {
             origin,
             machine: Box::new(machine),
             lifetime: None,
+            revision: None,
         }
     }
     pub(super) fn fixture(
@@ -55,6 +73,7 @@ impl ScopeEvidence {
             origin: ConfigurationOrigin::fixture(),
             machine: Box::new(machine),
             lifetime: None,
+            revision: None,
         }
     }
     pub(super) fn fixture_lifetime(
@@ -65,6 +84,23 @@ impl ScopeEvidence {
             origin: ConfigurationOrigin::fixture(),
             machine: Box::new(machine),
             lifetime: Some(lifetime),
+            revision: None,
+        }
+    }
+    pub(super) fn fixture_saved(
+        origin: ConfigurationOrigin,
+        machine: impl FnMut() -> Result<MachineIdentity, GateError> + 'static,
+        bytes: Arc<[u8]>,
+        observe: impl FnMut() -> Result<Arc<[u8]>, GateError> + 'static,
+    ) -> Self {
+        Self::Fixture {
+            origin,
+            machine: Box::new(machine),
+            lifetime: None,
+            revision: Some(FixtureRevision {
+                bytes,
+                observe: Box::new(observe),
+            }),
         }
     }
 }
@@ -109,6 +145,7 @@ pub enum WriterStatus {
     #[cfg(test)]
     Simulator,
     Clean,
+    ConfigurationStaged,
     Known {
         revision: u64,
         phase: JournalPhase,
@@ -117,6 +154,45 @@ pub enum WriterStatus {
 }
 
 impl WorkerAuthority {
+    #[cfg(test)]
+    pub(super) fn stage_configuration_for_test(&mut self) {
+        // Refusal-only characterization: this cannot construct a NativeScope,
+        // native receipt or positive write permission.
+        if let Self::Scoped(writer) = self {
+            writer.stage_configuration_for_test();
+        }
+    }
+    pub(super) fn reserve_configuration(
+        &mut self,
+        before: &CoordinatorSnapshot,
+    ) -> Result<(), GateError> {
+        match self {
+            Self::Scoped(writer) => writer.reserve_configuration(before),
+            _ => Err(GateError::Rejected(
+                "configuration reservation is unavailable",
+            )),
+        }
+    }
+    pub(super) fn install_saved(
+        &mut self,
+        saved: &SavedRevision,
+        before: &CoordinatorSnapshot,
+    ) -> Result<(), GateError> {
+        match self {
+            Self::Scoped(writer) => writer.install_saved(saved, before),
+            _ => Err(GateError::Rejected("saved handoff is unavailable")),
+        }
+    }
+    pub(super) fn block_configuration(&mut self) {
+        if let Self::Scoped(writer) = self {
+            writer
+                .session
+                .block(super::journal::JournalError::InvalidEvidence(
+                    "configuration handoff is unverified",
+                ));
+            writer.finish_operation();
+        }
+    }
     pub(super) fn finish_operation(&mut self) {
         if let Self::Scoped(writer) = self {
             writer.finish_operation();
@@ -182,7 +258,15 @@ impl WorkerAuthority {
             Self::Fake => WriterStatus::Simulator,
             #[cfg(test)]
             Self::Durable(session) => status(session),
-            Self::Scoped(writer) => status(&writer.session),
+            Self::Scoped(writer) => {
+                if writer.configuration_staged()
+                    && !matches!(writer.session.load(), JournalLoad::Blocked(_))
+                {
+                    WriterStatus::ConfigurationStaged
+                } else {
+                    status(&writer.session)
+                }
+            }
             Self::Blocked(reason) => WriterStatus::Blocked(reason.clone()),
         }
     }
