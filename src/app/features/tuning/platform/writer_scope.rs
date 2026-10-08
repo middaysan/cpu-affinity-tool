@@ -24,6 +24,18 @@ struct Captured {
     configured: ConfiguredSnapshot,
     before: CoordinatorSnapshot,
 }
+/// Only this worker-local writer creates positive terminal corroboration.
+/// Serialized acknowledgements are never accepted as this token.
+pub(in crate::app::features::tuning) struct VerifiedAcknowledgements {
+    records: Vec<crate::app::features::tuning::config::SavedAcknowledgement>,
+}
+impl VerifiedAcknowledgements {
+    pub(in crate::app::features::tuning) fn records(
+        &self,
+    ) -> &[crate::app::features::tuning::config::SavedAcknowledgement] {
+        &self.records
+    }
+}
 
 impl ScopeEvidence {
     fn origin(&self) -> Option<&ConfigurationOrigin> {
@@ -207,6 +219,83 @@ impl ScopedWriter {
         self.finish_operation();
         checked
     }
+    pub(super) fn saved_acknowledgements(
+        &mut self,
+        before: &CoordinatorSnapshot,
+    ) -> Result<VerifiedAcknowledgements, GateError> {
+        self.reserve_configuration(before)?;
+        let checked = (|| {
+            self.scope.begin_configuration_guard()?;
+            self.scope.verify(&self.machine)?;
+            let configured = self.source.snapshot();
+            let records = match self.session.load() {
+                JournalLoad::Known(document)
+                    if matches!(
+                        document.phase,
+                        JournalPhase::Transition | JournalPhase::Recovery
+                    ) =>
+                {
+                    let origin = self
+                        .session
+                        .origin()
+                        .ok_or(GateError::Rejected("ack original origin absent"))?;
+                    let measured = super::super::journal::JournalDocument::capture_bound(
+                        self.machine.clone(),
+                        origin.clone(),
+                        document.revision,
+                        document.stamp,
+                        document.phase.clone(),
+                        before,
+                    )
+                    .map_err(GateError::Durability)?;
+                    if &measured != document {
+                        return Err(GateError::Rejected("ack durable ledger differs"));
+                    }
+                    // Observe each current typed writer once for its exact owned
+                    // fields. No snapshot/baseline is recaptured or write attempted.
+                    let mut groups = std::collections::BTreeMap::new();
+                    for resource in &before.resources {
+                        let target = resource
+                            .current_snapshot
+                            .target
+                            .as_ref()
+                            .ok_or(GateError::Rejected("ack writer target absent"))?;
+                        groups
+                            .entry((&resource.current_source, target))
+                            .or_insert_with(Vec::new)
+                            .push(resource);
+                    }
+                    for ((feature, target), resources) in groups {
+                        let keys = resources.iter().map(|r| r.key.clone()).collect::<Vec<_>>();
+                        let observed = self
+                            .catalog
+                            .observe_resources(feature, target, &keys)
+                            .map_err(|_| {
+                                GateError::Rejected("ack resource observation unavailable")
+                            })?;
+                        if resources.iter().any(|resource| {
+                            !observed.iter().any(|state| {
+                                state.key == resource.key
+                                    && state.value == resource.confirmed
+                                    && state.value == resource.desired
+                            })
+                        }) {
+                            return Err(GateError::Rejected("ack current resource changed"));
+                        }
+                    }
+                    configured.terminal_acknowledgements(origin, before, document.revision)
+                }
+                _ => Vec::new(),
+            };
+            self.scope.verify(&self.machine)?;
+            if self.source.snapshot() != configured {
+                return Err(GateError::Rejected("ack saved source changed"));
+            }
+            Ok(VerifiedAcknowledgements { records })
+        })();
+        self.finish_operation();
+        checked
+    }
     pub(super) fn install_saved(
         &mut self,
         revision: &SavedRevision,
@@ -341,7 +430,7 @@ impl ScopedWriter {
         let Some(origin) = self.session.origin() else {
             return IntentDecision::Unknown;
         };
-        input.decision_for_origin(
+        input.ledger_decision_for_origin(
             origin,
             owner.owner,
             &owner.binding,
@@ -469,6 +558,54 @@ impl ScopedWriter {
                 Ok(())
             }
             Command::Release { owner } => {
+                if !before.owners.iter().any(|entry| entry.owner == *owner) {
+                    let entry = captured
+                        .configured
+                        .disabled_owner_for_origin(
+                            self.session
+                                .origin()
+                                .ok_or(GateError::Rejected("withdrawal origin absent"))?,
+                            *owner,
+                        )
+                        .ok_or(GateError::Rejected("unacquired withdrawal is unknown"))?;
+                    if !self.scope.fixture_lifetime_enabled()
+                        && !matches!(
+                            (&entry.binding, entry.mode),
+                            (ActivationBinding::Manual(_), ActivationMode::Manual)
+                        )
+                    {
+                        return Err(GateError::Rejected("withdrawal scope unavailable"));
+                    }
+                    self.catalog
+                        .validate_config(&entry.config)
+                        .map_err(|_| GateError::Rejected("withdrawal codec unavailable"))?;
+                    let descriptor = self
+                        .catalog
+                        .descriptors()
+                        .find(|d| d.id == entry.config.feature)
+                        .ok_or(GateError::Rejected("withdrawal module unavailable"))?;
+                    let keys = descriptor
+                        .resources
+                        .iter()
+                        .filter_map(|r| {
+                            entry
+                                .target
+                                .resource_target(r.scope)
+                                .map(|target| ResourceKey {
+                                    target,
+                                    field: r.field.clone(),
+                                })
+                        })
+                        .collect::<Vec<_>>();
+                    if !self
+                        .scope
+                        .supports(descriptor, &entry.target, &keys, &self.machine)
+                        || !entry.binding.permits(entry.mode, &entry.target)
+                    {
+                        return Err(GateError::Rejected("withdrawal lifetime unavailable"));
+                    }
+                    return Ok(());
+                }
                 let recorded = before
                     .owners
                     .iter()
@@ -554,7 +691,7 @@ impl RecoveryResolver for Resolver<'_> {
         let Some(target) = source.snapshot.target.as_ref() else {
             return OwnerAttachment::Unknown;
         };
-        if self.configured.decision_for_origin(
+        if self.configured.ledger_decision_for_origin(
             self.origin,
             owner.owner,
             &owner.binding,
@@ -588,6 +725,51 @@ impl RecoveryResolver for Resolver<'_> {
 }
 struct BootstrapControl<'a>(&'a mut ScopedWriter);
 impl ExecutionControl for BootstrapControl<'_> {
+    fn before_pending_update(
+        &mut self,
+        command: &Command,
+        before: &CoordinatorSnapshot,
+    ) -> Result<(), GateError> {
+        self.0.admit_command(command, before)?;
+        let Command::Acquire {
+            owner,
+            binding,
+            config,
+            target,
+            mode,
+        } = command
+        else {
+            return Err(GateError::MutationDisabled);
+        };
+        let recorded = before
+            .owners
+            .iter()
+            .find(|entry| entry.owner == *owner)
+            .ok_or(GateError::Rejected("pending update has no retained owner"))?;
+        let captured = self
+            .0
+            .captured
+            .as_ref()
+            .ok_or(GateError::Rejected("pending update capture is absent"))?;
+        let origin = self
+            .0
+            .session
+            .origin()
+            .ok_or(GateError::Rejected("pending update origin is absent"))?;
+        let requested = captured
+            .configured
+            .pending_update_for_origin(origin, recorded)
+            .ok_or(GateError::Rejected("independent pending update is absent"))?;
+        if &requested.binding == binding
+            && &requested.config == config
+            && &requested.target == target
+            && requested.mode == *mode
+        {
+            Ok(())
+        } else {
+            Err(GateError::Rejected("pending update request differs"))
+        }
+    }
     fn cancellation_requested(&self) -> bool {
         false
     }
@@ -678,7 +860,7 @@ pub(super) fn bootstrap(
                                 let Some(target) = source.snapshot.target.as_ref() else {
                                     return IntentDecision::Unknown;
                                 };
-                                configured.decision_for_origin(
+                                configured.ledger_decision_for_origin(
                                     &origin,
                                     owner.owner,
                                     &owner.binding,
@@ -693,14 +875,46 @@ pub(super) fn bootstrap(
                         }
                         let result =
                             recovered.apply_recovery(&plan, &mut BootstrapControl(&mut writer));
-                        if result.error.is_some()
-                            || !matches!(
-                                result.outcome,
-                                super::super::coordinator::Outcome::Unchanged
-                                    | super::super::coordinator::Outcome::Released
-                            )
-                        {
+                        if result.error.is_some() {
                             return Err(GateError::Rejected("durable recovery did not complete"));
+                        }
+                        let requests = recovered
+                            .snapshot()
+                            .owners
+                            .iter()
+                            .filter_map(|recorded| {
+                                configured
+                                    .pending_update_for_origin(&origin, recorded)
+                                    .cloned()
+                            })
+                            .collect::<Vec<_>>();
+                        for request in requests {
+                            let snapshot = recovered.snapshot();
+                            let completed = snapshot.owners.iter().find(|owner| owner.owner == request.owner)
+                                .is_some_and(|owner| owner.binding == request.binding && owner.config.as_deref() == Some(&request.config)
+                                && owner.resources.iter().all(|key| snapshot.resources.iter().find(|resource| &resource.key == key)
+                                    .is_some_and(|resource| resource.confirmed == resource.desired && resource.possible.is_empty()
+                                        && matches!(resource.status, ModuleStatus::VerifiedActive(_) | ModuleStatus::StoredRestartRequired))));
+                            if !completed {
+                                let result = recovered.resume_pending_update(
+                                    &request,
+                                    &mut BootstrapControl(&mut writer),
+                                );
+                                if result.error.is_some() {
+                                    return Err(GateError::Rejected(
+                                        "pending update did not complete",
+                                    ));
+                                }
+                            }
+                        }
+                        if recovered.snapshot().resources.iter().any(|resource| {
+                            !matches!(
+                                resource.status,
+                                ModuleStatus::VerifiedActive(_)
+                                    | ModuleStatus::StoredRestartRequired
+                            )
+                        }) {
+                            return Err(GateError::Rejected("durable recovery remains incomplete"));
                         }
                         Ok(())
                     })();

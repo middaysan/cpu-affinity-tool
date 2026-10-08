@@ -15,6 +15,7 @@ use super::{
     journal::{DurableSession, JournalLoad, JournalPhase, JournalStamp, JournalStore},
 };
 use scope::ScopedWriter;
+pub(in crate::app::features::tuning) use scope::VerifiedAcknowledgements;
 use std::sync::Arc;
 
 pub(super) enum SavedRevision {
@@ -154,6 +155,15 @@ pub enum WriterStatus {
 }
 
 impl WorkerAuthority {
+    pub(super) fn saved_acknowledgements(
+        &mut self,
+        before: &CoordinatorSnapshot,
+    ) -> Result<VerifiedAcknowledgements, GateError> {
+        match self {
+            Self::Scoped(writer) => writer.saved_acknowledgements(before),
+            _ => Err(GateError::Rejected("durable ack unavailable")),
+        }
+    }
     #[cfg(test)]
     pub(super) fn stage_configuration_for_test(&mut self) {
         // Refusal-only characterization: this cannot construct a NativeScope,

@@ -15,7 +15,7 @@ pub(crate) fn saved_configuration(bytes: &[u8]) -> Option<super::super::config::
         return None;
     }
     match state.tuning.decode() {
-        super::super::config::TuningLoad::Known(config) => Some(config),
+        super::super::config::TuningLoad::Known(config) => Some(*config),
         _ => None,
     }
 }
@@ -141,6 +141,124 @@ impl ConfiguredIntentSource for UnavailableConfiguredIntent {
     }
 }
 impl ConfiguredSnapshot {
+    pub(super) fn disabled_owner_for_origin(
+        &self,
+        origin: &ConfigurationOrigin,
+        owner: OwnerId,
+    ) -> Option<&ConfiguredEntry> {
+        let Self::Complete(set) = self else {
+            return None;
+        };
+        (&set.origin == origin)
+            .then(|| {
+                set.entries.iter().find(|entry| {
+                    entry.owner == owner && entry.decision == ConfiguredDecision::Disabled
+                })
+            })
+            .flatten()
+    }
+    pub(super) fn terminal_acknowledgements(
+        &self,
+        expected: &ConfigurationOrigin,
+        snapshot: &super::coordinator::CoordinatorSnapshot,
+        revision: u64,
+    ) -> Vec<crate::app::features::tuning::config::SavedAcknowledgement> {
+        use crate::app::features::tuning::config::{AckKind, SavedAcknowledgement};
+        let Self::Complete(set) = self else {
+            return Vec::new();
+        };
+        if &set.origin != expected
+            || revision == 0
+            || snapshot.resources.iter().any(|r| {
+                !r.possible.is_empty()
+                    || r.confirmed != r.desired
+                    || !matches!(
+                        r.status,
+                        ModuleStatus::VerifiedActive(_) | ModuleStatus::StoredRestartRequired
+                    )
+            })
+        {
+            return Vec::new();
+        }
+        set.entries
+            .iter()
+            .filter_map(|entry| {
+                let kind = match entry.decision {
+                    ConfiguredDecision::Disabled
+                        if !snapshot.owners.iter().any(|o| o.owner == entry.owner)
+                            && !snapshot
+                                .resources
+                                .iter()
+                                .any(|r| r.owners.contains(&entry.owner)) =>
+                    {
+                        AckKind::Withdrawn
+                    }
+                    ConfiguredDecision::Enabled
+                        if set.continuations.iter().any(|o| o.owner == entry.owner)
+                            && snapshot.owners.iter().any(|o| {
+                                o.owner == entry.owner
+                                    && o.binding == entry.binding
+                                    && o.config.as_deref() == Some(&entry.config)
+                                    && o.target == entry.target
+                                    && o.mode == entry.mode
+                            }) =>
+                    {
+                        AckKind::Updated
+                    }
+                    _ => return None,
+                };
+                Some(SavedAcknowledgement {
+                    version: 1,
+                    owner: entry.owner,
+                    generation: entry.binding.configured()?.generation,
+                    journal_revision: revision,
+                    kind,
+                })
+            })
+            .collect()
+    }
+    pub(super) fn ledger_decision_for_origin(
+        &self,
+        expected: &ConfigurationOrigin,
+        owner: OwnerId,
+        binding: &ActivationBinding,
+        config: &ModuleEnvelope,
+        target: &TargetIdentity,
+        mode: ActivationMode,
+    ) -> IntentDecision {
+        let decision = self.decision_for_origin(expected, owner, binding, config, target, mode);
+        if decision == IntentDecision::Unknown {
+            self.continuation_for_origin(expected, owner, binding, config, target, mode)
+        } else {
+            decision
+        }
+    }
+    pub(super) fn pending_update_for_origin(
+        &self,
+        expected: &ConfigurationOrigin,
+        recorded: &super::coordinator::OwnerView,
+    ) -> Option<&ConfiguredEntry> {
+        let Self::Complete(set) = self else {
+            return None;
+        };
+        if &set.origin != expected {
+            return None;
+        }
+        let old = set
+            .continuations
+            .iter()
+            .find(|entry| entry.owner == recorded.owner)?;
+        let new = set.entries.iter().find(|entry| {
+            entry.owner == recorded.owner && entry.decision == ConfiguredDecision::Enabled
+        })?;
+        let matches = |entry: &ConfiguredEntry| {
+            entry.binding == recorded.binding
+                && recorded.config.as_deref() == Some(&entry.config)
+                && entry.target == recorded.target
+                && entry.mode == recorded.mode
+        };
+        (matches(old) || matches(new)).then_some(new)
+    }
     pub(crate) fn continuation_for_origin(
         &self,
         expected: &ConfigurationOrigin,

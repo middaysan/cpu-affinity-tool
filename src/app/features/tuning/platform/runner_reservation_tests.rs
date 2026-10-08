@@ -14,11 +14,111 @@ use std::{
 };
 
 const WAIT: Duration = Duration::from_secs(5);
+
+// The public headless tests enter the existing worker with independently saved
+// ordinary fixture bytes. This does not construct native scope or a receipt.
+pub(super) fn start_saved_fixture(
+    limits: RunnerLimits,
+    catalog: Catalog,
+    state: PathBuf,
+    journal: PathBuf,
+) -> Result<Runner, StartError> {
+    struct DiskStore {
+        path: PathBuf,
+        _local: Rc<()>,
+    }
+    fn io_error(_: std::io::Error) -> JournalIoError {
+        JournalIoError {
+            kind: JournalIoKind::Io,
+            operation: "headless fixture journal",
+            native_code: None,
+        }
+    }
+    impl JournalStore for DiskStore {
+        fn read(&mut self) -> Result<StoredJournal, JournalIoError> {
+            match std::fs::File::open(&self.path) {
+                Ok(file) => {
+                    let mut bytes = Vec::new();
+                    file.take(4 * 1024 * 1024 + 1)
+                        .read_to_end(&mut bytes)
+                        .map_err(io_error)?;
+                    Ok(StoredJournal::Bytes(bytes))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StoredJournal::Absent),
+                Err(e) => Err(io_error(e)),
+            }
+        }
+        fn publish(&mut self, bytes: &[u8]) -> Result<(), JournalIoError> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&self.path)
+                .map_err(io_error)?;
+            file.write_all(bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(io_error)
+        }
+        fn validate_authority(&mut self) -> Result<(), JournalIoError> {
+            Ok(())
+        }
+    }
+    struct Lifetime;
+    impl super::super::recovery::RecoveryResolver for Lifetime {
+        fn owner(
+            &mut self,
+            _: &JournalOwner,
+            _: &JournalSource,
+        ) -> super::super::recovery::OwnerAttachment {
+            super::super::recovery::OwnerAttachment::Unknown
+        }
+        fn resource(&mut self, _: &ResourceKey) -> super::super::recovery::ResourceLifetime {
+            super::super::recovery::ResourceLifetime::VerifiedLive
+        }
+    }
+    fn read_state(path: &std::path::Path) -> Result<Arc<[u8]>, GateError> {
+        let mut bytes = Vec::new();
+        let file =
+            std::fs::File::open(path).map_err(|_| GateError::Rejected("fixture source read"))?;
+        file.take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| GateError::Rejected("fixture source read"))?;
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(GateError::Rejected("fixture source bound"));
+        }
+        Ok(Arc::from(bytes))
+    }
+    Runner::start_test_writer(limits, move || {
+        let saved = read_state(&state).unwrap();
+        let source =
+            SavedConfiguredSource::from_fixture(&saved, ConfigurationOrigin::fixture(), &catalog);
+        let mut scope = ScopeEvidence::fixture_saved(
+            ConfigurationOrigin::fixture(),
+            || Ok(machine()),
+            saved,
+            move || read_state(&state),
+        );
+        if let ScopeEvidence::Fixture { lifetime, .. } = &mut scope {
+            *lifetime = Some(Box::new(Lifetime));
+        }
+        super::super::writer::bootstrap_configured(
+            catalog,
+            machine(),
+            Box::new(DiskStore {
+                path: journal,
+                _local: Rc::new(()),
+            }),
+            Arc::new(source),
+            scope,
+        )
+    })
+}
 #[test]
 fn p2b_queued_abort_cannot_be_overwritten_by_a_late_grant() {
     let state = Mutex::new(ReservationState {
         phase: SavePhase::Queued,
         saved: None,
+        acknowledgements: None,
     });
     assert_eq!(state.lock().unwrap().phase, SavePhase::Queued);
     // The caller queues Abort after the worker's earlier Queued observation.
@@ -150,6 +250,21 @@ fn acquire(module: &ScalarModule) -> Command {
         target: TargetIdentity::Machine(machine()),
         mode: ActivationMode::Manual,
     }
+}
+fn edited_bytes(module: &ScalarModule) -> Vec<u8> {
+    let mut state: serde_json::Value = serde_json::from_slice(&bytes(module, 0)).unwrap();
+    let old = state["tuning"]["activations"][0].clone();
+    let mut new = old.clone();
+    new["binding"]["Manual"]["generation"] = json!(2);
+    new["config"] =
+        serde_json::to_value(module.config_envelope(&ScalarConfig { value: 13 }).unwrap()).unwrap();
+    state["tuning"]["version"] = json!(2);
+    state["tuning"]["profiles"][0]["modules"][0]["config"] = new["config"].clone();
+    state["tuning"]["activations"] = json!([]);
+    state["tuning"]["transitions"] =
+        json!([{"version":1,"owner":1,"generation":2,"old":old,"new":new}]);
+    state["tuning"]["allocations"]["next_config_generation"] = json!(3);
+    serde_json::to_vec(&state).unwrap()
 }
 fn start(module: &ScalarModule) -> (Runner, SavedFile, Arc<Mutex<Memory>>) {
     start_with(
@@ -329,6 +444,201 @@ fn p2b_matching_saved_handoff_installs_on_same_worker_after_start_ack() {
     assert_eq!(runner.shutdown(WAIT), ShutdownResult::Complete);
     let memory = memory.lock().unwrap();
     assert_eq!(memory.created, memory.dropped);
+}
+#[test]
+fn p2b_saved_same_owner_edit_preserves_first_baseline_through_live_handoff() {
+    let module = module();
+    let (mut runner, file, _) = start(&module);
+    let client = runner.client();
+    client
+        .submit(acquire(&module), 1)
+        .unwrap()
+        .wait(WAIT)
+        .unwrap();
+    let first = runner.snapshot().coordinator.resources[0].baseline.clone();
+    let mut reserved = client.reserve_configuration().unwrap();
+    reserved.wait(WAIT).unwrap();
+    reserved.begin_publication(WAIT).unwrap();
+    file.replace(&edited_bytes(&module));
+    reserved
+        .install_fixture(&file.bytes(), ConfigurationOrigin::fixture(), WAIT)
+        .unwrap();
+    let mut requested = acquire(&module);
+    if let Command::Acquire {
+        binding, config, ..
+    } = &mut requested
+    {
+        *binding = ActivationBinding::Manual(ConfiguredIntent {
+            profile: ProfileId::new(1).unwrap(),
+            generation: ConfigGeneration::new(2).unwrap(),
+        });
+        *config = module.config_envelope(&ScalarConfig { value: 13 }).unwrap();
+    }
+    let result = client.submit(requested, 2).unwrap().wait(WAIT).unwrap();
+    assert!(matches!(result.outcome, TerminalOutcome::Completed(result) if result.error.is_none()));
+    assert_eq!(module.value(), 13);
+    let snapshot = runner.snapshot().coordinator;
+    assert_eq!(snapshot.owners.len(), 1);
+    assert_eq!(snapshot.resources[0].baseline, first);
+    assert_eq!(snapshot.owners[0].owner, OwnerId::new(1).unwrap());
+    assert_eq!(
+        client.submit(acquire(&module), 1).err(),
+        Some(SubmitError::StaleGeneration { current: 2 })
+    );
+    assert_eq!(runner.shutdown(WAIT), ShutdownResult::Complete);
+}
+
+#[test]
+fn p2b_saved_update_recovers_each_actual_durable_boundary_and_original_baseline() {
+    struct Crash {
+        boundary: u8,
+        document: Option<JournalDocument>,
+    }
+    impl ExecutionControl for Crash {
+        fn cancellation_requested(&self) -> bool {
+            false
+        }
+        fn before_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError> {
+            self.document = Some(
+                JournalDocument::capture(
+                    machine(),
+                    4,
+                    JournalStamp::Recovery,
+                    JournalPhase::BeforeWrite {
+                        step: intent.step as u32,
+                        effect: intent.operation.effect(),
+                    },
+                    &intent.ownership,
+                )
+                .unwrap(),
+            );
+            if self.boundary == 1 {
+                panic!("fixture stop at durable new intent");
+            }
+            Ok(())
+        }
+        fn after_verified_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError> {
+            if self.boundary == 3 {
+                self.document = Some(
+                    JournalDocument::capture(
+                        machine(),
+                        5,
+                        JournalStamp::Recovery,
+                        JournalPhase::VerifiedWrite {
+                            step: intent.step as u32,
+                            effect: intent.operation.effect(),
+                        },
+                        &intent.ownership,
+                    )
+                    .unwrap(),
+                );
+            }
+            panic!("fixture stop after actual new target write");
+        }
+        fn publish(&mut self, _: CoordinatorSnapshot) {}
+        fn commit_transition(&mut self, _: &CoordinatorSnapshot) -> Result<(), GateError> {
+            Ok(())
+        }
+    }
+    for (boundary, observed_original) in [
+        (0, false),
+        (1, false),
+        (2, false),
+        (3, false),
+        (0, true),
+        (1, true),
+    ] {
+        let module = module();
+        let (mut original_runner, file, memory) = start(&module);
+        original_runner
+            .client()
+            .submit(acquire(&module), 1)
+            .unwrap()
+            .wait(WAIT)
+            .unwrap();
+        let snapshot = original_runner.snapshot().coordinator;
+        let first = snapshot.resources[0].baseline.clone();
+        let old = JournalDocument::capture(
+            machine(),
+            3,
+            JournalStamp::Recovery,
+            JournalPhase::Transition,
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(original_runner.shutdown(WAIT), ShutdownResult::Complete);
+        let mut catalog = Catalog::default();
+        catalog.register(module.clone()).unwrap();
+        let document = if boundary == 0 {
+            old
+        } else {
+            let mut coordinator = Coordinator::recover(catalog.clone(), &old).unwrap();
+            let mut command = acquire(&module);
+            if let Command::Acquire {
+                binding, config, ..
+            } = &mut command
+            {
+                *binding = ActivationBinding::Manual(ConfiguredIntent {
+                    profile: ProfileId::new(1).unwrap(),
+                    generation: ConfigGeneration::new(2).unwrap(),
+                });
+                *config = module.config_envelope(&ScalarConfig { value: 13 }).unwrap();
+            }
+            let mut crash = Crash {
+                boundary,
+                document: None,
+            };
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| coordinator.handle(command, &mut crash))).is_err()
+            );
+            if boundary >= 2 {
+                assert_eq!(module.value(), 13);
+            }
+            crash.document.unwrap()
+        };
+        if observed_original {
+            module.external_change(7);
+        }
+        file.replace(&edited_bytes(&module));
+        memory.lock().unwrap().bytes = Some(document.to_bytes().unwrap());
+        let source = SavedConfiguredSource::from_fixture(
+            &file.bytes(),
+            ConfigurationOrigin::fixture(),
+            &catalog,
+        );
+        let (recovered, authority) = super::super::writer::bootstrap_configured(
+            catalog,
+            machine(),
+            Box::new(Store::open(memory.clone())),
+            Arc::new(source),
+            ScopeEvidence::fixture(|| Ok(machine())),
+        );
+        assert!(
+            !matches!(authority.status(), WriterStatus::Blocked(_)),
+            "boundary {boundary}, original {observed_original}"
+        );
+        assert_eq!(
+            module.value(),
+            13,
+            "boundary {boundary}, original {observed_original}"
+        );
+        let snapshot = recovered.snapshot();
+        assert_eq!(snapshot.resources[0].baseline, first);
+        assert_eq!(
+            snapshot.resources[0].confirmed,
+            snapshot.resources[0].desired
+        );
+        assert!(snapshot.resources[0].possible.is_empty());
+        assert_eq!(
+            snapshot.owners[0]
+                .binding
+                .configured()
+                .unwrap()
+                .generation
+                .get(),
+            2
+        );
+    }
 }
 #[test]
 fn p2b_changed_owned_revision_cannot_abort_back_to_old_input() {

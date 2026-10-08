@@ -34,7 +34,7 @@ impl<'de> Deserialize<'de> for TuningEnvelope {
 pub(crate) enum TuningLoad {
     Off,
     /// Persistence shape only; module codecs and qualified sources decide admission.
-    Known(TuningConfig),
+    Known(Box<TuningConfig>),
     Unknown,
     Blocked,
 }
@@ -59,7 +59,7 @@ impl TuningEnvelope {
             Err(()) => TuningLoad::Blocked,
             Ok(true) => TuningLoad::Unknown,
             Ok(false) => match serde_json::from_value::<TuningConfig>(value) {
-                Ok(config) if config.valid() => TuningLoad::Known(config),
+                Ok(config) if config.valid() => TuningLoad::Known(Box::new(config)),
                 _ => TuningLoad::Blocked,
             },
         }
@@ -210,6 +210,7 @@ fn forward_shape(v: &serde_json::Value) -> Result<bool, ()> {
                 "activations",
                 "withdrawals",
                 "transitions",
+                "acknowledgements",
             ][..]
         } else {
             &[
@@ -458,6 +459,70 @@ fn forward_shape(v: &serde_json::Value) -> Result<bool, ()> {
     if v2 && [next_profile, next_owner, next_generation].contains(&u64::MAX) {
         return Err(());
     }
+    if v2 {
+        let mut ack_owners = std::collections::BTreeSet::new();
+        let acknowledgements = match v.get("acknowledgements") {
+            None => &[][..],
+            Some(value) => value.as_array().ok_or(())?.as_slice(),
+        };
+        if acknowledgements.len() > MAX_INTENTS {
+            return Err(());
+        }
+        for raw in acknowledgements {
+            if version_forward(raw)? {
+                forward = true;
+                continue;
+            }
+            forward |= fields_forward(
+                raw,
+                &["version", "owner", "generation", "journal_revision", "kind"],
+            )?;
+            // Understood identity/counter metadata is validated even if fields
+            // are forward. This wire is bookkeeping, never worker authority.
+            let owner = raw
+                .get("owner")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|n| *n > 0)
+                .ok_or(())?;
+            let generation = raw
+                .get("generation")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|n| *n > 0)
+                .ok_or(())?;
+            if !ack_owners.insert(owner)
+                || raw
+                    .get("journal_revision")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_none_or(|n| n == 0)
+            {
+                return Err(());
+            }
+            let kind: AckKind =
+                serde_json::from_value(raw.get("kind").ok_or(())?.clone()).map_err(|_| ())?;
+            let record = match kind {
+                AckKind::Updated => transitions
+                    .iter()
+                    .find(|t| t.get("owner").and_then(serde_json::Value::as_u64) == Some(owner))
+                    .and_then(|t| t.get("new")),
+                AckKind::Withdrawn => v
+                    .get("withdrawals")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|list| {
+                        list.iter().find(|t| {
+                            t.get("owner").and_then(serde_json::Value::as_u64) == Some(owner)
+                        })
+                    }),
+            }
+            .ok_or(())?;
+            if version_forward(record)? {
+                forward = true;
+                continue;
+            }
+            if known_intent_shape(record)?.configured.generation.get() != generation {
+                return Err(());
+            }
+        }
+    }
     if next_profile <= max_profile || next_owner <= max_owner || next_generation <= max_generation {
         return Err(());
     }
@@ -525,6 +590,22 @@ pub(crate) struct TuningConfig {
     pub withdrawals: Vec<SavedIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transitions: Option<Vec<SavedTransition>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledgements: Option<Vec<SavedAcknowledgement>>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum AckKind {
+    Updated,
+    Withdrawn,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SavedAcknowledgement {
+    pub version: u32,
+    pub owner: OwnerId,
+    pub generation: ConfigGeneration,
+    pub journal_revision: u64,
+    pub kind: AckKind,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -662,7 +743,7 @@ impl TuningConfig {
         let mut max_profile = 0;
         let mut max_owner = 0;
         let mut max_generation = 0;
-        if (self.version == 1 && self.transitions.is_some())
+        if (self.version == 1 && (self.transitions.is_some() || self.acknowledgements.is_some()))
             || (self.version == 2 && self.transitions.is_none())
         {
             return false;
@@ -757,6 +838,42 @@ mod tests {
         serde_json::from_value::<TuningEnvelope>(value)
             .unwrap()
             .decode()
+    }
+    #[test]
+    fn p2b_saved_ack_metadata_is_bounded_unique_and_matches_exact_pending_record() {
+        use super::super::testing::scalar::{ScalarConfig, ScalarModule};
+        let module = ScalarModule::new(7);
+        let mut value = known();
+        value["version"] = json!(2);
+        value["transitions"] = json!([]);
+        value["allocations"] = json!({"next_profile":2,"next_owner":2,"next_config_generation":2});
+        value["withdrawals"] = json!([{"version":1,"owner":1,"binding":ActivationBinding::Manual(ConfiguredIntent {profile:ProfileId::new(1).unwrap(),generation:ConfigGeneration::new(1).unwrap()}),"config":module.config_envelope(&ScalarConfig {value:12}).unwrap(),"target":TargetIdentity::Machine(MachineIdentity {id:MachineId::new([1;16]).unwrap()}),"mode":"Manual"}]);
+        let ack =
+            json!({"version":1,"owner":1,"generation":1,"journal_revision":7,"kind":"Withdrawn"});
+        value["acknowledgements"] = json!([ack]);
+        assert!(matches!(decode(value.clone()), TuningLoad::Known(_)));
+        for (field, bad) in [
+            ("generation", json!(2)),
+            ("generation", json!(0)),
+            ("journal_revision", json!(0)),
+            ("kind", json!("Updated")),
+            ("owner", json!(2)),
+        ] {
+            let mut changed = value.clone();
+            changed["acknowledgements"][0][field] = bad;
+            assert_eq!(decode(changed), TuningLoad::Blocked, "{field}");
+        }
+        let mut duplicates = value.clone();
+        duplicates["acknowledgements"] = json!([ack.clone(), ack.clone()]);
+        assert_eq!(decode(duplicates), TuningLoad::Blocked);
+        let mut too_many = value.clone();
+        too_many["acknowledgements"] = json!(vec![ack; 257]);
+        assert_eq!(decode(too_many), TuningLoad::Blocked);
+        value["acknowledgements"][0]["future"] = json!(true);
+        let raw = serde_json::to_string(&value).unwrap();
+        let envelope: TuningEnvelope = serde_json::from_str(&raw).unwrap();
+        assert_eq!(envelope.decode(), TuningLoad::Unknown);
+        assert_eq!(envelope.raw(), Some(raw.as_str()));
     }
     #[test]
     fn p1_config_off_is_only_absence_and_known_round_trip_retains_lineage() {

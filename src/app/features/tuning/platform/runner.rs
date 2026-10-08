@@ -87,6 +87,7 @@ pub struct SaveSnapshot {
 struct ReservationState {
     phase: SavePhase,
     saved: Option<Arc<SavedRevision>>,
+    acknowledgements: Option<Arc<super::writer::VerifiedAcknowledgements>>,
 }
 impl ReservationState {
     fn grant(&mut self) {
@@ -132,6 +133,14 @@ pub(crate) struct SaveReservation {
     sender: SyncSender<Dispatch>,
 }
 impl SaveReservation {
+    pub(in crate::app::features::tuning) fn acknowledgements(
+        &self,
+    ) -> Option<Arc<super::writer::VerifiedAcknowledgements>> {
+        if self.phase() != SavePhase::PublicationStarted {
+            return None;
+        }
+        self.data.state.lock().unwrap().acknowledgements.clone()
+    }
     pub(crate) fn phase(&self) -> SavePhase {
         self.data.phase()
     }
@@ -248,7 +257,7 @@ impl SaveReservation {
         self.install(SavedRevision::Native(Box::new(proof)), timeout)
     }
     #[cfg(test)]
-    fn install_fixture(
+    pub(in crate::app::features::tuning) fn install_fixture(
         &mut self,
         bytes: &[u8],
         origin: super::contract::ConfigurationOrigin,
@@ -639,6 +648,7 @@ impl RunnerClient {
             state: Mutex::new(ReservationState {
                 phase: SavePhase::Queued,
                 saved: None,
+                acknowledgements: None,
             }),
             changed: Condvar::new(),
             outstanding: AtomicBool::new(false),
@@ -849,7 +859,14 @@ impl ExecutionControl for WorkerControl<'_> {
         command: &Command,
         snapshot: &CoordinatorSnapshot,
     ) -> Result<(), GateError> {
-        self.authority.admit_command(command, snapshot)
+        self.authority.admit_command(command, snapshot)?;
+        if matches!(command,Command::Release {owner} if !snapshot.owners.iter().any(|record|record.owner==*owner))
+        {
+            // Independently saved exact Disabled input was admitted above. Even
+            // an unexecuted withdrawal needs a durable zero-write boundary.
+            self.commit(JournalPhase::Transition, snapshot)?;
+        }
+        Ok(())
     }
     fn before_shutdown(&mut self, snapshot: &CoordinatorSnapshot) -> Result<(), GateError> {
         self.authority.begin_shutdown(snapshot)
@@ -924,6 +941,15 @@ pub struct Runner {
     recovery_required: bool,
 }
 impl Runner {
+    #[cfg(test)]
+    pub(in crate::app::features::tuning) fn start_saved_fixture(
+        limits: RunnerLimits,
+        catalog: super::catalog::Catalog,
+        state: std::path::PathBuf,
+        journal: std::path::PathBuf,
+    ) -> Result<Self, StartError> {
+        reservation_tests::start_saved_fixture(limits, catalog, state, journal)
+    }
     /// F2 production admission is read-only even when a writable module exists.
     pub fn start(coordinator: Coordinator, limits: RunnerLimits) -> Result<Self, StartError> {
         Self::spawn(coordinator, limits, WriteAdmission::ReadOnly)
@@ -931,7 +957,7 @@ impl Runner {
     // Canonical metadata initialization is explicit and remains outside the
     // current application composition. No caller can inject a permissive store.
     #[cfg(windows)]
-    pub(super) fn start_native(
+    pub(in crate::app::features::tuning) fn start_native(
         catalog: super::catalog::Catalog,
         storage: &crate::app::models::AppStateStorage,
         limits: RunnerLimits,
@@ -1220,9 +1246,10 @@ fn handle_save_dispatch(
             if data.phase() != SavePhase::PublicationStarting {
                 return;
             }
-            authority
-                .reserve_configuration(before)
-                .map(|()| shared.set_save_phase(&data, SavePhase::PublicationStarted))
+            authority.saved_acknowledgements(before).map(|ack| {
+                data.state.lock().unwrap().acknowledgements = Some(Arc::new(ack));
+                shared.set_save_phase(&data, SavePhase::PublicationStarted)
+            })
         }
         Dispatch::Abort(_) => {
             if data.outstanding.load(Ordering::Acquire) || data.phase() != SavePhase::Aborting {

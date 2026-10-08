@@ -28,8 +28,9 @@ unavailable source remains base-only even if a later save can open its directory
 The dormant saved-input builder accepts sealed proof and derives immutable tuples
 from its exact bytes. Envelope v2 separates a same-owner old continuation from
 the new requested value; explicit withdrawals alone supply Disabled. Drafts,
-missing records and journal ownership do not supply intent. Transactions and
-matching recovery remain prerequisites before connecting this producer.
+missing records and journal ownership do not supply intent. Dormant headless
+transactions and matching recovery use this producer; application composition
+and native mutation admission remain separate requirements.
 Passing isolated test objects
 does not admit a writable module.
 
@@ -57,6 +58,8 @@ The Windows recommendations and exclusions are documented in
   first baselines, step verification, compensation and last-owner restoration.
 - `platform/runner.rs` owns bounded serial dispatch, generations, cancellation,
   terminal tickets, immutable snapshots and bounded shutdown.
+- `service.rs` owns dormant headless saved transactions over candidate state and
+  logical identities, exact withdrawals and terminal acknowledgement bookkeeping.
 - `platform/journal.rs` owns aggregate limits, deduplicated typed source envelopes,
   exact unknown input retention and durable intent/progress/ownership transitions.
 - `platform/recovery.rs` distinguishes verified attachment, positive expiry and
@@ -302,6 +305,10 @@ Drop retain that worker context. A matching sealed saved revision and its produc
 are installed together after current source and actual machine checks; rejected
 handoffs retain saved evidence and the original journal. Application saves are
 not yet composed through this seam, and fixture handoffs supply no native permit.
+Headless transactions adopt candidate state and logical identities after successful
+persistence. Optional bounded v2 acknowledgement metadata retains the pending tuple
+until its own save succeeds. Pruning requires fresh retained-worker corroboration
+against the current journal; deserialized acknowledgement fields supply no authority.
 
 Production native admission remains closed even for an absent journal: the
 default configured producer is Unavailable, and an explicit staged gate also
@@ -318,9 +325,10 @@ immediate crash rollback guarantee.
 
 Continuity identity stores all 32 nonce bytes with a fixed versioned producer,
 domain and registry view; its shape is not native authenticity or a boot UUID.
-Test-domain identities are distinct and unavailable in production. The unreleased
-journal format remains version 1, while legacy bare-array continuity identities
-are blocked with their exact raw bytes retained; there is no inferred upgrade.
+Test-domain identities are distinct and unavailable in production. Journal
+FORMAT2 binds the independently expected saved configuration origin; FORMAT1,
+missing/foreign origin and legacy bare-array continuity identities are blocked
+with their exact raw bytes retained; there is no inferred upgrade.
 The canonical continuity producer remains unavailable pending its native matrix.
 
 The Windows `canonical_marker` candidate is separately gated by

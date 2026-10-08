@@ -51,6 +51,13 @@ pub(super) trait ExecutionControl {
     fn before_shutdown(&mut self, _: &CoordinatorSnapshot) -> Result<(), GateError> {
         Ok(())
     }
+    fn before_pending_update(
+        &mut self,
+        _: &Command,
+        _: &CoordinatorSnapshot,
+    ) -> Result<(), GateError> {
+        Err(GateError::MutationDisabled)
+    }
     fn cancellation_requested(&self) -> bool;
     fn before_write(&mut self, intent: &WriteIntent<'_>) -> Result<(), GateError>;
     fn before_execute(&mut self, _: &WriteIntent<'_>) -> Result<(), GateError> {
@@ -474,10 +481,40 @@ impl Coordinator {
         command: Command,
         control: &mut dyn ExecutionControl,
     ) -> CommandResult {
+        self.handle_mode(command, control, false)
+    }
+    pub(super) fn resume_pending_update(
+        &mut self,
+        request: &super::configured_intent::ConfiguredEntry,
+        control: &mut dyn ExecutionControl,
+    ) -> CommandResult {
+        self.handle_mode(
+            Command::Acquire {
+                owner: request.owner,
+                binding: request.binding.clone(),
+                config: request.config.clone(),
+                target: request.target.clone(),
+                mode: request.mode,
+            },
+            control,
+            true,
+        )
+    }
+    fn handle_mode(
+        &mut self,
+        command: Command,
+        control: &mut dyn ExecutionControl,
+        pending: bool,
+    ) -> CommandResult {
         if matches!(command, Command::Observe { .. }) {
-            return self.dispatch(command, control);
+            return self.dispatch(command, control, false);
         }
-        if let Err(error) = control.before_command(&command, &self.snapshot()) {
+        let admission = if pending {
+            control.before_pending_update(&command, &self.snapshot())
+        } else {
+            control.before_command(&command, &self.snapshot())
+        };
+        if let Err(error) = admission {
             return self.result(
                 Outcome::Rejected,
                 Some(CoordinatorError::Gate(error)),
@@ -497,18 +534,17 @@ impl Coordinator {
         let before_snapshot = self.snapshot();
         self.command_native_started = false;
         self.durable_checkpoint = None;
-        let result = self.dispatch(command, control);
+        let result = self.dispatch(command, control, pending);
         self.finish_transition(result, before, before_snapshot, control)
     }
-    fn dispatch(&mut self, command: Command, control: &mut dyn ExecutionControl) -> CommandResult {
+    fn dispatch(
+        &mut self,
+        command: Command,
+        control: &mut dyn ExecutionControl,
+        pending: bool,
+    ) -> CommandResult {
         match command {
-            Command::Acquire {
-                owner,
-                binding,
-                config,
-                target,
-                mode,
-            } => self.acquire(owner, config, target, mode, binding, control),
+            request @ Command::Acquire { .. } => self.acquire(request, control, pending),
             Command::Release { owner } => self.release(owner, control),
             Command::Observe { feature, target } => {
                 if control.cancellation_requested() {
@@ -623,13 +659,20 @@ impl Coordinator {
     }
     fn acquire(
         &mut self,
-        owner: OwnerId,
-        config: ModuleEnvelope,
-        target: TargetIdentity,
-        mode: ActivationMode,
-        binding: ActivationBinding,
+        request: Command,
         control: &mut dyn ExecutionControl,
+        pending: bool,
     ) -> CommandResult {
+        let Command::Acquire {
+            owner,
+            binding,
+            config,
+            target,
+            mode,
+        } = request
+        else {
+            unreachable!()
+        };
         if control.cancellation_requested() {
             return self.result(Outcome::Cancelled, None, control);
         }
@@ -680,7 +723,11 @@ impl Coordinator {
             .iter()
             .filter(|claim| {
                 self.resources.get(&claim.key).is_some_and(|record| {
-                    unresolved(record.status)
+                    (unresolved(record.status)
+                        && !(pending
+                            && record.status == ModuleStatus::RecoveryRequired
+                            && record.owners.len() == 1
+                            && record.owners.contains(&owner)))
                         || (record.desired != claim.desired
                             && (record.owners.len() != 1 || !record.owners.contains(&owner)))
                 })
@@ -717,7 +764,9 @@ impl Coordinator {
             .iter()
             .filter(|state| match self.resources.get(&state.key) {
                 Some(record) => {
-                    state.value != record.confirmed && !record.possible.contains(&state.value)
+                    state.value != record.confirmed
+                        && !record.possible.contains(&state.value)
+                        && !(pending && state.value == record.baseline)
                 }
                 None => !baselines.iter().any(|baseline| baseline == *state),
             })
@@ -736,7 +785,16 @@ impl Coordinator {
                 .get(&claim.key)
                 .is_some_and(|record| record.desired == claim.desired)
         });
-        if previous_owner.is_some() && same_values {
+        if previous_owner.is_some()
+            && same_values
+            && (!pending
+                || keys.iter().all(|key| {
+                    let record = &self.resources[key];
+                    !unresolved(record.status)
+                        && record.confirmed == record.desired
+                        && record.possible.is_empty()
+                }))
+        {
             let previous = self.owners.get_mut(&owner).unwrap();
             previous.mode = mode;
             previous.binding = binding;
@@ -789,7 +847,7 @@ impl Coordinator {
         );
         control.publish(self.snapshot());
         let mut possible_write = false;
-        match self.execute(&prepared, control, &mut possible_write) {
+        match self.execute(&prepared, control, &mut possible_write, pending) {
             Ok(()) => {
                 let status = active_status(prepared.operation.effect());
                 for key in &keys {
@@ -891,6 +949,7 @@ impl Coordinator {
         source: &Arc<Source>,
         control: &mut dyn ExecutionControl,
         possible_write: &mut bool,
+        pending: bool,
     ) -> Result<(), CoordinatorError> {
         let operation = &source.operation;
         for step in 0..operation.step_count() {
@@ -898,7 +957,7 @@ impl Coordinator {
                 return Err(CoordinatorError::Gate(GateError::Cancelled));
             }
             let writes = operation.step_resources(step)?.to_vec();
-            let proof = self.proof(source, &writes, operation.restores_baseline())?;
+            let proof = self.proof(source, &writes, operation.restores_baseline() || pending)?;
             let after = operation.step_after(step)?;
             let already_desired = proof.states().iter().all(|state| after.contains(state));
             if !already_desired {
@@ -1079,7 +1138,7 @@ impl Coordinator {
                 .prepare_update_expected(&config, &proof)?,
         )?;
         let mut possible = false;
-        self.execute(&cleanup, control, &mut possible)
+        self.execute(&cleanup, control, &mut possible, false)
     }
     fn release(&mut self, owner: OwnerId, control: &mut dyn ExecutionControl) -> CommandResult {
         let Some(request) = self.owners.get(&owner).cloned() else {
@@ -1159,7 +1218,7 @@ impl Coordinator {
         }
         let source = Source::new(prepared)?;
         let mut possible = false;
-        self.execute(&source, control, &mut possible)?;
+        self.execute(&source, control, &mut possible, false)?;
         self.resources.remove(key);
         Ok(())
     }
