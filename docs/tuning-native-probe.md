@@ -45,7 +45,11 @@ Run actual module tests explicitly and serially; they change settings and verify
 cargo test --locked --features windows,tuning-test-controls --bin cpu-affinity-tool native_roundtrip_ -- --ignored --test-threads=1 --nocapture
 ```
 
-Fresh Linux test/Clippy/release evidence is unavailable on this PC because no Linux runner is installed. Interactive Windows Modules/UAC smoke remains a manual check; rendered egui/state-level tests and actual adapters cover the automated boundary. These open checks are not native acceptance failures and are not treated as complete goal sign-off.
+On 2026-10-09 actual Windows GUI checks confirmed profile creation and selection, parameters saved before launch, saved-rule association, running and foreground activation, foreground release and explicit disabling through **Enabled**. The ordinary debug executable used the shipping source without test-control features. Release UAC and window launch were observed separately; automated elevated-window input was not confirmed.
+
+The GUI test owned a new Character Map process. Direct Windows API reads checked its creation token and image on a retained handle: the applied power-policy control/state was `1/1`, and both foreground release and GUI disable restored the captured `0/0`. The card showed **Off** and **Original settings restored and verified**; saved enablement was false and the recovery document had no fields or owners. Both test processes then terminated, and a guarded comparison plus SHA256 verification confirmed exact restoration of the original application configuration. Existing user profiles and rules were preserved.
+
+Fresh Linux test/Clippy/release evidence remains unavailable on this PC because no Linux runner is installed. Historical CI does not certify the current source. This compatibility gate remains open, so complete goal sign-off is still unavailable.
 
 For the current Modules screen, select or create a profile, choose a category and use **Settings** to choose the value and **When** trigger. **Enabled** includes the setting in the profile; **Save changes** commits the draft. Connect an existing game under **Games using this profile** for automatic settings. Manual settings expose **Apply now** and stay applied until turned off. Confirm running/foreground transitions and restoration when disabling. **Windows settings** opens native Settings; **Check your PC** provides observations/imports without managed configuration. Technical inventories and error causes remain accessible under **Details** and **Error details**.
 
