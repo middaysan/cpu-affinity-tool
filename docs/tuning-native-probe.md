@@ -49,7 +49,7 @@ On 2026-10-09 actual Windows GUI checks confirmed profile creation and selection
 
 The GUI test owned a new Character Map process. Direct Windows API reads checked its creation token and image on a retained handle: the applied power-policy control/state was `1/1`, and both foreground release and GUI disable restored the captured `0/0`. The card showed **Off** and **Original settings restored and verified**; saved enablement was false and the recovery document had no fields or owners. Both test processes then terminated, and a guarded comparison plus SHA256 verification confirmed exact restoration of the original application configuration. Existing user profiles and rules were preserved.
 
-Fresh Linux test/Clippy/release evidence remains unavailable on this PC because no Linux runner is installed. Historical CI does not certify the current source. This compatibility gate remains open, so complete goal sign-off is still unavailable.
+Actual Linux test/Clippy/release evidence is unavailable on this PC. On 2026-10-09 the user explicitly excluded Linux verification from this MR's acceptance. All four Windows stages are accepted with the evidence above; the local source and release EXE are ready. Linux compatibility remains unverified, and publication is outside the user's current authorization.
 
 The module platform is disabled on Linux: no module registration, UI, actions, recovery or process/foreground observation. Ordinary rule/state saves retain the exact raw tuning data without updating associations. Linux module-native round trips are outside the current scope; the existing Linux beta build and regression contract remains separate from Windows module readiness.
 

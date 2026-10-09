@@ -4,6 +4,8 @@ The product consists of four stages: UI, a small module registry/controller, rea
 
 Modules are currently Windows-only. Linux hides the Modules page and profile associations, registers no modules and runs no module observations, recovery or native actions. Its existing background queue only saves ordinary application state/rules, retaining raw tuning data unchanged. Separate Windows/Linux module-platform abstractions are deferred.
 
+On 2026-10-09 the user explicitly excluded Linux verification from this MR's acceptance. The four stages are accepted against the verified Windows implementation; actual Linux compatibility is unverified. Existing repository CI and beta release definitions remain in place. Delivery stays local under the user's no-push decision.
+
 ## User flow
 
 The Modules view lists available modules and their current observations. A profile saves each module's switch, parameters and trigger (Manual, while a saved game rule is running, or while that game is foreground). Profiles attach to logical rule IDs. Read-only cards work without a profile and expose refresh, CSV import or a fixed native Settings page.
