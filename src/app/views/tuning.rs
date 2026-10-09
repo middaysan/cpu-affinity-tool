@@ -58,6 +58,9 @@ fn current_preference(
 }
 
 pub(crate) fn draw_tuning(app: &mut AppState, root_ui: &mut egui::Ui) {
+    if !app.modules_enabled() {
+        return;
+    }
     let snapshot = app.tuning_snapshot();
     let editable = matches!(
         snapshot.configuration,
@@ -529,7 +532,8 @@ mod tests {
         let setting = crate::app::features::tuning::simple_tests::Setting::new("ui_setting", false);
         let mut registry = Registry::default();
         registry.register(setting.clone()).unwrap();
-        let production = crate::app::features::tuning::modules::registry();
+        let mut production = Registry::default();
+        crate::app::features::tuning::modules::diagnostics::register(&mut production).unwrap();
         for id in ["gpu_preference", "measurements"] {
             registry
                 .register(
@@ -931,10 +935,25 @@ mod tests {
         );
     }
 
+    fn empty_modules_app(state: Arc<RwLock<AppStateStorage>>) -> AppState {
+        use crate::app::features::tuning::{platform::registry::Registry, Tuning, TuningRuntime};
+        let registry = Registry::default();
+        let runtime = TuningRuntime::start(
+            Tuning::from_registry(registry.clone()).headless(
+                state.read().unwrap().clone(),
+                Box::new(UiSave(Arc::new(std::sync::atomic::AtomicBool::new(false)))),
+            ),
+            Arc::new(tokio::sync::RwLock::new(Default::default())),
+        );
+        let mut app = AppState::new_for_test(state, 4);
+        app.replace_tuning_for_test(runtime, registry);
+        app
+    }
+
     #[test]
     fn p5_empty_shipping_catalog_page_does_not_invent_active_modules() {
         let state = Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {})));
-        let mut app = AppState::new_for_test(state, 4);
+        let mut app = empty_modules_app(state);
         assert!(app.tuning_snapshot().catalog.is_empty());
         let text = rendered_text(&mut app);
         assert!(text.contains("No modules are available in this build."));
@@ -948,7 +967,7 @@ mod tests {
         let state = Arc::new(RwLock::new(AppStateStorage::test_fixture(|state| {
             state.tuning = serde_json::from_str(raw).unwrap();
         })));
-        let mut app = AppState::new_for_test(state.clone(), 4);
+        let mut app = empty_modules_app(state.clone());
         let text = rendered_text(&mut app);
         assert!(text.contains("retained and read-only"));
         assert!(!text.contains("Create profile"));

@@ -61,6 +61,7 @@ Current platform reality:
 - Windows is the primary released and explicitly supported platform
 - Linux code exists as a CI build/test/clippy validated desktop beta path from source for `x86_64` `glibc`; desktop sessions on `X11` or `Wayland` are covered by manual beta smoke validation
 - Linux also has a separate beta prerelease artifact contract under `linux-beta-v*` tags, but it is not part of the stable release contract
+- Modules are Windows-only. Linux has no Modules route or rule-profile controls, no registered modules, recovery lease, native module actions or execution/foreground observations. The existing background queue remains only for ordinary state/rule saves; persisted tuning data is retained without interpretation or association edits.
 - the project must not be described as a fully cross-platform desktop app
 
 ## Repository map

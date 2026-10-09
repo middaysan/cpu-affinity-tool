@@ -81,6 +81,18 @@ pub(crate) enum TuningRequest {
         app: Box<AppToRun>,
     },
 }
+impl TuningRequest {
+    fn is_base_change(&self) -> bool {
+        matches!(
+            self,
+            Self::SaveBase { .. }
+                | Self::RemoveRule { .. }
+                | Self::RemoveGroup { .. }
+                | Self::MoveRule { .. }
+                | Self::EditRule { .. }
+        )
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TuningOperationState {
     Idle,
@@ -141,6 +153,7 @@ struct Admission {
     closing: Option<Instant>,
 }
 struct Shared {
+    modules_enabled: bool,
     admission: Mutex<Admission>,
     latest: Mutex<Arc<TuningSnapshot>>,
     #[cfg(test)]
@@ -165,7 +178,9 @@ impl TuningRuntime {
             false,
         ));
         let (sender, receiver) = mpsc::sync_channel(1);
+        let modules_enabled = service.modules_enabled;
         let shared = Arc::new(Shared {
+            modules_enabled,
             admission: Mutex::new(Admission {
                 sender,
                 next: Some(1),
@@ -178,12 +193,19 @@ impl TuningRuntime {
         });
         let owned = shared.clone();
         let worker = thread::Builder::new()
-            .name("tuning".into())
+            .name(
+                if modules_enabled {
+                    "tuning"
+                } else {
+                    "state-save"
+                }
+                .into(),
+            )
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     #[cfg(windows)]
                     {
-                        if !service.native_admitted {
+                        if modules_enabled && !service.native_admitted {
                             match os_api::OS::tuning_legacy_evidence_exists() {
                                 Ok(legacy) => service.legacy_recovery = legacy,
                                 Err(error) => {
@@ -200,7 +222,11 @@ impl TuningRuntime {
                     let observed_state = Arc::new(RwLock::new(service.state().clone()));
                     let mut bridge = ExecutionBridge::default();
                     let mut operation = TuningOperationState::Idle;
-                    let mut actors = retained_actors(&service);
+                    let mut actors = if modules_enabled {
+                        retained_actors(&service)
+                    } else {
+                        BTreeMap::new()
+                    };
                     let mut next_cards = Instant::now();
                     loop {
                         if owned.admission.lock().unwrap().closing.is_some() {
@@ -210,45 +236,49 @@ impl TuningRuntime {
                                     error: SaveError::Pending,
                                 };
                             }
-                            let saved_verified =
-                                !service.has_saved_source() || service.verify_saved().is_ok();
-                            let may_restore = service.native_admitted
-                                && !service.legacy_recovery
-                                && saved_verified;
-                            let mut failed = service.legacy_recovery || !saved_verified;
-                            for owner in service
-                                .controller
-                                .owners()
-                                .into_iter()
-                                .filter(OwnerKey::is_session)
-                            {
-                                if !may_restore {
-                                    failed = true;
-                                    continue;
-                                }
-                                let exited = actors.get_mut(&owner).is_some_and(|actor| {
-                                    actor.lifetime() == LifetimeEvidence::Exited
-                                });
-                                failed |= if exited {
-                                    service
-                                        .controller
-                                        .release_if_exited(&owner, LifetimeEvidence::Exited)
-                                        .is_err()
-                                } else {
-                                    service
-                                        .controller
-                                        .recover_owner(&owner, RecoveryIntent::Restore)
-                                        .is_err()
-                                };
-                            }
-                            service.controller.inspect();
-                            let outcome = if failed
-                                || !service.controller.can_admit()
-                                || service.controller.owners().iter().any(OwnerKey::is_session)
-                            {
-                                ShutdownResult::RecoveryRequired
-                            } else {
+                            let outcome = if !modules_enabled {
                                 ShutdownResult::Complete
+                            } else {
+                                let saved_verified =
+                                    !service.has_saved_source() || service.verify_saved().is_ok();
+                                let may_restore = service.native_admitted
+                                    && !service.legacy_recovery
+                                    && saved_verified;
+                                let mut failed = service.legacy_recovery || !saved_verified;
+                                for owner in service
+                                    .controller
+                                    .owners()
+                                    .into_iter()
+                                    .filter(OwnerKey::is_session)
+                                {
+                                    if !may_restore {
+                                        failed = true;
+                                        continue;
+                                    }
+                                    let exited = actors.get_mut(&owner).is_some_and(|actor| {
+                                        actor.lifetime() == LifetimeEvidence::Exited
+                                    });
+                                    failed |= if exited {
+                                        service
+                                            .controller
+                                            .release_if_exited(&owner, LifetimeEvidence::Exited)
+                                            .is_err()
+                                    } else {
+                                        service
+                                            .controller
+                                            .recover_owner(&owner, RecoveryIntent::Restore)
+                                            .is_err()
+                                    };
+                                }
+                                service.controller.inspect();
+                                if failed
+                                    || !service.controller.can_admit()
+                                    || service.controller.owners().iter().any(OwnerKey::is_session)
+                                {
+                                    ShutdownResult::RecoveryRequired
+                                } else {
+                                    ShutdownResult::Complete
+                                }
                             };
                             let completed = Arc::new(snapshot(
                                 &service,
@@ -263,7 +293,11 @@ impl TuningRuntime {
                             admission.pending = false;
                             break;
                         }
-                        match receiver.recv_timeout(Duration::from_millis(25)) {
+                        match receiver.recv_timeout(Duration::from_millis(if modules_enabled {
+                            25
+                        } else {
+                            250
+                        })) {
                             Ok(queued) => {
                                 let result = if queued.revision != service.saved_revision() {
                                     Err(SaveError::Invalid)
@@ -277,13 +311,25 @@ impl TuningRuntime {
                                         error,
                                     },
                                 };
-                                *observed_state.write().unwrap() = service.state().clone();
-                                bridge.request_refresh();
-                                // Keep the pending latch until the completed snapshot has been published.
-                                bridge.refresh(Instant::now(), &running, &observed_state);
-                                let observation = worker_observation(&owned, &bridge, &mut actors);
-                                reconcile_sessions(&mut service, observation.as_ref(), &mut actors);
-                                service.controller.inspect();
+                                let observation = if modules_enabled {
+                                    *observed_state.write().unwrap() = service.state().clone();
+                                    bridge.request_refresh();
+                                    // Keep the pending latch until the completed snapshot has been published.
+                                    bridge.refresh(Instant::now(), &running, &observed_state);
+                                    let observation =
+                                        worker_observation(&owned, &bridge, &mut actors);
+                                    reconcile_sessions(
+                                        &mut service,
+                                        observation.as_ref(),
+                                        &mut actors,
+                                    );
+                                    service.controller.inspect();
+                                    observation
+                                } else {
+                                    Arc::new(ExecutionObservation::Unknown(
+                                        UnknownReason::Unavailable,
+                                    ))
+                                };
                                 next_cards = Instant::now() + Duration::from_secs(1);
                                 let completed = Arc::new(snapshot(
                                     &service,
@@ -298,6 +344,9 @@ impl TuningRuntime {
                                 admission.pending = false;
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => {
+                                if !modules_enabled {
+                                    continue;
+                                }
                                 bridge.refresh(Instant::now(), &running, &observed_state);
                                 let observation = worker_observation(&owned, &bridge, &mut actors);
                                 reconcile_sessions(&mut service, observation.as_ref(), &mut actors);
@@ -341,6 +390,9 @@ impl TuningRuntime {
         Self { shared, worker }
     }
     pub(crate) fn request(&self, request: TuningRequest) -> Result<u64, SaveError> {
+        if !self.shared.modules_enabled && !request.is_base_change() {
+            return Err(SaveError::Invalid);
+        }
         let mut admission = self.shared.admission.lock().unwrap();
         if admission.closing.is_some() || self.worker.is_none() {
             return Err(SaveError::Recovering);
@@ -413,9 +465,14 @@ impl TuningRuntime {
             || self.shared.admission.lock().unwrap().closing.is_some()
         {
             Some(Duration::from_millis(25))
-        } else {
+        } else if self.shared.modules_enabled {
             Some(Duration::from_secs(1))
+        } else {
+            None
         }
+    }
+    pub(crate) fn modules_enabled(&self) -> bool {
+        self.shared.modules_enabled
     }
 }
 impl Drop for TuningRuntime {
@@ -424,6 +481,9 @@ impl Drop for TuningRuntime {
     }
 }
 fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), SaveError> {
+    if !service.modules_enabled && !request.is_base_change() {
+        return Err(SaveError::Invalid);
+    }
     match request {
         TuningRequest::ModuleAction { feature, action } => service
             .registry()
@@ -802,6 +862,23 @@ fn snapshot(
     shutdown_outcome: Option<ShutdownResult>,
     observe: bool,
 ) -> TuningSnapshot {
+    if !service.modules_enabled {
+        return TuningSnapshot {
+            revision: service.saved_revision(),
+            configuration: TuningConfigurationState::Off,
+            profiles: vec![],
+            associations: vec![],
+            catalog: vec![],
+            operation,
+            readonly_cards: vec![],
+            restoration_effect: None,
+            operation_error: None,
+            shutdown_complete,
+            shutdown_outcome,
+            state: Arc::new(service.state().clone()),
+            rules: service.rules().clone(),
+        };
+    }
     let load = service.state().tuning.decode();
     let mut profiles = Vec::new();
     let mut associations = Vec::new();

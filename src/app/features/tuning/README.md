@@ -2,6 +2,8 @@
 
 A module is a statically compiled Rust adapter. Register it once in `modules/mod.rs`; the UI and controller discover it through the registry. Concrete configuration decoding, the editor and native setting semantics stay in the module. Unsafe Windows code stays in `libs/os_api`.
 
+The module platform is currently enabled only for the Windows binary. Linux omits Modules and rule-profile controls, registers no modules and performs no module observation, activation, recovery or periodic polling. Its existing queue handles only ordinary state/rule persistence and retains the raw tuning field unchanged, including unknown data. Separate Windows/Linux module-platform abstractions are deferred.
+
 ## Small interface
 
 `Module` supplies a descriptor, editor, available targets, read-only observation, desired field changes, exact field reads and conditional writes. Optional actions cover refresh, bounded CSV import and fixed Windows Settings pages. Editors render cached data; native calls run on the existing application worker.

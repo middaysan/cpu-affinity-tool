@@ -223,8 +223,13 @@ impl AppState {
             ),
         );
         let tuning_editors = registered.registry().clone();
+        let service = registered.headless_selected(saved);
         let tuning = TuningRuntime::start(
-            registered.headless_selected(saved),
+            if crate::app::features::tuning::MODULES_ENABLED {
+                service
+            } else {
+                service.without_modules()
+            },
             runtime.running_apps_handle(),
         );
         Self {
@@ -272,8 +277,13 @@ impl AppState {
             .clone();
         let registered = Tuning::from_registry(Default::default());
         let tuning_editors = registered.registry().clone();
+        let service = registered.headless(saved, Box::new(TestStatePersistence));
         let tuning = TuningRuntime::start(
-            registered.headless(saved, Box::new(TestStatePersistence)),
+            if crate::app::features::tuning::MODULES_ENABLED {
+                service
+            } else {
+                service.without_modules()
+            },
             runtime.running_apps_handle(),
         );
         Self {
@@ -305,6 +315,9 @@ impl AppState {
     }
     pub(crate) fn tuning_snapshot(&self) -> Arc<TuningSnapshot> {
         self.tuning.snapshot()
+    }
+    pub(crate) fn modules_enabled(&self) -> bool {
+        self.tuning.modules_enabled()
     }
     pub(crate) fn tuning_editors(
         &self,
@@ -929,6 +942,11 @@ impl AppState {
     }
 
     pub fn set_current_window(&mut self, window: WindowRoute) {
+        let window = if matches!(window, WindowRoute::Tuning) && !self.modules_enabled() {
+            WindowRoute::Groups(GroupRoute::List)
+        } else {
+            window
+        };
         let leaving_installed_app_picker =
             matches!(self.ui.current_window, WindowRoute::InstalledAppPicker)
                 && !matches!(window, WindowRoute::InstalledAppPicker);
@@ -1942,6 +1960,56 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(all(target_os = "windows", feature = "windows")))]
+    #[test]
+    fn linux_modules_route_is_unavailable() {
+        let mut app = sample_state();
+        app.set_current_window(WindowRoute::Tuning);
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::Groups(GroupRoute::List)
+        ));
+    }
+
+    #[cfg(not(all(target_os = "windows", feature = "windows")))]
+    #[test]
+    fn linux_modules_requests_are_refused_without_idle_module_polling() {
+        let mut app = sample_state();
+        assert_eq!(
+            app.request_tuning(crate::app::features::tuning::TuningRequest::CreateProfile {
+                name: "Unavailable".into(),
+            }),
+            Err(crate::app::features::tuning::SaveError::Invalid)
+        );
+        assert_eq!(app.tuning_poll_interval(), None);
+        assert!(app.tuning_snapshot().catalog.is_empty());
+        assert!(app.tuning_snapshot().profiles.is_empty());
+    }
+
+    #[cfg(not(all(target_os = "windows", feature = "windows")))]
+    #[test]
+    fn linux_modules_disabled_preserves_raw_data_during_classic_rule_changes() {
+        let original = sample_state();
+        let mut saved = original.persistent_state.read().unwrap().clone();
+        saved.version = 11;
+        saved.loaded_version = 11;
+        let raw = r#"{ "version": 77, "future": { "preserve": [1, 2] } }"#;
+        saved.tuning = serde_json::from_str(raw).unwrap();
+        let mut app = AppState::new_for_test(Arc::new(RwLock::new(saved)), 2);
+        let group = app.rules.group_id_for_index(0).unwrap();
+        let rule = app.rules.rule_id_for_index(0, 0).unwrap();
+        assert!(app.enqueue_legacy(
+            crate::app::features::tuning::TuningRequest::RemoveRule { group, rule },
+            None,
+        ));
+        assert!(app.persistent_state.read().unwrap().groups[0]
+            .programs
+            .is_empty());
+        app.set_theme_index(2);
+        assert_eq!(app.get_theme_index(), 2);
+        assert_eq!(app.persistent_state.read().unwrap().tuning.raw(), Some(raw));
+    }
+
     #[test]
     fn p4_legacy_save_failure_keeps_saved_values_ids_and_rule_editor() {
         use crate::app::features::tuning::{

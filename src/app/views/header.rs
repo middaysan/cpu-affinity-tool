@@ -112,10 +112,12 @@ fn navigation_switch(app: &mut AppState, ui: &mut egui::Ui) {
                 if navigation_button(ui, activity, activity_selected).clicked() {
                     app.set_current_window(WindowRoute::Logs);
                 }
-                let modules_selected = matches!(app.ui.current_window, WindowRoute::Tuning);
-                let modules = RichText::new("Modules").size(BUTTON_FONT_SIZE);
-                if navigation_button(ui, modules, modules_selected).clicked() {
-                    app.set_current_window(WindowRoute::Tuning);
+                if app.modules_enabled() {
+                    let modules_selected = matches!(app.ui.current_window, WindowRoute::Tuning);
+                    let modules = RichText::new("Modules").size(BUTTON_FONT_SIZE);
+                    if navigation_button(ui, modules, modules_selected).clicked() {
+                        app.set_current_window(WindowRoute::Tuning);
+                    }
                 }
             });
         });
@@ -174,7 +176,11 @@ pub fn draw_top_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                         ui.spacing_mut().item_spacing.x = 0.0;
                         ui.add_space(centered_leading_space(
                             available_width,
-                            NAVIGATION_SWITCH_WIDTH,
+                            if app.modules_enabled() {
+                                NAVIGATION_SWITCH_WIDTH
+                            } else {
+                                168.0
+                            },
                         ));
                         navigation_switch(app, ui);
                     });

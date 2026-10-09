@@ -434,6 +434,9 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
 }
 
 fn draw_profile_association(app: &mut AppState, ui: &mut egui::Ui) {
+    if !app.modules_enabled() {
+        return;
+    }
     use crate::app::features::tuning::{
         platform::contract::ActivationEligibility, presentation::AssociationDraft,
         TuningConfigurationState, TuningOperationState, TuningRequest,

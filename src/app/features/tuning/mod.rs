@@ -8,6 +8,7 @@ pub(crate) mod presentation;
 pub(crate) mod service;
 mod session_reducer;
 use service::HeadlessTuning;
+pub(crate) const MODULES_ENABLED: bool = cfg!(all(target_os = "windows", feature = "windows"));
 pub(crate) use service::{SaveError, StatePersistence};
 pub(crate) use session_reducer::{
     TuningConfigurationState, TuningOperationState, TuningRequest, TuningRuntime, TuningSnapshot,

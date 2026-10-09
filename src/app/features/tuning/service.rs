@@ -48,6 +48,7 @@ pub(crate) struct HeadlessTuning {
     rules: RulesContext,
     persistence: Box<dyn StatePersistence>,
     registry: Registry,
+    pub(super) modules_enabled: bool,
     pub(super) controller: Controller,
     revision: u64,
     pub(super) native_admitted: bool,
@@ -66,6 +67,7 @@ impl HeadlessTuning {
             rules,
             persistence,
             registry,
+            modules_enabled: true,
             controller: Controller::default(),
             revision: 0,
             native_admitted: false,
@@ -75,6 +77,11 @@ impl HeadlessTuning {
     }
     pub(crate) fn state(&self) -> &AppStateStorage {
         &self.state
+    }
+    pub(crate) fn without_modules(mut self) -> Self {
+        self.modules_enabled = false;
+        self.registry = Registry::default();
+        self
     }
     pub(crate) fn rules(&self) -> &RulesContext {
         &self.rules
@@ -154,7 +161,8 @@ impl HeadlessTuning {
         Ok(())
     }
     pub(super) fn start_selected_recovery(&mut self) {
-        if self.controller.is_durable()
+        if !self.modules_enabled
+            || self.controller.is_durable()
             || !self.has_saved_source()
             || self.registry.descriptors().next().is_none()
         {
@@ -179,6 +187,9 @@ impl HeadlessTuning {
         }
     }
     fn configured(&self) -> Result<TuningConfig, SaveError> {
+        if !self.modules_enabled {
+            return Err(SaveError::Invalid);
+        }
         match self.state.tuning.decode() {
             TuningLoad::Off => Ok(TuningConfig::default()),
             TuningLoad::Known(c) => Ok(*c),
@@ -361,7 +372,9 @@ impl HeadlessTuning {
             rules.reconcile_with_storage(&candidate);
             rules
         };
-        if let TuningLoad::Known(config) = self.state.tuning.decode() {
+        if let Some(TuningLoad::Known(config)) =
+            self.modules_enabled.then(|| self.state.tuning.decode())
+        {
             for association in &config.associations {
                 let (g, r) = self.rule_index(&association.group, &association.rule)?;
                 let ng = next_rules
@@ -390,10 +403,11 @@ impl HeadlessTuning {
         ))
     }
     fn remove_associations(
+        &self,
         candidate: &mut AppStateStorage,
         remove: impl Fn(&Association) -> bool,
     ) -> Result<(), SaveError> {
-        if candidate.tuning.is_off() {
+        if !self.modules_enabled || candidate.tuning.is_off() {
             return Ok(());
         }
         let TuningLoad::Known(mut config) = candidate.tuning.decode() else {
@@ -417,7 +431,7 @@ impl HeadlessTuning {
     pub(crate) fn remove_rule(&mut self, group: &GroupId, rule: &RuleId) -> Result<(), SaveError> {
         let (g, r) = self.rule_index(group, rule)?;
         let mut candidate = self.state.clone();
-        Self::remove_associations(&mut candidate, |a| &a.group == group && &a.rule == rule)?;
+        self.remove_associations(&mut candidate, |a| &a.group == group && &a.rule == rule)?;
         candidate.groups[g].programs.remove(r);
         let mut rules = self.rules.clone();
         rules.remove_rule(g, r);
@@ -429,7 +443,7 @@ impl HeadlessTuning {
             .group_index_for_id(group)
             .ok_or(SaveError::Invalid)?;
         let mut candidate = self.state.clone();
-        Self::remove_associations(&mut candidate, |a| &a.group == group)?;
+        self.remove_associations(&mut candidate, |a| &a.group == group)?;
         candidate.groups.remove(g);
         let mut rules = self.rules.clone();
         rules.remove_group(g);
@@ -466,7 +480,7 @@ impl HeadlessTuning {
             return Err(SaveError::Invalid);
         }
         if source != target {
-            Self::remove_associations(&mut candidate, |a| &a.group == group && &a.rule == rule)?;
+            self.remove_associations(&mut candidate, |a| &a.group == group && &a.rule == rule)?;
         }
         rules::move_rule_between_groups_at(&mut candidate, source, index, target, insert)
             .ok_or(SaveError::Invalid)?;

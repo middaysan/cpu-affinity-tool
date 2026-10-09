@@ -375,6 +375,73 @@ fn submit(
     settle(runtime)
 }
 #[test]
+fn simple_disabled_modules_keep_only_state_saves_without_observation_or_recovery() {
+    struct SaveOnly;
+    impl super::StatePersistence for SaveOnly {
+        fn save(
+            &mut self,
+            _: &mut crate::app::models::AppStateStorage,
+        ) -> Result<super::service::SavedState, super::SaveError> {
+            Ok(super::service::SavedState::Unavailable)
+        }
+        fn source_path(&self) -> Option<std::path::PathBuf> {
+            panic!("Disabled modules must not inspect the native recovery source");
+        }
+    }
+    let module = Setting::new("disabled_setting", false);
+    let mut registry = Registry::default();
+    registry.register(module.clone()).unwrap();
+    let raw = r#"{ "version": 77, "future": { "keep": true } }"#;
+    let saved = crate::app::models::AppStateStorage::test_fixture(|state| {
+        state.tuning = serde_json::from_str(raw).unwrap();
+    });
+    let runtime = super::TuningRuntime::start(
+        super::Tuning::from_registry(registry)
+            .headless(saved, Box::new(SaveOnly))
+            .without_modules(),
+        Arc::new(tokio::sync::RwLock::new(Default::default())),
+    );
+    assert!(!runtime.modules_enabled());
+    assert_eq!(runtime.poll_interval(), None);
+    let initial = runtime.snapshot();
+    assert!(
+        initial.profiles.is_empty()
+            && initial.catalog.is_empty()
+            && initial.readonly_cards.is_empty()
+    );
+    assert_eq!(
+        runtime.request(super::TuningRequest::ModuleAction {
+            feature: module.id.clone(),
+            action: super::presentation::ModuleAction::Refresh,
+        }),
+        Err(super::SaveError::Invalid)
+    );
+    let mut candidate = (*initial.state).clone();
+    candidate.theme_index = 2;
+    let changed = submit(
+        &runtime,
+        super::TuningRequest::SaveBase {
+            candidate: Box::new(candidate),
+            expected_revision: initial.revision,
+        },
+    );
+    assert_eq!(changed.state.theme_index, 2);
+    assert_eq!(changed.state.tuning.raw(), Some(raw));
+    runtime.begin_shutdown();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !runtime.snapshot().shutdown_complete && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(
+        runtime.snapshot().shutdown_outcome,
+        Some(super::platform::controller::ShutdownResult::Complete)
+    );
+    assert!(!module
+        .observation_entered
+        .load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(*module.writes.lock().unwrap(), 0);
+}
+#[test]
 fn simple_public_scalar_and_user_shapes_save_activate_edit_disable_and_restore() {
     use super::{config::ModulePreference, TuningOperationState, TuningRequest as Request};
     for user in [false, true] {
