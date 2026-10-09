@@ -65,7 +65,7 @@ impl ModuleEditor for CpuSets {
             return Err(());
         }
         let before = value.ids.clone();
-        if ui.button("Use Windows default assignment").clicked() {
+        if ui.button("Let Windows choose CPUs").clicked() {
             value.ids.clear();
         }
         eframe::egui::ScrollArea::vertical()
@@ -73,21 +73,21 @@ impl ModuleEditor for CpuSets {
             .show(ui, |ui| {
                 if let Ok(topology) = self.topology.read() {
                     if topology.is_empty() {
-                        ui.label("Refresh to read the actual CPU Set topology.");
+                        ui.label("Refresh to load the available CPUs.");
                     }
                     for cpu in topology.iter() {
                         let mut selected = value.ids.contains(&cpu.id);
                         let permitted = !cpu.allocated || cpu.allocated_to_target;
                         let label = format!(
-                            "ID {} · group {} · CPU {} · core {} · efficiency class {}{}{}",
-                            cpu.id,
-                            cpu.group,
+                            "CPU {} · group {} · core {} · efficiency class {} · ID {}{}{}",
                             cpu.logical_processor,
+                            cpu.group,
                             cpu.core,
                             cpu.efficiency_class,
+                            cpu.id,
                             if cpu.parked { " · parked" } else { "" },
                             if !permitted {
-                                " · reserved elsewhere"
+                                " · used by another app"
                             } else {
                                 ""
                             }
@@ -114,12 +114,12 @@ impl ModuleEditor for CpuSets {
                         .collect();
                     if !unavailable.is_empty() {
                         ui.label(format!(
-                            "Saved IDs missing from this topology: {unavailable:?}"
+                            "These saved CPU choices are unavailable: {unavailable:?}"
                         ));
                     }
                 }
             });
-        ui.small("Process default CPU Sets. Existing hard affinity can constrain selection; thread-selected CPU Sets can differ. CPU indices do not identify P/E cores.");
+        ui.small("Select the CPUs this game may use, or let Windows choose. The game's own settings and existing affinity may limit this choice.");
         let changed = before != value.ids;
         if changed {
             *config = envelope(ID, &value);
@@ -129,9 +129,9 @@ impl ModuleEditor for CpuSets {
     fn summary(&self, config: &ModuleEnvelope) -> Option<String> {
         configured_ids(config).ok().map(|ids| {
             if ids.is_empty() {
-                "Windows default assignment".into()
+                "Windows chooses CPUs".into()
             } else {
-                format!("CPU Set IDs: {ids:?}")
+                format!("{} CPUs selected", ids.len())
             }
         })
     }
@@ -140,8 +140,8 @@ impl Module for CpuSets {
     fn descriptor(&self) -> ModuleDescriptor {
         descriptor(
             ID,
-            "CPU Sets",
-            "Select real process-default CPU Set IDs across processor groups.",
+            "Game CPU selection",
+            "Choose which CPUs are available to games linked to this profile.",
             TargetScope::Process,
             automatic_modes(),
         )
@@ -161,7 +161,9 @@ impl Module for CpuSets {
                     .topology
                     .write()
                     .map_err(|_| error(ErrorKind::Read, "CPU metadata"))? = topology;
-                return Ok(format!("{count} CPU Sets observed. Select an associated running process to inspect its assignment."));
+                return Ok(format!(
+                    "{count} CPUs available. Start a linked game to inspect its current selection."
+                ));
             }
             let process = process(target)?;
             let topology = gaming::cpu_topology(Some(&process)).map_err(|e| native("read", e))?;

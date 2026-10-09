@@ -5,7 +5,7 @@ use crate::app::features::tuning::{
         contract::*,
         registry::{FieldChange, Module, ModuleObservation},
     },
-    presentation::ModuleEditor,
+    presentation::{ModuleEditor, ModuleSection},
 };
 use os_api::gaming::{self, AccessibilityFeature, AccessibilityState};
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,9 @@ pub(super) fn changes(
         .collect()
 }
 impl ModuleEditor for AccessibilityHotkeys {
+    fn section(&self) -> ModuleSection {
+        ModuleSection::Input
+    }
     fn feature(&self) -> FeatureId {
         feature(ID)
     }
@@ -74,10 +77,12 @@ impl ModuleEditor for AccessibilityHotkeys {
     fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()> {
         let mut value: Config = decode(ID, config).map_err(|_| ())?;
         let before = value.clone();
-        ui.checkbox(&mut value.sticky, "Suppress Sticky Keys hotkey");
-        ui.checkbox(&mut value.filter, "Suppress Filter Keys hotkey");
-        ui.checkbox(&mut value.toggle, "Suppress Toggle Keys hotkey");
-        ui.small("Already enabled accessibility features are skipped. Feature state, timing, sound and other flags are preserved.");
+        ui.checkbox(&mut value.sticky, "Block Sticky Keys shortcut");
+        ui.checkbox(&mut value.filter, "Block Filter Keys shortcut");
+        ui.checkbox(&mut value.toggle, "Block Toggle Keys shortcut");
+        ui.small(
+            "Already enabled features are skipped. Other accessibility settings stay the same.",
+        );
         let changed = before != value;
         if changed {
             *config = envelope(ID, &value);
@@ -95,16 +100,22 @@ impl ModuleEditor for AccessibilityHotkeys {
             .filter_map(|(selected, name)| selected.then_some(name))
             .collect();
             if names.is_empty() {
-                "No hotkeys selected".into()
+                "No shortcuts blocked".into()
             } else {
-                format!("Suppress {} hotkeys", names.join(", "))
+                format!("Block {} Keys shortcuts", names.join(", "))
             }
         })
     }
 }
 impl Module for AccessibilityHotkeys {
     fn descriptor(&self) -> ModuleDescriptor {
-        descriptor(ID, "Accessibility hotkeys", "Suppress selected activation hotkeys without disabling an active accessibility feature.", TargetScope::User, vec![ActivationMode::Manual, ActivationMode::ForegroundSession])
+        descriptor(
+            ID,
+            "Accessibility shortcuts",
+            "Keep Sticky, Filter and Toggle Keys shortcuts from interrupting play.",
+            TargetScope::User,
+            vec![ActivationMode::Manual, ActivationMode::ForegroundSession],
+        )
     }
     fn editor(&self) -> &dyn ModuleEditor {
         self

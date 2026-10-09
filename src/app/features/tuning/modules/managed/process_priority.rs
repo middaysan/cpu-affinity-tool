@@ -84,7 +84,7 @@ impl ModuleEditor for ProcessPriority {
                     ui.selectable_value(&mut value.priority, priority, label(priority));
                 }
             });
-        ui.small("Use modest priority changes for associated processes. High can reduce responsiveness of other applications; Realtime is unavailable.");
+        ui.small("Applies to games linked to this profile. Higher priority gives the game preference when apps compete for CPU time. High may make other apps less responsive.");
         let changed = before != value.priority;
         if changed {
             *config = envelope(ID, &value);
@@ -99,7 +99,13 @@ impl ModuleEditor for ProcessPriority {
 }
 impl Module for ProcessPriority {
     fn descriptor(&self) -> ModuleDescriptor {
-        descriptor(ID, "Process priority", "Temporarily manage process priority with one owner shared by launch and monitor paths.", TargetScope::Process, automatic_modes())
+        descriptor(
+            ID,
+            "Game priority",
+            "Choose the game's priority when apps compete for CPU time.",
+            TargetScope::Process,
+            automatic_modes(),
+        )
     }
     fn editor(&self) -> &dyn ModuleEditor {
         self

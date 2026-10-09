@@ -37,9 +37,9 @@ impl Policy {
     }
     fn label(self) -> &'static str {
         match self {
-            Self::SystemManaged => "Let Windows decide",
-            Self::EcoQos => "EcoQoS",
-            Self::DisableThrottling => "Disable execution-speed throttling",
+            Self::SystemManaged => "Use Windows default",
+            Self::EcoQos => "Prefer power saving",
+            Self::DisableThrottling => "Turn off game power saving",
         }
     }
 }
@@ -73,7 +73,7 @@ impl ModuleEditor for ProcessQos {
                     ui.selectable_value(&mut value.policy, policy, policy.label());
                 }
             });
-        ui.small("Applies only to verified processes of the associated saved rule. EcoQoS favors power efficiency; thermal limits still apply.");
+        ui.small("Applies to games linked to this profile. Power saving may reduce performance; compare results before keeping a change.");
         let changed = before != value.policy;
         if changed {
             *config = envelope(ID, &value);
@@ -90,8 +90,8 @@ impl Module for ProcessQos {
     fn descriptor(&self) -> ModuleDescriptor {
         descriptor(
             ID,
-            "Process QoS",
-            "Manage the execution-speed power policy of associated game processes.",
+            "Game power saving",
+            "Choose how Windows balances CPU speed and power use for this game.",
             TargetScope::Process,
             automatic_modes(),
         )
@@ -107,13 +107,13 @@ impl Module for ProcessQos {
             let value = gaming::read_process_policy(&process(target)?, EXECUTION_SPEED)
                 .map_err(|e| native("read", e))?;
             Ok(format!(
-                "Execution speed: {}",
+                "Game power saving: {}",
                 if value.control == 0 {
-                    "Windows managed"
+                    "Windows default"
                 } else if value.state != 0 {
-                    "EcoQoS requested"
+                    "preferred"
                 } else {
-                    "throttling disabled"
+                    "off"
                 }
             ))
         })())

@@ -74,6 +74,33 @@ pub(crate) fn scope_label(scope: TargetScope) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(crate) enum ModuleSection {
+    #[default]
+    Performance,
+    Input,
+    Power,
+    Windows,
+    Diagnostics,
+}
+impl ModuleSection {
+    pub const ALL: [Self; 5] = [
+        Self::Performance,
+        Self::Input,
+        Self::Power,
+        Self::Windows,
+        Self::Diagnostics,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Performance => "Game performance",
+            Self::Input => "Mouse & keyboard",
+            Self::Power => "Power settings",
+            Self::Windows => "Windows settings",
+            Self::Diagnostics => "Check your PC",
+        }
+    }
+}
 /// Each module decodes and edits its own typed configuration. Shell presenters
 /// dispatch through this adapter and never interpret payloads or feature IDs.
 pub(crate) trait ModuleEditor: Send + Sync {
@@ -81,6 +108,9 @@ pub(crate) trait ModuleEditor: Send + Sync {
     fn default_config(&self) -> ModuleEnvelope;
     fn accepts_config(&self, config: &ModuleEnvelope) -> bool;
     fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()>;
+    fn section(&self) -> ModuleSection {
+        ModuleSection::Performance
+    }
     fn summary(&self, _config: &ModuleEnvelope) -> Option<String> {
         None
     }
@@ -124,6 +154,7 @@ pub(crate) struct EditorDraft {
     pub profile: ProfileId,
     pub expected: Option<ModulePreference>,
     pub candidate: ModulePreference,
+    pub pending_save_revision: Option<u64>,
 }
 
 #[derive(Default)]
@@ -134,6 +165,14 @@ pub(crate) struct TuningUiSession {
     pub error: Option<&'static str>,
     pub association: Option<AssociationDraft>,
     pub manual_target: Option<(ProfileId, FeatureId, TargetIdentity)>,
+    pub section: ModuleSection,
+    pub show_new_profile: bool,
+    pub creating_revision: Option<u64>,
+    pub selected_rule: Option<(
+        crate::app::shared::ids::GroupId,
+        crate::app::shared::ids::RuleId,
+    )>,
+    pub rule_eligibility: Option<ActivationEligibility>,
 }
 
 pub(crate) struct AssociationDraft {

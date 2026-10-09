@@ -5,7 +5,7 @@ use crate::app::features::tuning::{
         contract::*,
         registry::{FieldChange, Module, ModuleObservation},
     },
-    presentation::ModuleEditor,
+    presentation::{ModuleEditor, ModuleSection},
 };
 use os_api::gaming::{self, MouseParameters};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,9 @@ impl Config {
 }
 pub(crate) struct MouseAcceleration;
 impl ModuleEditor for MouseAcceleration {
+    fn section(&self) -> ModuleSection {
+        ModuleSection::Input
+    }
     fn feature(&self) -> FeatureId {
         feature(ID)
     }
@@ -47,23 +50,23 @@ impl ModuleEditor for MouseAcceleration {
         let before = value.clone();
         eframe::egui::ComboBox::from_id_salt(ID)
             .selected_text(match value.acceleration {
-                0 => "Off",
-                1 => "One threshold",
-                _ => "Two thresholds",
+                0 => "Off · consistent movement",
+                1 => "On · one speed threshold",
+                _ => "On · two speed thresholds",
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut value.acceleration, 0, "Off");
-                ui.selectable_value(&mut value.acceleration, 1, "One threshold");
-                ui.selectable_value(&mut value.acceleration, 2, "Two thresholds");
+                ui.selectable_value(&mut value.acceleration, 0, "Off · consistent movement");
+                ui.selectable_value(&mut value.acceleration, 1, "On · one speed threshold");
+                ui.selectable_value(&mut value.acceleration, 2, "On · two speed thresholds");
             });
         if value.acceleration != 0 {
             ui.horizontal(|ui| {
-                ui.label("Thresholds");
+                ui.label("Speed thresholds");
                 ui.add(eframe::egui::DragValue::new(&mut value.threshold1).range(0..=1024));
                 ui.add(eframe::egui::DragValue::new(&mut value.threshold2).range(0..=1024));
             });
         }
-        ui.small("Changes Windows pointer acceleration for this session. Games using raw mouse input can ignore it.");
+        ui.small("With acceleration on, faster mouse movement moves the pointer farther. Games using raw mouse input may ignore this setting.");
         let changed = before != value;
         if changed {
             *config = envelope(ID, &value);
@@ -73,10 +76,10 @@ impl ModuleEditor for MouseAcceleration {
     fn summary(&self, config: &ModuleEnvelope) -> Option<String> {
         decode::<Config>(ID, config).ok().map(|c| {
             if c.acceleration == 0 {
-                "Pointer acceleration off".into()
+                "Acceleration off".into()
             } else {
                 format!(
-                    "Acceleration {}, thresholds {} / {}",
+                    "Acceleration level {} · speed thresholds {} / {}",
                     c.acceleration, c.threshold1, c.threshold2
                 )
             }
@@ -88,7 +91,7 @@ impl Module for MouseAcceleration {
         descriptor(
             ID,
             "Mouse acceleration",
-            "Control Windows pointer acceleration while preserving the complete original tuple.",
+            "Choose how mouse movement affects the Windows pointer.",
             TargetScope::User,
             vec![ActivationMode::Manual, ActivationMode::ForegroundSession],
         )

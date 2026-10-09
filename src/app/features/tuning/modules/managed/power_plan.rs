@@ -5,7 +5,7 @@ use crate::app::features::tuning::{
         contract::*,
         registry::{FieldChange, Module, ModuleObservation},
     },
-    presentation::ModuleEditor,
+    presentation::{ModuleEditor, ModuleSection},
 };
 use os_api::gaming::{self, GuidValue, PowerScheme};
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ pub(crate) struct PowerPlan {
 impl PowerPlan {
     fn name(&self, scheme: Option<GuidValue>) -> String {
         match scheme {
-            None => "Current scheme".into(),
+            None => "Keep current plan".into(),
             Some(id) => self
                 .schemes
                 .read()
@@ -35,6 +35,9 @@ impl PowerPlan {
     }
 }
 impl ModuleEditor for PowerPlan {
+    fn section(&self) -> ModuleSection {
+        ModuleSection::Power
+    }
     fn feature(&self) -> FeatureId {
         feature(ID)
     }
@@ -50,14 +53,14 @@ impl ModuleEditor for PowerPlan {
         eframe::egui::ComboBox::from_id_salt(ID)
             .selected_text(self.name(value.scheme))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut value.scheme, None, "Current scheme");
+                ui.selectable_value(&mut value.scheme, None, "Keep current plan");
                 if let Ok(schemes) = self.schemes.read() {
                     for scheme in schemes.iter() {
                         ui.selectable_value(&mut value.scheme, Some(scheme.id), &scheme.name);
                     }
                 }
             });
-        ui.small("Select an existing Windows scheme. This changes the user preference and does not guarantee higher FPS.");
+        ui.small("Choose a Windows power plan. Your original plan is restored when this module is turned off.");
         let changed = before != value.scheme;
         if changed {
             *config = envelope(ID, &value);
@@ -75,7 +78,7 @@ impl Module for PowerPlan {
         descriptor(
             ID,
             "Power plan",
-            "Use an existing Windows power scheme for this user.",
+            "Choose an existing Windows power plan.",
             TargetScope::User,
             all_modes(),
         )

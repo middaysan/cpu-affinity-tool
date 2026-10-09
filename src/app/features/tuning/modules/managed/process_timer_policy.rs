@@ -39,18 +39,24 @@ impl ModuleEditor for ProcessTimerPolicy {
         if !value.honor_existing_requests {
             return Err(());
         }
-        ui.label("Honor this process's existing timer-resolution requests");
-        ui.small("Opt-in experiment. Creates no timer request and forces no global resolution. Measure visible and occluded behavior before using it.");
+        ui.label("Use the timing requests the game already makes");
+        ui.small("Optional experiment. Creates no new timing requests and changes no timers for other apps. Compare results with the game visible and minimized.");
         Ok(false)
     }
     fn summary(&self, config: &ModuleEnvelope) -> Option<String> {
         self.accepts_config(config)
-            .then(|| "Honor existing requests · experiment".into())
+            .then(|| "Use existing timing requests · optional experiment".into())
     }
 }
 impl Module for ProcessTimerPolicy {
     fn descriptor(&self) -> ModuleDescriptor {
-        descriptor(ID, "Process timer policy · experiment", "Honor existing timer requests of verified associated processes; no global timer changes.", TargetScope::Process, automatic_modes())
+        descriptor(
+            ID,
+            "Game timers · optional experiment",
+            "Let a linked game use its existing timing requests.",
+            TargetScope::Process,
+            automatic_modes(),
+        )
     }
     fn editor(&self) -> &dyn ModuleEditor {
         self
@@ -63,9 +69,9 @@ impl Module for ProcessTimerPolicy {
             let value = gaming::read_process_policy(&process(target)?, IGNORE_TIMER_RESOLUTION)
                 .map_err(|e| native("read", e))?;
             Ok(format!(
-                "Existing requests: {}. Requested resolution and latency are not measured.",
+                "Game timing requests: {}. Timing accuracy and input delay are not measured.",
                 if value.control == 0 {
-                    "Windows managed"
+                    "Windows default"
                 } else if value.state != 0 {
                     "ignored"
                 } else {

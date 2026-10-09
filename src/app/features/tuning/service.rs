@@ -86,7 +86,7 @@ impl HeadlessTuning {
         self.revision
     }
     #[cfg(test)]
-    pub(super) fn admit_test_modules(&mut self) {
+    pub(crate) fn admit_test_modules(&mut self) {
         self.native_admitted = true;
     }
     pub(super) fn has_saved_source(&self) -> bool {

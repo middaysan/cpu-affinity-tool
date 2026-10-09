@@ -46,4 +46,4 @@ mod native_roundtrip_tests;
 #[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]
-mod simple_tests;
+pub(crate) mod simple_tests;

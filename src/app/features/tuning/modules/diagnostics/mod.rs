@@ -8,7 +8,7 @@ use crate::app::features::tuning::{
         contract::*,
         registry::{FieldChange, Module, ModuleObservation, Registry},
     },
-    presentation::{ModuleAction, ModuleEditor},
+    presentation::{ModuleAction, ModuleEditor, ModuleSection},
 };
 use os_api::gaming_diagnostics::{self as native, DiagnosticError, SettingsPage};
 use serde::{Deserialize, Serialize};
@@ -56,36 +56,30 @@ impl Kind {
     }
     fn title(self) -> &'static str {
         match self {
-            Self::Measurements => "Frame-time measurements",
-            Self::Display => "Display audit",
-            Self::Latency => "Latency advisor",
-            Self::Audio => "Audio diagnostics",
-            Self::Irq => "Interrupt diagnostics",
-            Self::Usb => "USB topology",
+            Self::Measurements => "Compare game results",
+            Self::Display => "Display information",
+            Self::Latency => "Input delay guide",
+            Self::Audio => "Audio information",
+            Self::Irq => "Device interrupts",
+            Self::Usb => "USB connections",
             Self::GameMode => "Game Mode",
             Self::Capture => "Background recording",
-            Self::Windowed => "Windowed optimizations",
-            Self::Gpu => "Preferred GPU",
+            Self::Windowed => "Windowed game optimizations",
+            Self::Gpu => "Game graphics card",
         }
     }
     fn description(self) -> &'static str {
         match self {
-            Self::Measurements => {
-                "Import normalized benchmark CSV captures and compare frame times."
-            }
-            Self::Display => {
-                "Current desktop resolution, nominal refresh rate and display adapters."
-            }
-            Self::Latency => "Current display inventory and game/driver latency guidance.",
-            Self::Audio => {
-                "Active endpoints and audio session clients. Audio content is never recorded."
-            }
-            Self::Irq => "Present PnP devices, processor groups and stored interrupt preferences.",
-            Self::Usb => "Real PnP parent relationships and shared USB host controllers.",
-            Self::GameMode => "Open the native Game Mode page for this Windows user.",
-            Self::Capture => "Review background recording separately from other capture functions.",
-            Self::Windowed => "Review supported Windows graphics defaults and per-app exceptions.",
-            Self::Gpu => "Choose an application's preferred GPU in native Windows Settings.",
+            Self::Measurements => "Import two benchmark results to compare game smoothness.",
+            Self::Display => "Check screen resolution, refresh rate and graphics cards.",
+            Self::Latency => "Review options that may affect input delay.",
+            Self::Audio => "View active sound devices and apps using audio.",
+            Self::Irq => "Inspect device interrupt settings without changing them.",
+            Self::Usb => "See which USB devices share a controller.",
+            Self::GameMode => "Review Windows Game Mode settings.",
+            Self::Capture => "Review background recording in Windows.",
+            Self::Windowed => "Review Windows options for games played in a window.",
+            Self::Gpu => "Choose a game's graphics card in Windows Settings.",
         }
     }
     fn settings(self) -> Option<SettingsPage> {
@@ -147,7 +141,7 @@ impl DiagnosticModule {
             Kind::Audio => audio_summary(),
             Kind::Irq => irq_summary(),
             Kind::Usb => usb_summary(),
-            _ if cfg!(target_os = "windows") => Ok("Native Settings action available. Current switch/preference is not read by this card; confirm it in Settings.".into()),
+            _ if cfg!(target_os = "windows") => Ok("Open Windows Settings to view or change this option. Its current value is shown there.".into()),
             _ => Err(DiagnosticError::Unsupported),
         }
     }
@@ -313,6 +307,12 @@ impl Module for DiagnosticModule {
 }
 
 impl ModuleEditor for DiagnosticModule {
+    fn section(&self) -> ModuleSection {
+        match self.kind {
+            Kind::GameMode | Kind::Capture | Kind::Windowed | Kind::Gpu => ModuleSection::Windows,
+            _ => ModuleSection::Diagnostics,
+        }
+    }
     fn feature(&self) -> FeatureId {
         FeatureId::new(self.kind.id()).expect("static feature ID")
     }
@@ -333,7 +333,7 @@ impl ModuleEditor for DiagnosticModule {
     }
     fn summary(&self, config: &ModuleEnvelope) -> Option<String> {
         self.accepts_config(config)
-            .then(|| "Read-only observation and native guidance".into())
+            .then(|| self.kind.description().into())
     }
     fn actions(&self, ui: &mut eframe::egui::Ui) -> Option<ModuleAction> {
         let mut action = None;
@@ -345,7 +345,7 @@ impl ModuleEditor for DiagnosticModule {
                 && ui
                     .add_enabled(
                         cfg!(target_os = "windows"),
-                        eframe::egui::Button::new("Open Settings"),
+                        eframe::egui::Button::new("Open Windows Settings"),
                     )
                     .clicked()
             {
@@ -357,7 +357,7 @@ impl ModuleEditor for DiagnosticModule {
                     .lock()
                     .map(|captures| captures.next_label())
                     .unwrap_or("A");
-                if ui.button(format!("Import capture {label}")).clicked() {
+                if ui.button(format!("Import results {label}")).clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Frame-time CSV", &["csv"])
                         .pick_file()
@@ -368,7 +368,7 @@ impl ModuleEditor for DiagnosticModule {
             }
         });
         if matches!(self.kind, Kind::Measurements) {
-            ui.collapsing("CSV format and limits", |ui| {
+            ui.collapsing("Import format and limits", |ui| {
                 ui.label("UTF-8 normalized benchmark CSV, exact header below; repeat the same metadata on each frame row. Supports quoted fields. Export/convert one process and swap chain from your benchmark/PresentMon version. frame_type is rendered or generated; frame_time_ms must be finite, >0 and ≤60,000. Maximum 4 MiB, 100,000 rows and 256 bytes per field.");
                 ui.add(eframe::egui::Label::new(measurements::CSV_HEADER).wrap());
                 ui.label("Example row: PresentMon,2.4,game.exe,0x1,ComposedFlip,rendered,export,scene-a,16.67");

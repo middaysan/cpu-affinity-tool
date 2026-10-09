@@ -2,11 +2,12 @@ use crate::app::{
     features::tuning::{
         config::ModulePreference,
         platform::contract::{
-            ActivationMode, Capability, ModuleAccess, ModuleDescriptor, ModuleStatus, ProfileId,
+            ActivationEligibility, ActivationMode, Capability, ModuleAccess, ModuleDescriptor,
+            ModuleStatus, ProfileId, TargetScope,
         },
         presentation::{
             card_controls, edit_configuration, mode_label, preference_with_enabled, scope_label,
-            status_label, EditorDraft,
+            status_label, EditorDraft, ModuleSection,
         },
         SaveError, TuningConfigurationState, TuningOperationState, TuningRequest,
     },
@@ -26,8 +27,9 @@ pub(crate) fn save_error_message(error: SaveError) -> &'static str {
     }
 }
 
-pub(crate) fn submit(app: &mut AppState, request: TuningRequest) {
+pub(crate) fn submit(app: &mut AppState, request: TuningRequest) -> bool {
     app.ui.tuning.error = app.request_tuning(request).err().map(save_error_message);
+    app.ui.tuning.error.is_none()
 }
 
 fn busy(operation: &TuningOperationState) -> bool {
@@ -62,6 +64,17 @@ pub(crate) fn draw_tuning(app: &mut AppState, root_ui: &mut egui::Ui) {
         TuningConfigurationState::Off | TuningConfigurationState::Known
     );
     let pending = busy(&snapshot.operation);
+    if let Some(before) = app.ui.tuning.creating_revision {
+        if snapshot.revision > before && matches!(snapshot.operation, TuningOperationState::Idle) {
+            app.ui.tuning.selected_profile = snapshot.profiles.last().map(|p| p.id);
+            app.ui.tuning.creating_revision = None;
+            app.ui.tuning.profile_name.clear();
+            app.ui.tuning.show_new_profile = false;
+            app.ui.tuning.editor = None;
+        } else if matches!(snapshot.operation, TuningOperationState::Refused { .. }) {
+            app.ui.tuning.creating_revision = None;
+        }
+    }
     if app
         .ui
         .tuning
@@ -76,67 +89,103 @@ pub(crate) fn draw_tuning(app: &mut AppState, root_ui: &mut egui::Ui) {
     }
     egui::CentralPanel::default().frame(content_frame(root_ui)).show(root_ui, |ui| {
         ui.heading("Modules");
-        ui.label("Save settings in a profile and choose when to apply them.");
+        ui.label("Choose what to change, when to apply it, and which games use it.");
         match snapshot.operation {
-            TuningOperationState::Pending { .. } => { ui.spinner(); ui.label("Saving or applying settings…"); }
-            TuningOperationState::Refused { error, .. } => { ui.colored_label(ui.visuals().error_fg_color, save_error_message(error)); }
-            TuningOperationState::Recovering => { ui.colored_label(ui.visuals().error_fg_color, "Recovery required. Changes are paused."); }
+            TuningOperationState::Pending { .. } => { ui.horizontal(|ui| { ui.spinner(); ui.label("Saving your changes…"); }); }
+            TuningOperationState::Refused { error, .. } => {
+                if snapshot.operation_error.is_none() { ui.colored_label(ui.visuals().error_fg_color, save_error_message(error)); }
+            }
+            TuningOperationState::Recovering => { ui.colored_label(ui.visuals().error_fg_color, "A previous change needs attention. Applying settings is paused."); }
             TuningOperationState::Idle => {}
         }
-        if let Some(error) = app.ui.tuning.error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        }
+        if let Some(error) = app.ui.tuning.error { ui.colored_label(ui.visuals().error_fg_color, error); }
         if let Some(error) = &snapshot.operation_error {
-            draw_operation_error(ui, error);
+            ui.colored_label(ui.visuals().error_fg_color, "Could not complete this action. Open Error details for more information.");
+            egui::CollapsingHeader::new("Error details").show(ui, |ui| draw_operation_error(ui, error));
         }
         if !editable {
             ui.label("Saved module settings cannot be understood by this version. They are retained and read-only.");
             return;
         }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add(form_text_edit(&mut app.ui.tuning.profile_name).hint_text("Profile name").char_limit(128));
-            if ui.add_enabled(!pending && !app.ui.tuning.profile_name.trim().is_empty(), egui::Button::new("Create profile")).clicked() {
-                let name = app.ui.tuning.profile_name.trim().to_owned();
-                submit(app, TuningRequest::CreateProfile { name });
-            }
-        });
-        if !snapshot.profiles.is_empty() {
-            let selected_name = snapshot.profiles.iter().find(|p| Some(p.id) == app.ui.tuning.selected_profile)
-                .map_or("Select profile", |p| p.name.as_str());
-            egui::ComboBox::from_id_salt("tuning-profile").selected_text(selected_name).show_ui(ui, |ui| {
-                for profile in &snapshot.profiles {
-                    if ui.selectable_value(&mut app.ui.tuning.selected_profile, Some(profile.id), &profile.name).changed() {
-                        app.ui.tuning.editor = None;
-                    }
-                }
-            });
-            if let Some(profile) = snapshot.profiles.iter().find(|p| Some(p.id) == app.ui.tuning.selected_profile) {
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(!pending && profile.modules.iter().any(|m| m.enabled), egui::Button::new("Disable profile")).clicked() {
-                        submit(app, TuningRequest::DisableProfile { profile: profile.id });
-                    }
-                    if ui.add_enabled(!pending, egui::Button::new("Remove profile")).clicked() {
-                        submit(app, TuningRequest::RemoveProfile { profile: profile.id });
-                    }
+        ui.add_space(8.0);
+        glass_frame(ui).show(ui, |ui| {
+            if snapshot.profiles.is_empty() {
+                ui.strong("Start with a profile");
+                ui.label("A profile is a saved set of settings. Give it a name such as Gaming, then choose the settings below.");
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong("Profile");
+                    let name = snapshot.profiles.iter().find(|p| Some(p.id) == app.ui.tuning.selected_profile).map_or("Select a profile", |p| p.name.as_str());
+                    egui::ComboBox::from_id_salt("tuning-profile").selected_text(name).show_ui(ui, |ui| {
+                        for profile in &snapshot.profiles {
+                            if ui.selectable_value(&mut app.ui.tuning.selected_profile, Some(profile.id), &profile.name).changed() {
+                                app.ui.tuning.editor = None;
+                                app.ui.tuning.selected_rule = None;
+                                app.ui.tuning.rule_eligibility = None;
+                            }
+                        }
+                    });
+                    if ui.add_enabled(!pending, egui::Button::new("New profile")).clicked() { app.ui.tuning.show_new_profile = true; }
                 });
             }
-        }
+            if snapshot.profiles.is_empty() || app.ui.tuning.show_new_profile {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(form_text_edit(&mut app.ui.tuning.profile_name).desired_width(240.0).hint_text("Name, e.g. Gaming").char_limit(128));
+                    if ui.add_enabled(!pending && !app.ui.tuning.profile_name.trim().is_empty(), egui::Button::new("Create profile")).clicked()
+                        && submit(app, TuningRequest::CreateProfile { name: app.ui.tuning.profile_name.trim().to_owned() }) {
+                        app.ui.tuning.creating_revision = Some(snapshot.revision);
+                    }
+                    if !snapshot.profiles.is_empty() && ui.button("Cancel").clicked() { app.ui.tuning.show_new_profile = false; }
+                });
+            }
+            if let Some(profile) = snapshot.profiles.iter().find(|p| Some(p.id) == app.ui.tuning.selected_profile) {
+                ui.small("Turn settings on individually. Nothing is applied just by opening this page.");
+                egui::CollapsingHeader::new("Profile options").id_salt(profile.id.get()).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add_enabled(!pending && profile.modules.iter().any(|m| m.enabled), egui::Button::new("Turn off all settings")).clicked() {
+                            submit(app, TuningRequest::DisableProfile { profile: profile.id });
+                        }
+                        if ui.add_enabled(!pending, egui::Button::new("Delete profile")).clicked() {
+                            submit(app, TuningRequest::RemoveProfile { profile: profile.id });
+                        }
+                    });
+                    ui.small("Turning a setting off restores its original value when this app can safely verify it.");
+                });
+            }
+        });
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            for section in ModuleSection::ALL {
+                let count = snapshot.catalog.iter().filter(|d| app.tuning_editors().editor(&d.id).is_some_and(|e| e.section() == section)).count();
+                if count != 0 { ui.selectable_value(&mut app.ui.tuning.section, section, format!("{} ({count})", section.label())); }
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(match app.ui.tuning.section {
+            ModuleSection::Performance => "Choose how this app manages your game's processes. Connect a saved game to use automatic settings.",
+            ModuleSection::Input => "Choose mouse and keyboard behaviour while playing.",
+            ModuleSection::Power => "Choose a power plan or power mode. Original settings are retained for turning it off.",
+            ModuleSection::Windows => "These options are changed in Windows. Each card opens the right Settings page.",
+            ModuleSection::Diagnostics => "Check devices and performance. These tools provide information and do not change system settings.",
+        });
         ui.separator();
-        if snapshot.catalog.is_empty() {
-            ui.label("No modules are available in this build.");
-        }
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        if snapshot.catalog.is_empty() { ui.label("No modules are available in this build."); }
+        egui::ScrollArea::vertical().id_salt("modules-content").auto_shrink([false, false]).show(ui, |ui| {
+            if !matches!(app.ui.tuning.section, ModuleSection::Windows | ModuleSection::Diagnostics) {
+                draw_game_connection(app, ui, pending);
+            }
             for descriptor in &snapshot.catalog {
-                draw_module(app, ui, descriptor, pending);
+                if app.tuning_editors().editor(&descriptor.id).is_some_and(|e| e.section() == app.ui.tuning.section) {
+                    ui.push_id(descriptor.id.as_str(), |ui| draw_module(app, ui, descriptor, pending));
+                    ui.add_space(6.0);
+                }
             }
             if let Some(profile) = snapshot.profiles.iter().find(|p| Some(p.id) == app.ui.tuning.selected_profile) {
                 for card in &profile.modules {
                     if !snapshot.catalog.iter().any(|d| d.id == card.feature) {
                         glass_frame(ui).show(ui, |ui| {
                             ui.strong(&card.title);
-                            ui.label("This saved module is unavailable. Its configuration is retained and read-only.");
-                            ui.label(if card.enabled { "Saved preference: enabled" } else { "Saved preference: disabled" });
+                            ui.label("This saved setting is unavailable. Its configuration is retained.");
                             if let Some(status) = card.status { ui.label(status_label(status)); }
                         });
                     }
@@ -144,14 +193,94 @@ pub(crate) fn draw_tuning(app: &mut AppState, root_ui: &mut egui::Ui) {
             }
         });
         if let Some(effect) = snapshot.restoration_effect {
-            let text = match effect {
-                crate::app::features::tuning::platform::contract::Effect::Immediate => "Restoration verified.",
-                crate::app::features::tuning::platform::contract::Effect::GameRestartRequired => "Original settings restored; restart the game to take effect.",
-                crate::app::features::tuning::platform::contract::Effect::RestartRequired => "Original settings restored; restart Windows to take effect.",
-            };
-            ui.label(text);
+            ui.label(match effect {
+                crate::app::features::tuning::platform::contract::Effect::Immediate => "Original settings restored and verified.",
+                crate::app::features::tuning::platform::contract::Effect::GameRestartRequired => "Original settings restored. Restart the game to use them.",
+                crate::app::features::tuning::platform::contract::Effect::RestartRequired => "Original settings restored. Restart Windows to use them.",
+            });
         }
     });
+}
+
+fn draw_game_connection(app: &mut AppState, ui: &mut egui::Ui, pending: bool) {
+    let snapshot = app.tuning_snapshot();
+    let Some(profile) = app.ui.tuning.selected_profile else {
+        return;
+    };
+    let mut games = Vec::new();
+    for (gi, group) in snapshot.state.groups.iter().enumerate() {
+        let Some(group_id) = snapshot.rules.group_id_for_index(gi) else {
+            continue;
+        };
+        for (ri, game) in group.programs.iter().enumerate() {
+            if let Some(rule_id) = snapshot.rules.rule_id_for_index(gi, ri) {
+                games.push((
+                    (group_id.clone(), rule_id),
+                    format!("{} · {}", group.name, game.name),
+                ));
+            }
+        }
+    }
+    if app
+        .ui
+        .tuning
+        .selected_rule
+        .as_ref()
+        .is_some_and(|selected| !games.iter().any(|(ids, _)| ids == selected))
+    {
+        app.ui.tuning.selected_rule = None;
+    }
+    let connected: Vec<_> = games
+        .iter()
+        .filter(|(ids, _)| {
+            snapshot
+                .associations
+                .iter()
+                .any(|a| a.profile == profile && a.group == ids.0 && a.rule == ids.1)
+        })
+        .collect();
+    glass_frame(ui).show(ui, |ui| {
+        ui.strong("Games using this profile");
+        if connected.is_empty() { ui.small("No game connected yet. Automatic settings wait until you connect a game."); }
+        for (ids, name) in connected {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(name);
+                if ui.add_enabled(!pending, egui::Button::new("Disconnect")).clicked() {
+                    submit(app, TuningRequest::UnbindRule { group: ids.0.clone(), rule: ids.1.clone() });
+                }
+            });
+        }
+        egui::CollapsingHeader::new("Connect a game").id_salt(profile.get()).show(ui, |ui| {
+            if games.is_empty() {
+                ui.label("Add a game in Overview first, then return here to connect it.");
+                if ui.button("Go to Overview").clicked() { app.ui.set_current_window(crate::app::shell::WindowRoute::Groups(crate::app::shell::GroupRoute::List)); }
+                return;
+            }
+            ui.add_enabled_ui(!pending, |ui| {
+                let selected = games.iter().find(|(ids, _)| Some(ids) == app.ui.tuning.selected_rule.as_ref()).map_or("Choose a saved game", |(_, name)| name.as_str());
+                egui::ComboBox::from_id_salt("connect-module-game").selected_text(selected).show_ui(ui, |ui| {
+                    for (ids, name) in &games { ui.selectable_value(&mut app.ui.tuning.selected_rule, Some(ids.clone()), name); }
+                });
+                let mut eligibility = app.ui.tuning.rule_eligibility.unwrap_or(ActivationEligibility::Running);
+                egui::ComboBox::from_id_salt("connect-module-when").selected_text(match eligibility {
+                    ActivationEligibility::Running => "While the game is running", ActivationEligibility::Foreground => "Only while the game is in front",
+                }).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut eligibility, ActivationEligibility::Running, "While the game is running");
+                    ui.selectable_value(&mut eligibility, ActivationEligibility::Foreground, "Only while the game is in front");
+                });
+                app.ui.tuning.rule_eligibility = Some(eligibility);
+                ui.small("Running allows each setting's When choice. Foreground limits all automatic settings to when this game is in front.");
+                if let Some((group, rule)) = app.ui.tuning.selected_rule.clone() {
+                    if let Some(existing) = snapshot.associations.iter().find(|a| a.group == group && a.rule == rule && a.profile != profile) {
+                        let name = snapshot.profiles.iter().find(|p| p.id == existing.profile).map_or("another profile", |p| p.name.as_str());
+                        ui.label(format!("Connecting this game will replace its current profile: {name}."));
+                    }
+                    if ui.button("Connect to this profile").clicked() { submit(app, TuningRequest::BindRule { group, rule, profile, eligibility }); }
+                }
+            });
+        });
+    });
+    ui.add_space(6.0);
 }
 
 fn draw_module(
@@ -173,11 +302,22 @@ fn draw_module(
             .and_then(|id| snapshot.profiles.iter().find(|p| p.id == id))
             .and_then(|p| p.modules.iter().find(|m| m.feature == descriptor.id))
     };
-    let fallback = Capability::Unsupported(if profile.is_some() {
-        "Save this module's preferences to observe its target.".into()
-    } else {
-        "Choose a profile to configure this module.".into()
-    });
+    if let Some(draft) = app
+        .ui
+        .tuning
+        .editor
+        .as_ref()
+        .filter(|d| Some(d.profile) == profile && d.candidate.feature == descriptor.id)
+    {
+        if let Some(before) = draft.pending_save_revision {
+            if snapshot.revision > before && saved.as_ref() == Some(&draft.candidate) {
+                app.ui.tuning.editor = None;
+            } else if matches!(snapshot.operation, TuningOperationState::Refused { .. }) {
+                app.ui.tuning.editor.as_mut().unwrap().pending_save_revision = None;
+            }
+        }
+    }
+    let fallback = Capability::Unsupported("Not observed yet".into());
     let capability = card.map_or(&fallback, |card| &card.capability);
     let status = card
         .and_then(|card| card.status)
@@ -199,123 +339,121 @@ fn draw_module(
         descriptor.activation_modes.contains(&mode),
         pending,
     );
+    let editing = app
+        .ui
+        .tuning
+        .editor
+        .as_ref()
+        .is_some_and(|d| Some(d.profile) == profile && d.candidate.feature == descriptor.id);
     glass_frame(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.strong(descriptor.title);
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(descriptor.title);
+            if descriptor.access == ModuleAccess::ReadOnly {
+                ui.small(if app.tuning_editors().editor(&descriptor.id).is_some_and(|e| e.section() == ModuleSection::Windows) { "Change in Windows" } else { "Information only" });
+            } else if let Some(profile) = profile {
+                let mut enabled = if editing { app.ui.tuning.editor.as_ref().unwrap().candidate.enabled } else { saved.as_ref().is_some_and(|p| p.enabled) };
+                let stale = editing && app.ui.tuning.editor.as_ref().unwrap().expected != saved;
+                let allowed = if editing { !pending && !stale && known } else if enabled { controls.disable } else { controls.enable };
+                if ui.add_enabled(allowed, egui::Checkbox::new(&mut enabled, "Enabled")).changed() {
+                    if editing { app.ui.tuning.editor.as_mut().unwrap().candidate.enabled = enabled; }
+                    else if let Some(editor) = app.tuning_editors().editor(&descriptor.id) {
+                        let default = ModulePreference { feature: descriptor.id.clone(), enabled: false, mode, config: editor.default_config() };
+                        submit(app, TuningRequest::SetModulePreference { profile, preference: Box::new(preference_with_enabled(saved.as_ref(), default, enabled)), expected: saved.clone() });
+                    }
+                }
+                if !editing && ui.add_enabled(controls.configure, egui::Button::new("Settings…")).clicked() {
+                    if let Some(editor) = app.tuning_editors().editor(&descriptor.id) {
+                        let candidate = saved.clone().unwrap_or_else(|| ModulePreference { feature: descriptor.id.clone(), enabled: false, mode, config: editor.default_config() });
+                        app.ui.tuning.editor = Some(EditorDraft { profile, expected: saved.clone(), candidate, pending_save_revision: None });
+                    }
+                }
+            }
+        });
         ui.label(descriptor.description);
-        ui.label(format!("Scope: {}", descriptor.target_scopes.iter().map(|scope| scope_label(*scope)).collect::<Vec<_>>().join(", ")));
-        ui.label(status_label(status));
-        if let Capability::Unsupported(reason) | Capability::Denied(reason) = capability {
-            if descriptor.access == ModuleAccess::Managed || card.is_some() {
-            ui.label(reason.chars().take(512).collect::<String>());
-            }
-        }
-        if let Some(saved) = &saved {
-            ui.label(format!("Saved: {} · {}", if saved.enabled { "enabled" } else { "disabled" }, mode_label(saved.mode)));
-            if let Some(summary) = app.tuning_editors().editor(&descriptor.id).and_then(|editor| editor.summary(&saved.config)) {
-                ui.label(format!("Desired: {}", summary.chars().take(512).collect::<String>()));
-            }
-        }
-        if let Some(observed) = card.and_then(|card| card.observed.as_ref()) {
-            draw_observation(ui, &observed.summary);
-        } else {
-            ui.label("Not observed yet.");
-        }
         if descriptor.access == ModuleAccess::ReadOnly {
-            ui.label("Read only · no system settings are changed.");
+            if app.tuning_editors().editor(&descriptor.id).is_some_and(|e| e.section() != ModuleSection::Windows) {
+                if let Some(observed) = card.and_then(|card| card.observed.as_ref()) {
+                    let line = observed.summary.lines().next().unwrap_or("No information yet");
+                    ui.small(line.chars().take(220).collect::<String>());
+                }
+            }
+            ui.small("Information only. This card does not apply or restore system settings.");
             let action = app.tuning_editors().editor(&descriptor.id).and_then(|editor| editor.actions(ui));
-            if let Some(action) = action {
-                submit(app, TuningRequest::ModuleAction { feature: descriptor.id.clone(), action });
+            if let Some(action) = action { submit(app, TuningRequest::ModuleAction { feature: descriptor.id.clone(), action }); }
+        } else if profile.is_none() {
+            ui.small("Create a profile above to choose and enable this setting.");
+        } else {
+            let enabled = saved.as_ref().is_some_and(|p| p.enabled);
+            let missing_process = descriptor.target_scopes.contains(&TargetScope::Process) && card.is_none_or(|c| c.targets.is_empty());
+            let linked = snapshot.associations.iter().any(|a| Some(a.profile) == profile);
+            let label = if status != ModuleStatus::Unmanaged { status_label(status) }
+                else if !enabled { "Off" }
+                else if mode == ActivationMode::Manual { "Ready. Use Apply now to activate this setting." }
+                else if !linked { "Waiting. Connect a game to this profile above." }
+                else if missing_process { "Waiting for the connected game to run." }
+                else { "Waiting for the selected game trigger." };
+            ui.small(label);
+            if let Some(saved) = &saved {
+                ui.small(format!("When: {}", mode_label(saved.mode)));
+                if let Some(summary) = app.tuning_editors().editor(&descriptor.id).and_then(|editor| editor.summary(&saved.config)) { ui.label(summary); }
             }
-            return;
-        }
-        if descriptor.target_scopes.contains(&crate::app::features::tuning::platform::contract::TargetScope::Process)
-            && card.is_none_or(|card| card.targets.is_empty()) {
-            ui.label("Configure the trigger now; application waits for a verified process from a saved rule.");
-        }
-        if !known { ui.label("Configuration is retained and read-only because its editor is unavailable."); }
-        if let Some(profile) = profile {
-            let mut enabled = saved.as_ref().is_some_and(|preference| preference.enabled);
-            let can_toggle = if enabled { controls.disable } else { controls.enable };
-            if ui.add_enabled(can_toggle, egui::Checkbox::new(&mut enabled, "Manage this module")).changed() {
-                if let Some(editor) = app.tuning_editors().editor(&descriptor.id) {
-                    let default = ModulePreference {
-                        feature: descriptor.id.clone(), enabled: false,
-                        mode: descriptor.activation_modes.first().copied().unwrap_or(ActivationMode::Manual),
-                        config: editor.default_config(),
-                    };
-                    let preference = preference_with_enabled(saved.as_ref(), default, enabled);
-                    submit(app, TuningRequest::SetModulePreference { profile, preference: Box::new(preference), expected: saved.clone() });
-                }
-            }
-            if ui.add_enabled(controls.configure, egui::Button::new("Configure")).clicked() {
-                if let Some(editor) = app.tuning_editors().editor(&descriptor.id) {
-                    let candidate = saved.clone().unwrap_or_else(|| ModulePreference {
-                        feature: descriptor.id.clone(), enabled: false,
-                        mode: descriptor.activation_modes.first().copied().unwrap_or(ActivationMode::Manual),
-                        config: editor.default_config(),
-                    });
-                    app.ui.tuning.editor = Some(EditorDraft { profile, expected: saved.clone(), candidate });
-                }
-            }
+            if !known { ui.label("These saved settings need an editor from a compatible app version."); }
             if let Some(mut draft) = app.ui.tuning.editor.take() {
-                if draft.profile == profile && draft.candidate.feature == descriptor.id {
+                if Some(draft.profile) == profile && draft.candidate.feature == descriptor.id {
                     let stale = draft.expected != saved;
+                    let saving = draft.pending_save_revision.is_some();
                     let mut save = false;
                     let mut cancel = false;
-                    ui.add_enabled_ui(!pending && !stale, |ui| {
-                        let mut valid = false;
-                        if let Some(editor) = app.tuning_editors().editor(&descriptor.id) {
-                            valid = edit_configuration(editor, ui, &mut draft.candidate.config);
-                            if !valid {
-                                ui.label("This configuration cannot be edited by this version.");
-                            }
-                        }
-                        egui::ComboBox::from_id_salt(("tuning-mode", profile.get(), descriptor.id.as_str())).selected_text(mode_label(draft.candidate.mode)).show_ui(ui, |ui| {
-                            for mode in &descriptor.activation_modes { ui.selectable_value(&mut draft.candidate.mode, *mode, mode_label(*mode)); }
+                    ui.separator();
+                    ui.strong("Setting options");
+                    ui.add_enabled_ui(!pending && !saving && !stale, |ui| {
+                        let valid = app.tuning_editors().editor(&descriptor.id).is_some_and(|editor| edit_configuration(editor, ui, &mut draft.candidate.config));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("When");
+                            egui::ComboBox::from_id_salt("module-when").selected_text(mode_label(draft.candidate.mode)).show_ui(ui, |ui| {
+                                for mode in &descriptor.activation_modes { ui.selectable_value(&mut draft.candidate.mode, *mode, mode_label(*mode)); }
+                            });
                         });
-                        ui.add_enabled_ui(valid, |ui| { ui.checkbox(&mut draft.candidate.enabled, "Enabled in this profile"); });
-                        save = ui.add_enabled(valid, egui::Button::new("Save module settings")).clicked();
+                        ui.small("Use Enabled above to include this setting. Changes take effect after saving.");
+                        save = ui.add_enabled(valid, egui::Button::new("Save changes").fill(ui.visuals().selection.bg_fill)).clicked();
                     });
-                    if stale { ui.label("Saved settings changed. Reopen the editor before saving."); }
-                    cancel |= ui.button("Cancel editor").clicked();
-                    if save {
-                        submit(app, TuningRequest::SetModulePreference { profile, preference: Box::new(draft.candidate.clone()), expected: draft.expected.clone() });
+                    if stale {
+                        ui.label("This setting changed while you were editing. Reload it to continue.");
+                        if ui.button("Reload saved settings").clicked() {
+                            if let Some(saved) = &saved { draft.expected = Some(saved.clone()); draft.candidate = saved.clone(); }
+                        }
+                    }
+                    cancel |= ui.add_enabled(!saving, egui::Button::new("Cancel")).clicked();
+                    if save && submit(app, TuningRequest::SetModulePreference { profile: draft.profile, preference: Box::new(draft.candidate.clone()), expected: draft.expected.clone() }) {
+                        draft.pending_save_revision = Some(snapshot.revision);
                     }
                     if !cancel { app.ui.tuning.editor = Some(draft); }
-                } else {
-                    app.ui.tuning.editor = Some(draft);
-                }
-            }
-            if controls.disable && ui.button("Disable module").clicked() {
-                if let Some(mut preference) = saved.clone() {
-                    preference.enabled = false;
-                    submit(app, TuningRequest::SetModulePreference { profile, preference: Box::new(preference), expected: saved.clone() });
-                }
+                } else { app.ui.tuning.editor = Some(draft); }
             }
             if let Some(card) = card.filter(|card| card.enabled && card.mode == ActivationMode::Manual) {
-                ui.label("After manual application, settings stay active after closing the app. Disable the module to restore them.");
-                let selected = app.ui.tuning.manual_target.as_ref().filter(|(id, feature, target)| {
-                    *id == profile && *feature == descriptor.id && card.targets.contains(target)
-                }).map(|(_, _, target)| target.clone());
+                let profile = profile.unwrap();
+                ui.small("Stays applied until you turn it off, including after closing this app.");
+                let selected = app.ui.tuning.manual_target.as_ref().filter(|(id, feature, target)| *id == profile && *feature == descriptor.id && card.targets.contains(target)).map(|(_, _, target)| target.clone());
                 let mut target = selected.or_else(|| (card.targets.len() == 1).then(|| card.targets[0].clone()));
                 if card.targets.len() > 1 {
-                    egui::ComboBox::from_id_salt(("tuning-target", profile.get(), descriptor.id.as_str()))
-                        .selected_text(target.as_ref().map_or("Select target", |target| scope_label(target.scope())))
-                        .show_ui(ui, |ui| {
-                            for (index, candidate) in card.targets.iter().enumerate() {
-                                ui.selectable_value(&mut target, Some(candidate.clone()), format!("{} {}", scope_label(candidate.scope()), index + 1));
-                            }
-                        });
+                    egui::ComboBox::from_id_salt("module-target").selected_text("Choose where to apply").show_ui(ui, |ui| {
+                        for (index, candidate) in card.targets.iter().enumerate() { ui.selectable_value(&mut target, Some(candidate.clone()), format!("{} {}", scope_label(candidate.scope()), index + 1)); }
+                    });
                 }
                 if let Some(target) = target {
                     app.ui.tuning.manual_target = Some((profile, descriptor.id.clone(), target.clone()));
-                    if ui.add_enabled(controls.apply && !matches!(status, ModuleStatus::VerifiedActive(_)), egui::Button::new("Apply manually")).clicked() {
+                    if ui.add_enabled(controls.apply && !editing && !matches!(status, ModuleStatus::VerifiedActive(_)), egui::Button::new("Apply now")).clicked() {
                         submit(app, TuningRequest::ActivateManual { profile, feature: descriptor.id.clone(), target });
                     }
                 }
             }
         }
+        egui::CollapsingHeader::new("Details").show(ui, |ui| {
+            ui.label(format!("Applies to: {}", descriptor.target_scopes.iter().map(|scope| scope_label(*scope)).collect::<Vec<_>>().join(", ")));
+            if let Capability::Unsupported(reason) | Capability::Denied(reason) = capability { ui.label(reason); }
+            if let Some(observed) = card.and_then(|card| card.observed.as_ref()) { draw_observation(ui, &observed.summary); }
+        });
     });
 }
 
@@ -366,6 +504,292 @@ mod tests {
         sync::{Arc, RwLock},
         time::{Duration, Instant},
     };
+
+    struct UiSave(Arc<std::sync::atomic::AtomicBool>);
+    impl crate::app::features::tuning::StatePersistence for UiSave {
+        fn save(
+            &mut self,
+            _: &mut AppStateStorage,
+        ) -> Result<crate::app::features::tuning::service::SavedState, SaveError> {
+            if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(SaveError::Storage)
+            } else {
+                Ok(crate::app::features::tuning::service::SavedState::Unavailable)
+            }
+        }
+    }
+    fn ui_fixture() -> (
+        AppState,
+        Arc<crate::app::features::tuning::simple_tests::Setting>,
+        Arc<std::sync::atomic::AtomicBool>,
+        ProfileId,
+    ) {
+        use crate::app::features::tuning::{platform::registry::Registry, Tuning, TuningRuntime};
+        let state = AppStateStorage::test_fixture(|_| {});
+        let setting = crate::app::features::tuning::simple_tests::Setting::new("ui_setting", false);
+        let mut registry = Registry::default();
+        registry.register(setting.clone()).unwrap();
+        let production = crate::app::features::tuning::modules::registry();
+        for id in ["gpu_preference", "measurements"] {
+            registry
+                .register(
+                    production
+                        .get(
+                            &crate::app::features::tuning::platform::contract::FeatureId::new(id)
+                                .unwrap(),
+                        )
+                        .unwrap()
+                        .clone(),
+                )
+                .unwrap();
+        }
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut service = Tuning::from_registry(registry.clone())
+            .headless(state.clone(), Box::new(UiSave(fail.clone())));
+        service.admit_test_modules();
+        let runtime = TuningRuntime::start(
+            service,
+            Arc::new(tokio::sync::RwLock::new(Default::default())),
+        );
+        let mut app = AppState::new_for_test(Arc::new(RwLock::new(state)), 4);
+        app.replace_tuning_for_test(runtime, registry);
+        app.request_tuning(TuningRequest::CreateProfile {
+            name: "Gaming".into(),
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        let profile = app.tuning_snapshot().profiles[0].id;
+        app.ui.tuning.selected_profile = Some(profile);
+        (app, setting, fail, profile)
+    }
+    fn wait_saved(app: &mut AppState) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while matches!(
+            app.tuning_snapshot().operation,
+            TuningOperationState::Pending { .. }
+        ) {
+            assert!(Instant::now() < deadline);
+            app.poll_tuning();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        app.poll_tuning();
+    }
+    #[test]
+    fn modules_ui_own_successful_save_closes_editor_without_stale_warning() {
+        use crate::app::features::tuning::platform::registry::Module;
+        let (mut app, setting, _, profile) = ui_fixture();
+        let preference = ModulePreference {
+            feature: setting.descriptor().id,
+            enabled: true,
+            mode: ActivationMode::Session,
+            config: setting.config(12),
+        };
+        app.ui.tuning.editor = Some(EditorDraft {
+            profile,
+            expected: None,
+            candidate: preference.clone(),
+            pending_save_revision: Some(app.tuning_snapshot().revision),
+        });
+        app.request_tuning(TuningRequest::SetModulePreference {
+            profile,
+            preference: Box::new(preference),
+            expected: None,
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        let text = rendered_text(&mut app);
+        assert!(
+            app.ui.tuning.editor.is_none(),
+            "a confirmed own save must close the editor"
+        );
+        assert!(!text.contains("Saved settings changed"));
+        finish(&mut app);
+    }
+    #[test]
+    fn modules_ui_saved_edit_closes_even_when_native_restoration_needs_attention() {
+        use crate::app::features::tuning::platform::contract::{
+            ResourceId, ResourceKey, TargetIdentity,
+        };
+        use crate::app::features::tuning::platform::registry::Module;
+        let (mut app, setting, _, profile) = ui_fixture();
+        let original = ModulePreference {
+            feature: setting.descriptor().id,
+            enabled: true,
+            mode: ActivationMode::Manual,
+            config: setting.config(12),
+        };
+        app.request_tuning(TuningRequest::SetModulePreference {
+            profile,
+            preference: Box::new(original.clone()),
+            expected: None,
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        app.request_tuning(TuningRequest::ActivateManual {
+            profile,
+            feature: original.feature.clone(),
+            target: TargetIdentity::Machine,
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        let key = ResourceKey {
+            target: TargetIdentity::Machine,
+            field: ResourceId::new("value").unwrap(),
+        };
+        assert_eq!(setting.read(&key).unwrap(), vec![12]);
+        setting.write(&key, &[12], &[20]).unwrap();
+        let candidate = ModulePreference {
+            config: setting.config(13),
+            ..original.clone()
+        };
+        app.ui.tuning.editor = Some(EditorDraft {
+            profile,
+            expected: Some(original.clone()),
+            candidate: candidate.clone(),
+            pending_save_revision: Some(app.tuning_snapshot().revision),
+        });
+        app.request_tuning(TuningRequest::SetModulePreference {
+            profile,
+            preference: Box::new(candidate.clone()),
+            expected: Some(original),
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        assert!(matches!(
+            app.tuning_snapshot().operation,
+            TuningOperationState::Refused {
+                error: SaveError::Recovering,
+                ..
+            }
+        ));
+        assert_eq!(
+            current_preference(&app, profile, &setting.descriptor()),
+            Some(candidate)
+        );
+        let text = rendered_text(&mut app);
+        assert!(
+            app.ui.tuning.editor.is_none(),
+            "a saved edit must not become stale when restoration fails"
+        );
+        assert!(
+            text.contains("Could not complete this action")
+                || text.contains("Recovery needs attention")
+        );
+        assert_eq!(
+            setting.read(&key).unwrap(),
+            vec![20],
+            "foreign changes must be preserved"
+        );
+        finish(&mut app);
+    }
+    #[test]
+    fn modules_ui_failed_save_retains_editable_draft() {
+        use crate::app::features::tuning::platform::registry::Module;
+        let (mut app, setting, fail, profile) = ui_fixture();
+        let preference = ModulePreference {
+            feature: setting.descriptor().id,
+            enabled: true,
+            mode: ActivationMode::Session,
+            config: setting.config(13),
+        };
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.ui.tuning.editor = Some(EditorDraft {
+            profile,
+            expected: None,
+            candidate: preference.clone(),
+            pending_save_revision: Some(app.tuning_snapshot().revision),
+        });
+        app.request_tuning(TuningRequest::SetModulePreference {
+            profile,
+            preference: Box::new(preference.clone()),
+            expected: None,
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        rendered_text(&mut app);
+        assert_eq!(app.ui.tuning.editor.as_ref().unwrap().candidate, preference);
+        assert!(
+            app.ui
+                .tuning
+                .editor
+                .as_ref()
+                .unwrap()
+                .pending_save_revision
+                .is_none(),
+            "failed save must allow retry"
+        );
+        finish(&mut app);
+    }
+    #[test]
+    fn modules_ui_import_error_does_not_claim_saved_settings_or_activation_broke() {
+        use crate::app::features::tuning::{
+            platform::contract::FeatureId, presentation::ModuleAction,
+        };
+        let (mut app, _, _, profile) = ui_fixture();
+        app.request_tuning(TuningRequest::RemoveProfile { profile })
+            .unwrap();
+        wait_saved(&mut app);
+        assert!(app.tuning_snapshot().profiles.is_empty());
+        let revision = app.tuning_snapshot().revision;
+        let missing = std::env::temp_dir().join(format!(
+            "modules-missing-{}.csv",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        app.request_tuning(TuningRequest::ModuleAction {
+            feature: FeatureId::new("measurements").unwrap(),
+            action: ModuleAction::Import(missing),
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        assert_eq!(app.tuning_snapshot().revision, revision);
+        assert_eq!(
+            app.tuning_snapshot()
+                .operation_error
+                .as_ref()
+                .unwrap()
+                .operation,
+            "import CSV"
+        );
+        let text = rendered_text(&mut app);
+        assert!(
+            !text.contains("Saved settings could not be verified"),
+            "import failure is not a saved-state verification failure"
+        );
+        assert!(!text.contains("Applying changes is paused"));
+        assert!(
+            !text.contains("Recovery needs attention"),
+            "an invalid import needs no recovery"
+        );
+        assert!(
+            !text.contains("verification will run again"),
+            "read-only import does not need a profile"
+        );
+        assert!(text.contains("Error details"));
+        finish(&mut app);
+    }
+    #[test]
+    fn modules_ui_groups_actions_and_keeps_technical_details_closed() {
+        use crate::app::features::tuning::presentation::ModuleSection;
+        let (mut app, _, _, _) = ui_fixture();
+        let text = rendered_text(&mut app);
+        assert!(text.contains("Test setting"));
+        assert!(
+            !text.contains("Preferred GPU"),
+            "Windows actions do not belong in game settings"
+        );
+        app.ui.tuning.section = ModuleSection::Windows;
+        let text = rendered_text(&mut app);
+        assert!(text.contains("Open Windows Settings"));
+        assert!(!text.contains("Test setting"));
+        assert!(
+            !text.contains("Current switch/preference"),
+            "raw observations start collapsed"
+        );
+        finish(&mut app);
+    }
 
     fn simple_descriptor(access: ModuleAccess) -> ModuleDescriptor {
         use crate::app::features::tuning::platform::contract::*;
@@ -477,7 +901,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!text.contains("Choose a profile"), "{text}");
-        assert!(text.contains("Read only"));
+        assert!(text.contains("Information only"));
         finish(&mut app);
     }
 

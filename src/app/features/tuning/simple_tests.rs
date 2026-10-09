@@ -12,7 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub(super) struct Setting {
+pub(crate) struct Setting {
     id: FeatureId,
     pub(super) fields: Arc<Mutex<BTreeMap<ResourceId, Vec<u8>>>>,
     pub(super) writes: Arc<Mutex<usize>>,
@@ -23,7 +23,7 @@ pub(super) struct Setting {
     user: bool,
 }
 impl Setting {
-    pub(super) fn new(name: &str, user: bool) -> Arc<Self> {
+    pub(crate) fn new(name: &str, user: bool) -> Arc<Self> {
         Arc::new(Self {
             id: FeatureId::new(name).unwrap(),
             fields: Arc::new(Mutex::new(BTreeMap::from([
@@ -38,7 +38,7 @@ impl Setting {
             user,
         })
     }
-    pub(super) fn config(&self, desired: u8) -> ModuleEnvelope {
+    pub(crate) fn config(&self, desired: u8) -> ModuleEnvelope {
         ModuleEnvelope {
             feature: self.id.clone(),
             kind: EnvelopeKind::Config,

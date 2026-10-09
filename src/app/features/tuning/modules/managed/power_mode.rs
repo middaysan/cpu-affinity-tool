@@ -5,7 +5,7 @@ use crate::app::features::tuning::{
         contract::*,
         registry::{FieldChange, Module, ModuleObservation},
     },
-    presentation::ModuleEditor,
+    presentation::{ModuleEditor, ModuleSection},
 };
 use os_api::gaming::{self, GuidValue, PowerSource};
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,9 @@ fn name(guid: GuidValue) -> String {
         .unwrap_or_else(|| format!("Unknown mode {:032x}", u128::from_be_bytes(guid.0)))
 }
 impl ModuleEditor for PowerMode {
+    fn section(&self) -> ModuleSection {
+        ModuleSection::Power
+    }
     fn feature(&self) -> FeatureId {
         feature(ID)
     }
@@ -84,7 +87,9 @@ impl ModuleEditor for PowerMode {
                     });
             });
         }
-        ui.small("Windows 11 user preferences for AC and DC. Other system signals may override the effective power mode.");
+        ui.small(
+            "Choose separately for plugged-in and battery use. Windows may adjust the active mode.",
+        );
         let changed = before != (value.ac, value.dc);
         if changed {
             *config = envelope(ID, &value);
@@ -94,7 +99,7 @@ impl ModuleEditor for PowerMode {
     fn summary(&self, config: &ModuleEnvelope) -> Option<String> {
         decode::<Config>(ID, config)
             .ok()
-            .map(|c| format!("AC: {}; DC: {}", c.ac.label(), c.dc.label()))
+            .map(|c| format!("Plugged in: {}; On battery: {}", c.ac.label(), c.dc.label()))
     }
 }
 impl Module for PowerMode {
@@ -102,7 +107,7 @@ impl Module for PowerMode {
         descriptor(
             ID,
             "Power mode",
-            "Separate Windows 11 power preferences for plugged-in and battery operation.",
+            "Balance power use and performance for plugged-in and battery use.",
             TargetScope::User,
             all_modes(),
         )
@@ -121,7 +126,7 @@ impl Module for PowerMode {
             let dc =
                 gaming::read_power_mode(&user, PowerSource::Dc).map_err(|e| native("read", e))?;
             Ok(format!(
-                "Configured AC: {}; DC: {}. Effective mode can differ.",
+                "Plugged in: {}; On battery: {}. The active mode may differ.",
                 name(ac),
                 name(dc)
             ))
