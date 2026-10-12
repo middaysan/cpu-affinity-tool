@@ -96,6 +96,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: windows-release-artifacts
+          # Keep the inter-job handoff for publication retries; GitHub Releases retains the EXE/PDB.
+          retention-days: 7
           path: |
             target/release/cpu-affinity-tool.exe
             target/release/cpu_affinity_tool.pdb
