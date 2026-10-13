@@ -1,6 +1,6 @@
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    paint_focus_ring, row_fill, toned_button, toned_sized_button, ToneRole, BUTTON_FONT_SIZE,
+    paint_focus_ring, row_fill, toned_sized_button, ToneRole, BUTTON_FONT_SIZE,
 };
 use crate::app::shell::{GroupRoute, WindowRoute};
 use eframe::egui::{self, Color32, Layout, Margin, Panel, RichText, Stroke};
@@ -88,9 +88,11 @@ fn navigation_switch(app: &mut AppState, ui: &mut egui::Ui) {
                 let groups_selected =
                     matches!(app.ui.current_window, WindowRoute::Groups(GroupRoute::List));
                 let groups = if groups_selected {
-                    RichText::new("CPU Groups").size(BUTTON_FONT_SIZE).strong()
+                    RichText::new("Affinity groups")
+                        .size(BUTTON_FONT_SIZE)
+                        .strong()
                 } else {
-                    RichText::new("CPU Groups").size(BUTTON_FONT_SIZE)
+                    RichText::new("Affinity groups").size(BUTTON_FONT_SIZE)
                 };
                 if navigation_button(ui, groups, groups_selected).clicked() {
                     app.set_current_window(WindowRoute::Groups(GroupRoute::List));
@@ -139,17 +141,6 @@ pub fn draw_top_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
 
                         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                             settings_menu(app, ui);
-                            if toned_button(
-                                ui,
-                                egui::Button::new(
-                                    RichText::new("+ New group").size(BUTTON_FONT_SIZE).strong(),
-                                ),
-                                ToneRole::Primary,
-                            )
-                            .clicked()
-                            {
-                                app.start_creating_group();
-                            }
                         });
                     });
 
@@ -178,11 +169,12 @@ mod tests {
     use super::{centered_leading_space, draw_top_panel};
     use crate::app::models::AppStateStorage;
     use crate::app::runtime::AppState;
+    use crate::app::shell::{GroupRoute, WindowRoute};
     use eframe::egui::{self, Pos2, RawInput, Rect};
     use std::sync::{Arc, RwLock};
 
     #[test]
-    fn header_navigation_has_clear_labels_order_and_no_cpu_badge() {
+    fn groups_navigation_and_creation_action_are_in_their_panels() {
         let mut app = AppState::new_for_test(
             Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
             4,
@@ -196,7 +188,10 @@ mod tests {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 600.0))),
                     ..Default::default()
                 },
-                |ui| draw_top_panel(&mut app, ui),
+                |ui| {
+                    draw_top_panel(&mut app, ui);
+                    crate::app::shell::presenters::central::draw_central_panel(&mut app, ui);
+                },
             )
             .textures_delta
             .clear();
@@ -205,7 +200,10 @@ mod tests {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 600.0))),
                 ..Default::default()
             },
-            |ui| draw_top_panel(&mut app, ui),
+            |ui| {
+                draw_top_panel(&mut app, ui);
+                crate::app::shell::presenters::central::draw_central_panel(&mut app, ui);
+            },
         );
         output.textures_delta.clear();
         let labels = output
@@ -218,7 +216,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!labels.iter().any(|(label, _)| label == "CPU"));
         assert!(labels.iter().any(|(label, _)| label == "CPU Affinity Tool"));
-        let mut expected = vec!["CPU Groups"];
+        let mut expected = vec!["Affinity groups"];
         if app.modules_enabled() {
             expected.push("System Tweaks");
         }
@@ -234,9 +232,65 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            labels
+                .iter()
+                .filter(|(label, _)| label == "Affinity groups")
+                .count(),
+            1,
+            "The navigation label must not be repeated as a panel heading"
+        );
         assert!(!labels
             .iter()
-            .any(|(label, _)| matches!(label.as_str(), "Overview" | "Activity")));
+            .any(|(label, _)| matches!(label.as_str(), "Overview" | "Activity" | "CPU Groups")));
+        let text_rect = |label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(Rect::from_min_size(text.pos, text.galley.size()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("Missing label: {label}"))
+        };
+        let new_group = text_rect("+ New group");
+        assert!(new_group.top() > text_rect("Logs").bottom());
+        assert!(new_group.left() > 280.0 && new_group.right() <= 400.0);
+        let position = new_group.center();
+        // Exercise the relocated button through normal pointer input.
+        for pressed in [true, false] {
+            context
+                .run_ui(
+                    RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            egui::vec2(400.0, 600.0),
+                        )),
+                        events: vec![
+                            egui::Event::PointerMoved(position),
+                            egui::Event::PointerButton {
+                                pos: position,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: Default::default(),
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    |ui| {
+                        draw_top_panel(&mut app, ui);
+                        crate::app::shell::presenters::central::draw_central_panel(&mut app, ui);
+                    },
+                )
+                .textures_delta
+                .clear();
+        }
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::Groups(GroupRoute::Create)
+        ));
     }
 
     #[test]

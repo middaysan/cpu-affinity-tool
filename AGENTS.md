@@ -114,7 +114,7 @@ Important root files:
 
 ## Runtime architecture
 
-The main navigation is CPU Groups / System Tweaks / Logs on Windows; System Tweaks remains absent on Linux. The header has no CPU badge; hovering the application title shows the CPU model and logical thread count.
+The main navigation is Affinity groups / System Tweaks / Logs on Windows; System Tweaks remains absent on Linux. The group list has no repeated heading; its New group button is at the top right, absent from the shared header. The header has no CPU badge; hovering the application title shows the CPU model and logical thread count.
 
 Layers:
 - `shell` owns the top-level `eframe::App`, tray/window lifecycle, route enums, UI sessions, presenter dispatch, and repaint policy

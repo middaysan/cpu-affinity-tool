@@ -14,7 +14,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Confirm no project docs claim full cross-platform support or Linux release parity.
 - Confirm `README.md` and `AGENTS.md` describe Windows as the primary stable released platform and Linux as a separate beta prerelease track without stable parity.
 - Confirm `README.md` documents the administrator/UAC expectation from `app.manifest`, including that saved-rule shortcut launches may show UAC.
-- Confirm `README.md` matches the current interface terminology: **Add installed...**, **Add file...**, **CPU Groups**, **Logs**, **Monitoring active**, the pause/resume icon, and **Settings**.
+- Confirm `README.md` matches the current interface terminology: **Add installed...**, **Add file...**, **Affinity groups**, **Logs**, **Monitoring active**, the pause/resume icon, and **Settings**.
 - Confirm the bundled Inter font and its SIL Open Font License file are present under `assets/fonts` and included in the release commit.
 - Confirm shortcut docs explain current elevated token Desktop placement, including credential-over-the-shoulder UAC placing shortcuts on the elevated account's Desktop.
 - Confirm version markers are aligned manually before tagging: release tag `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`. The workflow validates these again after the tag is pushed.
@@ -49,7 +49,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 
 - Run the release-path manual checks from `docs/release-smoke-matrix.md`.
 - Run every release-blocking row in the `Shortcut MVP Smoke` table when saved-rule desktop shortcuts are included in the release notes.
-- Smoke the redesigned **CPU Groups** and **Logs** routes in system, dark, and light themes.
+- Smoke the redesigned **Affinity groups** and **Logs** routes in system, dark, and light themes.
 - Smoke the **Crash reports** Logs subpage, Logs report control, Explorer broker, confirmation dialogs, incomplete-state guidance, privacy copy, and the newest-report summary retained in **Logs** after **Clear**.
 - Smoke the enabled-by-default Windows Event Log lookup after the first rendered frame. Verify Logs's persistent control can disable it, clears the record immediately, presents unavailable/error status without leaking raw XML or executable paths, labels evidence with Record ID/UTC time/exception code/sanitized module basename and only valid optional module-version/faulting-offset/process-creation-time values, and leaves the separate diagnostic status/evidence visible after **Clear** without adding Event Log data to chronological entries. Confirm this remains read-only: it must not create dumps or modify Windows Error Reporting or registry settings.
 - Smoke a new rule with descendant management off and an upgraded pre-`v10` rule with it preserved on. Verify the intended root is managed in both cases and only the opted-in rule applies settings to verified descendants.

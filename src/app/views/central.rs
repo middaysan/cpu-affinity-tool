@@ -100,19 +100,30 @@ pub fn draw_central_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
         .show(root_ui, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.heading(RichText::new("Affinity groups").strong());
                     ui.label(
                         RichText::new("CPU placement and application rules")
                             .small()
                             .weak(),
                     );
-                });
-                ui.with_layout(Layout::right_to_left(Align::BOTTOM), |ui| {
                     ui.label(
                         RichText::new(format!("{group_count} groups · drag to reorder"))
                             .small()
                             .weak(),
                     );
+                });
+                ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                    if toned_sized_button(
+                        ui,
+                        [105.0, 25.0],
+                        egui::Button::new(
+                            RichText::new("+ New group").size(BUTTON_FONT_SIZE).strong(),
+                        ),
+                        ToneRole::Primary,
+                    )
+                    .clicked()
+                    {
+                        app.start_creating_group();
+                    }
                 });
             });
             ui.add_space(5.0);

@@ -27,7 +27,7 @@ System Tweaks has a Windows-only production catalog and a compact manual Apply/U
 | Theme persistence across restart | Theme changes persist after closing and reopening the app | Yes |
 | Theme selector icons | System, light, and dark states use readable painted icons with no missing-glyph square | Yes |
 | **Logs** visible and clearable | Events appear in chronological order and can be cleared without breaking later activity reporting; the newest validated saved crash-report summary remains visible until its report is removed or replaced | Yes |
-| CPU Groups and Logs navigation | The centered navigation switches routes without overlap, clipping, or losing state | Yes |
+| Affinity groups and Logs navigation | The centered navigation switches routes without overlap, clipping, or losing state | Yes |
 | **Modules** with the empty production catalog | The page explicitly reports that no modules are available; it invents no targets, active settings or performance gains. Profile creation and a separate saved rule association survive restart | Yes |
 | Unknown tuning data | Future/unsupported configuration remains retained and read-only. An unavailable saved module is visible without raw configuration payloads or an enabled apply action | Yes |
 | Pending or refused profile/rule save | The UI stays responsive; failed saving preserves previous saved settings, logical identities and the current rule draft. A stale module draft cannot overwrite a newer saved preference | Yes |
