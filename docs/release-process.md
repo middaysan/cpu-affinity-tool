@@ -101,6 +101,10 @@ Before pushing a Linux beta tag, align:
 
 ## Current artifact contract
 
+The stable workflow retains the temporary Actions artifact `windows-release-artifacts` for 7 days. It carries the EXE/PDB pair from `build-windows` to `create-release` and leaves a week to retry a failed publication. GitHub Release assets are the durable published copies; their retention is independent of this temporary archive.
+
+If publication fails, rerun the failed publish job while the archive is available. After the archive expires, rerun all jobs to rebuild and upload the pair before publishing. The shorter retention applies to newly uploaded artifacts; existing archives keep their original expiration dates.
+
 Stable published artifact:
 
 - `cpu-affinity-tool.exe`
