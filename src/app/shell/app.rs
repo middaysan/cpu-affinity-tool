@@ -1336,6 +1336,11 @@ impl App {
         self.is_hidden = true;
 
         #[cfg(target_os = "windows")]
+        if let Err(error) = crate::app::adapters::os::normalize_winit_event_target_window() {
+            self.state.log_manager.add_sticky_once(error);
+        }
+
+        #[cfg(target_os = "windows")]
         if let Some(hwnd) = self.hwnd {
             crate::app::adapters::os::set_taskbar_visible(hwnd, false);
             crate::app::adapters::os::restore_and_focus_window(hwnd);

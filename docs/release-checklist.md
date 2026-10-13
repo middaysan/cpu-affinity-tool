@@ -61,6 +61,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Verify **Focus** on a correctly configured running app only activates its existing window and does not reapply settings or start another process.
 - Verify Settings offers explicit System, Light, and Dark choices and applies each theme.
 - Verify Start minimized applies on the next Windows launch, restores from the tray, and falls back to a visible window without a tray.
+- With an existing interactive Task Scheduler startup task, verify Start minimized leaves no small Winit helper rectangle; restore, resize, minimize again and Quit (issue #20).
 - Verify hovering the monitor status exposes the scrollable PID/name/group list and that pause/resume stays to the left of the status.
 - Verify selected CPU threads remain clearly distinguishable with the restrained turquoise primary color in both dark and light themes.
 - Select scattered Performance and Efficient threads and verify every CPU control wraps within the fixed-width editor, keeps both its core and `thread N` labels visible, remains reachable, and does not shift or overflow when selected.

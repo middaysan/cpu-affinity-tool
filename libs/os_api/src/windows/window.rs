@@ -2,10 +2,11 @@ use std::ptr::null_mut;
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    ASFW_ANY, AllowSetForegroundWindow, EnumWindows, GWL_EXSTYLE, GetForegroundWindow,
-    GetWindowLongW, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SW_HIDE, SW_RESTORE,
-    SW_SHOW, SetForegroundWindow, SetWindowLongW, ShowWindow, ShowWindowAsync, WM_NULL,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    ASFW_ANY, AllowSetForegroundWindow, EnumThreadWindows, EnumWindows, GWL_EXSTYLE, GetClassNameW,
+    GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOZORDER, SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow, ShowWindowAsync,
+    WM_NULL, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 use windows::core::BOOL;
 
@@ -19,6 +20,47 @@ fn qualified_foreground(window: usize, thread: u32, pid: u32) -> Result<(usize, 
 }
 
 impl OS {
+    /// Keep Winit's event popup visible for WM_PAINT, but remove its minimized rectangle.
+    /// Called on the GUI thread; windows on other threads/processes are never selected.
+    pub fn normalize_winit_event_target_window() -> Result<(), String> {
+        unsafe extern "system" fn select_helper(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            if is_winit_event_target_window(hwnd) {
+                unsafe { *(lparam.0 as *mut Option<HWND>) = Some(hwnd) };
+                return BOOL(0);
+            }
+            BOOL(1)
+        }
+
+        let mut helper = None;
+        unsafe {
+            let _ = EnumThreadWindows(
+                windows::Win32::System::Threading::GetCurrentThreadId(),
+                Some(select_helper),
+                LPARAM((&mut helper as *mut Option<HWND>) as isize),
+            );
+        }
+        let Some(helper) = helper else { return Ok(()) };
+        unsafe {
+            // Hiding this window breaks Winit's event delivery during interactive resizing.
+            // Restore without activation, then remove the system's leftover minimized geometry.
+            let _ = ShowWindow(helper, SW_SHOWNOACTIVATE);
+            SetWindowPos(helper, None, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOZORDER)
+                .map_err(|error| format!("Reset Winit event window geometry: {error}"))?;
+            let mut rect = windows::Win32::Foundation::RECT::default();
+            GetWindowRect(helper, &mut rect)
+                .map_err(|error| format!("Verify Winit event window geometry: {error}"))?;
+            let restored = !IsIconic(helper).as_bool();
+            let visible = IsWindowVisible(helper).as_bool();
+            let zero_sized = rect.right == rect.left && rect.bottom == rect.top;
+            if !(restored && visible && zero_sized) {
+                return Err(
+                    "Winit event window did not return to its visible zero-sized state".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn foreground_process() -> Result<(usize, u32), String> {
         unsafe {
             let window = GetForegroundWindow();
@@ -120,6 +162,23 @@ impl OS {
     }
 }
 
+fn is_winit_event_target_window(hwnd: HWND) -> bool {
+    let expected_style = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+    let style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
+    if style & expected_style.0 != expected_style.0 {
+        return false;
+    }
+    let mut class_name = [0u16; 64];
+    let length = unsafe { GetClassNameW(hwnd, &mut class_name) };
+    if length <= 0 {
+        return false;
+    }
+    class_name[..length as usize]
+        .iter()
+        .copied()
+        .eq("Winit Thread Event Target".encode_utf16())
+}
+
 #[cfg(test)]
 mod p3_tests {
     use super::*;
@@ -129,5 +188,136 @@ mod p3_tests {
         assert!(qualified_foreground(0, 1, 42).is_err());
         assert!(qualified_foreground(1, 0, 42).is_err());
         assert!(qualified_foreground(1, 1, 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod startup_window_tests {
+    use super::*;
+    use windows::Win32::Foundation::{HINSTANCE, LRESULT, RECT};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_STYLE, GetWindowRect, IsIconic,
+        RegisterClassW, SW_SHOWMINNOACTIVE, UnregisterClassW, WNDCLASSW, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
+    };
+    use windows::core::{PCWSTR, w};
+
+    struct TestWindow {
+        hwnd: HWND,
+        class: PCWSTR,
+        instance: HINSTANCE,
+    }
+
+    impl TestWindow {
+        fn new(class: PCWSTR) -> Self {
+            unsafe extern "system" fn window_proc(
+                hwnd: HWND,
+                message: u32,
+                wparam: WPARAM,
+                lparam: LPARAM,
+            ) -> LRESULT {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+
+            unsafe {
+                let instance = HINSTANCE(GetModuleHandleW(None).unwrap().0);
+                assert_ne!(
+                    RegisterClassW(&WNDCLASSW {
+                        lpfnWndProc: Some(window_proc),
+                        hInstance: instance,
+                        lpszClassName: class,
+                        ..Default::default()
+                    }),
+                    0
+                );
+                let mut window = Self {
+                    hwnd: HWND::default(),
+                    class,
+                    instance,
+                };
+                window.hwnd = CreateWindowExW(
+                    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    class,
+                    w!(""),
+                    WS_POPUP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    Some(instance),
+                    None,
+                )
+                .unwrap();
+                window
+            }
+        }
+
+        fn rect(&self) -> RECT {
+            let mut rect = RECT::default();
+            unsafe { GetWindowRect(self.hwnd, &mut rect).unwrap() };
+            rect
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.hwnd.is_invalid() {
+                    let _ = DestroyWindow(self.hwnd);
+                }
+                let _ = UnregisterClassW(self.class, Some(self.instance));
+            }
+        }
+    }
+
+    #[test]
+    fn minimized_winit_helper_returns_to_zero_size_without_hiding_other_windows() {
+        let helper = TestWindow::new(w!("Winit Thread Event Target"));
+        let unrelated = TestWindow::new(w!("CPU Affinity Tool issue20 test window"));
+        unsafe {
+            let _ = ShowWindow(helper.hwnd, SW_SHOWMINNOACTIVE);
+            let _ = ShowWindow(unrelated.hwnd, SW_SHOWMINNOACTIVE);
+            // Winit installs this style after creation; the minimized rectangle can remain.
+            SetWindowLongW(helper.hwnd, GWL_STYLE, (WS_VISIBLE | WS_POPUP).0 as i32);
+        }
+        let before = helper.rect();
+        let original_style = unsafe { GetWindowLongW(helper.hwnd, GWL_EXSTYLE) };
+        assert!(before.right > before.left && before.bottom > before.top);
+        assert!(unsafe { IsIconic(unrelated.hwnd).as_bool() });
+
+        OS::normalize_winit_event_target_window().unwrap();
+
+        let after = helper.rect();
+        assert_eq!(
+            after.right - after.left,
+            0,
+            "leftover minimized helper rectangle"
+        );
+        assert_eq!(after.bottom - after.top, 0);
+        assert!(!unsafe { IsIconic(helper.hwnd).as_bool() });
+        assert!(
+            unsafe { IsWindowVisible(helper.hwnd).as_bool() },
+            "Winit needs WM_PAINT delivery"
+        );
+        assert!(
+            unsafe { IsIconic(unrelated.hwnd).as_bool() },
+            "unrelated windows must remain untouched"
+        );
+        assert_eq!(
+            unsafe { GetWindowLongW(helper.hwnd, GWL_EXSTYLE) },
+            original_style
+        );
+        OS::normalize_winit_event_target_window().unwrap();
+        let repeated = helper.rect();
+        assert_eq!(
+            (
+                repeated.right - repeated.left,
+                repeated.bottom - repeated.top
+            ),
+            (0, 0)
+        );
     }
 }

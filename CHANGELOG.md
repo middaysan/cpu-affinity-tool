@@ -6,6 +6,10 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Remove the leftover minimized Winit helper rectangle when hiding to the tray, including **Start minimized**. Keep the event helper available for paint delivery and leave unrelated windows untouched (issue #20).
+
 ### Changed
 
 - Update direct and compatible transitive dependencies, including `eframe` / `egui` 0.36.2, `tray-icon` 0.26.1, Tokio 1.53.2 and Serde/JSON. Raise the minimum Rust toolchain to 1.95 for the GUI stack.
