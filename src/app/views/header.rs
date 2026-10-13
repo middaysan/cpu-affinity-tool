@@ -1,7 +1,6 @@
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    paint_focus_ring, palette, row_fill, toned_button, toned_sized_button, ToneRole,
-    BUTTON_FONT_SIZE,
+    paint_focus_ring, row_fill, toned_button, toned_sized_button, ToneRole, BUTTON_FONT_SIZE,
 };
 use crate::app::shell::{GroupRoute, WindowRoute};
 use eframe::egui::{self, Color32, Layout, Margin, Panel, RichText, Stroke};
@@ -86,38 +85,36 @@ fn navigation_switch(app: &mut AppState, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.horizontal(|ui| {
-                let overview_selected =
+                let groups_selected =
                     matches!(app.ui.current_window, WindowRoute::Groups(GroupRoute::List));
-                let overview = if overview_selected {
-                    RichText::new("Overview").size(BUTTON_FONT_SIZE).strong()
+                let groups = if groups_selected {
+                    RichText::new("CPU Groups").size(BUTTON_FONT_SIZE).strong()
                 } else {
-                    RichText::new("Overview").size(BUTTON_FONT_SIZE)
+                    RichText::new("CPU Groups").size(BUTTON_FONT_SIZE)
                 };
-                if navigation_button(ui, overview, overview_selected).clicked() {
+                if navigation_button(ui, groups, groups_selected).clicked() {
                     app.set_current_window(WindowRoute::Groups(GroupRoute::List));
                 }
 
-                let activity_selected = matches!(app.ui.current_window, WindowRoute::Logs);
-                #[cfg(all(target_os = "windows", feature = "windows"))]
-                let activity_selected =
-                    activity_selected || matches!(app.ui.current_window, WindowRoute::CrashReports);
-                let activity_label = "Activity";
-                let activity = if activity_selected {
-                    RichText::new(activity_label)
-                        .size(BUTTON_FONT_SIZE)
-                        .strong()
-                } else {
-                    RichText::new(activity_label).size(BUTTON_FONT_SIZE)
-                };
-                if navigation_button(ui, activity, activity_selected).clicked() {
-                    app.set_current_window(WindowRoute::Logs);
-                }
                 if app.modules_enabled() {
                     let modules_selected = matches!(app.ui.current_window, WindowRoute::Tuning);
                     let modules = RichText::new("System Tweaks").size(BUTTON_FONT_SIZE);
                     if navigation_button(ui, modules, modules_selected).clicked() {
                         app.set_current_window(WindowRoute::Tuning);
                     }
+                }
+
+                let logs_selected = matches!(app.ui.current_window, WindowRoute::Logs);
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                let logs_selected =
+                    logs_selected || matches!(app.ui.current_window, WindowRoute::CrashReports);
+                let logs = if logs_selected {
+                    RichText::new("Logs").size(BUTTON_FONT_SIZE).strong()
+                } else {
+                    RichText::new("Logs").size(BUTTON_FONT_SIZE)
+                };
+                if navigation_button(ui, logs, logs_selected).clicked() {
+                    app.set_current_window(WindowRoute::Logs);
                 }
             });
         });
@@ -137,20 +134,8 @@ pub fn draw_top_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                 .fill(ui.visuals().panel_fill)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let colors = palette(ui);
-                        let cpu_badge = egui::Frame::NONE
-                            .fill(colors.accent.fill)
-                            .stroke(Stroke::new(1.0, colors.accent.border))
-                            .corner_radius(5.0)
-                            .inner_margin(Margin::symmetric(5, 2))
-                            .show(ui, |ui| {
-                                ui.label(RichText::new("CPU").color(colors.accent.fg).strong());
-                            });
-                        cpu_badge
-                            .response
+                        ui.label(RichText::new("CPU Affinity Tool").heading().strong())
                             .on_hover_text(format!("{cpu_model}\n{total_threads} logical threads"));
-
-                        ui.label(RichText::new("CPU Affinity Tool").heading().strong());
 
                         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                             settings_menu(app, ui);
@@ -190,7 +175,69 @@ pub fn draw_top_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
 
 #[cfg(test)]
 mod tests {
-    use super::centered_leading_space;
+    use super::{centered_leading_space, draw_top_panel};
+    use crate::app::models::AppStateStorage;
+    use crate::app::runtime::AppState;
+    use eframe::egui::{self, Pos2, RawInput, Rect};
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn header_navigation_has_clear_labels_order_and_no_cpu_badge() {
+        let mut app = AppState::new_for_test(
+            Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
+            4,
+        );
+        let context = egui::Context::default();
+        context.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+        // Panels measure their height on the first frame; inspect the settled layout.
+        context
+            .run_ui(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 600.0))),
+                    ..Default::default()
+                },
+                |ui| draw_top_panel(&mut app, ui),
+            )
+            .textures_delta
+            .clear();
+        let mut output = context.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 600.0))),
+                ..Default::default()
+            },
+            |ui| draw_top_panel(&mut app, ui),
+        );
+        output.textures_delta.clear();
+        let labels = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some((text.galley.text().to_owned(), text.pos.x)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!labels.iter().any(|(label, _)| label == "CPU"));
+        assert!(labels.iter().any(|(label, _)| label == "CPU Affinity Tool"));
+        let mut expected = vec!["CPU Groups"];
+        if app.modules_enabled() {
+            expected.push("System Tweaks");
+        }
+        expected.push("Logs");
+        let positions = expected
+            .iter()
+            .map(|expected| {
+                labels
+                    .iter()
+                    .find(|(label, _)| label == expected)
+                    .unwrap_or_else(|| panic!("Missing navigation label: {expected}; {labels:?}"))
+                    .1
+            })
+            .collect::<Vec<_>>();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(!labels
+            .iter()
+            .any(|(label, _)| matches!(label.as_str(), "Overview" | "Activity")));
+    }
 
     #[test]
     fn test_centered_leading_space_uses_full_available_width() {

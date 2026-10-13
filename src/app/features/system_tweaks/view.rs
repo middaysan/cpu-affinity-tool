@@ -175,7 +175,7 @@ pub(crate) fn draw_system_tweaks(app: &mut AppState, root_ui: &mut egui::Ui) {
             ui.spacing_mut().item_spacing.y = 5.0;
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("System Tweaks").size(19.0).strong());
-                help_button(app, ui, "System Tweaks", "Apply individual settings when they suit your PC. Opening this page changes nothing.\n\nThis app reads the current value before a change and retains it for Undo. It only restores fields that still match its own verified change. Later changes by Windows or other programs are preserved; an uncertain or skipped restore is shown.\n\nManual changes remain after closing the app. Windows decides when Game Mode and graphics preferences affect a game. A stored preference is not proof of higher FPS or lower latency. CPU affinity and process priority remain in Overview.\n\nHardware guides and Check PC provide information. They do not apply a performance bundle.");
+                help_button(app, ui, "System Tweaks", "Apply individual settings when they suit your PC. Opening this page changes nothing.\n\nThis app reads the current value before a change and retains it for Undo. It only restores fields that still match its own verified change. Later changes by Windows or other programs are preserved; an uncertain or skipped restore is shown.\n\nManual changes remain after closing the app. Windows decides when Game Mode and graphics preferences affect a game. A stored preference is not proof of higher FPS or lower latency. CPU affinity and process priority remain in CPU Groups.\n\nHardware guides and Check PC provide information. They do not apply a performance bundle.");
             });
             ui.add_space(3.0);
             draw_section_selector(app, ui);
@@ -202,7 +202,7 @@ pub(crate) fn draw_system_tweaks(app: &mut AppState, root_ui: &mut egui::Ui) {
                 if ui.add_enabled(!pending && editable && snapshot.has_tweak_changes, egui::Button::new(egui::RichText::new("Undo my changes").size(10.5))).clicked() {
                     app.ui.tuning.confirm_undo_all = true;
                 }
-                ui.label(egui::RichText::new("CPU controls: Overview").size(10.0).color(palette(ui).text_muted));
+                ui.label(egui::RichText::new("CPU controls: CPU Groups").size(10.0).color(palette(ui).text_muted));
             });
             ui.separator();
             let selected = app.ui.tuning.selected_section;
@@ -702,7 +702,7 @@ fn draw_saved_exe_picker(app: &mut AppState, ui: &mut egui::Ui, card: &TweakCard
     let snapshot = app.tuning_snapshot();
     let choices = saved_exe_choices(&snapshot.state);
     if choices.is_empty() {
-        ui.small("Add an EXE rule in Overview to choose a game.");
+        ui.small("Add an EXE rule in CPU Groups to choose a game.");
         return;
     }
     let original = card.target.as_ref().and_then(|target| {

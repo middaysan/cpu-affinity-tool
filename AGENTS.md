@@ -113,6 +113,9 @@ Important root files:
 - `CPU_SCHEME_INSTRUCTION` - format contract for `cpu_presets.json`
 
 ## Runtime architecture
+
+The main navigation is CPU Groups / System Tweaks / Logs on Windows; System Tweaks remains absent on Linux. The header has no CPU badge; hovering the application title shows the CPU model and logical thread count.
+
 Layers:
 - `shell` owns the top-level `eframe::App`, tray/window lifecycle, route enums, UI sessions, presenter dispatch, and repaint policy
 - `features` own product behavior:
@@ -166,7 +169,7 @@ Current runtime split:
 - runtime process identity stays keyed by opaque `AppRuntimeKey`, but tracked app ownership now also stores logical `GroupId` / `RuleId`
 - shell presenters are owned under `shell::presenters`; their source files still live under `src/app/views/` via path-based module ownership
 - workers emit typed `shell::events::ShellEvent` messages and do not hold `egui::Context`
-- Windows crash-report discovery uses an initial/on-demand single-flight standard thread plus at most one coalesced follow-up refresh; egui rendering reads only the last completed snapshot and synchronizes its newest validated report into the retained Activity context; the Linux beta does not start this worker or expose the Crash reports route
+- Windows crash-report discovery uses an initial/on-demand single-flight standard thread plus at most one coalesced follow-up refresh; egui rendering reads only the last completed snapshot and synchronizes its newest validated report into the retained Logs context; the Linux beta does not start this worker or expose the Crash reports route
 - Windows Event Log diagnostics uses a separate single-flight worker. It is never started by construction, focus gain, tray restore, or periodic refresh: after the first rendered UI frame it can run one bounded lookup when the persisted enabled-by-default preference allows it, with at most one delayed retry after a successful empty result.
 - Settings offers a persisted `start_minimized` preference: the next Windows GUI launch hides to the tray only when a usable tray runtime exists. It defaults to false when absent and remains readable in schema v10 and v11. Changing the preference does not hide the current window. The app does not register Windows login startup or accept `--start-in-tray`.
 - Tray hiding also normalizes only the calling GUI thread's exact layered/nonactivating `Winit Thread Event Target` popup to a restored zero-sized state. The helper stays visible for Winit's paint-event delivery; other windows are not hidden or restored. Native regression coverage reproduces a leftover minimized helper rectangle; the Task Scheduler login scenario remains a manual smoke check.
@@ -303,7 +306,7 @@ Important contract facts:
   - `Regular` capped at 1000 entries
   - `Important` capped at 200 entries
   - `Sticky` retained outside normal rotation for startup and critical diagnostics
-  - the local crash-report context is runtime-only and separate from chronological entries; Activity's **Clear** action preserves it
+  - the local crash-report context is runtime-only and separate from chronological entries; the **Clear** action in Logs preserves it
 - local Windows crash reports are separate from `AppStateStorage` and do not change schema `v10`:
   - directory: `<active-data-dir>/crash-reports/`
   - event kinds: main-thread panic and native UI-loop error
@@ -312,14 +315,14 @@ Important contract facts:
   - newest 20 complete reports are retained; incomplete, corrupt, unrelated, nested, and reparse entries are never removed automatically
   - each panic-path writer refuses a new report after it observes 64 managed complete or partial entries; this is a non-transactional multi-process safety ceiling rather than a strict quota, so simultaneous GUI writers may exceed it slightly
   - no crash-report scan or deletion is added to the synchronous startup path; a successful normal background refresh prunes complete reports to 20, while incomplete or invalid entries require user review
-  - after a completed background scan, Activity shows the newest validated report's type, timestamp, reason, and full-report path; the report file remains the complete support artifact
+  - after a completed background scan, Logs shows the newest validated report's type, timestamp, reason, and full-report path; the report file remains the complete support artifact
   - reports are never uploaded automatically and can contain local paths or system details
 - Windows Event Log diagnostics is separate from crash reports and remains runtime-only, owned by `WindowsEventLogManager` rather than `LogManager`:
   - it reads only recent local `Application Error` Event ID 1000 records from the local Application log after the first rendered frame when the enabled-by-default preference remains on
   - it uses an exact executable-name plus fully-qualified-path match and accepts false negatives rather than filename-only matches
-  - only record ID, UTC time, exception code, a sanitized faulting-module basename, and strictly validated optional module version, faulting offset, and process creation time may enter the retained Activity context; no raw XML, event payload, path, clipboard, state.json, crash report, dump, or automatic upload is used
-  - an Activity record is unverified supplemental evidence, not proof of a previous launch or crash cause
-  - Activity can disable the lookup persistently; disabling clears the visible record immediately, while a failed save is reported as session-only. The app never creates dumps or changes WER/registry settings.
+  - only record ID, UTC time, exception code, a sanitized faulting-module basename, and strictly validated optional module version, faulting offset, and process creation time may enter the retained Logs context; no raw XML, event payload, path, clipboard, state.json, crash report, dump, or automatic upload is used
+  - an Logs record is unverified supplemental evidence, not proof of a previous launch or crash cause
+  - Logs can disable the lookup persistently; disabling clears the visible record immediately, while a failed save is reported as session-only. The app never creates dumps or changes WER/registry settings.
 
 CPU presets:
 - `assets/cpu_presets.json` is a compile-time source file
@@ -341,7 +344,7 @@ Data source separation:
 - installed-app discovery and activation on Windows
 - installed package metadata lookup on Windows
 - opening the active data directory in the platform file manager
-- opening crash-report directories and selecting report files through an Explorer shell process whose token is verified non-elevated and below high integrity; the pre-existing Activity data-folder action retains its direct Explorer launch contract
+- opening crash-report directories and selecting report files through an Explorer shell process whose token is verified non-elevated and below high integrity; the pre-existing Logs data-folder action retains its direct Explorer launch contract
 - bounded read-only lookup of matching local Windows Application Event Log records for enabled-by-default diagnostics
 - process-instance token lookup used to prevent retained/reused PIDs from being managed as a different process instance
 - Windows affinity/priority application labels the failed Win32 operation and, after an access-denied settings open, may read `ProcessProtectionLevelInfo` through a query-limited handle to explain a confirmed protected-process denial; it never changes protection or privileges
@@ -402,7 +405,7 @@ Linux gaps:
 - no tray parity
 - no focus parity
 - no crash-report capture, index worker, Crash reports UI, or Explorer-broker parity
-- no Windows Event Log diagnostics capture, worker, or Activity context
+- no Windows Event Log diagnostics capture, worker, or Logs context
 - no Windows-style installed-app activation, AUMID identity, or package metadata parity
 - `os_api` is not symmetric between Windows and Linux
 - no Linux stable release artifacts, installer packaging, AppImage, Flatpak, or parity with the Windows stable release contract

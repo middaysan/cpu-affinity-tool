@@ -12,6 +12,7 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Changed
 
+- Rename the main tabs to **CPU Groups**, **System Tweaks**, and **Logs**, in that order. Remove the header CPU badge; CPU details remain available by hovering the application title.
 - Update direct and compatible transitive dependencies, including `eframe` / `egui` 0.36.2, `tray-icon` 0.26.1, Tokio 1.53.2 and Serde/JSON. Raise the minimum Rust toolchain to 1.95 for the GUI stack.
 
 ## [1.6.3] - 2026-09-20

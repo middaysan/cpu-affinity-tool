@@ -46,7 +46,7 @@ This is a manual, opt-in support procedure. CPU Affinity Tool never enables Wind
 
 - A dump is not guaranteed. Forced termination, power loss, anti-cheat action, some security-product actions, and crashes outside WER's handling path can leave no dump.
 - A dump identifies the process state at failure; it does not by itself prove that CPU affinity, monitoring, an overlay, a driver, or another application caused the failure.
-- The app's **Activity** Event Log record is supplemental evidence. Its sanitized module, offset, and timestamp can help match a dump, but it is not a root-cause determination.
+- The app's **Logs** Event Log record is supplemental evidence. Its sanitized module, offset, and timestamp can help match a dump, but it is not a root-cause determination.
 
 ## Disable and remove the capture
 
