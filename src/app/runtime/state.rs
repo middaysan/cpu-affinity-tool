@@ -17,7 +17,7 @@ use crate::app::features::shortcut::{
     create_saved_rule_shortcut, CreateRuleShortcutError, RuleShortcutPlatform,
     SystemRuleShortcutPlatform,
 };
-use crate::app::features::tuning::{
+use crate::app::features::system_tweaks::{
     SaveError, Tuning, TuningRequest, TuningRuntime, TuningSnapshot,
 };
 use crate::app::models::cpu_schema::CpuSchema;
@@ -140,12 +140,12 @@ pub(crate) struct TrackedProcessSnapshot {
 #[cfg(test)]
 struct TestStatePersistence;
 #[cfg(test)]
-impl crate::app::features::tuning::StatePersistence for TestStatePersistence {
+impl crate::app::features::system_tweaks::StatePersistence for TestStatePersistence {
     fn save(
         &mut self,
         _candidate: &mut AppStateStorage,
-    ) -> Result<crate::app::features::tuning::service::SavedState, SaveError> {
-        Ok(crate::app::features::tuning::service::SavedState::Unavailable)
+    ) -> Result<crate::app::features::system_tweaks::service::SavedState, SaveError> {
+        Ok(crate::app::features::system_tweaks::service::SavedState::Unavailable)
     }
 }
 
@@ -155,6 +155,16 @@ enum LegacyCompletion {
         Option<AppToRun>,
     ),
     Group(Option<GroupId>, String, Vec<bool>, bool),
+    Import(ImportIntent, String),
+}
+enum ImportIntent {
+    Files(GroupId, Vec<PathBuf>),
+    Installed {
+        group: GroupId,
+        entry: InstalledAppCatalogEntry,
+        selected: Option<usize>,
+        query: String,
+    },
 }
 struct PendingLegacy {
     id: u64,
@@ -183,12 +193,12 @@ pub struct AppState {
     windows_event_log_disabled_for_session: bool,
     shortcut_creation_role: ShortcutCreationRole,
     tuning: TuningRuntime,
-    tuning_editors: crate::app::features::tuning::platform::registry::Registry,
+    tuning_editors: crate::app::features::system_tweaks::platform::registry::Registry,
     tuning_adopted_revision: u64,
     tuning_seen: Option<Arc<TuningSnapshot>>,
     pending_legacy: Option<PendingLegacy>,
     tuning_shutdown_reported:
-        Option<crate::app::features::tuning::platform::controller::ShutdownResult>,
+        Option<crate::app::features::system_tweaks::platform::controller::ShutdownResult>,
     #[cfg(test)]
     save_count: usize,
 }
@@ -218,14 +228,14 @@ impl AppState {
             .expect("newly created state lock")
             .clone();
         let registered = Tuning::from_registry(
-            crate::app::features::tuning::modules::registry_with_scheduling(
+            crate::app::features::system_tweaks::platforms::registry_with_scheduling(
                 runtime.scheduling_handle(),
             ),
         );
         let tuning_editors = registered.registry().clone();
         let service = registered.headless_selected(saved);
         let tuning = TuningRuntime::start(
-            if crate::app::features::tuning::MODULES_ENABLED {
+            if crate::app::features::system_tweaks::MODULES_ENABLED {
                 service
             } else {
                 service.without_modules()
@@ -279,7 +289,7 @@ impl AppState {
         let tuning_editors = registered.registry().clone();
         let service = registered.headless(saved, Box::new(TestStatePersistence));
         let tuning = TuningRuntime::start(
-            if crate::app::features::tuning::MODULES_ENABLED {
+            if crate::app::features::system_tweaks::MODULES_ENABLED {
                 service
             } else {
                 service.without_modules()
@@ -321,14 +331,14 @@ impl AppState {
     }
     pub(crate) fn tuning_editors(
         &self,
-    ) -> &crate::app::features::tuning::platform::registry::Registry {
+    ) -> &crate::app::features::system_tweaks::platform::registry::Registry {
         &self.tuning_editors
     }
     #[cfg(test)]
     pub(crate) fn replace_tuning_for_test(
         &mut self,
         runtime: TuningRuntime,
-        editors: crate::app::features::tuning::platform::registry::Registry,
+        editors: crate::app::features::system_tweaks::platform::registry::Registry,
     ) {
         let snapshot = runtime.snapshot();
         *self.persistent_state.write().unwrap() = (*snapshot.state).clone();
@@ -371,16 +381,33 @@ impl AppState {
                 self.tuning_shutdown_reported = Some(outcome);
             }
         }
-        if self.pending_legacy.as_ref().is_some_and(|pending| !matches!(snapshot.operation, crate::app::features::tuning::TuningOperationState::Pending { id } if id == pending.id)) {
+        if self.pending_legacy.as_ref().is_some_and(|pending| !matches!(snapshot.operation, crate::app::features::system_tweaks::TuningOperationState::Pending { id } if id == pending.id)) {
             let pending = self.pending_legacy.take().unwrap();
-            if matches!(snapshot.operation, crate::app::features::tuning::TuningOperationState::Idle) && snapshot.revision > pending.revision {
+            if matches!(snapshot.operation, crate::app::features::system_tweaks::TuningOperationState::Idle) && snapshot.revision > pending.revision {
                 match pending.completion {
                     Some(LegacyCompletion::Rule(target, draft)) if self.ui.app_edit_state.target.as_ref() == Some(&target) && self.ui.app_edit_state.current_edit == draft => self.close_app_run_settings(),
                     Some(LegacyCompletion::Group(target, name, selection, run_all)) if self.ui.group_form.editing_group_id == target && self.ui.group_form.group_name == name && self.ui.group_form.core_selection == selection && self.ui.group_form.run_all_enabled == run_all => self.cancel_group_form_session(),
+                    Some(LegacyCompletion::Import(intent, message)) => {
+                        match intent {
+                            ImportIntent::Installed { group, entry, selected, query } if matches!(self.ui.current_window, WindowRoute::InstalledAppPicker) && self.ui.installed_app_picker.target_group_id.as_ref() == Some(&group) && self.ui.installed_app_picker.selected_entry_index == selected && self.ui.installed_app_picker.query == query && selected.and_then(|index| self.ui.installed_app_picker.entries.get(index)) == Some(&entry) => self.close_installed_app_picker(),
+                            _ => {},
+                        }
+                        self.log_manager.add_entry(message);
+                    }
                     _ => {},
                 }
             } else {
-                self.log_manager.add_important_sticky_once("Settings were not saved. The draft and saved values were retained.".into());
+                if let Some(LegacyCompletion::Import(ImportIntent::Files(group, files), _)) = pending.completion {
+                    if self.ui.dropped_files.is_none() {
+                        self.ui.dropped_files = Some(files);
+                        self.ui.file_drop_hover_target = Some(group);
+                        self.log_manager.add_important_sticky_once("App targets were not saved. The files and target group were retained for retry.".into());
+                    } else {
+                        self.log_manager.add_important_sticky_once(format!("App targets were not saved for group {}: {files:?}. A newer file selection was preserved; select these files again to retry.", group.0));
+                    }
+                } else {
+                    self.log_manager.add_important_sticky_once("Settings were not saved. The draft and saved values were retained.".into());
+                }
             }
         }
         self.tuning_seen = Some(snapshot);
@@ -398,7 +425,7 @@ impl AppState {
     }
     pub(crate) fn tuning_shutdown_outcome(
         &self,
-    ) -> Option<crate::app::features::tuning::platform::controller::ShutdownResult> {
+    ) -> Option<crate::app::features::system_tweaks::platform::controller::ShutdownResult> {
         self.tuning.snapshot().shutdown_outcome
     }
 
@@ -463,6 +490,20 @@ impl AppState {
             revision,
             completion,
         });
+        if let Some(LegacyCompletion::Import(ImportIntent::Files(group, files), _)) = self
+            .pending_legacy
+            .as_ref()
+            .and_then(|pending| pending.completion.as_ref())
+        {
+            if self.ui.dropped_files.as_ref() == Some(files)
+                && self.ui.file_drop_hover_target.as_ref() == Some(group)
+            {
+                // The accepted completion now owns this input, independently of
+                // pointer hover and any fresh drop received while saving.
+                self.ui.dropped_files = None;
+                self.ui.file_drop_hover_target = None;
+            }
+        }
         #[cfg(test)]
         {
             // Existing state-level unit tests wait for the same authority. Real
@@ -470,7 +511,7 @@ impl AppState {
             let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while matches!(
                 self.tuning.snapshot().operation,
-                crate::app::features::tuning::TuningOperationState::Pending { .. }
+                crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
             ) && std::time::Instant::now() < until
             {
                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -478,7 +519,7 @@ impl AppState {
             self.poll_tuning();
             return matches!(
                 self.tuning.snapshot().operation,
-                crate::app::features::tuning::TuningOperationState::Idle
+                crate::app::features::system_tweaks::TuningOperationState::Idle
             );
         }
         #[cfg(not(test))]
@@ -714,7 +755,6 @@ impl AppState {
             return;
         };
 
-        let attempted_count = paths.len();
         let group_name = self.get_group_name(group_index).unwrap_or_default();
         self.log_manager.add_entry(format!(
             "Adding app targets to group: {group_name}, paths: {paths:?}"
@@ -723,79 +763,86 @@ impl AppState {
         let Some((draft, revision)) = self.base_draft() else {
             return;
         };
+        self.ui.dropped_files = Some(paths.clone());
+        self.ui.file_drop_hover_target = Some(group_id.clone());
+        let intent = ImportIntent::Files(group_id, paths.clone());
         let outcome = rules::add_apps_to_group(&draft, group_index, paths);
-        self.handle_add_apps_outcome(
-            draft,
-            revision,
-            group_index,
-            &group_name,
-            attempted_count,
-            outcome,
-        );
+        self.handle_add_apps_outcome(draft, revision, group_index, &group_name, outcome, intent);
     }
 
     pub fn add_installed_app_to_group(
         &mut self,
         group_id: GroupId,
         entry: InstalledAppCatalogEntry,
-    ) {
+    ) -> bool {
         let Some(group_index) = self.group_index_for_id(&group_id) else {
-            return;
+            return false;
         };
 
         let group_name = self.get_group_name(group_index).unwrap_or_default();
         let app_name = entry.name.clone();
         let Some((draft, revision)) = self.base_draft() else {
-            return;
+            return false;
         };
+        let completion = LegacyCompletion::Import(
+            ImportIntent::Installed {
+                group: group_id,
+                entry: entry.clone(),
+                selected: self.ui.installed_app_picker.selected_entry_index,
+                query: self.ui.installed_app_picker.query.clone(),
+            },
+            format!("Added installed app '{app_name}' to group: {group_name}"),
+        );
         let outcome = rules::add_installed_app_to_group(&draft, group_index, entry);
 
-        if outcome.added_count > 0 {
+        let queued = if outcome.added_count > 0 {
             let mut identities = self.rules.clone();
             identities.append_rules_to_group(group_index, outcome.added_count);
-            let _ = self.persist_draft(draft, revision, identities, None);
-            self.log_manager.add_entry(format!(
-                "Added installed app '{app_name}' to group: {group_name}"
-            ));
-        }
+            self.persist_draft(draft, revision, identities, Some(completion))
+        } else {
+            false
+        };
 
         if let Some(err) = outcome.first_error {
             self.log_manager
                 .add_entry(format!("Error adding installed app '{app_name}': {err}"));
         }
+        queued
     }
 
     pub fn consume_dropped_files_into_group(&mut self, group_id: GroupId) -> bool {
-        self.ui.file_drop_hover_target = None;
-        let Some(files) = self.ui.dropped_files.take() else {
+        let Some(files) = self.ui.dropped_files.clone() else {
+            self.ui.file_drop_hover_target = None;
             return false;
         };
 
         if files.is_empty() {
+            self.ui.dropped_files = None;
+            self.ui.file_drop_hover_target = None;
             return false;
         }
 
         let Some(group_index) = self.group_index_for_id(&group_id) else {
+            self.ui.dropped_files = None;
+            self.ui.file_drop_hover_target = None;
             return false;
         };
+        self.ui.file_drop_hover_target = Some(group_id.clone());
 
-        let files_count = files.len();
         let group_name = self.get_group_name(group_index).unwrap_or_default();
 
         let Some((draft, revision)) = self.base_draft() else {
             return false;
         };
-        let outcome = rules::add_apps_to_group(&draft, group_index, files);
+        let outcome = rules::add_apps_to_group(&draft, group_index, files.clone());
         self.handle_add_apps_outcome(
             draft,
             revision,
             group_index,
             &group_name,
-            files_count,
             outcome,
-        );
-
-        true
+            ImportIntent::Files(group_id, files),
+        )
     }
 
     fn handle_add_apps_outcome(
@@ -804,29 +851,47 @@ impl AppState {
         revision: u64,
         group_index: usize,
         group_name: &str,
-        attempted_count: usize,
         outcome: AddAppsOutcome,
-    ) {
-        if outcome.added_count > 0 {
+        intent: ImportIntent,
+    ) -> bool {
+        let attempted_count = match &intent {
+            ImportIntent::Files(_, files) => files.len(),
+            ImportIntent::Installed { .. } => 1,
+        };
+        let queued = if outcome.added_count > 0 {
             let mut identities = self.rules.clone();
             identities.append_rules_to_group(group_index, outcome.added_count);
-            let _ = self.persist_draft(draft, revision, identities, None);
-
-            if outcome.added_count == attempted_count {
-                self.log_manager
-                    .add_entry(format!("Added app targets to group: {group_name}"));
+            let message = if outcome.added_count == attempted_count {
+                format!("Added app targets to group: {group_name}")
             } else {
-                self.log_manager.add_entry(format!(
+                format!(
                     "Added {} app targets to group: {}",
                     outcome.added_count, group_name
-                ));
+                )
+            };
+            self.persist_draft(
+                draft,
+                revision,
+                identities,
+                Some(LegacyCompletion::Import(intent, message)),
+            )
+        } else {
+            if let ImportIntent::Files(group, files) = intent {
+                if self.ui.dropped_files.as_ref() == Some(&files)
+                    && self.ui.file_drop_hover_target.as_ref() == Some(&group)
+                {
+                    self.ui.dropped_files = None;
+                    self.ui.file_drop_hover_target = None;
+                }
             }
-        }
+            false
+        };
 
         if let Some(err) = outcome.first_error {
             self.log_manager
                 .add_entry(format!("Error adding app targets: {err}"));
         }
+        queued
     }
 
     pub fn get_theme_index(&self) -> usize {
@@ -1585,9 +1650,8 @@ impl AppState {
             return false;
         };
 
-        self.add_installed_app_to_group(group_id, entry);
-        self.close_installed_app_picker();
-        true
+        self.ui.installed_app_picker.selected_entry_index = Some(entry_index);
+        self.add_installed_app_to_group(group_id, entry)
     }
 
     pub fn open_app_run_settings(&mut self, group_id: GroupId, rule_id: RuleId) {
@@ -1976,10 +2040,12 @@ mod tests {
     fn linux_modules_requests_are_refused_without_idle_module_polling() {
         let mut app = sample_state();
         assert_eq!(
-            app.request_tuning(crate::app::features::tuning::TuningRequest::CreateProfile {
-                name: "Unavailable".into(),
-            }),
-            Err(crate::app::features::tuning::SaveError::Invalid)
+            app.request_tuning(
+                crate::app::features::system_tweaks::TuningRequest::CreateProfile {
+                    name: "Unavailable".into(),
+                }
+            ),
+            Err(crate::app::features::system_tweaks::SaveError::Invalid)
         );
         assert_eq!(app.tuning_poll_interval(), None);
         assert!(app.tuning_snapshot().catalog.is_empty());
@@ -1999,7 +2065,7 @@ mod tests {
         let group = app.rules.group_id_for_index(0).unwrap();
         let rule = app.rules.rule_id_for_index(0, 0).unwrap();
         assert!(app.enqueue_legacy(
-            crate::app::features::tuning::TuningRequest::RemoveRule { group, rule },
+            crate::app::features::system_tweaks::TuningRequest::RemoveRule { group, rule },
             None,
         ));
         assert!(app.persistent_state.read().unwrap().groups[0]
@@ -2012,7 +2078,7 @@ mod tests {
 
     #[test]
     fn p4_legacy_save_failure_keeps_saved_values_ids_and_rule_editor() {
-        use crate::app::features::tuning::{
+        use crate::app::features::system_tweaks::{
             service::{SavedState, StatePersistence},
             SaveError, TuningOperationState, TuningRuntime,
         };
@@ -2025,7 +2091,7 @@ mod tests {
         let mut app = sample_state();
         let state = app.persistent_state.read().unwrap().clone();
         let runtime = TuningRuntime::start(
-            crate::app::features::tuning::Tuning::from_registry(Default::default())
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
                 .headless(state, Box::new(Failing)),
             app.runtime.running_apps_handle(),
         );
@@ -2197,8 +2263,8 @@ mod tests {
     fn rebase_sample_fixture(app: &mut AppState) {
         let mut saved = app.persistent_state.read().unwrap().clone();
         saved.mark_ready_for_current_schema_save(app.rules.to_persisted_identities());
-        let runtime = crate::app::features::tuning::TuningRuntime::start(
-            crate::app::features::tuning::Tuning::from_registry(Default::default())
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
                 .headless(saved, Box::new(super::TestStatePersistence)),
             app.runtime.running_apps_handle(),
         );
@@ -3236,6 +3302,424 @@ mod tests {
             WindowRoute::Groups(GroupRoute::List)
         ));
         assert!(app.ui.installed_app_picker.target_group_id.is_none());
+    }
+
+    struct ImportPersistence {
+        fail: Arc<std::sync::atomic::AtomicBool>,
+        gate: Option<std::sync::mpsc::Receiver<()>>,
+        entered: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl crate::app::features::system_tweaks::StatePersistence for ImportPersistence {
+        fn save(
+            &mut self,
+            _: &mut AppStateStorage,
+        ) -> Result<crate::app::features::system_tweaks::service::SavedState, super::SaveError>
+        {
+            if let Some(gate) = self.gate.take() {
+                self.entered.take().unwrap().send(()).unwrap();
+                gate.recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(super::SaveError::Storage)
+            } else {
+                Ok(crate::app::features::system_tweaks::service::SavedState::Unavailable)
+            }
+        }
+    }
+
+    struct ImportGate(Option<std::sync::mpsc::Sender<()>>);
+    impl Drop for ImportGate {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    fn install_import_persistence(
+        app: &mut AppState,
+        pending: bool,
+    ) -> (Arc<std::sync::atomic::AtomicBool>, ImportGate) {
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(
+                    state,
+                    Box::new(ImportPersistence {
+                        fail: fail.clone(),
+                        gate: pending.then_some(release_rx),
+                        entered: pending.then_some(entered_tx),
+                    }),
+                ),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        if pending {
+            let mut candidate = app.persistent_state.read().unwrap().clone();
+            candidate.mark_ready_for_current_schema_save(app.rules.to_persisted_identities());
+            app.request_tuning(
+                crate::app::features::system_tweaks::TuningRequest::SaveBase {
+                    candidate: Box::new(candidate),
+                    expected_revision: app.tuning_adopted_revision,
+                },
+            )
+            .unwrap();
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+        }
+        (fail, ImportGate(pending.then_some(release_tx)))
+    }
+
+    fn await_import_completion(app: &mut AppState) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while matches!(
+            app.tuning_snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.poll_tuning();
+    }
+
+    fn assert_import_not_saved(
+        app: &AppState,
+        identities: &crate::app::features::rules::PersistedRuleIdentities,
+    ) {
+        assert_eq!(
+            app.persistent_state.read().unwrap().groups[0]
+                .programs
+                .len(),
+            1
+        );
+        assert_eq!(&app.rules.to_persisted_identities(), identities);
+        assert!(!app
+            .log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.starts_with("Added ")));
+    }
+
+    fn assert_one_import_saved(app: &AppState, old_group: &GroupId, old_rule: &RuleId) {
+        assert_eq!(
+            app.persistent_state.read().unwrap().groups[0]
+                .programs
+                .len(),
+            2
+        );
+        assert_eq!(app.rules.group_id_for_index(0).as_ref(), Some(old_group));
+        assert_eq!(app.rules.rule_id_for_index(0, 0).as_ref(), Some(old_rule));
+        assert_ne!(app.rules.rule_id_for_index(0, 1).as_ref(), Some(old_rule));
+        assert_eq!(
+            app.log_manager
+                .entries
+                .iter()
+                .filter(|entry| entry.message.starts_with("Added "))
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_dropped_pending_retry() {
+        let mut app = sample_state();
+        let (_fail, gate) = install_import_persistence(&mut app, true);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        let files = vec![PathBuf::from(r"C:\Dropped.exe")];
+        app.ui.dropped_files = Some(files.clone());
+        app.ui.file_drop_hover_target = Some(group.clone());
+        assert!(!app.consume_dropped_files_into_group(group.clone()));
+        assert_eq!(app.ui.dropped_files.as_ref(), Some(&files));
+        assert_eq!(app.ui.file_drop_hover_target.as_ref(), Some(&group));
+        assert_import_not_saved(&app, &identities);
+        drop(gate);
+        await_import_completion(&mut app);
+        assert!(app.consume_dropped_files_into_group(group.clone()));
+        await_import_completion(&mut app);
+        assert!(app.ui.dropped_files.is_none());
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[test]
+    fn import_retention_installed_pending_retry() {
+        let mut app = sample_state();
+        let (_fail, gate) = install_import_persistence(&mut app, true);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        app.ui.installed_app_picker.entries = vec![InstalledAppCatalogEntry::new_aumid(
+            "Spotify",
+            "Spotify!App",
+            InstalledAppCatalogSource::WindowsAppsFolder,
+        )];
+        app.open_installed_app_picker(group.clone());
+        app.set_installed_app_picker_query("spot".into());
+        assert!(!app.confirm_selected_installed_app());
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::InstalledAppPicker
+        ));
+        assert_eq!(app.ui.installed_app_picker.query, "spot");
+        assert_eq!(app.ui.installed_app_picker.selected_entry_index, Some(0));
+        assert_import_not_saved(&app, &identities);
+        drop(gate);
+        await_import_completion(&mut app);
+        assert!(app.confirm_selected_installed_app());
+        await_import_completion(&mut app);
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::Groups(GroupRoute::List)
+        ));
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_dropped_storage_failure_retry() {
+        let mut app = sample_state();
+        let (fail, _gate) = install_import_persistence(&mut app, false);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        let files = vec![PathBuf::from(r"C:\Dropped.exe")];
+        app.ui.dropped_files = Some(files.clone());
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = app.consume_dropped_files_into_group(group.clone());
+        await_import_completion(&mut app);
+        assert_eq!(app.ui.dropped_files.as_ref(), Some(&files));
+        assert_import_not_saved(&app, &identities);
+        fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(app.consume_dropped_files_into_group(group.clone()));
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[test]
+    fn import_retention_installed_storage_failure_retry() {
+        let mut app = sample_state();
+        let (fail, _gate) = install_import_persistence(&mut app, false);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        app.ui.installed_app_picker.entries = vec![InstalledAppCatalogEntry::new_aumid(
+            "Spotify",
+            "Spotify!App",
+            InstalledAppCatalogSource::WindowsAppsFolder,
+        )];
+        app.open_installed_app_picker(group.clone());
+        app.set_installed_app_picker_query("spot".into());
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = app.confirm_selected_installed_app();
+        await_import_completion(&mut app);
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::InstalledAppPicker
+        ));
+        assert_eq!(
+            app.ui.installed_app_picker.target_group_id.as_ref(),
+            Some(&group)
+        );
+        assert_eq!(app.ui.installed_app_picker.query, "spot");
+        assert_eq!(app.ui.installed_app_picker.selected_entry_index, Some(0));
+        assert_import_not_saved(&app, &identities);
+        fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(app.confirm_selected_installed_app());
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[test]
+    fn import_retention_accepted_installed_waits_for_adoption() {
+        let mut app = sample_state();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(
+                    state,
+                    Box::new(ImportPersistence {
+                        fail: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        gate: Some(release_rx),
+                        entered: Some(entered_tx),
+                    }),
+                ),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        let gate = ImportGate(Some(release_tx));
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        app.ui.installed_app_picker.entries = vec![InstalledAppCatalogEntry::new_aumid(
+            "Spotify",
+            "Spotify!App",
+            InstalledAppCatalogSource::WindowsAppsFolder,
+        )];
+        app.open_installed_app_picker(group.clone());
+        app.set_installed_app_picker_query("spot".into());
+        // The test-only enqueue wait expires while this accepted save remains gated.
+        let _ = app.confirm_selected_installed_app();
+        entered_rx.try_recv().unwrap();
+        assert!(matches!(
+            app.tuning_snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ));
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::InstalledAppPicker
+        ));
+        assert_eq!(app.ui.installed_app_picker.query, "spot");
+        assert_eq!(app.ui.installed_app_picker.selected_entry_index, Some(0));
+        assert_import_not_saved(&app, &identities);
+        assert!(!app.confirm_selected_installed_app());
+        drop(gate);
+        await_import_completion(&mut app);
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::Groups(GroupRoute::List)
+        ));
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_accepted_dropped_preserves_new_target() {
+        let mut app = sample_state();
+        add_empty_group(&mut app, "Other group");
+        let group = group_id(&app, 0);
+        let other_group = group_id(&app, 1);
+        let old_rule = rule_id(&app, 0, 0);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(
+                    state,
+                    Box::new(ImportPersistence {
+                        fail: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        gate: Some(release_rx),
+                        entered: Some(entered_tx),
+                    }),
+                ),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        let gate = ImportGate(Some(release_tx));
+        let files = vec![PathBuf::from(r"C:\Dropped.exe")];
+        app.ui.dropped_files = Some(files.clone());
+        let _ = app.consume_dropped_files_into_group(group.clone());
+        entered_rx.try_recv().unwrap();
+        assert!(matches!(
+            app.tuning_snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ));
+        // A fresh drop of the same files now belongs to another group.
+        app.ui.dropped_files = Some(files.clone());
+        app.ui.file_drop_hover_target = Some(other_group.clone());
+        drop(gate);
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
+        assert_eq!(app.ui.dropped_files.as_ref(), Some(&files));
+        assert_eq!(app.ui.file_drop_hover_target.as_ref(), Some(&other_group));
+        assert!(app.persistent_state.read().unwrap().groups[1]
+            .programs
+            .is_empty());
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_accepted_dropped_clears_transient_hover() {
+        let mut app = sample_state();
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(
+                    state,
+                    Box::new(ImportPersistence {
+                        fail: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        gate: Some(release_rx),
+                        entered: Some(entered_tx),
+                    }),
+                ),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        let gate = ImportGate(Some(release_tx));
+        app.ui.dropped_files = Some(vec![PathBuf::from(r"C:\Dropped.exe")]);
+        let _ = app.consume_dropped_files_into_group(group.clone());
+        entered_rx.try_recv().unwrap();
+        assert!(matches!(
+            app.tuning_snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ));
+        // The pointer moved outside group rows; this is not a fresh drop.
+        app.ui.file_drop_hover_target = None;
+        drop(gate);
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
+        assert!(
+            app.ui.dropped_files.is_none(),
+            "accepted input must not survive as a second drop"
+        );
+        assert!(app.ui.file_drop_hover_target.is_none());
+        assert!(!app.consume_dropped_files_into_group(group.clone()));
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_selected_files_pending_retry() {
+        let mut app = sample_state();
+        let (_fail, gate) = install_import_persistence(&mut app, true);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        let files = vec![PathBuf::from(r"C:\Selected.exe")];
+        app.add_selected_files_to_group(group.clone(), files.clone());
+        assert_eq!(app.ui.dropped_files.as_ref(), Some(&files));
+        assert_eq!(app.ui.file_drop_hover_target.as_ref(), Some(&group));
+        assert_import_not_saved(&app, &identities);
+        drop(gate);
+        await_import_completion(&mut app);
+        assert!(app.consume_dropped_files_into_group(group.clone()));
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_selected_files_storage_failure_retry() {
+        let mut app = sample_state();
+        let (fail, _gate) = install_import_persistence(&mut app, false);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        let files = vec![PathBuf::from(r"C:\Selected.exe")];
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.add_selected_files_to_group(group.clone(), files.clone());
+        await_import_completion(&mut app);
+        assert_eq!(app.ui.dropped_files.as_ref(), Some(&files));
+        assert_eq!(app.ui.file_drop_hover_target.as_ref(), Some(&group));
+        assert_import_not_saved(&app, &identities);
+        fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(app.consume_dropped_files_into_group(group.clone()));
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
     }
 
     #[test]

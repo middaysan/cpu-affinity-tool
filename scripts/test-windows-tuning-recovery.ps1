@@ -11,7 +11,7 @@ if ($env:OS -ne "Windows_NT") {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$testPrefix = "app::features::tuning::recovery_tests::"
+$testPrefix = "app::features::system_tweaks::recovery_tests::"
 $requiredTests = @(
     "${testPrefix}forced_exit_after_intent_recovers_without_a_target_write",
     "${testPrefix}forced_exit_after_physical_write_restores_exact_original_baseline",

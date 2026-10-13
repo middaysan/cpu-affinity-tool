@@ -545,7 +545,7 @@ mod tests {
     }
     #[test]
     fn p1_storage_v11_round_trip_uses_real_save_seam_and_old_missing_tuning_stays_off() {
-        use crate::app::features::tuning::config::TuningLoad;
+        use crate::app::features::system_tweaks::config::TuningLoad;
         let path = state_path();
         let original = p1_state("11", Some(&p1_config()), None);
         let mut fs = FakeFilesystem::default();
@@ -601,7 +601,7 @@ mod tests {
             super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
         assert_eq!(
             state.tuning.decode(),
-            crate::app::features::tuning::config::TuningLoad::Unknown
+            crate::app::features::system_tweaks::config::TuningLoad::Unknown
         );
         state.theme_index = 1;
         state

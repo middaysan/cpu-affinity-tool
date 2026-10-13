@@ -83,10 +83,7 @@ fn main() {
 
     let options = NativeOptions {
         run_and_return: true,
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_min_inner_size([470.0, 600.0])
-            .with_max_inner_size([470.0, 1000.0])
-            .with_maximize_button(false), // Disable maximize button
+        viewport: windows_viewport(),
         ..Default::default()
     };
 
@@ -142,6 +139,28 @@ fn main() {
     if let Err(e) = res {
         eprintln!("Application error: {}", e);
         std::process::exit(EXIT_GUI_STARTUP_ERROR);
+    }
+}
+
+fn windows_viewport() -> eframe::egui::ViewportBuilder {
+    eframe::egui::ViewportBuilder::default()
+        .with_inner_size([400.0, 700.0])
+        .with_min_inner_size([400.0, 600.0])
+        .with_max_inner_size([400.0, 1000.0])
+        .with_maximize_button(false)
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    #[test]
+    fn compact_layout_window_keeps_fixed_width_and_resizable_height() {
+        let viewport = super::windows_viewport();
+        let minimum = viewport.min_inner_size.unwrap();
+        let maximum = viewport.max_inner_size.unwrap();
+        assert_eq!(viewport.inner_size.unwrap().x, 400.0);
+        assert_eq!(minimum.x, 400.0);
+        assert_eq!(maximum.x, 400.0);
+        assert!(maximum.y > minimum.y);
     }
 }
 

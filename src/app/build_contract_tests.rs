@@ -164,7 +164,7 @@ fn windows_ci_and_stable_release_require_isolated_tuning_recovery() {
     for required in [
         "windows,tuning-test-controls",
         "cpu-affinity-tool",
-        "app::features::tuning::recovery_tests::",
+        "app::features::system_tweaks::recovery_tests::",
         "--locked",
         "--test-threads=1",
         "forced_exit_after_intent_recovers_without_a_target_write",

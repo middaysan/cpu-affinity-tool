@@ -1,4 +1,4 @@
-use crate::app::features::tuning::platform::{
+use crate::app::features::system_tweaks::platform::{
     contract::{FeatureId, TargetScope},
     controller::ShutdownResult,
 };

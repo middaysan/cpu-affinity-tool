@@ -6,7 +6,7 @@ use crate::app::shell::presenters::shared_elements::{
 use crate::app::shell::{GroupRoute, WindowRoute};
 use eframe::egui::{self, Color32, Layout, Margin, Panel, RichText, Stroke};
 
-const NAVIGATION_SWITCH_WIDTH: f32 = 250.0;
+const NAVIGATION_SWITCH_WIDTH: f32 = 300.0;
 fn settings_menu(app: &mut AppState, ui: &mut egui::Ui) {
     let button = ui.button(RichText::new("Settings").size(BUTTON_FONT_SIZE));
     egui::Popup::menu(&button)
@@ -66,10 +66,10 @@ fn navigation_button(
 ) -> egui::Response {
     let button = egui::Button::new(label).selected(selected);
     if selected {
-        toned_sized_button(ui, [82.0, 20.0], button, ToneRole::Selected)
+        toned_sized_button(ui, [98.0, 20.0], button, ToneRole::Selected)
     } else {
         let response = ui.add_sized(
-            [82.0, 20.0],
+            [98.0, 20.0],
             button.fill(Color32::TRANSPARENT).stroke(Stroke::NONE),
         );
         paint_focus_ring(ui, &response);
@@ -114,7 +114,7 @@ fn navigation_switch(app: &mut AppState, ui: &mut egui::Ui) {
                 }
                 if app.modules_enabled() {
                     let modules_selected = matches!(app.ui.current_window, WindowRoute::Tuning);
-                    let modules = RichText::new("Modules").size(BUTTON_FONT_SIZE);
+                    let modules = RichText::new("System Tweaks").size(BUTTON_FONT_SIZE);
                     if navigation_button(ui, modules, modules_selected).clicked() {
                         app.set_current_window(WindowRoute::Tuning);
                     }

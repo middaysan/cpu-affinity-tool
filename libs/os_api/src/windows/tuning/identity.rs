@@ -11,8 +11,9 @@ use windows::{
             WAIT_TIMEOUT,
         },
         Security::{
-            Authorization::ConvertSidToStringSidW, GetTokenInformation, PSID, TOKEN_QUERY,
-            TOKEN_STATISTICS, TOKEN_USER, TokenSessionId, TokenStatistics, TokenUser,
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, PSID, TOKEN_ELEVATION_TYPE,
+            TOKEN_LINKED_TOKEN, TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER, TokenElevationType,
+            TokenElevationTypeFull, TokenLinkedToken, TokenSessionId, TokenStatistics, TokenUser,
         },
         System::Threading::{
             GetCurrentProcess, GetProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
@@ -123,6 +124,48 @@ impl OS {
     pub fn tuning_current_token_identity() -> Result<TuningTokenIdentity, TuningNativeError> {
         let token = current_token()?;
         token_identity(token.0)
+    }
+
+    /// Read the OS-linked limited token of the same elevated caller. This grants
+    /// no impersonation or write authority and is not a public platform API.
+    pub(crate) fn tuning_current_linked_token_identity(
+        expected: &TuningTokenIdentity,
+    ) -> Result<Option<TuningTokenIdentity>, TuningNativeError> {
+        let token = current_token()?;
+        if &token_identity(token.0)? != expected {
+            return Err(TuningNativeError::Unsupported("caller token changed"));
+        }
+        let mut elevation = TOKEN_ELEVATION_TYPE::default();
+        let mut length = 0;
+        unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenElevationType,
+                Some((&mut elevation as *mut TOKEN_ELEVATION_TYPE).cast()),
+                size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+                &mut length,
+            )
+        }
+        .map_err(|e| native_error("TokenElevationType", e))?;
+        if elevation != TokenElevationTypeFull {
+            return Ok(None);
+        }
+        let mut linked = TOKEN_LINKED_TOKEN::default();
+        unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenLinkedToken,
+                Some((&mut linked as *mut TOKEN_LINKED_TOKEN).cast()),
+                size_of::<TOKEN_LINKED_TOKEN>() as u32,
+                &mut length,
+            )
+        }
+        .map_err(|e| native_error("TokenLinkedToken", e))?;
+        let linked = HandleGuard(linked.LinkedToken);
+        if linked.0.is_invalid() {
+            return Err(TuningNativeError::Unsupported("invalid linked token"));
+        }
+        token_identity(linked.0).map(Some)
     }
 
     pub fn tuning_process_identity(pid: u32) -> Result<TuningProcessIdentity, TuningNativeError> {
@@ -266,6 +309,18 @@ fn sid_string(sid: PSID) -> Result<String, TuningNativeError> {
 #[cfg(test)]
 mod token_tests {
     use super::*;
+    #[test]
+    fn linked_token_read_requires_the_exact_current_caller() {
+        let caller = OS::tuning_current_token_identity().unwrap();
+        let linked = OS::tuning_current_linked_token_identity(&caller).unwrap();
+        if let Some(linked) = linked {
+            assert_eq!(linked.sid(), caller.sid());
+            assert_eq!(linked.session_id(), caller.session_id());
+        }
+        let mut changed = caller;
+        changed.authentication_id ^= 1;
+        assert!(OS::tuning_current_linked_token_identity(&changed).is_err());
+    }
     #[test]
     fn current_process_has_exact_current_caller_identity() {
         let token = OS::tuning_current_token_identity().unwrap();

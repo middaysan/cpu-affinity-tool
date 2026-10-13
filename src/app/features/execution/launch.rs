@@ -4,9 +4,7 @@ use crate::app::features::execution::{
     MonitorWake, RuntimeRegistry,
 };
 use crate::app::features::rules::RulesContext;
-use crate::app::features::tuning::modules::managed::scheduling::{
-    fields_for_rule, SchedulingHandoff,
-};
+use crate::app::features::system_tweaks::tweaks::scheduling::{fields_for_rule, SchedulingHandoff};
 use crate::app::models::{
     AppRuntimeKey, AppStateStorage, AppToRun, LaunchTarget, LogManager, ProcessInstanceToken,
 };
@@ -1412,16 +1410,16 @@ mod tests {
     ) {
         use crate::app::features::{
             rules::RulesContext,
-            tuning::{
+            system_tweaks::{
                 config::{Association, ModulePreference, Profile, TuningConfig, TuningEnvelope},
-                modules::managed,
                 platform::contract::{ActivationEligibility, ActivationMode, ProfileId},
+                tweaks,
             },
         };
         let rules = RulesContext::from_storage(state);
         state.rule_identities = Some(rules.to_persisted_identities());
         let profile = ProfileId::new(1).unwrap();
-        let modules = managed::modules()
+        let modules = tweaks::modules()
             .into_iter()
             .filter(|module| features.contains(&module.descriptor().id.as_str()))
             .map(|module| ModulePreference {

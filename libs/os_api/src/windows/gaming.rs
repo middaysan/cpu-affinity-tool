@@ -80,6 +80,18 @@ fn success(operation: &'static str, value: u32) -> Result<(), GamingError> {
     }
 }
 
+// A split UAC logon is accepted only through its actual OS-linked token.
+fn caller_matches_shell(
+    caller: &crate::tuning::TuningTokenIdentity,
+    shell: &crate::tuning::TuningTokenIdentity,
+    linked: Option<&crate::tuning::TuningTokenIdentity>,
+) -> bool {
+    caller == shell
+        || (caller.sid() == shell.sid()
+            && caller.session_id() == shell.session_id()
+            && linked == Some(shell))
+}
+
 /// Cross-account elevation, missing shells and impersonation cannot write user settings.
 pub fn interactive_user() -> Result<UserIdentity, GamingError> {
     let mut thread_token = HANDLE::default();
@@ -115,9 +127,20 @@ pub fn interactive_user() -> Result<UserIdentity, GamingError> {
             "The interactive shell is not Explorer",
         ));
     }
-    if &caller != first.token() {
+    let linked = if &caller != first.token() {
+        OS::tuning_current_linked_token_identity(&caller).map_err(native_identity)?
+    } else {
+        None
+    };
+    if !caller_matches_shell(&caller, first.token(), linked.as_ref()) {
         return Err(GamingError::Denied {
-            operation: "Caller and Explorer SID/session/logon differ",
+            operation: if caller.sid() != first.token().sid() {
+                "App and Explorer Windows accounts differ"
+            } else if caller.session_id() != first.token().session_id() {
+                "App and Explorer desktop sessions differ"
+            } else {
+                "App and its UAC-linked token do not match the Explorer sign-in"
+            },
             code: ERROR_ACCESS_DENIED.0,
         });
     }
@@ -133,7 +156,8 @@ pub fn interactive_user() -> Result<UserIdentity, GamingError> {
     }
     Ok(UserIdentity {
         sid: caller.sid().to_string(),
-        logon: caller.authentication_id(),
+        // Persist the same desktop identity before and after UAC elevation.
+        logon: first.token().authentication_id(),
     })
 }
 fn verify_user(expected: &UserIdentity) -> Result<(), GamingError> {
@@ -946,6 +970,37 @@ pub fn write_priority(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interactive_user_accepts_only_exact_or_os_linked_same_account_session() {
+        use crate::tuning::TuningTokenIdentity;
+        let shell = TuningTokenIdentity {
+            sid: "S-1-5-21-1".into(),
+            session_id: 2,
+            authentication_id: 10,
+        };
+        let mut caller = shell.clone();
+        assert!(caller_matches_shell(&caller, &shell, None));
+        caller.authentication_id = 11;
+        assert!(
+            caller_matches_shell(&caller, &shell, Some(&shell)),
+            "The OS-linked UAC token identifies the same desktop logon"
+        );
+        assert!(!caller_matches_shell(&caller, &shell, None));
+        assert!(!caller_matches_shell(&caller, &shell, Some(&caller)));
+        let mut foreign = caller.clone();
+        foreign.sid = "S-1-5-21-2".into();
+        assert!(!caller_matches_shell(&foreign, &shell, Some(&shell)));
+        foreign = caller.clone();
+        foreign.session_id = 3;
+        assert!(!caller_matches_shell(&foreign, &shell, Some(&shell)));
+        let mut unrelated_link = shell.clone();
+        unrelated_link.authentication_id = 12;
+        assert!(!caller_matches_shell(
+            &caller,
+            &shell,
+            Some(&unrelated_link)
+        ));
+    }
     #[test]
     fn gaming_process_read_rejects_wrong_creation_token_and_image_without_writes() {
         let identity = OS::tuning_process_identity(std::process::id()).unwrap();

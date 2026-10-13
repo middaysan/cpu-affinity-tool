@@ -1,7 +1,7 @@
 use crate::app::features::execution::MonitorEventSender;
 use crate::app::features::execution::RunningAppStatusCache;
 use crate::app::features::rules::RulesContext;
-use crate::app::features::tuning::modules::managed::scheduling::fields_for_rule;
+use crate::app::features::system_tweaks::tweaks::scheduling::fields_for_rule;
 use crate::app::models::{AppRuntimeKey, AppStateStorage, AppStatus, RunningApps};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::events::ShellEvent;
@@ -429,17 +429,17 @@ mod tests {
     fn handoff_monitor_skips_module_fields_before_first_baseline() {
         use crate::app::features::{
             rules::RulesContext,
-            tuning::{
+            system_tweaks::{
                 config::{Association, ModulePreference, Profile, TuningConfig, TuningEnvelope},
-                modules::managed,
                 platform::contract::{ActivationEligibility, ActivationMode, ProfileId},
+                tweaks,
             },
         };
         let mut state = sample_state();
         let rules = RulesContext::from_storage(&state);
         state.rule_identities = Some(rules.to_persisted_identities());
         let profile = ProfileId::new(1).unwrap();
-        let modules = managed::modules()
+        let modules = tweaks::modules()
             .into_iter()
             .filter(|m| ["cpu_sets", "process_priority"].contains(&m.descriptor().id.as_str()))
             .map(|m| ModulePreference {

@@ -1,14 +1,20 @@
+## 2026-10-11 compact System Tweaks revision
+
+The accepted manual interface stays English and is named **System Tweaks**. Each native tweak owns `src/app/features/system_tweaks/tweaks/<name>/mod.rs`; the page, persistence, worker and shared controller stay inside `system_tweaks`. Adapter-owned Windows 10/11 requirements grey unavailable cards and block observation/activation before native work. Linux has an empty composition seam for a possible later implementation. Stable persisted feature IDs, `tuning` schema-v11 data and conditional Undo remain unchanged. Windows 10 support is a tested compatibility map; actual native validation so far is Windows 11 only.
+
 # Modular gaming features
 
 The product consists of four stages: UI, a small module registry/controller, real modules, and persistence with safe lifecycle/rollback. Stage identity and acceptance status live in the local `.codex/ROADMAP.md`, not this document. The earlier general transaction/continuity lab plan is superseded.
 
-Modules are currently Windows-only. Linux hides the Modules page and profile associations, registers no modules and runs no module observations, recovery or native actions. Its existing background queue only saves ordinary application state/rules, retaining raw tuning data unchanged. Separate Windows/Linux module-platform abstractions are deferred.
+Modules are currently Windows-only. Linux hides the Modules page and profile associations, registers no modules and runs no module observations, recovery or native actions. Its existing background queue only saves ordinary application state/rules, retaining raw tuning data unchanged. System Tweaks now has separate Windows catalog composition and an inactive Linux extension point; Linux native tweaks remain out of scope.
 
-On 2026-10-09 the user explicitly excluded Linux verification from this MR's acceptance. The four stages are accepted against the verified Windows implementation; actual Linux compatibility is unverified. Existing repository CI and beta release definitions remain in place. Delivery stays local under the user's no-push decision.
+Native acceptance evidence is from Windows 11. Linux native tweaks and local Linux verification are outside this implementation's acceptance; existing repository CI and beta release definitions remain in place. Windows 10 support is declared and unit-tested, with native Windows 10 validation still open.
 
 ## User flow
 
-The Modules view lists available modules and their current observations. A profile saves each module's switch, parameters and trigger (Manual, while a saved game rule is running, or while that game is foreground). Profiles attach to logical rule IDs. Read-only cards work without a profile and expose refresh, CSV import or a fixed native Settings page.
+System Tweaks is a compact manual page in a fixed-width 400 logical-pixel window: choose an individual setting and use Apply or Undo. A horizontal segmented switch selects System, GPU / network, Check PC or Restore; only its selected content scrolls. Scope and current value stay visible; help opens on hover or click. No profile or process trigger is required. GPU preference alone selects an existing saved EXE. CPU affinity and priority remain in Overview. Existing schema-v11 profiles/controller/recovery supply hidden manual intents; previous profiles and associations are retained in Restore. Section selection does not apply a tweak or read PC diagnostics.
+
+Five game settings cover AC performance preference, Game Mode, background clips, compatible windowed-game optimization and main-screen nominal Hz. Two comfort settings cover accessibility activation popups and mouse acceleration. Hardware guidance lives in GPU / network; six cached read-only PC checks run only after the explicit Check PC action. Guidance is not an automatic BIOS/driver/network modification or a measured performance result.
 
 Saved intent, observed state, verified application, unsupported/denied settings, external changes, failure and restoration are separate. A requested value is not an observed result. Module operations and state saves run off the UI thread. Unknown configuration remains visible and read-only.
 
@@ -17,7 +23,7 @@ Saved intent, observed state, verified application, unsupported/denied settings,
 | Module | Initial behavior |
 | --- | --- |
 | `power_plan` | Select an existing Windows power scheme; restore the original GUID. |
-| `power_mode` | Save supported Windows AC/DC power preferences; the effective mode can differ. |
+| `power_mode` | Compact preset changes only AC performance preference, preserving battery preference; effective mode can differ. Legacy AC/DC configurations remain readable. |
 | `mouse_acceleration` | Own only acceleration fields, preserve pointer speed. |
 | `accessibility_hotkeys` | Manage activation shortcuts while preserving active accessibility functions and unrelated fields. |
 | `process_qos` | Manage the documented execution-speed policy for an exact process instance. |
@@ -30,12 +36,13 @@ Saved intent, observed state, verified application, unsupported/denied settings,
 | `audio_diagnostics` | Observe endpoints and real audio session clients, with mapping limitations explicit. |
 | `irq_diagnostics` | Observe present devices, processor groups and stored interrupt preferences. |
 | `usb_topology` | Show actual parent/controller relationships and shared controller scope. |
-| `game_mode` | Native Windows Settings card; no undocumented registry writer. |
-| `background_capture` | Native Windows Settings card. |
-| `windowed_optimizations` | Native Windows graphics Settings card and supported-app guidance. |
-| `gpu_preference` | Native per-app graphics Settings card. |
+| `game_mode` | Conditional stored user preference write, exact absence/baseline undo; restart game. |
+| `background_capture` | Only the stored Record what happened preference, preserving other recording controls. |
+| `windowed_optimizations` | Own only the stored windowed-optimization field; preserve other graphics fields and Auto HDR dependency. |
+| `gpu_preference` | Own only GPU preference for one existing saved EXE; preference is not proof of renderer selection. |
+| `display_refresh` | Tested compatible temporary main-screen Hz, 15-second keep/undo and exact recovery; geometry/scan/color fields retained. |
 
-Core parking, HAGS, IRQ/MSI mutation, GPU vendor writers, display-mode changes and audio-engine pinning remain conditional/advanced research. HPET/BCD changes, global timer hacks and stripping security/services/updates are excluded. Read-only diagnostics do not establish effective ISR/DPC placement or click-to-photon latency. See [the research and disposition table](windows11-gaming-module-research.md) for evidence and scope.
+Core parking, HAGS, IRQ/MSI mutation, GPU vendor writers and audio-engine pinning remain conditional/advanced research. HPET/BCD changes, global timer hacks and stripping security/services/updates are excluded. Read-only diagnostics do not establish effective ISR/DPC placement or click-to-photon latency. See [the research and disposition table](windows11-gaming-module-research.md) for evidence and scope.
 
 The power-mode adapter uses the documented Windows 11 user-configured AC/DC APIs. Other system signals can override the effective mode. [Microsoft API contract](https://learn.microsoft.com/en-us/windows/win32/api/powrprof/nf-powrprof-powersetuserconfiguredacpowermode).
 

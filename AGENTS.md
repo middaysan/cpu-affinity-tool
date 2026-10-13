@@ -61,20 +61,21 @@ Current platform reality:
 - Windows is the primary released and explicitly supported platform
 - Linux code exists as a CI build/test/clippy validated desktop beta path from source for `x86_64` `glibc`; desktop sessions on `X11` or `Wayland` are covered by manual beta smoke validation
 - Linux also has a separate beta prerelease artifact contract under `linux-beta-v*` tags, but it is not part of the stable release contract
-- Modules are Windows-only. Linux has no Modules route or rule-profile controls, no registered modules, recovery lease, native module actions or execution/foreground observations. The existing background queue remains only for ordinary state/rule saves; persisted tuning data is retained without interpretation or association edits.
+- System Tweaks is Windows-only. Linux has no tuning route or rule-profile controls, no registered modules, recovery lease, native module actions or execution/foreground observations. The existing background queue remains only for ordinary state/rule saves; persisted tuning data is retained without interpretation or association edits.
 - the project must not be described as a fully cross-platform desktop app
 
 ## Repository map
 Key directories:
 - `src/` - application runtime code and entrypoints
 - `src/app/shell/` - the top-level `eframe::App` shell, route enums, transient UI sessions, typed shell events, and presenter module ownership
-- `src/app/features/` - bounded feature modules for `rules`, `execution`, `preferences`, `shortcut`, `topology`, `diagnostics`, and `tuning`
-- `src/app/features/tuning/platform/` - small typed contracts/codecs, the module registry and owned-field controller
-- `src/app/features/tuning/config.rs` - bounded profile/configuration persistence shapes and exact forward-data retention; parsing supplies no module execution or native source authority
-- `src/app/features/tuning/service.rs` - candidate-state saves with logical identities and manual module requests
-- `src/app/features/tuning/execution_bridge.rs` - bounded execution/foreground observations with copy/inspect/recheck publication, scheduled refresh and coalesced refresh requests
-- `src/app/features/tuning/session_reducer.rs` - one bounded application worker, existing execution observations and immutable profile/card/shutdown snapshots
-- `src/app/features/tuning/presentation.rs` - pure card decisions, transient profile/association drafts and typed module-owned editor registration; `src/app/views/tuning.rs` is the catalog-driven Modules presenter
+- `src/app/features/` - bounded feature modules for `rules`, `execution`, `preferences`, `shortcut`, `topology`, `diagnostics`, and `system_tweaks`
+- `src/app/features/system_tweaks/platform/` - small typed contracts/codecs, the module registry and owned-field controller
+- `src/app/features/system_tweaks/config.rs` - bounded profile/configuration persistence shapes and exact forward-data retention; parsing supplies no module execution or native source authority
+- `src/app/features/system_tweaks/service.rs` - candidate-state saves with logical identities and manual module requests
+- `src/app/features/system_tweaks/execution_bridge.rs` - bounded execution/foreground observations with copy/inspect/recheck publication, scheduled refresh and coalesced refresh requests
+- `src/app/features/system_tweaks/session_reducer.rs` - one bounded application worker, existing execution observations and immutable profile/card/shutdown snapshots
+- `src/app/features/system_tweaks/presentation.rs` - typed module validation/tweak metadata and transient help/undo sessions; `src/app/features/system_tweaks/view.rs` is the compact System Tweaks presenter
+- `src/app/features/system_tweaks/pc_checks.rs` - pure summaries, hardware guidance and explicit read-only PC checks; bounded native reads live in `libs/os_api/src/windows/pc_checks.rs`
 - `src/app/adapters/` - seams for persisted state loading, OS helpers, and installed-app discovery
 - `src/app/runtime/` - thin composition-root state facade kept around `AppState`
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
@@ -121,7 +122,7 @@ Layers:
   - `preferences` owns theme and monitoring toggles
   - `topology` owns CPU model/thread detection helpers
   - `diagnostics` owns startup logging, typed diagnostic event shape, bounded local crash-report formatting/capture, safe report discovery/retention, report-list state, and the Windows-only read-only Event Log lookup
-  - `tuning` owns schema-v11 profiles/associations, one module registry, an owned-field controller, compact disk recovery, one application worker and Modules UI. Concrete managed settings and read-only cards live in `tuning/modules/`. Native admission requires verified saved configuration, the recovery lease and resolved recovery evidence.
+  - `system_tweaks` owns schema-v11 profiles/associations, one module registry, an owned-field controller, compact disk recovery, one application worker and System Tweaks UI. Concrete managed settings and read-only cards live in `system_tweaks/tweaks/`. Native admission requires verified saved configuration, the recovery lease and resolved recovery evidence.
 - `adapters` isolate storage loading, OS helper calls, and installed-app discovery
 - `models` hold persisted schema plus domain and runtime-adjacent value types
 - `runtime` is now a thin composition-root facade around `AppState`
@@ -153,7 +154,7 @@ Current runtime split:
   - crash-report delete confirmations and the last report action message
   - Windows Event Log preference action error state
   - application Settings menu startup action error state
-  - Modules profile selection, exact expected/candidate module drafts, qualified manual-target selection and logical rule/profile association drafts
+  - System Tweaks section selection, help/undo confirmation and qualified saved-EXE target selection; existing saved profiles/associations remain compatible restoration data
 - `features::rules::RulesContext` owns logical `GroupId` / `RuleId` allocation, index projection, and persisted `rule_identities`
 - `features::execution::RuntimeRegistry` owns runtime process tracking:
   - `running_apps`
@@ -192,20 +193,28 @@ Windows runtime flow:
 Linux entrypoint now reaches the shared `shell::App` shell, startup logging, autorun, and monitor wiring, but it still must not be described as having tray, taskbar, or focus parity with Windows runtime behavior.
 
 Tuning status:
-- concrete registration supplies eight managed adapters (including the optional process timer-policy experiment) and ten read-only cards without native work during construction
+- Interactive user admission accepts the exact caller/Explorer identity or the caller's OS-queried UAC-linked token with the same SID/session and exact Explorer logon. User targets retain the desktop logon across elevation; other accounts/sessions and impersonation remain unavailable. Process token/lifetime identities retain their exact original contract.
+- concrete registration supplies thirteen managed adapters (including five compact Windows preference/display adapters and the retained optional process timer-policy experiment) and ten read-only adapters without native work during construction
 - registry registration supplies each module editor; the UI/controller do not match feature IDs or decode arbitrary native payloads
-- the controller owns exact target/field first baselines, confirmed/attempted values and owners; it shares equal requests, rejects conflicts before writes and restores only owned fields at matching app-written state
-- the single application worker saves state candidates off UI, reconciles existing bounded execution/foreground observations and publishes immutable snapshots; saved state/logical IDs adopt together only after successful persistence
+- the controller owns exact target/field first baselines, confirmed/attempted values and owners; it shares equal requests, rejects conflicts before writes and restores only owned fields at matching app-written state. Restore handles fields independently so drift or Unknown in one field retains its evidence without blocking safe siblings; a recovery publication fault stops subsequent writes.
+- the single application worker saves state candidates off UI, reconciles existing bounded execution/foreground observations and publishes immutable snapshots; saved state/logical IDs adopt together only after successful persistence. Classic imports log success only after adoption, retain rejected input and carry accepted file input into completion for restoration or explicit failure reporting without overwriting newer input. Already accepted classic saves finish before shutdown restoration; autonomous display expiry reserves the existing admission latch and publishes its updated revision before reopening admission.
 - compact recovery publishes original/current/desired/attempted field tokens and deduplicated owners before writes; one user-local writer lease, normalized selected-state source and exact saved activation facts control startup reconciliation. Invalid/ambiguous records or unavailable saved/native evidence remain blocked
 - all eight managed adapters passed actual Windows apply/read/disk-reload/disable/original verification on 2026-10-08. Native admission opens only after verified saved state and recovery initialization; in-memory fixtures do not prove native readiness
+- On 2026-10-10 all five new stored-preference/display adapters and the new AC-only power preset passed real Windows apply/read/disk-reload/disable/original verification. Display used 3840×2160, 32-bit color and 120↔144 nominal Hz, returning to the original144Hz; a bounded exact-mode settlement check handles delayed readback without accepting foreign modes. These results prove stored values and restoration, not game FPS, latency, HDR/VRR behavior or actual GPU renderer selection. Compact GUI validation was interrupted by the user's physical Escape; remaining live UI smoke is open.
+- Hidden legacy read-only audio/PnP/USB inventory adapters are retained for compatibility but are not polled by the compact catalog; PC checks run only on explicit request.
 - schema v11 retains optional bounded tuning configuration; the compact version3 envelope stores profiles, rule associations, saved manual targets and monotonic profile allocation. Absence is Off. Unknown extensions retain exact raw input read-only; malformed/oversized input and old nonempty activation/withdrawal/transition evidence remain blocked
 - process identity uses PID, creation token and image, with an actual retained native lifetime guard; only positive completion of the same instance retires its process owner, while observation errors remain Unknown
 - Manual owners retain their durable baseline/settings across application closure until disabled. Quit restores Session owners only with current native/legacy/saved-source admission; exact positively expired process fields retire without a dead-PID read/write. Shutdown uncertainty retains evidence and reports RecoveryRequired
 - CPU Sets/priority integration uses per-runtime field-selection handoff with existing launch/monitor writers; no second lifecycle monitor is added
-- Modules groups managed settings, Windows Settings actions and diagnostics by purpose; managed cards use one enable control and a typed editor, while technical observations start collapsed. Cards distinguish saved enablement, observed values, verified activity, restart requirements, external drift, failures and restoration. Read-only cards need no profile and expose bounded import/refresh or fixed native Settings actions
+- System Tweaks uses one permanently visible horizontal segmented switch: System, GPU / network, Check PC, and Restore. Full section descriptions are available on hover. System opens by default and contains five game settings and two comfort settings with direct Apply/Undo, visible scope/current value and explanations in help. Only the selected content scrolls; section selection is transient and starts no native operation. GPU preference targets one qualified saved EXE; hardware guides remain manual and Check PC requires an explicit read-only request. Global errors, Undo and display confirmation remain reachable across sections. There are no visible new profiles, triggers or duplicated process affinity/priority controls. Each manual tweak reuses one hidden existing-schema profile/target intent; old profiles and associations remain retained in the Previous settings restoration section. Already-suitable values create no owner or Undo baseline. Cards distinguish exact stored preferences from effective/game results, restart requirements, drift, failure and restoration.
+- Display refresh changes only a tested compatible nominal Hz at the current geometry/color/scan mode and requires its exact original mode to be in the tested inventory before acquisition. It is a temporary user-session change with a 15-second confirmation; pending intent is durably distinct, and expiry, closing or startup attempts exact restoration. Failed withdrawal retains evidence and reports recovery required. Confirmed settings are not written as persistent boot display modes. An unowned display card rediscovers the current primary screen; active or unresolved ownership retains its exact original target.
+- New GPU preference activation qualifies an existing saved EXE. Owned registry reads and conditional restoration retain the exact user/path even after EXE removal; UNC qualification preserves the network root. This does not bypass user/session or expected-value checks.
+- The Windows viewport has a fixed width of 400 logical pixels and permits vertical resizing from 600 to 1000; the tuning page is bounded to 400. Tweak rows reserve a fixed right action column; Undo replaces Apply in the same slot. The remaining application layout and classic saved-EXE workflow remain shared.
 - old canonical continuity/configuration-receipt/handle-transfer laboratory source was removed with recoverable local snapshots; existing ProgramData journal/staging/previous evidence is detected read-only and never discarded or overwritten
 - native handles, typed user/process reads and conditional writes, and read-only display/audio/PnP inventories live in `libs/os_api`; application code owns configuration and lifecycle
-- tests and contribution rules are in `src/app/features/tuning/README.md`; product scope is `docs/modular-gaming-features-plan.md`
+- tests and contribution rules are in `src/app/features/system_tweaks/README.md`; product scope is `docs/modular-gaming-features-plan.md`
+- System Tweaks lives entirely in `src/app/features/system_tweaks/`; each managed tweak owns a folder under `tweaks/<name>/mod.rs`. `platforms/windows.rs` composes the Windows catalog; `platforms/linux.rs` is an inactive extension point. Each adapter declares its Windows 10/11 minimum build. Cached read-only real Windows build detection gates observation and activation; unsupported cards remain grey with a reason. Recovery/Undo is retained independently of activation eligibility. Serialized `tuning` data, stable feature IDs and recovery targets remain compatible. Windows 10 compatibility is declarative and unit-tested; native round-trip evidence remains from Windows 11.
+
 ## Concurrency model
 - GUI runs on the main thread
 - background tasks use `tokio`

@@ -13,7 +13,7 @@ use crate::app::runtime::{AppState, RunRuleOutcome};
 #[cfg(all(target_os = "windows", feature = "windows"))]
 use crate::app::shell::presenters::crash_reports;
 use crate::app::shell::presenters::{
-    central, footer, group_editor, header, installed_app_picker, logs, run_settings, tuning,
+    central, footer, group_editor, header, installed_app_picker, logs, run_settings, system_tweaks,
 };
 #[cfg(all(target_os = "windows", feature = "windows"))]
 use crate::app::shell::sessions::ShortcutCreationRole;
@@ -1369,7 +1369,7 @@ impl App {
                 GroupRoute::Edit => group_editor::edit_group_window(app_state, ui),
             },
             WindowRoute::Logs => logs::draw_logs_window(app_state, ui),
-            WindowRoute::Tuning => tuning::draw_tuning(app_state, ui),
+            WindowRoute::Tuning => system_tweaks::draw_system_tweaks(app_state, ui),
             #[cfg(all(target_os = "windows", feature = "windows"))]
             WindowRoute::CrashReports => crash_reports::draw_crash_reports_window(app_state, ui),
             WindowRoute::AppRunSettings => run_settings::draw_app_run_settings(app_state, ui),

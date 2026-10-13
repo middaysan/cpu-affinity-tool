@@ -39,9 +39,8 @@ pub struct RunningApps {
     /// Map of application keys to RunningApp instances
     pub apps: HashMap<AppRuntimeKey, RunningApp>,
     /// Runtime-only two-field handoff shared with the registered scheduling modules.
-    pub(crate) scheduling: std::sync::Arc<
-        crate::app::features::tuning::modules::managed::scheduling::SchedulingHandoff,
-    >,
+    pub(crate) scheduling:
+        std::sync::Arc<crate::app::features::system_tweaks::tweaks::scheduling::SchedulingHandoff>,
     membership_generation: Option<u64>,
     editing_membership: bool,
 }

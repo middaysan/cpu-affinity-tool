@@ -13,7 +13,7 @@ pub struct ExecutionStore {
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     running_apps_statuses: RunningAppStatusCache,
     status_read_pending: bool,
-    scheduling: Arc<crate::app::features::tuning::modules::managed::scheduling::SchedulingHandoff>,
+    scheduling: Arc<crate::app::features::system_tweaks::tweaks::scheduling::SchedulingHandoff>,
 }
 impl Default for ExecutionStore {
     fn default() -> Self {
@@ -322,7 +322,7 @@ impl RuntimeRegistry {
     }
     pub(crate) fn scheduling_handle(
         &self,
-    ) -> Arc<crate::app::features::tuning::modules::managed::scheduling::SchedulingHandoff> {
+    ) -> Arc<crate::app::features::system_tweaks::tweaks::scheduling::SchedulingHandoff> {
         self.store.scheduling.clone()
     }
 

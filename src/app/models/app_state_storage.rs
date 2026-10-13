@@ -57,7 +57,7 @@ pub struct AppStateStorage {
     pub windows_event_log_diagnostics_enabled: bool,
     /// Persisted logical identities for groups and rules in schema v6.
     pub rule_identities: Option<PersistedRuleIdentities>,
-    pub(crate) tuning: crate::app::features::tuning::config::TuningEnvelope,
+    pub(crate) tuning: crate::app::features::system_tweaks::config::TuningEnvelope,
     pub(crate) loaded_version: u32,
     pub(crate) pending_pre_v6_backup: bool,
     extensions: BTreeMap<String, Arc<RawValue>>,
@@ -89,7 +89,7 @@ struct StateFields {
     #[serde(default)]
     rule_identities: Option<PersistedRuleIdentities>,
     #[serde(default)]
-    tuning: crate::app::features::tuning::config::TuningEnvelope,
+    tuning: crate::app::features::system_tweaks::config::TuningEnvelope,
 }
 const STATE_FIELDS: &[&str] = &[
     "version",
@@ -196,7 +196,7 @@ impl AppStateStorage {
             || self.version > CURRENT_APP_STATE_VERSION
             || matches!(
                 self.tuning.decode(),
-                crate::app::features::tuning::config::TuningLoad::Blocked
+                crate::app::features::system_tweaks::config::TuningLoad::Blocked
             )
     }
     #[cfg(test)]
@@ -264,7 +264,7 @@ impl AppStateStorage {
                         if old_tuning
                             || matches!(
                                 state.tuning.decode(),
-                                crate::app::features::tuning::config::TuningLoad::Blocked
+                                crate::app::features::system_tweaks::config::TuningLoad::Blocked
                             )
                         {
                             state.block_save(Some(Arc::from(data.as_str())), data.len());

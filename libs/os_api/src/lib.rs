@@ -1,9 +1,12 @@
 mod catalog;
 pub mod gaming;
 pub mod gaming_diagnostics;
+pub mod pc_checks;
+pub mod platform;
 mod process;
 mod shortcut;
 pub mod tuning;
+pub mod windows_tweaks;
 pub use catalog::{
     InstalledAppCatalogEntry, InstalledAppCatalogSource, InstalledAppCatalogTarget,
     InstalledPackageRuntimeInfo,
