@@ -77,7 +77,7 @@ impl ModuleEditor for PowerMode {
         ))
     }
     fn tweak_ready(&self, target: &TargetIdentity) -> Result<bool, ModuleError> {
-        gaming::read_power_mode(&user(target)?, PowerSource::Ac)
+        gaming::read_power_mode(&account_user(target)?, PowerSource::Ac)
             .map(|v| v == gaming::POWER_MODE_PERFORMANCE)
             .map_err(|e| native("read", e))
     }
@@ -140,11 +140,14 @@ impl Module for PowerMode {
         self
     }
     fn targets(&self) -> Vec<TargetIdentity> {
-        user_targets()
+        account_targets()
+    }
+    fn canonical_target(&self, target: &TargetIdentity) -> Result<TargetIdentity, ModuleError> {
+        canonical_account_target(target)
     }
     fn observe(&self, target: &TargetIdentity) -> ModuleObservation {
         observation((|| {
-            let user = observed_user(target)?;
+            let user = observed_account_user(target)?;
             let ac =
                 gaming::read_power_mode(&user, PowerSource::Ac).map_err(|e| native("read", e))?;
             let dc =
@@ -161,7 +164,7 @@ impl Module for PowerMode {
         target: &TargetIdentity,
         config: &ModuleEnvelope,
     ) -> Result<Vec<FieldChange>, ModuleError> {
-        user(target)?;
+        account_user(target)?;
         let config: Config = decode(ID, config)?;
         let mut fields = vec![field(
             target,
@@ -178,13 +181,13 @@ impl Module for PowerMode {
         Ok(fields)
     }
     fn read(&self, key: &ResourceKey) -> Result<Vec<u8>, ModuleError> {
-        gaming::read_power_mode(&user(&key.target)?, source(key)?)
+        gaming::read_power_mode(&account_user(&key.target)?, source(key)?)
             .map(|v| v.0.to_vec())
             .map_err(|e| native("read", e))
     }
     fn write(&self, key: &ResourceKey, expected: &[u8], desired: &[u8]) -> Result<(), ModuleError> {
         gaming::write_power_mode(
-            &user(&key.target)?,
+            &account_user(&key.target)?,
             source(key)?,
             guid(expected)?,
             guid(desired)?,

@@ -21,6 +21,59 @@ pub struct UserIdentity {
     pub sid: String,
     pub logon: u64,
 }
+/// Bounded canonical decimal SID syntax. This supplies no native account authority.
+pub fn valid_account_sid(sid: &str) -> bool {
+    fn component(value: &str, maximum: u64) -> bool {
+        !value.is_empty()
+            && (value == "0" || !value.starts_with('0'))
+            && value.bytes().all(|b| b.is_ascii_digit())
+            && value.parse::<u64>().is_ok_and(|value| value <= maximum)
+    }
+    if sid.len() > 184 {
+        return false;
+    }
+    let mut parts = sid.split('-');
+    if parts.next() != Some("S")
+        || parts.next() != Some("1")
+        || !parts
+            .next()
+            .is_some_and(|value| component(value, (1 << 48) - 1))
+    {
+        return false;
+    }
+    let mut count = 0;
+    for value in parts {
+        count += 1;
+        if count > 15 || !component(value, u32::MAX as u64) {
+            return false;
+        }
+    }
+    count != 0
+}
+#[cfg(any(windows, test))]
+pub(crate) fn verified_session_user(
+    expected: &UserIdentity,
+    actual: Result<UserIdentity, GamingError>,
+) -> Result<UserIdentity, GamingError> {
+    let actual = actual?;
+    if expected == &actual {
+        Ok(actual)
+    } else {
+        Err(GamingError::Changed)
+    }
+}
+#[cfg(any(windows, test))]
+pub(crate) fn admitted_account_user(
+    expected: &UserIdentity,
+    actual: Result<UserIdentity, GamingError>,
+) -> Result<UserIdentity, GamingError> {
+    let actual = actual?;
+    if expected.sid == actual.sid && actual.logon != 0 && valid_account_sid(&actual.sid) {
+        Ok(actual)
+    } else {
+        Err(GamingError::Changed)
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessIdentity {
     pub pid: u32,
@@ -225,6 +278,83 @@ pub use unavailable::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn durable_account_admission_rebinds_only_the_same_live_account() {
+        let old = UserIdentity {
+            sid: "S-1-5-21-1".into(),
+            logon: 77,
+        };
+        let current = UserIdentity {
+            logon: 78,
+            ..old.clone()
+        };
+        assert_eq!(
+            admitted_account_user(&old, Ok(current.clone())),
+            Ok(current.clone())
+        );
+        let canonical = UserIdentity {
+            logon: 0,
+            ..old.clone()
+        };
+        assert_eq!(
+            admitted_account_user(&canonical, Ok(current.clone())),
+            Ok(current.clone())
+        );
+        let different = UserIdentity {
+            sid: "S-1-5-21-2".into(),
+            logon: 78,
+        };
+        assert_eq!(
+            admitted_account_user(&old, Ok(different)),
+            Err(GamingError::Changed)
+        );
+        assert_eq!(
+            admitted_account_user(&old, Ok(canonical)),
+            Err(GamingError::Changed)
+        );
+    }
+
+    #[test]
+    fn durable_account_admission_preserves_native_denial_and_exact_session_checks() {
+        let old = UserIdentity {
+            sid: "S-1-5-21-1".into(),
+            logon: 77,
+        };
+        let current = UserIdentity {
+            logon: 78,
+            ..old.clone()
+        };
+        assert_eq!(
+            verified_session_user(&old, Ok(current)),
+            Err(GamingError::Changed)
+        );
+        assert_eq!(
+            verified_session_user(&old, Ok(old.clone())),
+            Ok(old.clone())
+        );
+        for failure in [
+            GamingError::Unsupported("Per-user settings are unavailable while impersonating"),
+            GamingError::Denied {
+                operation: "App and Explorer Windows accounts differ",
+                code: 5,
+            },
+            GamingError::Denied {
+                operation: "App and its UAC-linked token do not match the Explorer sign-in",
+                code: 5,
+            },
+            GamingError::Changed,
+        ] {
+            assert_eq!(
+                admitted_account_user(&old, Err(failure.clone())),
+                Err(failure.clone())
+            );
+            assert_eq!(
+                verified_session_user(&old, Err(failure.clone())),
+                Err(failure)
+            );
+        }
+    }
+
     #[test]
     fn gaming_qos_merge_preserves_timer_policy_and_unknown_bits() {
         let current = PowerThrottling {

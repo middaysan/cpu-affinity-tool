@@ -21,8 +21,13 @@ impl StoredDword {
 #[serde(deny_unknown_fields)]
 pub struct GpuTarget {
     pub user_sid: String,
+    // A nonzero value is legacy session evidence; new account targets omit it.
+    #[serde(default, skip_serializing_if = "is_zero_logon")]
     pub user_logon: u64,
     pub executable: String,
+}
+fn is_zero_logon(logon: &u64) -> bool {
+    *logon == 0
 }
 impl GpuTarget {
     pub fn user(&self) -> UserIdentity {
@@ -267,6 +272,24 @@ pub use unavailable::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn durable_account_gpu_codec_accepts_legacy_and_stable_account_targets() {
+        let legacy = r#"{"user_sid":"S-1-5-21-1","user_logon":77,"executable":"C:\\game.exe"}"#;
+        let stable = r#"{"user_sid":"S-1-5-21-1","executable":"C:\\game.exe"}"#;
+        let old: GpuTarget = serde_json::from_str(legacy).unwrap();
+        let current: GpuTarget = serde_json::from_str(stable).unwrap();
+        assert_eq!(old.user_logon, 77);
+        assert_eq!(current.user_logon, 0);
+        assert_eq!(old.user_sid, current.user_sid);
+        assert_eq!(old.executable, current.executable);
+        assert_eq!(serde_json::to_string(&current).unwrap(), stable);
+        assert!(
+            serde_json::from_str::<DisplayTarget>(
+                r#"{"user_sid":"S-1-5-21-1","device_name":"d","adapter_id":"a","monitor_id":"m"}"#
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn tweak_dword_absence_is_distinct_from_explicit_off() {

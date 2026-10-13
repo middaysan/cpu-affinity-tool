@@ -39,7 +39,7 @@ impl ModuleEditor for WindowedOptimizations {
         Ok(false)
     }
     fn tweak_ready(&self, target: &TargetIdentity) -> Result<bool, ModuleError> {
-        native_api::read_windowed_optimizations(&user(target)?)
+        native_api::read_windowed_optimizations(&account_user(target)?)
             .map(|stored| stored.as_deref() == Some("1"))
             .map_err(|e| native("read", e))
     }
@@ -65,11 +65,14 @@ impl Module for WindowedOptimizations {
         self
     }
     fn targets(&self) -> Vec<TargetIdentity> {
-        user_targets()
+        account_targets()
+    }
+    fn canonical_target(&self, target: &TargetIdentity) -> Result<TargetIdentity, ModuleError> {
+        canonical_account_target(target)
     }
     fn observe(&self, target: &TargetIdentity) -> ModuleObservation {
         let result = (|| {
-            let stored = native_api::read_windowed_optimizations(&observed_user(target)?)
+            let stored = native_api::read_windowed_optimizations(&observed_account_user(target)?)
                 .map_err(|e| native("read", e))?;
             Ok(format!(
                 "{} · stored preference",
@@ -87,19 +90,19 @@ impl Module for WindowedOptimizations {
         envelope: &ModuleEnvelope,
     ) -> Result<Vec<FieldChange>, ModuleError> {
         config(ID, envelope, false)?;
-        user(target)?;
+        account_user(target)?;
         Ok(vec![field(target, FIELD, token(&Some("1".to_owned())))])
     }
     fn read(&self, key: &ResourceKey) -> Result<Vec<u8>, ModuleError> {
         check_field(key, FIELD)?;
-        native_api::read_windowed_optimizations(&user(&key.target)?)
+        native_api::read_windowed_optimizations(&account_user(&key.target)?)
             .map(|stored| token(&stored))
             .map_err(|e| native("read", e))
     }
     fn write(&self, key: &ResourceKey, expected: &[u8], desired: &[u8]) -> Result<(), ModuleError> {
         check_field(key, FIELD)?;
         native_api::write_windowed_optimizations(
-            &user(&key.target)?,
+            &account_user(&key.target)?,
             value::<Option<String>>(expected)?.as_deref(),
             value::<Option<String>>(desired)?.as_deref(),
         )

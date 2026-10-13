@@ -42,7 +42,7 @@ impl ModuleEditor for BackgroundCapture {
         Ok(false)
     }
     fn tweak_ready(&self, target: &TargetIdentity) -> Result<bool, ModuleError> {
-        native_api::read_background_capture(&user(target)?)
+        native_api::read_background_capture(&account_user(target)?)
             .map(|stored| stored == StoredDword::Value(0))
             .map_err(|e| native("read", e))
     }
@@ -68,11 +68,14 @@ impl Module for BackgroundCapture {
         self
     }
     fn targets(&self) -> Vec<TargetIdentity> {
-        user_targets()
+        account_targets()
+    }
+    fn canonical_target(&self, target: &TargetIdentity) -> Result<TargetIdentity, ModuleError> {
+        canonical_account_target(target)
     }
     fn observe(&self, target: &TargetIdentity) -> ModuleObservation {
         let result = (|| {
-            let stored = native_api::read_background_capture(&observed_user(target)?)
+            let stored = native_api::read_background_capture(&observed_account_user(target)?)
                 .map_err(|e| native("read", e))?;
             Ok(format!(
                 "{} · background buffer preference",
@@ -90,19 +93,23 @@ impl Module for BackgroundCapture {
         envelope: &ModuleEnvelope,
     ) -> Result<Vec<FieldChange>, ModuleError> {
         config(ID, envelope, false)?;
-        user(target)?;
+        account_user(target)?;
         Ok(vec![field(target, FIELD, token(&StoredDword::Value(0)))])
     }
     fn read(&self, key: &ResourceKey) -> Result<Vec<u8>, ModuleError> {
         check_field(key, FIELD)?;
-        native_api::read_background_capture(&user(&key.target)?)
+        native_api::read_background_capture(&account_user(&key.target)?)
             .map(|stored| token(&stored))
             .map_err(|e| native("read", e))
     }
     fn write(&self, key: &ResourceKey, expected: &[u8], desired: &[u8]) -> Result<(), ModuleError> {
         check_field(key, FIELD)?;
-        native_api::write_background_capture(&user(&key.target)?, value(expected)?, value(desired)?)
-            .map_err(|e| native("write", e))
+        native_api::write_background_capture(
+            &account_user(&key.target)?,
+            value(expected)?,
+            value(desired)?,
+        )
+        .map_err(|e| native("write", e))
     }
     fn action(&self, action: ModuleAction) -> Result<(), ModuleError> {
         settings_action(action, SettingsPage::BackgroundCapture)

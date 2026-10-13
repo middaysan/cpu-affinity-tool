@@ -306,6 +306,7 @@ impl TuningRuntime {
                             }
                         };
                         if expire_display {
+                            operation = TuningOperationState::Idle;
                             service.expire_display_tweak(false);
                             next_cards = Instant::now();
                             let completed = Arc::new(snapshot(
@@ -322,6 +323,7 @@ impl TuningRuntime {
                         }
                         if owned.admission.lock().unwrap().closing.is_some() {
                             while let Ok(queued) = receiver.try_recv() {
+                                service.begin_operation();
                                 // Closing finishes already accepted classic saves, but never
                                 // starts queued native actions or new session reconciliation.
                                 let result = if !queued.request.is_base_change() {
@@ -404,6 +406,7 @@ impl TuningRuntime {
                             250
                         })) {
                             Ok(queued) => {
+                                service.begin_operation();
                                 let result = if queued.revision != service.saved_revision() {
                                     Err(SaveError::Invalid)
                                 } else {
@@ -525,6 +528,7 @@ impl TuningRuntime {
         admission.pending = true;
         let mut latest = (**self.shared.latest.lock().unwrap()).clone();
         latest.operation = TuningOperationState::Pending { id };
+        latest.restoration_effect = None;
         *self.shared.latest.lock().unwrap() = Arc::new(latest);
         Ok(id)
     }
@@ -900,9 +904,7 @@ fn reconcile_sessions(
                 } else {
                     RecoveryIntent::Unknown
                 };
-                if let Err(error) = service.controller.recover_owner(&owner, intent) {
-                    service.native_failure(error);
-                }
+                let _ = service.controller.recover_owner(&owner, intent);
                 if intent == RecoveryIntent::Restore
                     && !service.controller.owners().contains(&owner)
                 {
@@ -963,9 +965,6 @@ fn reconcile_sessions(
             activation,
         );
         let acquired = result.is_ok();
-        if let Err(error) = result {
-            service.native_failure(error);
-        }
         if acquired || service.controller.owners().contains(&owner) {
             if let Some(actor) = actors.get_mut(&owner) {
                 actor.target = target;
@@ -1048,6 +1047,9 @@ fn tweak_cards(
                         .and_then(|c| c.targets.first().cloned())
                 }
             });
+        // Keep retained legacy intents and the controller's stable account key
+        // referring to one card, without a new baseline or native work here.
+        let target = target.and_then(|target| module.canonical_target(&target).ok());
         let observed = if observe && availability.is_available() {
             target.as_ref().map(|target| module.observe(target))
         } else {
@@ -1355,9 +1357,9 @@ fn snapshot(
         readonly_cards,
         restoration_effect: service.controller.restoration_effect,
         operation_error: service
-            .operation_error
-            .clone()
-            .or_else(|| service.controller.error()),
+            .controller
+            .error()
+            .or_else(|| service.operation_error.clone()),
         shutdown_complete,
         shutdown_outcome,
         state: Arc::new(service.state().clone()),
@@ -1538,6 +1540,201 @@ mod card_tests {
         ) -> Result<super::super::service::SavedState, SaveError> {
             Ok(super::super::service::SavedState::Unavailable)
         }
+    }
+
+    #[test]
+    fn operation_feedback_autonomous_session_retry_clears_the_previous_error() {
+        use crate::app::models::CoreGroup;
+
+        for fail_acquire in [true, false] {
+            let setting = Setting::new("scalar", false);
+            let mut registry = Registry::default();
+            registry.register(setting.clone()).unwrap();
+            let app = AppToRun::new_installed(
+                "fixture".into(),
+                "fixture".into(),
+                os_api::PriorityClass::Normal,
+                false,
+            );
+            let state = AppStateStorage::test_fixture(|state| {
+                state.groups = vec![CoreGroup {
+                    name: "Games".into(),
+                    cores: vec![],
+                    programs: vec![app.clone()],
+                    is_hidden: false,
+                    run_all_button: false,
+                }];
+                state.rule_identities = None;
+            });
+            let mut service =
+                super::super::Tuning::from_registry(registry).headless(state, Box::new(NoSave));
+            service.admit_test_modules();
+            let group = service.rules().group_id_for_index(0).unwrap();
+            let rule = service.rules().rule_id_for_index(0, 0).unwrap();
+            let profile = service
+                .create_profile(
+                    "Session".into(),
+                    vec![ModulePreference {
+                        feature: setting.descriptor().id,
+                        enabled: true,
+                        mode: ActivationMode::Session,
+                        config: setting.config(12),
+                    }],
+                )
+                .unwrap();
+            service
+                .bind_rule(
+                    group.clone(),
+                    rule.clone(),
+                    profile,
+                    ActivationEligibility::Running,
+                )
+                .unwrap();
+            let facts = ProcessFacts {
+                pid: 42,
+                token: 142,
+                image: Arc::from("fixture.exe"),
+                #[cfg(windows)]
+                native: None,
+            };
+            let observation = Arc::new(ExecutionObservation::fixture(
+                service.state(),
+                1,
+                vec![Member {
+                    key: app.get_key(),
+                    group,
+                    rule,
+                    instances: vec![facts.clone()],
+                }],
+                facts,
+            ));
+            let value = ResourceId::new("value").unwrap();
+            if fail_acquire {
+                *setting.fail_at.lock().unwrap() = Some(value.clone());
+            }
+            let mut actors = BTreeMap::new();
+            reconcile_sessions(&mut service, &observation, &mut actors);
+            assert_eq!(actors.len(), 1);
+            let owner = actors.keys().next().unwrap().clone();
+            // Seed the pending owner that durable reload or an uncertain tick retains.
+            service
+                .controller
+                .recover_owner(&owner, RecoveryIntent::Unknown)
+                .unwrap();
+            if !fail_acquire {
+                setting
+                    .fields
+                    .lock()
+                    .unwrap()
+                    .insert(value.clone(), vec![21]);
+                reconcile_sessions(&mut service, &observation, &mut actors);
+            }
+            let failed = snapshot(
+                &service,
+                TuningOperationState::Idle,
+                observation.clone(),
+                false,
+                None,
+                false,
+            );
+            assert_eq!(
+                failed.operation_error.unwrap().kind,
+                if fail_acquire {
+                    ErrorKind::Write
+                } else {
+                    ErrorKind::ExternalChange
+                },
+            );
+
+            *setting.fail_at.lock().unwrap() = None;
+            if !fail_acquire {
+                setting.fields.lock().unwrap().insert(value, vec![12]);
+            }
+            // Retry is autonomous: no request or begin_operation clears its feedback.
+            reconcile_sessions(&mut service, &observation, &mut actors);
+            assert_eq!(setting.value(), vec![12]);
+            assert!(service.controller.can_admit());
+            assert!(service.controller.error().is_none());
+            let retried = snapshot(
+                &service,
+                TuningOperationState::Idle,
+                observation,
+                false,
+                None,
+                false,
+            );
+            assert!(
+                retried.operation_error.is_none(),
+                "successful autonomous retry must clear its previous error (fail_acquire={fail_acquire}): {:?}",
+                retried.operation_error,
+            );
+        }
+    }
+
+    #[test]
+    fn operation_feedback_automatic_display_retry_replaces_an_old_save_failure() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct SwitchSave(Arc<AtomicBool>);
+        impl super::super::StatePersistence for SwitchSave {
+            fn save(
+                &mut self,
+                _: &mut AppStateStorage,
+            ) -> Result<super::super::service::SavedState, SaveError> {
+                if self.0.load(Ordering::SeqCst) {
+                    Err(SaveError::Storage)
+                } else {
+                    Ok(super::super::service::SavedState::Unavailable)
+                }
+            }
+        }
+        let fail = Arc::new(AtomicBool::new(false));
+        let setting = Setting::new("display_refresh", false);
+        let mut registry = Registry::default();
+        registry.register(setting.clone()).unwrap();
+        let feature = setting.descriptor().id;
+        let mut service = super::super::Tuning::from_registry(registry).headless(
+            AppStateStorage::test_fixture(|_| {}),
+            Box::new(SwitchSave(fail.clone())),
+        );
+        service.admit_test_modules();
+        service
+            .apply_tweak(feature.clone(), TargetIdentity::Machine)
+            .unwrap();
+        service.display_confirmation = Some(Instant::now() + Duration::from_millis(300));
+        fail.store(true, Ordering::SeqCst);
+        let runtime = TuningRuntime::start(
+            service,
+            Arc::new(tokio::sync::RwLock::new(Default::default())),
+        );
+        runtime
+            .request(TuningRequest::UndoTweak { feature })
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        while matches!(
+            runtime.snapshot().operation,
+            TuningOperationState::Pending { .. }
+        ) {
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(matches!(
+            runtime.snapshot().operation,
+            TuningOperationState::Refused {
+                error: SaveError::Storage,
+                ..
+            }
+        ));
+        fail.store(false, Ordering::SeqCst);
+        while runtime.snapshot().display_confirmation.is_some() {
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(5));
+        }
+        let snapshot = runtime.snapshot();
+        runtime.begin_shutdown();
+        assert_eq!(setting.value(), vec![7]);
+        assert_eq!(snapshot.operation, TuningOperationState::Idle);
+        assert!(snapshot.operation_error.is_none());
+        assert_eq!(snapshot.restoration_effect, Some(Effect::Immediate));
     }
 
     struct MovingDisplay(Arc<Setting>, Arc<Mutex<TargetIdentity>>);

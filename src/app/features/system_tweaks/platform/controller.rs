@@ -109,7 +109,7 @@ impl Controller {
                 controller.pending.insert(record.owner.clone());
                 controller.records.insert(record.owner.clone(), record);
             }
-            for field in document.fields {
+            for mut field in document.fields {
                 let module = registry
                     .get(&field.module)
                     .ok_or_else(|| {
@@ -126,6 +126,15 @@ impl Controller {
                     return Err(persistence::failure(
                         "recovery module",
                         "Recorded module version or target unavailable",
+                    ));
+                }
+                // Legacy account resources carried a logon ID. Normalize only the
+                // module's resource identity, retaining every original value and owner.
+                field.key.target = module.canonical_target(&field.key.target)?;
+                if !field.key.target.valid() || controller.fields.contains_key(&field.key) {
+                    return Err(persistence::failure(
+                        "recovery target",
+                        "Invalid or ambiguous account recovery identity; original evidence retained",
                     ));
                 }
                 controller.fields.insert(
@@ -381,6 +390,7 @@ impl Controller {
             }
         }
         let descriptor = module.descriptor();
+        let target = module.canonical_target(&target)?;
         if !target.valid()
             || descriptor.access != ModuleAccess::Managed
             || config.feature != descriptor.id
@@ -690,7 +700,17 @@ impl Controller {
             }
             return Err(error);
         }
-        self.restoration_effect = Some(field.module.descriptor().effect);
+        self.restoration_effect = Some(
+            match (self.restoration_effect, field.module.descriptor().effect) {
+                (Some(Effect::RestartRequired), _) | (_, Effect::RestartRequired) => {
+                    Effect::RestartRequired
+                }
+                (Some(Effect::GameRestartRequired), _) | (_, Effect::GameRestartRequired) => {
+                    Effect::GameRestartRequired
+                }
+                _ => Effect::Immediate,
+            },
+        );
         Ok(())
     }
     pub fn release(&mut self, owner: &OwnerKey) -> Result<(), ModuleError> {

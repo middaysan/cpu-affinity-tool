@@ -81,11 +81,14 @@ impl Module for PowerPlan {
         self
     }
     fn targets(&self) -> Vec<TargetIdentity> {
-        user_targets()
+        account_targets()
+    }
+    fn canonical_target(&self, target: &TargetIdentity) -> Result<TargetIdentity, ModuleError> {
+        canonical_account_target(target)
     }
     fn observe(&self, target: &TargetIdentity) -> ModuleObservation {
         observation((|| {
-            let user = observed_user(target)?;
+            let user = observed_account_user(target)?;
             let schemes = gaming::power_schemes(&user).map_err(|e| native("read", e))?;
             let active = gaming::read_power_plan(&user).map_err(|e| native("read", e))?;
             let summary = schemes
@@ -106,7 +109,7 @@ impl Module for PowerPlan {
         config: &ModuleEnvelope,
     ) -> Result<Vec<FieldChange>, ModuleError> {
         let config: Config = decode(ID, config)?;
-        let user = user(target)?;
+        let user = account_user(target)?;
         let selected = match config.scheme {
             Some(id) => id,
             None => gaming::read_power_plan(&user).map_err(|e| native("read", e))?,
@@ -125,13 +128,13 @@ impl Module for PowerPlan {
     }
     fn read(&self, key: &ResourceKey) -> Result<Vec<u8>, ModuleError> {
         check_field(key, FIELD)?;
-        gaming::read_power_plan(&user(&key.target)?)
+        gaming::read_power_plan(&account_user(&key.target)?)
             .map(|v| v.0.to_vec())
             .map_err(|e| native("read", e))
     }
     fn write(&self, key: &ResourceKey, expected: &[u8], desired: &[u8]) -> Result<(), ModuleError> {
         check_field(key, FIELD)?;
-        gaming::write_power_plan(&user(&key.target)?, guid(expected)?, guid(desired)?)
+        gaming::write_power_plan(&account_user(&key.target)?, guid(expected)?, guid(desired)?)
             .map_err(|e| native("write", e))
     }
 }

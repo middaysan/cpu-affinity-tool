@@ -129,6 +129,168 @@ mod preference_contract_tests {
     }
 
     #[test]
+    fn durable_account_targets_share_one_identity_across_logons() {
+        let expected = TargetIdentity::Account {
+            sid: "S-1-5-21-1".into(),
+        };
+        let modules: Vec<Arc<dyn Module>> = vec![
+            Arc::new(game_mode::GameMode),
+            Arc::new(background_capture::BackgroundCapture),
+            Arc::new(windowed_optimizations::WindowedOptimizations),
+            Arc::new(power_plan::PowerPlan::default()),
+            Arc::new(power_mode::PowerMode),
+        ];
+        for module in modules {
+            for logon in [77, 78] {
+                let legacy = TargetIdentity::User {
+                    sid: "S-1-5-21-1".into(),
+                    logon,
+                };
+                assert_eq!(
+                    module.canonical_target(&legacy).unwrap(),
+                    expected,
+                    "{} must retain its first account baseline",
+                    module.descriptor().id.as_str()
+                );
+            }
+            assert_eq!(module.canonical_target(&expected).unwrap(), expected);
+            assert_ne!(
+                module
+                    .canonical_target(&TargetIdentity::User {
+                        sid: "S-1-5-21-2".into(),
+                        logon: 78,
+                    })
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn durable_account_identity_requires_canonical_bounded_sid() {
+        for sid in ["S-1-5-21-1", "S-1-5-21-4294967295-0-1-1001"] {
+            let account = TargetIdentity::Account { sid: sid.into() };
+            assert!(account.valid(), "{sid}");
+            assert_eq!(account.scope(), TargetScope::User);
+            assert_eq!(canonical_account_target(&account).unwrap(), account);
+        }
+        for sid in [
+            "S-1-",
+            "S-2-5-21-1",
+            "S-1-5",
+            "S-1-5-21-x",
+            "S-1-5-21-01",
+            "S-1-5-21-4294967296",
+            "S-1-281474976710656-1",
+            "S-1-5-21-1\0",
+            "s-1-5-21-1",
+            "S-1-5--1",
+            "S-1-5-+1",
+            "S-1-5-21-1 ",
+        ] {
+            let account = TargetIdentity::Account { sid: sid.into() };
+            assert!(!account.valid(), "{sid}");
+            assert!(canonical_account_target(&account).is_err(), "{sid}");
+            assert!(
+                canonical_account_target(&TargetIdentity::User {
+                    sid: sid.into(),
+                    logon: 77,
+                })
+                .is_err(),
+                "{sid}"
+            );
+        }
+        let excessive = TargetIdentity::Account {
+            sid: format!("S-1-5{}", "-1".repeat(16)),
+        };
+        assert!(!excessive.valid());
+        assert!(canonical_account_target(&excessive).is_err());
+        let missing_logon = TargetIdentity::User {
+            sid: "S-1-5-21-1".into(),
+            logon: 0,
+        };
+        assert!(!missing_logon.valid());
+        assert!(canonical_account_target(&missing_logon).is_err());
+        assert!(canonical_account_target(&TargetIdentity::Machine).is_err());
+    }
+
+    #[test]
+    fn durable_account_fields_accept_stable_targets_without_native_work() {
+        let target = TargetIdentity::Account {
+            sid: "S-1-5-21-1".into(),
+        };
+        let modules: Vec<Arc<dyn Module>> = vec![
+            Arc::new(game_mode::GameMode),
+            Arc::new(background_capture::BackgroundCapture),
+            Arc::new(windowed_optimizations::WindowedOptimizations),
+            Arc::new(power_mode::PowerMode),
+        ];
+        for module in modules {
+            let fields = module
+                .fields(&target, &module.editor().default_config())
+                .unwrap();
+            assert!(!fields.is_empty());
+            assert!(fields.iter().all(|field| field.key.target == target));
+        }
+    }
+
+    #[test]
+    fn durable_account_mapping_preserves_exact_session_and_process_targets() {
+        let old = TargetIdentity::User {
+            sid: "S-1-5-21-1".into(),
+            logon: 77,
+        };
+        let current = TargetIdentity::User {
+            sid: "S-1-5-21-1".into(),
+            logon: 78,
+        };
+        let modules: Vec<Arc<dyn Module>> = vec![
+            Arc::new(mouse_acceleration::MouseAcceleration),
+            Arc::new(accessibility_hotkeys::AccessibilityHotkeys),
+        ];
+        for module in modules {
+            assert_eq!(module.canonical_target(&old).unwrap(), old);
+            assert_eq!(module.canonical_target(&current).unwrap(), current);
+            assert!(module
+                .fields(
+                    &TargetIdentity::Account {
+                        sid: "S-1-5-21-1".into(),
+                    },
+                    &module.editor().default_config()
+                )
+                .is_err());
+        }
+        let process = TargetIdentity::Process {
+            pid: 42,
+            creation_token: 123,
+            image_path: r"C:\game.exe".into(),
+        };
+        assert_eq!(
+            process_qos::ProcessQos.canonical_target(&process).unwrap(),
+            process
+        );
+        assert!(canonical_account_target(&process).is_err());
+        let display = TargetIdentity::Device {
+            identity: "display:".to_owned()
+                + &serde_json::to_string(&os_api::windows_tweaks::DisplayTarget {
+                    user_sid: "S-1-5-21-1".into(),
+                    user_logon: 77,
+                    device_name: "display1".into(),
+                    adapter_id: "adapter1".into(),
+                    monitor_id: "monitor1".into(),
+                })
+                .unwrap(),
+        };
+        assert_eq!(
+            display_refresh::DisplayRefresh
+                .canonical_target(&display)
+                .unwrap(),
+            display
+        );
+        assert!(canonical_account_target(&display).is_err());
+    }
+
+    #[test]
     fn windows_tweaks_preserve_saved_feature_field_and_token_contracts() {
         let target = TargetIdentity::User {
             sid: "S-1-5-21-1".into(),

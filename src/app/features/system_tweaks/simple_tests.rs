@@ -14,16 +14,28 @@ use std::{
 
 pub(crate) struct Setting {
     id: FeatureId,
-    pub(super) fields: Arc<Mutex<BTreeMap<ResourceId, Vec<u8>>>>,
+    pub(crate) fields: Arc<Mutex<BTreeMap<ResourceId, Vec<u8>>>>,
     pub(super) writes: Arc<Mutex<usize>>,
     actions: Arc<Mutex<Vec<String>>>,
     pub(super) fail_at: Mutex<Option<ResourceId>>,
     observation_gate: Mutex<Option<Arc<(Mutex<bool>, std::sync::Condvar)>>>,
     observation_entered: std::sync::atomic::AtomicBool,
     user: bool,
+    effect: Effect,
 }
 impl Setting {
     pub(crate) fn new(name: &str, user: bool) -> Arc<Self> {
+        Self::with_effect(
+            name,
+            user,
+            if user {
+                Effect::RestartRequired
+            } else {
+                Effect::Immediate
+            },
+        )
+    }
+    pub(crate) fn with_effect(name: &str, user: bool, effect: Effect) -> Arc<Self> {
         Arc::new(Self {
             id: FeatureId::new(name).unwrap(),
             fields: Arc::new(Mutex::new(BTreeMap::from([
@@ -36,6 +48,7 @@ impl Setting {
             observation_gate: Mutex::new(None),
             observation_entered: std::sync::atomic::AtomicBool::new(false),
             user,
+            effect,
         })
     }
     pub(crate) fn config(&self, desired: u8) -> ModuleEnvelope {
@@ -47,7 +60,7 @@ impl Setting {
             payload: serde_json::json!({"value": desired}),
         }
     }
-    pub(super) fn value(&self) -> Vec<u8> {
+    pub(crate) fn value(&self) -> Vec<u8> {
         self.fields
             .lock()
             .unwrap()
@@ -125,11 +138,7 @@ impl Module for Setting {
                 TargetScope::Machine
             }],
             activation_modes: vec![ActivationMode::Manual, ActivationMode::Session],
-            effect: if self.user {
-                Effect::RestartRequired
-            } else {
-                Effect::Immediate
-            },
+            effect: self.effect,
             config_version: SchemaVersion::new(1).unwrap(),
         }
     }

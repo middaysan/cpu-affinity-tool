@@ -295,6 +295,7 @@ fn roundtrip(
     config: ModuleEnvelope,
     verify_unowned: impl Fn() -> TestResult,
 ) -> TestResult {
+    let target = checked(module.canonical_target(&target))?;
     let observation = module.observe(&target);
     if observation.capability != Capability::Available {
         return Err(format!(
@@ -534,6 +535,7 @@ fn recommended_tweak_roundtrip(id: &str, target: TargetIdentity) -> TestResult {
     use os_api::windows_tweaks::{self as api, StoredDword};
     let registry = tweaks::registry();
     let module = module(&registry, id);
+    let target = checked(module.canonical_target(&target))?;
     let desired = checked(module.editor().tweak_config(&target))?;
     let mut change = checked(module.fields(&target, &desired))?
         .into_iter()

@@ -161,11 +161,12 @@ pub fn interactive_user() -> Result<UserIdentity, GamingError> {
     })
 }
 fn verify_user(expected: &UserIdentity) -> Result<(), GamingError> {
-    if &interactive_user()? == expected {
-        Ok(())
-    } else {
-        Err(GamingError::Changed)
-    }
+    verified_session_user(expected, interactive_user()).map(|_| ())
+}
+pub(super) fn admit_account(expected: &UserIdentity) -> Result<UserIdentity, GamingError> {
+    // Old recovery targets name a previous logon. Admission still obtains the
+    // fully checked current caller/Explorer identity and pins it for this operation.
+    admitted_account_user(expected, interactive_user())
 }
 fn with_user<T>(
     expected: &UserIdentity,
@@ -174,6 +175,15 @@ fn with_user<T>(
     verify_user(expected)?;
     let value = operation()?;
     verify_user(expected)?;
+    Ok(value)
+}
+fn with_account<T>(
+    expected: &UserIdentity,
+    operation: impl FnOnce() -> Result<T, GamingError>,
+) -> Result<T, GamingError> {
+    let current = admit_account(expected)?;
+    let value = operation()?;
+    verify_user(&current)?;
     Ok(value)
 }
 fn guid(value: GuidValue) -> GUID {
@@ -200,10 +210,10 @@ fn active_scheme() -> Result<GuidValue, GamingError> {
     Ok(value)
 }
 pub fn read_power_plan(user: &UserIdentity) -> Result<GuidValue, GamingError> {
-    with_user(user, active_scheme)
+    with_account(user, active_scheme)
 }
 pub fn power_schemes(user: &UserIdentity) -> Result<Vec<PowerScheme>, GamingError> {
-    with_user(user, || {
+    with_account(user, || {
         let mut schemes = Vec::new();
         for index in 0..128 {
             let mut value = GUID::zeroed();
@@ -274,8 +284,8 @@ pub fn write_power_plan(
     expected: GuidValue,
     desired: GuidValue,
 ) -> Result<(), GamingError> {
-    verify_user(user)?;
-    if !power_schemes(user)?
+    let current = admit_account(user)?;
+    if !power_schemes(&current)?
         .iter()
         .any(|scheme| scheme.id == desired)
     {
@@ -286,12 +296,14 @@ pub fn write_power_plan(
     if active_scheme()? != expected {
         return Err(GamingError::Changed);
     }
-    verify_user(user)?;
+    verify_user(&current)?;
     success(
         "PowerSetActiveScheme",
         unsafe { PowerSetActiveScheme(None, Some(&guid(desired))) }.0,
     )?;
-    if read_power_plan(user)? != desired {
+    let actual = read_power_plan(&current)?;
+    verify_user(&current)?;
+    if actual != desired {
         return Err(GamingError::Changed);
     }
     Ok(())
@@ -383,7 +395,7 @@ impl ModeApi {
     }
 }
 pub fn read_power_mode(user: &UserIdentity, source: PowerSource) -> Result<GuidValue, GamingError> {
-    with_user(user, || ModeApi::load()?.read(source))
+    with_account(user, || ModeApi::load()?.read(source))
 }
 pub fn write_power_mode(
     user: &UserIdentity,
@@ -400,12 +412,12 @@ pub fn write_power_mode(
     {
         return Err(GamingError::InvalidValue);
     }
-    verify_user(user)?;
+    let current = admit_account(user)?;
     let api = ModeApi::load()?;
     if api.read(source)? != expected {
         return Err(GamingError::Changed);
     }
-    verify_user(user)?;
+    verify_user(&current)?;
     let desired_guid = guid(desired);
     success("PowerSetUserConfiguredPowerMode", unsafe {
         match source {
@@ -413,8 +425,10 @@ pub fn write_power_mode(
             PowerSource::Dc => (api.set_dc)(&desired_guid),
         }
     })?;
-    verify_user(user)?;
-    if api.read(source)? != desired {
+    verify_user(&current)?;
+    let actual = api.read(source)?;
+    verify_user(&current)?;
+    if actual != desired {
         return Err(GamingError::Changed);
     }
     Ok(())

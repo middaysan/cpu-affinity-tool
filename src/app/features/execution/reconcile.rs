@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_monitor_skips_module_fields_before_first_baseline() {
+    fn handoff_monitor_reserves_module_fields_only_on_enabled_platform() {
         use crate::app::features::{
             rules::RulesContext,
             system_tweaks::{
@@ -467,6 +467,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+        let saved_tuning = serde_json::to_value(&state.tuning).unwrap();
         let key = state.groups[1].programs[0].get_key();
         let mut apps = RunningApps::default();
         apps.add_app(&key, 323, group_id(1), rule_id(0));
@@ -476,8 +477,14 @@ mod tests {
         );
         seed_tracked_instance(&mut apps, &key, 323, &mut os);
         process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
-        assert!(os.affinity_sets.is_empty());
-        assert!(os.priority_sets.is_empty());
+        if crate::app::features::system_tweaks::MODULES_ENABLED {
+            assert!(os.affinity_sets.is_empty());
+            assert!(os.priority_sets.is_empty());
+        } else {
+            assert_eq!(os.affinity_sets, vec![(323, 0b110)]);
+            assert_eq!(os.priority_sets, vec![(323, PriorityClass::High)]);
+        }
+        assert_eq!(serde_json::to_value(&state.tuning).unwrap(), saved_tuning);
     }
 
     #[test]

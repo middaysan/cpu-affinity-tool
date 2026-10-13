@@ -131,6 +131,10 @@ pub(crate) fn fields_for_rule(
     rule: &RuleId,
 ) -> ProcessSettingsFields {
     let mut fields = ProcessSettingsFields::default();
+    // Retained Windows profiles cannot reserve fields when no module can apply them.
+    if !crate::app::features::system_tweaks::MODULES_ENABLED {
+        return fields;
+    }
     let TuningLoad::Known(config) = state.tuning.decode() else {
         return fields;
     };

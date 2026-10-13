@@ -185,11 +185,18 @@ pub(crate) fn draw_system_tweaks(app: &mut AppState, root_ui: &mut egui::Ui) {
                 ui.colored_label(palette(ui).warning.fg, "Saved settings are retained and read-only because this version cannot safely understand them.");
             }
             if let Some(effect) = snapshot.restoration_effect {
-                ui.add(egui::Label::new(egui::RichText::new(match effect {
-                    Effect::Immediate => "Original settings restored and verified.",
-                    Effect::GameRestartRequired => "Original settings restored. Restart the game to use them.",
-                    Effect::RestartRequired => "Original settings restored. Restart Windows to use them.",
-                }).size(10.5).color(palette(ui).success.fg)).wrap());
+                let partial = snapshot.operation_error.is_some()
+                    || !matches!(snapshot.operation, TuningOperationState::Idle);
+                let message = match (partial, effect) {
+                    (false, Effect::Immediate) => "Original settings restored and verified.",
+                    (false, Effect::GameRestartRequired) => "Original settings restored. Restart the game to use them.",
+                    (false, Effect::RestartRequired) => "Original settings restored. Restart Windows to use them.",
+                    (true, Effect::Immediate) => "Some original settings restored. Remaining changes need attention.",
+                    (true, Effect::GameRestartRequired) => "Some original settings restored. Restart the game to use them. Remaining changes need attention.",
+                    (true, Effect::RestartRequired) => "Some original settings restored. Restart Windows to use them. Remaining changes need attention.",
+                };
+                let color = if partial { palette(ui).warning.fg } else { palette(ui).success.fg };
+                ui.add(egui::Label::new(egui::RichText::new(message).size(10.5).color(color)).wrap());
             }
             ui.horizontal_wrapped(|ui| {
                 if ui.add_enabled(!pending && editable && snapshot.has_tweak_changes, egui::Button::new(egui::RichText::new("Undo my changes").size(10.5))).clicked() {
@@ -364,7 +371,9 @@ fn draw_operation_state(app: &mut AppState, ui: &mut egui::Ui) {
                 ui.small("Working…");
             });
         }
-        TuningOperationState::Refused { error, .. } if snapshot.operation_error.is_none() => {
+        TuningOperationState::Refused { error, .. }
+            if error != SaveError::Recovering || snapshot.operation_error.is_none() =>
+        {
             ui.colored_label(palette(ui).danger.fg, save_error_message(error));
         }
         TuningOperationState::Recovering => {
@@ -1232,6 +1241,272 @@ mod tests {
         }
         app.poll_tuning();
     }
+
+    fn feedback_fixture(
+        settings: &[(&str, bool, Effect)],
+    ) -> (
+        AppState,
+        Vec<Arc<crate::app::features::system_tweaks::simple_tests::Setting>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use crate::app::features::system_tweaks::{
+            platform::registry::{Module, Registry},
+            simple_tests::Setting,
+            Tuning, TuningRuntime,
+        };
+        let settings: Vec<_> = settings
+            .iter()
+            .map(|(name, user, effect)| Setting::with_effect(name, *user, *effect))
+            .collect();
+        let mut registry = Registry::default();
+        for setting in &settings {
+            registry.register(setting.clone()).unwrap();
+        }
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut service = Tuning::from_registry(registry.clone()).headless(
+            AppStateStorage::test_fixture(|_| {}),
+            Box::new(UiSave(fail.clone())),
+        );
+        service.admit_test_modules();
+        for setting in &settings {
+            let feature = setting.descriptor().id;
+            let profile = service
+                .create_profile(
+                    "Windows Tweaks [manual v1]".into(),
+                    vec![ModulePreference {
+                        feature: feature.clone(),
+                        enabled: true,
+                        mode: ActivationMode::Manual,
+                        config: setting.config(12),
+                    }],
+                )
+                .unwrap();
+            service
+                .activate_manual(profile, feature, setting.targets()[0].clone())
+                .unwrap();
+        }
+        let state = service.state().clone();
+        let runtime = TuningRuntime::start(
+            service,
+            Arc::new(tokio::sync::RwLock::new(Default::default())),
+        );
+        let mut app = AppState::new_for_test(Arc::new(RwLock::new(state)), 4);
+        app.replace_tuning_for_test(runtime, registry);
+        (app, settings, fail)
+    }
+
+    fn feedback_undo(
+        app: &mut AppState,
+        setting: &crate::app::features::system_tweaks::simple_tests::Setting,
+    ) {
+        use crate::app::features::system_tweaks::platform::registry::Module;
+        app.request_tuning(TuningRequest::UndoTweak {
+            feature: setting.descriptor().id,
+        })
+        .unwrap();
+        wait_saved(app);
+    }
+
+    fn feedback_drift(
+        setting: &crate::app::features::system_tweaks::simple_tests::Setting,
+        value: u8,
+    ) {
+        use crate::app::features::system_tweaks::platform::contract::ResourceId;
+        setting
+            .fields
+            .lock()
+            .unwrap()
+            .insert(ResourceId::new("value").unwrap(), vec![value]);
+    }
+
+    #[test]
+    fn operation_feedback_successful_undo_retry_clears_the_previous_error() {
+        let (mut app, settings, _) =
+            feedback_fixture(&[("simple_tweak", false, Effect::Immediate)]);
+        feedback_drift(&settings[0], 20);
+        feedback_undo(&mut app, &settings[0]);
+        assert!(app.tuning_snapshot().operation_error.is_some());
+        assert_eq!(settings[0].value(), vec![20]);
+        feedback_drift(&settings[0], 12);
+        feedback_undo(&mut app, &settings[0]);
+        let snapshot = app.tuning_snapshot();
+        let text = rendered_text(&mut app);
+        finish(&mut app);
+        assert_eq!(snapshot.operation, TuningOperationState::Idle);
+        assert!(!snapshot.has_tweak_changes);
+        assert_eq!(settings[0].value(), vec![7]);
+        assert!(
+            snapshot.operation_error.is_none(),
+            "the successful retry resolved the original failure"
+        );
+        assert!(!text.contains("Could not complete this action"));
+    }
+
+    #[test]
+    fn operation_feedback_storage_failure_is_visible_beside_retained_controller_error() {
+        use crate::app::features::system_tweaks::platform::contract::ErrorKind;
+        let (mut app, settings, fail) =
+            feedback_fixture(&[("simple_tweak", false, Effect::Immediate)]);
+        feedback_drift(&settings[0], 20);
+        feedback_undo(&mut app, &settings[0]);
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        feedback_undo(&mut app, &settings[0]);
+        let snapshot = app.tuning_snapshot();
+        let text = rendered_text(&mut app);
+        finish(&mut app);
+        assert!(matches!(
+            snapshot.operation,
+            TuningOperationState::Refused {
+                error: SaveError::Storage,
+                ..
+            }
+        ));
+        assert_eq!(
+            snapshot.operation_error.as_ref().unwrap().kind,
+            ErrorKind::ExternalChange
+        );
+        assert!(snapshot.has_tweak_changes);
+        assert!(
+            text.contains("Could not save"),
+            "the current save failure must not be hidden by retained native evidence: {text}"
+        );
+        assert!(text.contains("Error details"));
+    }
+
+    #[test]
+    fn operation_feedback_new_request_keeps_unresolved_controller_error() {
+        use crate::app::features::system_tweaks::platform::{
+            contract::ErrorKind, registry::Module,
+        };
+        let (mut app, settings, _) =
+            feedback_fixture(&[("simple_tweak", false, Effect::Immediate)]);
+        feedback_drift(&settings[0], 20);
+        feedback_undo(&mut app, &settings[0]);
+        app.request_tuning(TuningRequest::ModuleAction {
+            feature: settings[0].descriptor().id,
+            action: ModuleAction::Refresh,
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        let snapshot = app.tuning_snapshot();
+        finish(&mut app);
+        assert_eq!(snapshot.operation, TuningOperationState::Idle);
+        assert_eq!(
+            snapshot.operation_error.as_ref().unwrap().kind,
+            ErrorKind::ExternalChange
+        );
+        assert!(snapshot.has_tweak_changes);
+        assert_eq!(settings[0].value(), vec![20]);
+    }
+
+    #[test]
+    fn operation_feedback_new_apply_clears_the_previous_restore_success() {
+        use crate::app::features::system_tweaks::platform::registry::Module;
+        let (mut app, settings, _) =
+            feedback_fixture(&[("simple_tweak", false, Effect::Immediate)]);
+        feedback_undo(&mut app, &settings[0]);
+        assert_eq!(
+            app.tuning_snapshot().restoration_effect,
+            Some(Effect::Immediate)
+        );
+        app.request_tuning(TuningRequest::ApplyTweak {
+            feature: settings[0].descriptor().id,
+            target: TargetIdentity::Machine,
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        let snapshot = app.tuning_snapshot();
+        let text = rendered_text(&mut app);
+        finish(&mut app);
+        assert!(snapshot.has_tweak_changes);
+        assert_eq!(settings[0].value(), vec![12]);
+        assert_eq!(
+            snapshot.restoration_effect, None,
+            "a previous Undo is not the result of this Apply"
+        );
+        assert!(!text.contains("Original settings restored"));
+    }
+
+    #[test]
+    fn operation_feedback_stale_request_clears_the_previous_restore_success() {
+        let (mut app, settings, _) =
+            feedback_fixture(&[("simple_tweak", false, Effect::Immediate)]);
+        feedback_undo(&mut app, &settings[0]);
+        let restored = app.tuning_snapshot();
+        assert_eq!(restored.restoration_effect, Some(Effect::Immediate));
+        app.request_tuning(TuningRequest::SaveBase {
+            candidate: Box::new((*restored.state).clone()),
+            expected_revision: 0,
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        let snapshot = app.tuning_snapshot();
+        finish(&mut app);
+        assert!(matches!(
+            snapshot.operation,
+            TuningOperationState::Refused {
+                error: SaveError::Invalid,
+                ..
+            }
+        ));
+        assert_eq!(snapshot.restoration_effect, None);
+    }
+
+    #[test]
+    fn operation_feedback_partial_undo_keeps_restart_notice_without_claiming_full_restore() {
+        let (mut app, settings, _) = feedback_fixture(&[
+            ("feedback_restart", true, Effect::GameRestartRequired),
+            ("feedback_drift", false, Effect::Immediate),
+        ]);
+        feedback_drift(&settings[1], 20);
+        app.request_tuning(TuningRequest::UndoAllTweaks).unwrap();
+        wait_saved(&mut app);
+        let snapshot = app.tuning_snapshot();
+        let text = rendered_text(&mut app);
+        finish(&mut app);
+        assert_eq!(settings[0].value(), vec![7]);
+        assert_eq!(settings[1].value(), vec![20]);
+        assert!(snapshot.has_tweak_changes);
+        assert_eq!(
+            snapshot.restoration_effect,
+            Some(Effect::GameRestartRequired)
+        );
+        assert!(
+            text.contains("Some original settings restored"),
+            "partial Undo needs qualified feedback: {text}"
+        );
+        assert!(text.contains("Restart the game"));
+        assert!(!text.contains("Original settings restored."));
+    }
+
+    #[test]
+    fn operation_feedback_complete_undo_preserves_the_strongest_restart_requirement() {
+        for effect in [Effect::GameRestartRequired, Effect::RestartRequired] {
+            let (mut app, settings, _) = feedback_fixture(&[
+                ("feedback_restart", true, effect),
+                ("feedback_immediate", false, Effect::Immediate),
+            ]);
+            app.request_tuning(TuningRequest::UndoAllTweaks).unwrap();
+            wait_saved(&mut app);
+            let snapshot = app.tuning_snapshot();
+            let text = rendered_text(&mut app);
+            finish(&mut app);
+            assert_eq!(snapshot.operation, TuningOperationState::Idle);
+            assert!(!snapshot.has_tweak_changes);
+            assert!(settings.iter().all(|setting| setting.value() == vec![7]));
+            assert_eq!(
+                snapshot.restoration_effect,
+                Some(effect),
+                "an Immediate field restored last must not discard an earlier restart requirement"
+            );
+            assert!(text.contains(match effect {
+                Effect::GameRestartRequired => "Restart the game",
+                _ => "Restart Windows",
+            }));
+            assert!(!text.contains("Some original settings restored"));
+        }
+    }
+
     #[test]
     fn modules_ui_own_successful_save_closes_editor_without_stale_warning() {
         use crate::app::features::system_tweaks::platform::registry::Module;

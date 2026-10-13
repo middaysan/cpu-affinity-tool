@@ -675,6 +675,251 @@ fn durable_disk_lease_ambiguous_artifact_unknown_and_source_mismatch_block() {
 }
 struct SavedFile(PathBuf);
 
+/// Account-scoped field reads use the current authenticated account, never the old logon.
+struct AccountSetting {
+    setting: Arc<Setting>,
+    sid: String,
+}
+impl Module for AccountSetting {
+    fn descriptor(&self) -> ModuleDescriptor {
+        self.setting.descriptor()
+    }
+    fn editor(&self) -> &dyn super::presentation::ModuleEditor {
+        self.setting.editor()
+    }
+    fn targets(&self) -> Vec<TargetIdentity> {
+        vec![TargetIdentity::Account {
+            sid: self.sid.clone(),
+        }]
+    }
+    fn canonical_target(&self, target: &TargetIdentity) -> Result<TargetIdentity, ModuleError> {
+        super::tweaks::game_mode::GameMode.canonical_target(target)
+    }
+    fn accepts_target(&self, target: &TargetIdentity) -> bool {
+        self.canonical_target(target)
+            .is_ok_and(|target| self.targets().contains(&target))
+    }
+    fn observe(&self, target: &TargetIdentity) -> super::platform::registry::ModuleObservation {
+        self.setting.observe(target)
+    }
+    fn fields(
+        &self,
+        target: &TargetIdentity,
+        config: &super::platform::codec::ModuleEnvelope,
+    ) -> Result<Vec<super::platform::registry::FieldChange>, ModuleError> {
+        self.setting.fields(target, config)
+    }
+    fn read(&self, key: &ResourceKey) -> Result<Vec<u8>, ModuleError> {
+        if !self.targets().contains(&key.target) {
+            return Err(ModuleError::new(ErrorKind::Denied, "account fixture"));
+        }
+        self.setting.read(key)
+    }
+    fn write(&self, key: &ResourceKey, expected: &[u8], desired: &[u8]) -> Result<(), ModuleError> {
+        self.read(key)?;
+        self.setting.write(key, expected, desired)
+    }
+}
+
+#[test]
+fn durable_account_old_logon_reload_keeps_baseline_and_undo_available() {
+    use super::config::ModulePreference;
+    use crate::app::models::AppStateStorage;
+    let directory = OwnedDirectory::new();
+    let path = directory.0.join("state.json");
+    let mut state = AppStateStorage::test_fixture(|_| {});
+    state.try_save_to_path(&path).unwrap();
+    let setting = Setting::new("simple_tweak", true);
+    let mut legacy_registry = Registry::default();
+    legacy_registry.register(setting.clone()).unwrap();
+    let mut old = super::Tuning::from_registry(legacy_registry)
+        .headless(state, Box::new(SavedFile(path.clone())));
+    old.start_selected_recovery();
+    let feature = setting.descriptor().id;
+    old.apply_tweak(feature.clone(), setting.targets()[0].clone())
+        .unwrap();
+    assert_eq!(setting.value(), vec![12]);
+    let original_writes = *setting.writes.lock().unwrap();
+    drop(old);
+
+    let module = Arc::new(AccountSetting {
+        setting: setting.clone(),
+        sid: "S-1-5-21-1".into(),
+    });
+    let mut registry = Registry::default();
+    registry.register(module.clone()).unwrap();
+    let state = AppStateStorage::read_saved_for_tuning(&path).unwrap();
+    let mut reopened =
+        super::Tuning::from_registry(registry).headless(state, Box::new(SavedFile(path.clone())));
+    reopened
+        .start_recovery(Box::new(DiskRecoveryStore::open(&directory.0).unwrap()))
+        .unwrap();
+    assert!(reopened.controller.can_admit());
+    assert_eq!(
+        *setting.writes.lock().unwrap(),
+        original_writes,
+        "opening must not restore/reapply"
+    );
+    assert!(reopened
+        .controller
+        .fields()
+        .iter()
+        .all(|field| field.key.target == module.targets()[0]));
+
+    // A second request under a different logon shares the original baseline.
+    let second = reopened
+        .create_profile(
+            "Shared account".into(),
+            vec![ModulePreference {
+                feature: feature.clone(),
+                enabled: true,
+                mode: ActivationMode::Manual,
+                config: setting.config(12),
+            }],
+        )
+        .unwrap();
+    reopened
+        .activate_manual(
+            second,
+            feature.clone(),
+            TargetIdentity::User {
+                sid: "S-1-5-21-1".into(),
+                logon: 78,
+            },
+        )
+        .unwrap();
+    assert_eq!(*setting.writes.lock().unwrap(), original_writes);
+    assert_eq!(
+        reopened
+            .controller
+            .fields()
+            .iter()
+            .find(|f| f.key.field.as_str() == "value")
+            .unwrap()
+            .baseline,
+        vec![7]
+    );
+    reopened.undo_tweak(&feature).unwrap();
+    assert_eq!(
+        setting.value(),
+        vec![12],
+        "shared owner keeps its requested value"
+    );
+    reopened.disable_profile(second).unwrap();
+    assert_eq!(setting.value(), vec![7]);
+    assert!(reopened.controller.is_empty());
+    assert!(reopened.controller.can_admit());
+}
+
+#[test]
+fn durable_account_reload_preserves_foreign_values_and_denies_another_sid() {
+    for other_account in [false, true] {
+        let (setting, _, memory, mut controller) = setup(true);
+        controller
+            .acquire(
+                owner(1),
+                setting.clone(),
+                setting.targets()[0].clone(),
+                setting.config(12),
+            )
+            .unwrap();
+        drop(controller);
+        if !other_account {
+            setting
+                .fields
+                .lock()
+                .unwrap()
+                .insert(ResourceId::new("value").unwrap(), vec![19]);
+        }
+        let writes_before = *setting.writes.lock().unwrap();
+        let module = Arc::new(AccountSetting {
+            setting: setting.clone(),
+            sid: if other_account {
+                "S-1-5-21-2"
+            } else {
+                "S-1-5-21-1"
+            }
+            .into(),
+        });
+        let mut registry = Registry::default();
+        registry.register(module).unwrap();
+        let mut loaded = Controller::restore(
+            Box::new(Store(memory.clone())),
+            "C:/owned/state.json".into(),
+            &registry,
+        )
+        .unwrap();
+        assert!(loaded
+            .recover_owner(&owner(1), RecoveryIntent::Restore)
+            .is_err());
+        assert!(!loaded.can_admit());
+        assert!(loaded
+            .fields()
+            .iter()
+            .any(|field| field.baseline == vec![7]));
+        assert_eq!(
+            setting.value(),
+            if other_account { vec![12] } else { vec![19] }
+        );
+        // Safe siblings can be restored on drift, but a different account permits no write.
+        if other_account {
+            assert_eq!(*setting.writes.lock().unwrap(), writes_before);
+        }
+        assert!(!memory
+            .lock()
+            .unwrap()
+            .document
+            .as_ref()
+            .unwrap()
+            .fields
+            .is_empty());
+    }
+}
+
+#[test]
+fn durable_account_ambiguous_legacy_aliases_do_not_overwrite_evidence() {
+    let (setting, _, memory, mut controller) = setup(true);
+    controller
+        .acquire(
+            owner(1),
+            setting.clone(),
+            setting.targets()[0].clone(),
+            setting.config(12),
+        )
+        .unwrap();
+    drop(controller);
+    let evidence = {
+        let mut memory = memory.lock().unwrap();
+        let document = memory.document.as_mut().unwrap();
+        let mut alias = document.fields[0].clone();
+        alias.key.target = TargetIdentity::User {
+            sid: "S-1-5-21-1".into(),
+            logon: 78,
+        };
+        alias.baseline = vec![44];
+        document.fields.push(alias);
+        serde_json::to_value(document).unwrap()
+    };
+    let module = Arc::new(AccountSetting {
+        setting: setting.clone(),
+        sid: "S-1-5-21-1".into(),
+    });
+    let mut registry = Registry::default();
+    registry.register(module).unwrap();
+    let writes_before = *setting.writes.lock().unwrap();
+    assert!(Controller::restore(
+        Box::new(Store(memory.clone())),
+        "C:/owned/state.json".into(),
+        &registry
+    )
+    .is_err());
+    assert_eq!(*setting.writes.lock().unwrap(), writes_before);
+    assert_eq!(
+        serde_json::to_value(memory.lock().unwrap().document.as_ref().unwrap()).unwrap(),
+        evidence
+    );
+}
+
 #[test]
 fn durable_saved_off_reconciles_loaded_session_before_quit() {
     use super::config::TuningEnvelope;

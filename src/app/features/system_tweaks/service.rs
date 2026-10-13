@@ -109,6 +109,14 @@ impl HeadlessTuning {
         self.operation_error = Some(error);
         SaveError::Recovering
     }
+    pub(super) fn begin_operation(&mut self) {
+        // Admission failures remain actionable until initialization succeeds.
+        // Controller errors and recovery evidence have their own lifetime.
+        if self.native_admitted || !self.modules_enabled {
+            self.operation_error = None;
+        }
+        self.controller.restoration_effect = None;
+    }
     pub(super) fn verify_saved(&mut self) -> Result<(), SaveError> {
         let Some(path) = self.persistence.source_path() else {
             return if self.native_admitted {
@@ -545,6 +553,9 @@ impl HeadlessTuning {
             .get(&feature)
             .ok_or(SaveError::Invalid)?
             .clone();
+        let target = module
+            .canonical_target(&target)
+            .map_err(|e| self.native_failure(e))?;
         if !module.editor().availability().is_available() {
             return Err(SaveError::Invalid);
         }
@@ -608,7 +619,8 @@ impl HeadlessTuning {
                         failed = true;
                         continue;
                     }
-                    let matching = selected.target == target
+                    let matching = module.canonical_target(&selected.target).as_ref()
+                        == Ok(&target)
                         && self
                             .controller
                             .owner_record(&owner)
@@ -712,6 +724,9 @@ impl HeadlessTuning {
             .editor()
             .qualify_tweak_target(&target)
             .map_err(|e| self.native_failure(e))?;
+        let target = module
+            .canonical_target(&target)
+            .map_err(|e| self.native_failure(e))?;
         if !self.qualified_tweak_target(&feature, &target) {
             return Err(SaveError::Invalid);
         }
@@ -734,6 +749,9 @@ impl HeadlessTuning {
         let target = module
             .editor()
             .qualify_tweak_target(&target)
+            .map_err(|e| self.native_failure(e))?;
+        let target = module
+            .canonical_target(&target)
             .map_err(|e| self.native_failure(e))?;
         if !self.modules_enabled || !self.qualified_tweak_target(&feature, &target) {
             return Err(SaveError::Invalid);
@@ -774,7 +792,9 @@ impl HeadlessTuning {
                     && profile.modules[0].feature == feature
                     && !config.associations.iter().any(|a| a.profile == profile.id)
                     && config.manual_targets.iter().any(|t| {
-                        t.profile == profile.id && t.feature == feature && t.target == target
+                        t.profile == profile.id
+                            && t.feature == feature
+                            && module.canonical_target(&t.target).as_ref() == Ok(&target)
                     })
             })
             .map(|p| p.id);
@@ -840,6 +860,7 @@ impl HeadlessTuning {
     }
     pub(crate) fn undo_tweak(&mut self, feature: &FeatureId) -> Result<(), SaveError> {
         let mut config = self.configured()?;
+        let module = self.registry.get(feature).ok_or(SaveError::Invalid)?;
         let selected_target = self.tweak_targets.get(feature);
         let ids: Vec<_> = config
             .profiles
@@ -848,10 +869,10 @@ impl HeadlessTuning {
                 is_tweak_profile(p)
                     && &p.modules[0].feature == feature
                     && selected_target.is_none_or(|target| {
-                        config
-                            .manual_targets
-                            .iter()
-                            .any(|t| t.profile == p.id && &t.target == target)
+                        config.manual_targets.iter().any(|t| {
+                            t.profile == p.id
+                                && module.canonical_target(&t.target).as_ref() == Ok(target)
+                        })
                     })
             })
             .map(|p| p.id)
@@ -899,6 +920,7 @@ impl HeadlessTuning {
             .display_confirmation
             .is_some_and(|deadline| closing || std::time::Instant::now() >= deadline)
         {
+            self.begin_operation();
             if let Err(error) = self.undo_tweak(&FeatureId::new("display_refresh").unwrap()) {
                 self.native_failure(ModuleError::new(ErrorKind::Verification, "display restoration")
                     .with_detail(format!("Display restoration is incomplete ({error:?}). Original settings are retained; retry Undo.")).unwrap());

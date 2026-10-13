@@ -21,8 +21,18 @@ pub trait Module: Send + Sync {
     fn editor(&self) -> &dyn ModuleEditor;
     /// Process targets are supplied by the worker from verified tracked instances.
     fn targets(&self) -> Vec<TargetIdentity>;
+    /// Stable resource identity; session and process targets remain exact by default.
+    fn canonical_target(&self, target: &TargetIdentity) -> Result<TargetIdentity, ModuleError> {
+        Ok(target.clone())
+    }
     fn accepts_target(&self, target: &TargetIdentity) -> bool {
-        self.targets().contains(target)
+        let Ok(target) = self.canonical_target(target) else {
+            return false;
+        };
+        self.targets().iter().any(|candidate| {
+            self.canonical_target(candidate)
+                .is_ok_and(|candidate| candidate == target)
+        })
     }
     fn observe(&self, target: &TargetIdentity) -> ModuleObservation;
     fn fields(

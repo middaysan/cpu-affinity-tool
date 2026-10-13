@@ -83,6 +83,41 @@ pub(super) fn user(target: &TargetIdentity) -> Result<gaming::UserIdentity, Modu
         _ => Err(error(ErrorKind::Unsupported, "user target")),
     }
 }
+pub(crate) fn canonical_account_target(
+    target: &TargetIdentity,
+) -> Result<TargetIdentity, ModuleError> {
+    let sid = match target {
+        TargetIdentity::Account { sid } | TargetIdentity::User { sid, .. } if target.valid() => sid,
+        _ => return Err(error(ErrorKind::Unsupported, "account target")),
+    };
+    let account = TargetIdentity::Account { sid: sid.clone() };
+    if account.valid() {
+        Ok(account)
+    } else {
+        Err(error(ErrorKind::Unsupported, "account target"))
+    }
+}
+pub(super) fn account_targets() -> Vec<TargetIdentity> {
+    user_targets()
+        .iter()
+        .filter_map(|target| canonical_account_target(target).ok())
+        .collect()
+}
+pub(super) fn account_user(target: &TargetIdentity) -> Result<gaming::UserIdentity, ModuleError> {
+    let TargetIdentity::Account { sid } = canonical_account_target(target)? else {
+        return Err(error(ErrorKind::Unsupported, "account target"));
+    };
+    Ok(gaming::UserIdentity { sid, logon: 0 })
+}
+pub(super) fn observed_account_user(
+    target: &TargetIdentity,
+) -> Result<gaming::UserIdentity, ModuleError> {
+    if matches!(target, TargetIdentity::Machine) {
+        gaming::interactive_user().map_err(|e| native("read", e))
+    } else {
+        account_user(target)
+    }
+}
 pub(super) fn process(target: &TargetIdentity) -> Result<gaming::ProcessIdentity, ModuleError> {
     match target {
         TargetIdentity::Process {

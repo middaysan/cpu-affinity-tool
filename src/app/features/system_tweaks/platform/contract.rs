@@ -82,6 +82,11 @@ pub enum TargetScope {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum TargetIdentity {
     Machine,
+    /// Durable account resource; native operations still verify the current desktop context.
+    Account {
+        sid: String,
+    },
+    /// Exact desktop logon identity for session-scoped resources and legacy evidence.
     User {
         sid: String,
         logon: u64,
@@ -99,7 +104,7 @@ impl TargetIdentity {
     pub fn scope(&self) -> TargetScope {
         match self {
             Self::Machine => TargetScope::Machine,
-            Self::User { .. } => TargetScope::User,
+            Self::Account { .. } | Self::User { .. } => TargetScope::User,
             Self::Process { .. } => TargetScope::Process,
             Self::Device { .. } => TargetScope::PnpDevice,
         }
@@ -107,6 +112,7 @@ impl TargetIdentity {
     pub fn valid(&self) -> bool {
         match self {
             Self::Machine => true,
+            Self::Account { sid } => os_api::gaming::valid_account_sid(sid),
             Self::User { sid, logon } => {
                 sid.starts_with("S-1-") && sid.len() <= 184 && !sid.contains('\0') && *logon != 0
             }

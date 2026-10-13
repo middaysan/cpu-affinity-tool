@@ -28,6 +28,10 @@ The current UI uses direct Apply/Undo, without visible profiles or triggers. One
 
 A resource is an exact target plus a stable owned-field ID. Equal requests share the first baseline. Conflicting requests fail before writing. Last-owner restoration compares the current owned field with the app-written token and preserves other fields. A module must never turn a read error into a default, infer success from its desired value or recapture an uncertain baseline.
 
+Persistent account settings use `Account { sid }`; GPU preferences use the account SID and executable path. Their module-owned `canonical_target` codec maps legacy logon-bearing targets to the same resource during recovery and acquisition, preserving the first baseline across Windows sign-ins. Ambiguous canonical keys block recovery without publishing or discarding the old evidence. Saved legacy manual targets remain readable; comparisons use the same codec. Parsing an account SID grants no native authority: each operation verifies the live caller/Explorer/UAC identity, requires the same account and pins its exact current logon until readback completes. Mouse, accessibility and display changes remain session-scoped; unresolved evidence for a previous session stays blocked rather than being applied to another session.
+
+Errors and restoration summaries belong to the latest operation. A successful retry removes the previous transient error; current controller faults and recovery evidence remain visible. Partial Undo reports partial restoration, and several restored fields retain the strongest restart requirement. A newer Apply or refused request clears the old success message.
+
 ## Files
 
 - `config.rs`: profiles, logical rule associations and bounded versioned configuration. Unknown extensions remain exact and read-only; old lifecycle evidence remains blocked.

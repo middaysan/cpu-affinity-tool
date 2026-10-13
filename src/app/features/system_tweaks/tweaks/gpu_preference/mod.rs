@@ -28,9 +28,8 @@ fn gpu(target: &TargetIdentity) -> Result<GpuTarget, ModuleError> {
         .ok_or_else(|| error(ErrorKind::Unsupported, "GPU executable target"))?;
     let value: GpuTarget = serde_json::from_str(raw)
         .map_err(|_| error(ErrorKind::InvalidConfig, "GPU executable identity"))?;
-    if !(TargetIdentity::User {
+    if !(TargetIdentity::Account {
         sid: value.user_sid.clone(),
-        logon: value.user_logon,
     })
     .valid()
         || value.executable.is_empty()
@@ -70,13 +69,15 @@ impl ModuleEditor for GpuPreference {
         true
     }
     fn qualify_tweak_target(&self, target: &TargetIdentity) -> Result<TargetIdentity, ModuleError> {
-        if let Ok(qualified) = gpu(target) {
+        if gpu(target).is_ok() {
+            let canonical = self.canonical_target(target)?;
+            let qualified = gpu(&canonical)?;
             let actual = native_api::qualify_gpu_target(&qualified.executable)
                 .map_err(|e| native("qualify GPU executable", e))?;
             if actual != qualified {
                 return Err(error(ErrorKind::ExternalChange, "GPU executable identity"));
             }
-            return Ok(target.clone());
+            return Ok(canonical);
         }
         let TargetIdentity::Device { identity } = target else {
             return Err(error(ErrorKind::Unsupported, "GPU executable target"));
@@ -129,8 +130,22 @@ impl Module for GpuPreference {
     fn targets(&self) -> Vec<TargetIdentity> {
         Vec::new()
     }
+    fn canonical_target(&self, target: &TargetIdentity) -> Result<TargetIdentity, ModuleError> {
+        let mut qualified = gpu(target)?;
+        qualified.user_logon = 0;
+        let canonical = TargetIdentity::Device {
+            identity: "gpu_exe:".to_owned()
+                + &serde_json::to_string(&qualified)
+                    .map_err(|_| error(ErrorKind::InvalidConfig, "GPU executable identity"))?,
+        };
+        gpu(&canonical)?;
+        Ok(canonical)
+    }
     fn accepts_target(&self, target: &TargetIdentity) -> bool {
-        gpu(target).is_ok_and(|target| {
+        let Ok(canonical) = self.canonical_target(target) else {
+            return false;
+        };
+        gpu(&canonical).is_ok_and(|target| {
             native_api::qualify_gpu_target(&target.executable).is_ok_and(|actual| actual == target)
         })
     }
@@ -187,6 +202,45 @@ impl Module for GpuPreference {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn durable_account_gpu_targets_drop_legacy_logon_but_keep_sid_and_executable() {
+        let target = |sid: &str, logon: u64, executable: &str| TargetIdentity::Device {
+            identity: "gpu_exe:".to_owned()
+                + &serde_json::to_string(&GpuTarget {
+                    user_sid: sid.into(),
+                    user_logon: logon,
+                    executable: executable.into(),
+                })
+                .unwrap(),
+        };
+        let old = target("S-1-5-21-1", 77, r"C:\game.exe");
+        let current = target("S-1-5-21-1", 78, r"C:\game.exe");
+        let canonical = GpuPreference.canonical_target(&old).unwrap();
+        assert_eq!(GpuPreference.canonical_target(&current).unwrap(), canonical);
+        assert_eq!(
+            GpuPreference.canonical_target(&canonical).unwrap(),
+            canonical
+        );
+        let TargetIdentity::Device { identity } = &canonical else {
+            panic!()
+        };
+        assert!(!identity.contains("user_logon"));
+        assert_eq!(gpu(&canonical).unwrap().executable, r"C:\game.exe");
+        assert_eq!(gpu(&canonical).unwrap().user_sid, "S-1-5-21-1");
+        for distinct in [
+            target("S-1-5-21-2", 78, r"C:\game.exe"),
+            target("S-1-5-21-1", 78, r"C:\another.exe"),
+        ] {
+            assert_ne!(
+                GpuPreference.canonical_target(&distinct).unwrap(),
+                canonical
+            );
+        }
+        assert!(GpuPreference
+            .canonical_target(&target("S-1-x", 77, r"C:\game.exe"))
+            .is_err());
+    }
+
     #[test]
     fn windows_tweaks_gpu_target_requires_durable_user_identity() {
         let target = TargetIdentity::Device {

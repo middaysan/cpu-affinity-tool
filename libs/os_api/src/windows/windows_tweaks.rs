@@ -1,5 +1,6 @@
 //! Conditional per-user preference writes and documented GDI refresh changes.
 //! No policy, Game Bar disablement, services or driver-specific settings.
+use super::gaming::admit_account;
 use crate::{
     gaming::{self, GamingError, UserIdentity},
     windows_tweaks::*,
@@ -32,11 +33,7 @@ fn io_error(operation: &'static str, error: io::Error) -> GamingError {
     }
 }
 fn verify_user(user: &UserIdentity) -> Result<(), GamingError> {
-    if gaming::interactive_user()? == *user {
-        Ok(())
-    } else {
-        Err(GamingError::Changed)
-    }
+    gaming::verified_session_user(user, gaming::interactive_user()).map(|_| ())
 }
 fn read_raw(path: &str, name: &str) -> Result<Option<winreg::RegValue<'static>>, GamingError> {
     let key = match RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(path, KEY_READ) {
@@ -136,9 +133,9 @@ fn dword(raw: Option<&winreg::RegValue<'_>>) -> Result<StoredDword, GamingError>
     }
 }
 fn read_toggle(user: &UserIdentity, path: &str, name: &str) -> Result<StoredDword, GamingError> {
-    verify_user(user)?;
+    let current = admit_account(user)?;
     let result = dword(read_raw(path, name)?.as_ref())?;
-    verify_user(user)?;
+    verify_user(&current)?;
     Ok(result)
 }
 fn write_toggle(
@@ -151,7 +148,7 @@ fn write_toggle(
     if matches!(desired, StoredDword::Value(value) if value > 1) {
         return Err(GamingError::InvalidValue);
     }
-    verify_user(user)?;
+    let current = admit_account(user)?;
     let before = read_raw(path, name)?;
     if dword(before.as_ref())? != expected {
         return Err(GamingError::Changed);
@@ -160,12 +157,14 @@ fn write_toggle(
         vtype: REG_DWORD,
         bytes: value.to_le_bytes().to_vec().into(),
     });
-    verify_user(user)?;
+    verify_user(&current)?;
     if read_raw(path, name)? != before {
         return Err(GamingError::Changed);
     }
     store(path, name, raw.as_ref())?;
-    if read_toggle(user, path, name)? != desired {
+    let actual = read_toggle(&current, path, name)?;
+    verify_user(&current)?;
+    if actual != desired {
         return Err(GamingError::Changed);
     }
     Ok(())
@@ -245,11 +244,11 @@ fn checked_field(value: Option<&str>, field: &str) -> Result<Option<String>, Gam
     Ok(result)
 }
 fn read_field(user: &UserIdentity, name: &str, field: &str) -> Result<Option<String>, GamingError> {
-    verify_user(user)?;
+    let current = admit_account(user)?;
     let raw = read_raw(GPU, name)?;
     let value = string_value(raw.as_ref())?;
     let result = checked_field(value.as_deref(), field)?;
-    verify_user(user)?;
+    verify_user(&current)?;
     Ok(result)
 }
 fn write_field(
@@ -259,7 +258,7 @@ fn write_field(
     expected: Option<&str>,
     desired: Option<&str>,
 ) -> Result<(), GamingError> {
-    verify_user(user)?;
+    let current = admit_account(user)?;
     let before = read_raw(GPU, name)?;
     let value = string_value(before.as_ref())?;
     if checked_field(value.as_deref(), field)?.as_deref() != expected {
@@ -270,12 +269,14 @@ fn write_field(
     }
     let merged = merge_preference(value.as_deref(), field, desired)?;
     let raw = merged.as_deref().map(string_raw);
-    verify_user(user)?;
+    verify_user(&current)?;
     if read_raw(GPU, name)? != before {
         return Err(GamingError::Changed);
     }
     store(GPU, name, raw.as_ref())?;
-    if read_field(user, name, field)?.as_deref() != desired {
+    let actual = read_field(&current, name, field)?;
+    verify_user(&current)?;
+    if actual.as_deref() != desired {
         return Err(GamingError::Changed);
     }
     Ok(())
@@ -347,7 +348,7 @@ pub fn qualify_gpu_target(path: &str) -> Result<GpuTarget, GamingError> {
     verify_user(&user)?;
     Ok(GpuTarget {
         user_sid: user.sid,
-        user_logon: user.logon,
+        user_logon: 0,
         executable,
     })
 }
