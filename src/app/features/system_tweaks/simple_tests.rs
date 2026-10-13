@@ -57,6 +57,16 @@ impl Setting {
     }
 }
 impl ModuleEditor for Setting {
+    fn availability(&self) -> super::platforms::TweakAvailability {
+        // In-memory settings exercise ownership and recovery on any test host.
+        self.platform_support()
+            .for_platform(super::platforms::OsPlatform::Windows {
+                major: 10,
+                minor: 0,
+                build: 22621,
+                workstation: true,
+            })
+    }
     fn platform_support(&self) -> super::platforms::PlatformSupport {
         if self.id.as_str() == "unsupported_tweak" {
             super::platforms::PlatformSupport {
@@ -226,6 +236,19 @@ fn owner(id: u64) -> OwnerKey {
         profile: ProfileId::new(id).unwrap(),
         feature: FeatureId::new("scalar").unwrap(),
     }
+}
+
+#[test]
+fn fixture_availability_is_deterministic_and_keeps_unsupported_cases() {
+    use super::platforms::TweakAvailability;
+    assert_eq!(
+        Setting::new("scalar", false).availability(),
+        TweakAvailability::Available
+    );
+    assert_eq!(
+        Setting::new("unsupported_tweak", false).availability(),
+        TweakAvailability::Unavailable("Windows 10 required")
+    );
 }
 
 #[test]

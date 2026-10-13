@@ -1834,6 +1834,9 @@ mod card_tests {
 
     struct SavedExeCard(Arc<Setting>, TargetIdentity);
     impl ModuleEditor for SavedExeCard {
+        fn availability(&self) -> super::super::platforms::TweakAvailability {
+            self.0.availability()
+        }
         fn tweak(&self) -> Option<super::super::presentation::TweakSpec> {
             Some(super::super::presentation::TweakSpec {
                 order: 1,

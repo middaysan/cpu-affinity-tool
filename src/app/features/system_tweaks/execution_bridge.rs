@@ -24,8 +24,10 @@ pub(crate) enum UnknownReason {
     InvalidMembership,
     RevisionChanged,
     IncompleteEnumeration,
+    #[cfg(any(windows, test))]
     Denied,
     InstanceChanged,
+    #[cfg(windows)]
     ObservedExit,
     ForegroundRace,
 }

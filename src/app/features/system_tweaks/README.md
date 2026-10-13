@@ -46,6 +46,8 @@ A resource is an exact target plus a stable owned-field ID. Equal requests share
 
 Write behavior tests before implementation. Test common sharing/failure/recovery guarantees in the controller; test only native/configuration differences in an adapter. Configuration construction and registry registration perform no native operations. Process writes validate the exact creation token and image on the same retained handle. Process completion requires a positive observation of the same instance; errors remain Unknown.
 
+In-memory setting fixtures supply deterministic desktop availability, including explicit unsupported cases, so common ownership/recovery tests also run on Windows Server CI hosts. Native adapters retain actual OS-build admission; fixtures do not establish host compatibility.
+
 Persistent settings save compact durable original/current/attempted records before the first write, retain an independent writer lease and reconcile unfinished records against independently saved intent at startup. Unavailable saved state, conflicting evidence and legacy recovery artifacts block native admission. CPU Sets/priority coordinate with the existing affinity/priority writers before their first relevant write.
 
 Manual activation stays in effect after closing the application and retains its recovery baseline; explicit disablement restores it. Quit releases Session owners only with verified mutation authority. An exact positively exited process target can retire without a write to its vanished resource.
