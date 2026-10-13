@@ -2,6 +2,8 @@
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU32, NonZeroU64};
 
+pub(crate) const MAX_FIELD_BYTES: usize = 64 * 1024;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InvalidIdentity;
 impl std::fmt::Display for InvalidIdentity {

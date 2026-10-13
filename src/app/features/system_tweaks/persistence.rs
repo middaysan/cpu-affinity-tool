@@ -8,6 +8,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 const LIMIT: usize = 4 * 1024 * 1024;
+const MAX_FIELD_OWNERS: usize = 256;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActivationFacts {
@@ -112,12 +113,15 @@ impl RecoveryDocument {
         for field in &self.fields {
             if !keys.insert(field.key.clone())
                 || !field.key.target.valid()
-                || field.baseline.len() > 65536
-                || field.current.len() > 65536
-                || field.desired.len() > 65536
-                || field.attempted.as_ref().is_some_and(|v| v.len() > 65536)
+                || field.baseline.len() > MAX_FIELD_BYTES
+                || field.current.len() > MAX_FIELD_BYTES
+                || field.desired.len() > MAX_FIELD_BYTES
+                || field
+                    .attempted
+                    .as_ref()
+                    .is_some_and(|v| v.len() > MAX_FIELD_BYTES)
                 || field.owners.is_empty()
-                || field.owners.len() > 256
+                || field.owners.len() > MAX_FIELD_OWNERS
             {
                 return Err(bad());
             }

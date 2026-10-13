@@ -403,7 +403,7 @@ impl Controller {
             if change.key.target != target
                 || !change.key.target.valid()
                 || !keys.insert(change.key.clone())
-                || change.desired.len() > 65536
+                || change.desired.len() > MAX_FIELD_BYTES
             {
                 return Err(invalid());
             }
@@ -422,7 +422,7 @@ impl Controller {
                 prepared.push((change, field.written.clone()));
             } else {
                 let baseline = module.read(&change.key)?;
-                if baseline.len() > 65536 {
+                if baseline.len() > MAX_FIELD_BYTES {
                     return Err(invalid());
                 }
                 prepared.push((change, baseline));
