@@ -149,6 +149,13 @@ impl HeadlessTuning {
             }
             Ok(())
         })();
+        if result.is_ok()
+            && self.operation_error.as_ref().is_some_and(|error| {
+                error.kind == ErrorKind::Verification && error.operation == "saved configuration"
+            })
+        {
+            self.operation_error = None;
+        }
         result.map_err(|e| self.native_failure(e))
     }
     pub(crate) fn start_recovery(
@@ -590,6 +597,16 @@ impl HeadlessTuning {
         }
         self.verify_saved()?;
         let config = self.configured()?;
+        self.controller.forget_withdrawn_rejections(|owner| {
+            !config.profiles.iter().any(|profile| {
+                profile.id == owner.profile()
+                    && profile.modules.iter().any(|preference| {
+                        &preference.feature == owner.feature()
+                            && preference.enabled
+                            && (preference.mode != ActivationMode::Manual) == owner.is_session()
+                    })
+            })
+        });
         let mut failed = false;
         for owner in self.controller.owners() {
             if owner.is_session() {

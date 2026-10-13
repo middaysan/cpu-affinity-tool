@@ -1450,7 +1450,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_fresh_launch_skips_classic_affinity_and_priority_before_capture() {
+    fn handoff_fresh_launch_reserves_fields_only_on_enabled_platform() {
         let state = sample_state();
         enable_scheduling(
             &mut state.write().unwrap(),
@@ -1472,8 +1472,8 @@ mod tests {
         assert_eq!(
             os.launch_field_calls.borrow().as_slice(),
             &[os_api::gaming::ProcessSettingsFields {
-                affinity: false,
-                priority: false
+                affinity: !crate::app::features::system_tweaks::MODULES_ENABLED,
+                priority: !crate::app::features::system_tweaks::MODULES_ENABLED
             }]
         );
         assert!(os.affinity_calls.borrow().is_empty());
@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_manual_fix_leaves_module_priority_and_still_applies_classic_affinity() {
+    fn handoff_manual_fix_reserves_priority_only_on_enabled_platform() {
         let state = sample_state();
         enable_scheduling(&mut state.write().unwrap(), 0, 0, &["process_priority"]);
         let mut runtime = RuntimeRegistry::new();
@@ -1500,10 +1500,17 @@ mod tests {
             super::LaunchDispatchOutcome::Accepted
         );
         assert_eq!(os.affinity_calls.borrow().as_slice(), &[(322, 3)]);
-        assert!(
-            os.priority_calls.borrow().is_empty(),
-            "classic Fix must not race the module's baseline capture"
-        );
+        if crate::app::features::system_tweaks::MODULES_ENABLED {
+            assert!(
+                os.priority_calls.borrow().is_empty(),
+                "classic Fix must not race the module's baseline capture"
+            );
+        } else {
+            assert_eq!(
+                os.priority_calls.borrow().as_slice(),
+                &[(322, PriorityClass::Normal)]
+            );
+        }
     }
 
     fn sample_app() -> AppToRun {

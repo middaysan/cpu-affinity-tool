@@ -675,6 +675,194 @@ fn durable_disk_lease_ambiguous_artifact_unknown_and_source_mismatch_block() {
 }
 struct SavedFile(PathBuf);
 
+#[test]
+fn durable_operation_feedback_withdrawn_conflicts_keep_real_recovery_errors() {
+    use super::{config::ModulePreference, SaveError};
+    use crate::app::models::AppStateStorage;
+
+    for remove in [false, true] {
+        let directory = OwnedDirectory::new();
+        let path = directory.0.join("state.json");
+        let mut state = AppStateStorage::test_fixture(|_| {});
+        state.try_save_to_path(&path).unwrap();
+        let scalar = Setting::new("scalar", false);
+        let retained = Setting::new("retained", true);
+        let mut registry = Registry::default();
+        registry.register(scalar.clone()).unwrap();
+        registry.register(retained.clone()).unwrap();
+        let memory = Arc::new(Mutex::new(Memory::default()));
+        let mut service =
+            super::Tuning::from_registry(registry).headless(state, Box::new(SavedFile(path)));
+        service.start_recovery(Box::new(Store(memory))).unwrap();
+        let mut profiles = Vec::new();
+        for (name, module, desired) in [
+            ("Active", &scalar, 12),
+            ("Rejected", &scalar, 13),
+            ("Retained", &retained, 12),
+        ] {
+            profiles.push(
+                service
+                    .create_profile(
+                        name.into(),
+                        vec![ModulePreference {
+                            feature: module.descriptor().id,
+                            enabled: true,
+                            mode: ActivationMode::Manual,
+                            config: module.config(desired),
+                        }],
+                    )
+                    .unwrap(),
+            );
+        }
+        for (profile, module) in [(profiles[0], &scalar), (profiles[2], &retained)] {
+            service
+                .activate_manual(profile, module.descriptor().id, module.targets()[0].clone())
+                .unwrap();
+        }
+        assert_eq!(
+            service.activate_manual(profiles[1], scalar.descriptor().id, TargetIdentity::Machine,),
+            Err(SaveError::Recovering)
+        );
+        let rejected_owner = OwnerKey::Manual {
+            profile: profiles[1],
+            feature: scalar.descriptor().id,
+        };
+        assert!(!service.controller.owners().contains(&rejected_owner));
+        assert!(service.controller.owner_record(&rejected_owner).is_none());
+        assert!(!service.controller.needs_recovery(&rejected_owner));
+        assert_eq!(
+            service.controller.error().unwrap().kind,
+            ErrorKind::Conflict
+        );
+
+        retained
+            .fields
+            .lock()
+            .unwrap()
+            .insert(ResourceId::new("value").unwrap(), vec![20]);
+        service.begin_operation();
+        assert_eq!(
+            service.disable_profile(profiles[2]),
+            Err(SaveError::Recovering)
+        );
+        let retained_owner = OwnerKey::Manual {
+            profile: profiles[2],
+            feature: retained.descriptor().id,
+        };
+        assert!(service.controller.owner_record(&retained_owner).is_some());
+        assert!(service.controller.needs_recovery(&retained_owner));
+        let baseline = service.controller.baselines(&retained_owner);
+
+        service.begin_operation();
+        let result = if remove {
+            service.remove_profile(profiles[1])
+        } else {
+            service.disable_profile(profiles[1])
+        };
+        assert_eq!(result, Err(SaveError::Recovering));
+        assert!(
+            service.controller.status(&rejected_owner).is_none(),
+            "confirmed withdrawal must forget a rejected owner with no recovery evidence (remove={remove})"
+        );
+        assert_eq!(
+            service.controller.error().unwrap().kind,
+            ErrorKind::ExternalChange
+        );
+        assert!(service.controller.owners().contains(&retained_owner));
+        assert!(service.controller.owner_record(&retained_owner).is_some());
+        assert!(service.controller.needs_recovery(&retained_owner));
+        assert_eq!(service.controller.baselines(&retained_owner), baseline);
+        assert_eq!(retained.value(), vec![20]);
+        assert_eq!(scalar.value(), vec![12]);
+
+        retained
+            .fields
+            .lock()
+            .unwrap()
+            .insert(ResourceId::new("value").unwrap(), vec![12]);
+        service.begin_operation();
+        service.disable_profile(profiles[2]).unwrap();
+        service.begin_operation();
+        service.disable_profile(profiles[0]).unwrap();
+        assert!(service.controller.owners().is_empty());
+        assert!(service.controller.error().is_none());
+        assert_eq!(scalar.value(), vec![7]);
+        assert_eq!(retained.value(), vec![7]);
+    }
+}
+
+#[test]
+fn durable_operation_feedback_autonomous_saved_source_retry_clears_its_error() {
+    use super::{config::ModulePreference, TuningOperationState};
+    use crate::app::models::{AppStateStorage, RunningApps};
+    use std::time::{Duration, Instant};
+
+    let directory = OwnedDirectory::new();
+    let path = directory.0.join("state.json");
+    let mut state = AppStateStorage::test_fixture(|_| {});
+    state.try_save_to_path(&path).unwrap();
+    let module = Setting::new("scalar", false);
+    let mut registry = Registry::default();
+    registry.register(module.clone()).unwrap();
+    let mut service =
+        super::Tuning::from_registry(registry).headless(state, Box::new(SavedFile(path.clone())));
+    service.start_selected_recovery();
+    service
+        .create_profile(
+            "Saved configuration".into(),
+            vec![ModulePreference {
+                feature: module.descriptor().id,
+                enabled: false,
+                mode: ActivationMode::Manual,
+                config: module.config(12),
+            }],
+        )
+        .unwrap();
+    let unrelated = ModuleError::new(ErrorKind::Denied, "fixture action");
+    service.native_failure(unrelated.clone());
+    service.verify_saved().unwrap();
+    assert_eq!(service.operation_error, Some(unrelated));
+    service.begin_operation();
+
+    let original = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let runtime = super::TuningRuntime::start(
+        service,
+        Arc::new(tokio::sync::RwLock::new(RunningApps::default())),
+    );
+    let failed_until = Instant::now() + Duration::from_secs(3);
+    while runtime.snapshot().operation_error.is_none() && Instant::now() < failed_until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let failed = runtime.snapshot();
+    std::fs::write(&path, &original).unwrap();
+    let restored_until = Instant::now() + Duration::from_secs(3);
+    while runtime.snapshot().operation_error.is_some() && Instant::now() < restored_until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let restored = runtime.snapshot();
+    runtime.begin_shutdown();
+    let closing_until = Instant::now() + Duration::from_secs(3);
+    while !runtime.snapshot().shutdown_complete && Instant::now() < closing_until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    assert_eq!(
+        failed.operation_error.as_ref().unwrap().operation,
+        "saved configuration"
+    );
+    assert!(
+        restored.operation_error.is_none(),
+        "an automatic successful verification must clear its previous read failure without a new request: {:?}",
+        restored.operation_error
+    );
+    assert_eq!(restored.operation, TuningOperationState::Idle);
+    assert_eq!(restored.revision, failed.revision);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(*module.writes.lock().unwrap(), 0);
+    assert!(runtime.snapshot().shutdown_complete);
+}
+
 /// Account-scoped field reads use the current authenticated account, never the old logon.
 struct AccountSetting {
     setting: Arc<Setting>,

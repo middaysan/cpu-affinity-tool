@@ -189,6 +189,18 @@ impl Controller {
                 })
             })
     }
+    pub(crate) fn forget_withdrawn_rejections(&mut self, withdrawn: impl Fn(&OwnerKey) -> bool) {
+        let owners = self.owners();
+        let records = &self.records;
+        let pending = &self.pending;
+        // A rejected attempt can be forgotten only when no recovery evidence exists.
+        self.errors.retain(|owner, _| {
+            !withdrawn(owner)
+                || owners.contains(owner)
+                || records.contains_key(owner)
+                || pending.contains(owner)
+        });
+    }
     #[cfg(test)]
     pub fn fields(&self) -> Vec<FieldSnapshot> {
         self.fields

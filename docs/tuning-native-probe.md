@@ -12,7 +12,7 @@ Regression tests cover old-logon journal reload, unchanged first baseline, equal
 
 Six affected native round trips passed on this Windows host: Power Plan, Game Mode, Background clips, Windowed games, GPU preference after removing the temporary EXE, and the AC-only power preset. Each applied a real setting, read it, reloaded its isolated disk journal, disabled it and verified the original. The AC test also verified the untouched DC preference. Independent conditional rollback remained available throughout; existing user rules and application state were not replaced. These results verify stored settings and restoration, not FPS or latency gains.
 
-Current-request feedback regressions also cover retry error cleanup, partial restoration, the strongest remaining restart requirement and subsequent Apply. The disabled-platform regression verifies that retained Windows associations cannot reserve classic affinity/priority fields when System Tweaks is disabled; the local Linux-feature run on Windows is not native Linux evidence.
+Current-request feedback regressions also cover manual/autonomous retry error cleanup, partial restoration, the strongest remaining restart requirement and subsequent Apply. Successful saved-source verification removes only its preceding verification error. Confirmed withdrawal clears a rejected conflict only without field/record/pending evidence; real recovery errors and baselines remain. The disabled-platform regressions cover launch, manual Fix and monitoring: retained Windows associations cannot reserve classic affinity/priority fields when System Tweaks is disabled. The local Linux-feature run on Windows is not native Linux evidence.
 
 ## Current read-only evidence
 
