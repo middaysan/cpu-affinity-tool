@@ -24,6 +24,45 @@ pub(crate) struct OwnerRecord {
     pub config: ModuleEnvelope,
     pub activation: Option<ActivationFacts>,
 }
+impl OwnerRecord {
+    /// Check saved activation evidence before admitting it for recovery.
+    /// This validates the record; it does not prove that a process is still alive.
+    fn has_valid_activation(&self) -> bool {
+        match (&self.owner, &self.activation) {
+            // Manual changes do not depend on a running process.
+            (OwnerKey::Manual { .. }, None) => true,
+            (
+                OwnerKey::Session {
+                    pid,
+                    token,
+                    group,
+                    rule,
+                    ..
+                },
+                Some(facts),
+            ) => {
+                // PID alone is insufficient: the creation token must identify the same instance.
+                let same_process =
+                    *pid != 0 && *token != 0 && *pid == facts.pid && *token == facts.token;
+
+                // Reject missing, oversized or NUL-containing executable paths.
+                let valid_image = !facts.image.is_empty()
+                    && facts.image.len() <= 32767
+                    && !facts.image.contains('\0');
+
+                // Session ownership must name both a saved group and a saved rule.
+                let valid_rule_owner = !group.is_empty()
+                    && group.len() <= 128
+                    && !rule.is_empty()
+                    && rule.len() <= 128;
+
+                same_process && valid_image && valid_rule_owner
+            }
+            // Sessions require activation evidence; manual owners must not carry it.
+            _ => false,
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FieldRecord {
@@ -35,6 +74,23 @@ pub(crate) struct FieldRecord {
     pub desired: Vec<u8>,
     pub attempted: Option<Vec<u8>>,
     pub owners: Vec<OwnerKey>,
+}
+impl FieldRecord {
+    /// Check one field's target and bounds; the document checks cross-record references.
+    fn is_well_formed(&self) -> bool {
+        let values_within_limit = self.baseline.len() <= MAX_FIELD_BYTES
+            && self.current.len() <= MAX_FIELD_BYTES
+            && self.desired.len() <= MAX_FIELD_BYTES
+            && self
+                .attempted
+                .as_ref()
+                .is_none_or(|value| value.len() <= MAX_FIELD_BYTES);
+
+        // A retained field must have at least one owner, within the supported bound.
+        let valid_owner_count = !self.owners.is_empty() && self.owners.len() <= MAX_FIELD_OWNERS;
+
+        self.key.target.valid() && values_within_limit && valid_owner_count
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,46 +139,14 @@ impl RecoveryDocument {
             {
                 return Err(bad());
             }
-            match (&record.owner, &record.activation) {
-                (OwnerKey::Manual { .. }, None) => {}
-                (
-                    OwnerKey::Session {
-                        pid,
-                        token,
-                        group,
-                        rule,
-                        ..
-                    },
-                    Some(facts),
-                ) if *pid != 0
-                    && *token != 0
-                    && *pid == facts.pid
-                    && *token == facts.token
-                    && !facts.image.is_empty()
-                    && facts.image.len() <= 32767
-                    && !facts.image.contains('\0')
-                    && !group.is_empty()
-                    && group.len() <= 128
-                    && !rule.is_empty()
-                    && rule.len() <= 128 => {}
-                _ => return Err(bad()),
+            if !record.has_valid_activation() {
+                return Err(bad());
             }
         }
         let mut keys = BTreeSet::new();
         let mut used = BTreeSet::new();
         for field in &self.fields {
-            if !keys.insert(field.key.clone())
-                || !field.key.target.valid()
-                || field.baseline.len() > MAX_FIELD_BYTES
-                || field.current.len() > MAX_FIELD_BYTES
-                || field.desired.len() > MAX_FIELD_BYTES
-                || field
-                    .attempted
-                    .as_ref()
-                    .is_some_and(|v| v.len() > MAX_FIELD_BYTES)
-                || field.owners.is_empty()
-                || field.owners.len() > MAX_FIELD_OWNERS
-            {
+            if !keys.insert(field.key.clone()) || !field.is_well_formed() {
                 return Err(bad());
             }
             let mut unique = BTreeSet::new();

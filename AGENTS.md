@@ -540,6 +540,7 @@ Language rules:
 - all code comments must be in English
 - any text intended to be committed to Git should be in English
 - internal local-only operational docs may be English or Russian, but must stay truthful and consistent
+- keep complex validation conditions in focused, meaningfully named methods; split independent checks into named predicates and use brief comments to explain identity, bounds, or recovery requirements
 
 ## Repo-specific workflow deltas
 This repository's staged-workflow protocol is self-contained in root `AGENTS.md`. A global `AGENTS.md` may add general collaboration rules, but it is not a task-state source for this repository.
