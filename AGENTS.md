@@ -435,6 +435,9 @@ Linux-only backend dependencies inside `libs/os_api`:
 Do not invent dependency purpose just because a crate appears in `Cargo.toml`.
 
 ## Build, verification, CI, and release
+
+The root package requires Rust 1.95 or newer, matching the `eframe` / `egui` 0.36 desktop stack. CI and release workflows use the stable toolchain.
+
 Local verification commands:
 - `cargo test --manifest-path libs/os_api/Cargo.toml`
 - `cargo test --features windows --bin cpu-affinity-tool`

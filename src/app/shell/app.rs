@@ -641,6 +641,47 @@ mod tests {
     }
 
     #[test]
+    fn file_drops_keep_all_paths_without_reading_files_or_clearing_pending_input() {
+        #[derive(Debug)]
+        struct PathOnlyDrop(PathBuf);
+
+        impl egui::DroppedFile for PathOnlyDrop {
+            fn path(&self) -> &std::path::Path {
+                &self.0
+            }
+
+            fn bytes(&self) -> Result<Vec<u8>, String> {
+                panic!("Import must use the path, not read the dropped file contents");
+            }
+        }
+
+        let paths = vec![
+            PathBuf::from(r"C:\Games\Game one.exe"),
+            PathBuf::from(r"C:\Games\Game two.exe"),
+        ];
+        let input = egui::RawInput {
+            dropped_files: paths
+                .iter()
+                .map(|path| Arc::new(PathOnlyDrop(path.clone())) as egui::DroppedFileHandle)
+                .collect(),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut app = App::new_for_test(sample_state());
+        ctx.run_ui(input, |ui| app.handle_file_drops(ui.ctx()))
+            .textures_delta
+            .clear();
+        assert_eq!(app.state.ui.dropped_files.as_ref(), Some(&paths));
+
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.handle_file_drops(ui.ctx())
+        })
+        .textures_delta
+        .clear();
+        assert_eq!(app.state.ui.dropped_files.as_ref(), Some(&paths));
+    }
+
+    #[test]
     fn tray_quit_latch_ignores_show_in_a_later_logic_tick() {
         let mut app = App::new_for_test(sample_state());
         let ctx = egui::Context::default();
@@ -657,10 +698,11 @@ mod tests {
     fn p5_tray_quit_enters_draining_before_viewport_close() {
         let mut app = App::new_for_test(sample_state());
         let ctx = egui::Context::default();
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             assert!(app.handle_tray_commands(ui.ctx(), [TrayCmd::Quit]));
             assert!(app.closing_requested);
         });
+        output.textures_delta.clear();
         assert!(
             output.viewport_output.values().all(|viewport| {
                 !viewport
@@ -1346,7 +1388,7 @@ impl App {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .map(|file| file.path().to_path_buf())
                 .collect()
         });
 

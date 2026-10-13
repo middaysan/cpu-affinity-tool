@@ -2,6 +2,24 @@
 
 This file records reviewed RustSec findings that remain in the lockfile so release checks do not silently normalize known advisories.
 
+## Current dependency update (2026-10-13)
+
+- Rechecked both updated lockfiles against RustSec database commit `6aed84668c23d7f535077a9fe918bf1fa0f6a5bc` (2026-10-13).
+- The application and separate `libs/os_api` audits pass without advisory exceptions and report zero vulnerabilities. Both include the yanked-package lookup.
+- `wayland-scanner` is now `0.31.11` and accepts the patched `quick-xml 0.41.0`; both previously accepted XML advisories are resolved.
+- The application lockfile still reports `proc-macro-error 1.0.4` (`RUSTSEC-2024-0370`, unmaintained) and `glib 0.18.5` (`RUSTSEC-2024-0429`, unsound) as informational warnings. Neither package is present in the selected Windows stable or Linux beta dependency graph, as checked with `cargo tree --locked --features windows --target x86_64-pc-windows-msvc -i <package>` and the equivalent Linux feature/target command. They remain in Cargo's all-target/optional dependency resolution; do not replace upstream GTK components with private forks to alter an unused graph.
+- The separate OS API lockfile reports no informational warnings.
+- All direct registry dependencies match their latest non-yanked stable releases at the check date. A final `cargo update --dry-run --verbose` proposes no compatible changes. Three older TOML-family versions remain constrained by the unused GTK build graph's upstream exact requirements (`proc-macro-crate 2.0.2` pins `toml_datetime =0.6.3` and `toml_edit =0.20.2`); no application override or vendored fork is introduced.
+
+Current commands (no ignores):
+
+```bash
+cargo audit
+cargo audit --file libs/os_api/Cargo.lock
+```
+
+The assessments below are historical and apply to the versions recorded there.
+
 ## v1.6.3 recheck (2026-09-20)
 
 - Rechecked against RustSec database commit `d5c17953a895cf19e8d3ce66eaa42b6fcfe1fb16` (2026-09-19).
@@ -34,7 +52,7 @@ Decision:
 
 Accept this as a build-time, non-user-input exposure for `v1.6.0`. Do not remove Wayland beta support or vendor a private scanner fork solely to force the transitive upgrade. Re-evaluate when `wayland-scanner` accepts `quick-xml >=0.41.0`, when the GUI stack is updated, or if the dependency begins parsing untrusted XML.
 
-Audit command for the reviewed lockfile:
+Historical audit command for that lockfile:
 
 ```bash
 cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195

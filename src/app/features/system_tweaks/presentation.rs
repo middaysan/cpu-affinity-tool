@@ -249,9 +249,10 @@ mod tests {
         let original = draft.clone();
         let ctx = eframe::egui::Context::default();
         let mut save_allowed = true;
-        let _ = ctx.run_ui(eframe::egui::RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(eframe::egui::RawInput::default(), |ui| {
             save_allowed = edit_configuration(&InvalidEditor, ui, &mut draft);
         });
+        output.textures_delta.clear();
         assert!(!save_allowed);
         assert_eq!(draft, original);
     }

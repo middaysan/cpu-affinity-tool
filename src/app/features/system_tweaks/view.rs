@@ -976,7 +976,7 @@ mod tests {
             capability: Capability::Available,
             availability: TweakAvailability::Available,
         };
-        let output = egui::Context::default().run_ui(
+        let mut output = egui::Context::default().run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -986,6 +986,7 @@ mod tests {
             },
             |ui| draw_tweak(&mut app, ui, &card, false),
         );
+        output.textures_delta.clear();
         let buttons: Vec<_> = output
             .shapes
             .iter()
@@ -1729,9 +1730,10 @@ mod tests {
             "device row\n".repeat(70)
         );
         let context = egui::Context::default();
-        let output = context.run_ui(egui::RawInput::default(), |ui| {
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
             draw_observation(ui, &summary)
         });
+        output.textures_delta.clear();
         let text = output
             .shapes
             .iter()
@@ -1762,9 +1764,10 @@ mod tests {
                 code: 5,
             });
         let context = egui::Context::default();
-        let output = context.run_ui(egui::RawInput::default(), |ui| {
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
             draw_operation_error(ui, &error)
         });
+        output.textures_delta.clear();
         let text = output
             .shapes
             .iter()
@@ -1786,7 +1789,7 @@ mod tests {
             .with_detail("Long recovery detail.\n".repeat(40))
             .unwrap();
         let mut undo = egui::Rect::NOTHING;
-        let _output = egui::Context::default().run_ui(
+        let mut output = egui::Context::default().run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1800,6 +1803,7 @@ mod tests {
                 ui.label("Selected section content");
             },
         );
+        output.textures_delta.clear();
         assert!(
             undo.bottom() < 140.0,
             "expanded error details must leave room for Undo and section content: {undo:?}"
@@ -1819,8 +1823,11 @@ mod tests {
 
     fn rendered_text(app: &mut AppState) -> String {
         let context = egui::Context::default();
-        context
-            .run_ui(egui::RawInput::default(), |ui| draw_system_tweaks(app, ui))
+        let mut output =
+            context.run_ui(egui::RawInput::default(), |ui| draw_system_tweaks(app, ui));
+        // These headless tests inspect layout; there is no GPU renderer to apply textures.
+        output.textures_delta.clear();
+        output
             .shapes
             .iter()
             .filter_map(|shape| match &shape.shape {
@@ -1865,7 +1872,7 @@ mod tests {
         app: &mut AppState,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
-        context.run_ui(
+        let mut output = context.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1875,7 +1882,9 @@ mod tests {
                 ..Default::default()
             },
             |ui| draw_system_tweaks(app, ui),
-        )
+        );
+        output.textures_delta.clear();
+        output
     }
 
     fn section_text(output: &egui::FullOutput) -> String {

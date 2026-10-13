@@ -501,7 +501,7 @@ mod tests {
         ctx.set_fonts(ui_font_definitions());
         let mut name = String::from("New group");
         let mut input_rect = Rect::NOTHING;
-        let output = ctx.run_ui(
+        let mut output = ctx.run_ui(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(470.0, 600.0))),
                 ..Default::default()
@@ -511,6 +511,7 @@ mod tests {
                 input_rect = group_name_input(ui, &mut name).rect;
             },
         );
+        output.textures_delta.clear();
         let text = output
             .shapes
             .iter()
@@ -553,7 +554,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut tile_rects = Vec::new();
 
-        let _ = ctx.run_ui(
+        let mut output = ctx.run_ui(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(190.0, 500.0))),
                 ..Default::default()
@@ -562,6 +563,7 @@ mod tests {
                 tile_rects = draw_core_buttons_for_test(ui, &mut groups, &mut cores);
             },
         );
+        output.textures_delta.clear();
         tile_rects
     }
 
@@ -611,7 +613,7 @@ mod tests {
         ctx.set_fonts(ui_font_definitions());
         let mut measured = Vec::new();
 
-        let _ = ctx.run_ui(RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
             for (label, thread_index) in [("P19", 19), ("P127", 127)] {
                 let text = core_tile_text(label, thread_index);
                 let primary = ui.fonts_mut(|fonts| {
@@ -632,6 +634,7 @@ mod tests {
             }
         });
 
+        output.textures_delta.clear();
         for (primary, secondary) in measured {
             assert!(primary.x <= CORE_TILE_WIDTH - 4.0);
             assert!(secondary.x <= CORE_TILE_WIDTH - 4.0);

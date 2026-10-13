@@ -217,7 +217,7 @@ mod tests {
             } else {
                 pointer
             };
-            let _ = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 RawInput {
                     time: Some(time),
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 400.0))),
@@ -237,6 +237,7 @@ mod tests {
                     }
                 },
             );
+            output.textures_delta.clear();
         }
         assert!(popup.is_positive());
     }
@@ -263,7 +264,7 @@ mod tests {
             .collect::<Vec<_>>();
         for height in [240.0, 600.0] {
             for frame in 0..2 {
-                let _ = ctx.run_ui(
+                let mut output = ctx.run_ui(
                     RawInput {
                         screen_rect: Some(Rect::from_min_size(
                             Pos2::ZERO,
@@ -287,6 +288,7 @@ mod tests {
                         }
                     },
                 );
+                output.textures_delta.clear();
             }
         }
     }
