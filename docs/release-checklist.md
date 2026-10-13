@@ -14,7 +14,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Confirm no project docs claim full cross-platform support or Linux release parity.
 - Confirm `README.md` and `AGENTS.md` describe Windows as the primary stable released platform and Linux as a separate beta prerelease track without stable parity.
 - Confirm `README.md` documents the administrator/UAC expectation from `app.manifest`, including that saved-rule shortcut launches may show UAC.
-- Confirm `README.md` matches the current interface terminology: **Add installed...**, **Add file...**, **Affinity groups**, **Logs**, **Monitoring active**, the pause/resume icon, and **Settings**.
+- Confirm `README.md` matches the current interface terminology: **Add installed...**, **Add file...**, **Affinity groups**, **Logs**, **Monitoring active**, the pause/resume icon, and **App settings**.
 - Confirm the bundled Inter font and its SIL Open Font License file are present under `assets/fonts` and included in the release commit.
 - Confirm shortcut docs explain current elevated token Desktop placement, including credential-over-the-shoulder UAC placing shortcuts on the elevated account's Desktop.
 - Confirm version markers are aligned manually before tagging: release tag `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`. The workflow validates these again after the tag is pushed.
@@ -59,7 +59,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Reorder groups with both pointer drag-and-drop and the keyboard-accessible reorder path, restart, and verify order plus saved-rule shortcut identity.
 - Verify **Fix** on a mismatched running app reapplies affinity and priority without launching or focusing; it may show the protected/green state only after every OS setting call succeeds.
 - Verify **Focus** on a correctly configured running app only activates its existing window and does not reapply settings or start another process.
-- Verify Settings offers explicit System, Light, and Dark choices and applies each theme.
+- Verify App settings offers explicit System, Light, and Dark choices and applies each theme.
 - Verify Start minimized applies on the next Windows launch, restores from the tray, and falls back to a visible window without a tray.
 - With an existing interactive Task Scheduler startup task, verify Start minimized leaves no small Winit helper rectangle; restore, resize, minimize again and Quit (issue #20).
 - Verify hovering the monitor status exposes the scrollable PID/name/group list and that pause/resume stays to the left of the status.

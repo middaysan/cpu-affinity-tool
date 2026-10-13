@@ -47,8 +47,8 @@ This is a control tool, not a promise of better FPS.
 - Inspect launches, corrections, and monitoring events in **Logs**
 - Review locally saved **Crash reports** after a main application panic or native UI-loop error; reports are never uploaded automatically
 - Open the active data folder directly from **Logs**
-- Choose light, dark, or system theme in **Settings**
-- Enable **Start minimized** in Settings to open the next Windows session in the tray (not Windows login autostart)
+- Choose light, dark, or system theme in **App settings**
+- Enable **Start minimized** in App settings to open the next Windows session in the tray (not Windows login autostart)
 - Hover the monitor status to inspect verified process filenames, PIDs, and owning groups
 
 ## When it helps

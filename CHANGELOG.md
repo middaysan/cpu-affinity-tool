@@ -12,7 +12,8 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Changed
 
-- Rename the main tabs to **Affinity groups**, **System Tweaks**, and **Logs**, in that order. Remove the header CPU badge; CPU details remain available by hovering the application title. Place **New group** at the top right of the group list and remove its repeated heading.
+- Rename the main tabs to **Affinity groups**, **System Tweaks**, and **Logs**, in that order. Place **New group** at the top right of the group list and remove its repeated heading.
+- Simplify the header to **⚙ App settings** on the left and the version on the right. Keep the application name in the window title bar, CPU details on version hover, and the footer for monitoring controls and status.
 - Update direct and compatible transitive dependencies, including `eframe` / `egui` 0.36.2, `tray-icon` 0.26.1, Tokio 1.53.2 and Serde/JSON. Raise the minimum Rust toolchain to 1.95 for the GUI stack.
 
 ## [1.6.3] - 2026-09-20

@@ -1,3 +1,4 @@
+use crate::app::models::APP_VERSION;
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
     paint_focus_ring, row_fill, toned_sized_button, ToneRole, BUTTON_FONT_SIZE,
@@ -7,7 +8,7 @@ use eframe::egui::{self, Color32, Layout, Margin, Panel, RichText, Stroke};
 
 const NAVIGATION_SWITCH_WIDTH: f32 = 300.0;
 fn settings_menu(app: &mut AppState, ui: &mut egui::Ui) {
-    let button = ui.button(RichText::new("Settings").size(BUTTON_FONT_SIZE));
+    let button = ui.button(RichText::new("⚙ App settings").size(BUTTON_FONT_SIZE));
     egui::Popup::menu(&button)
         .width(220.0)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -136,11 +137,12 @@ pub fn draw_top_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                 .fill(ui.visuals().panel_fill)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("CPU Affinity Tool").heading().strong())
-                            .on_hover_text(format!("{cpu_model}\n{total_threads} logical threads"));
-
+                        settings_menu(app, ui);
                         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                            settings_menu(app, ui);
+                            ui.label(RichText::new(format!("v{APP_VERSION}")).size(8.5).weak())
+                                .on_hover_text(format!(
+                                    "{cpu_model}\n{total_threads} logical threads"
+                                ));
                         });
                     });
 
@@ -174,7 +176,7 @@ mod tests {
     use std::sync::{Arc, RwLock};
 
     #[test]
-    fn groups_navigation_and_creation_action_are_in_their_panels() {
+    fn compact_shell_controls_have_one_clear_location() {
         let mut app = AppState::new_for_test(
             Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
             4,
@@ -190,6 +192,7 @@ mod tests {
                 },
                 |ui| {
                     draw_top_panel(&mut app, ui);
+                    crate::app::shell::presenters::footer::draw_bottom_panel(&mut app, ui);
                     crate::app::shell::presenters::central::draw_central_panel(&mut app, ui);
                 },
             )
@@ -202,6 +205,7 @@ mod tests {
             },
             |ui| {
                 draw_top_panel(&mut app, ui);
+                crate::app::shell::presenters::footer::draw_bottom_panel(&mut app, ui);
                 crate::app::shell::presenters::central::draw_central_panel(&mut app, ui);
             },
         );
@@ -215,7 +219,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(!labels.iter().any(|(label, _)| label == "CPU"));
-        assert!(labels.iter().any(|(label, _)| label == "CPU Affinity Tool"));
+        assert!(!labels.iter().any(|(label, _)| label == "CPU Affinity Tool"));
         let mut expected = vec!["Affinity groups"];
         if app.modules_enabled() {
             expected.push("System Tweaks");
@@ -249,7 +253,8 @@ mod tests {
                 .iter()
                 .find_map(|shape| match &shape.shape {
                     egui::Shape::Text(text) if text.galley.text() == label => {
-                        Some(Rect::from_min_size(text.pos, text.galley.size()))
+                        // Right-aligned text uses an anchor, not its visible top-left corner.
+                        Some(text.galley.rect.translate(text.pos.to_vec2()))
                     }
                     _ => None,
                 })
@@ -258,6 +263,19 @@ mod tests {
         let new_group = text_rect("+ New group");
         assert!(new_group.top() > text_rect("Logs").bottom());
         assert!(new_group.left() > 280.0 && new_group.right() <= 400.0);
+        let settings = text_rect("⚙ App settings");
+        let version_text = format!("v{}", crate::app::models::APP_VERSION);
+        let version = text_rect(&version_text);
+        assert!(settings.left() <= 20.0 && settings.bottom() < text_rect("Affinity groups").top());
+        assert!(version.left() > 340.0 && version.right() <= 400.0);
+        assert!((version.center().y - settings.center().y).abs() < 8.0);
+        assert_eq!(
+            labels
+                .iter()
+                .filter(|(label, _)| label == &version_text)
+                .count(),
+            1
+        );
         let position = new_group.center();
         // Exercise the relocated button through normal pointer input.
         for pressed in [true, false] {
@@ -281,6 +299,7 @@ mod tests {
                     },
                     |ui| {
                         draw_top_panel(&mut app, ui);
+                        crate::app::shell::presenters::footer::draw_bottom_panel(&mut app, ui);
                         crate::app::shell::presenters::central::draw_central_panel(&mut app, ui);
                     },
                 )

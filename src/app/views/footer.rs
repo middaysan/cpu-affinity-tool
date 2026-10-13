@@ -1,4 +1,3 @@
-use crate::app::models::APP_VERSION;
 use crate::app::runtime::{AppState, TrackedProcessSnapshot};
 use crate::app::shell::presenters::shared_elements::{
     inter_medium_family, palette, success_color, UiPalette, BUTTON_FONT_SIZE,
@@ -165,15 +164,6 @@ pub fn draw_bottom_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                         ui.label(RichText::new("Tracked processes").strong());
                         ui.add_space(2.0);
                         draw_tracked_process_list(ui, &tracked_processes);
-                    });
-
-                    ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("v{APP_VERSION}"))
-                                .size(8.5)
-                                .color(colors.text_muted),
-                        );
-
                     });
             });
         });

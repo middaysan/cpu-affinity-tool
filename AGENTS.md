@@ -114,7 +114,7 @@ Important root files:
 
 ## Runtime architecture
 
-The main navigation is Affinity groups / System Tweaks / Logs on Windows; System Tweaks remains absent on Linux. The group list has no repeated heading; its New group button is at the top right, absent from the shared header. The header has no CPU badge; hovering the application title shows the CPU model and logical thread count.
+The main navigation is Affinity groups / System Tweaks / Logs on Windows; System Tweaks remains absent on Linux. The group list has no repeated heading; its New group button is at the top right, absent from the shared header. The top row contains App settings with a gear icon on the left and the application version on the right; version hover shows the CPU model and logical thread count. The application title appears only in the native window title bar. The footer contains only monitoring controls/status and the tracked-process hover list.
 
 Layers:
 - `shell` owns the top-level `eframe::App`, tray/window lifecycle, route enums, UI sessions, presenter dispatch, and repaint policy
@@ -156,7 +156,7 @@ Current runtime split:
   - installed app picker session and cached catalog
   - crash-report delete confirmations and the last report action message
   - Windows Event Log preference action error state
-  - application Settings menu startup action error state
+  - App settings menu startup action error state
   - System Tweaks section selection, help/undo confirmation and qualified saved-EXE target selection; existing saved profiles/associations remain compatible restoration data
 - `features::rules::RulesContext` owns logical `GroupId` / `RuleId` allocation, index projection, and persisted `rule_identities`
 - `features::execution::RuntimeRegistry` owns runtime process tracking:
@@ -171,7 +171,7 @@ Current runtime split:
 - workers emit typed `shell::events::ShellEvent` messages and do not hold `egui::Context`
 - Windows crash-report discovery uses an initial/on-demand single-flight standard thread plus at most one coalesced follow-up refresh; egui rendering reads only the last completed snapshot and synchronizes its newest validated report into the retained Logs context; the Linux beta does not start this worker or expose the Crash reports route
 - Windows Event Log diagnostics uses a separate single-flight worker. It is never started by construction, focus gain, tray restore, or periodic refresh: after the first rendered UI frame it can run one bounded lookup when the persisted enabled-by-default preference allows it, with at most one delayed retry after a successful empty result.
-- Settings offers a persisted `start_minimized` preference: the next Windows GUI launch hides to the tray only when a usable tray runtime exists. It defaults to false when absent and remains readable in schema v10 and v11. Changing the preference does not hide the current window. The app does not register Windows login startup or accept `--start-in-tray`.
+- App settings offers a persisted `start_minimized` preference: the next Windows GUI launch hides to the tray only when a usable tray runtime exists. It defaults to false when absent and remains readable in schema v10 and v11. Changing the preference does not hide the current window. The app does not register Windows login startup or accept `--start-in-tray`.
 - Tray hiding also normalizes only the calling GUI thread's exact layered/nonactivating `Winit Thread Event Target` popup to a restored zero-sized state. The helper stays visible for Winit's paint-event delivery; other windows are not hidden or restored. Native regression coverage reproduces a leftover minimized helper rectangle; the Task Scheduler login scenario remains a manual smoke check.
 - Hovering the footer monitor status opens a bounded, scrollable tracked-process list; there is no separate list button. The list stays open while hovered, with a short gap-crossing grace period. It includes only saved rules matching the runtime instance's logical group/rule owner, so duplicate executable rules do not duplicate or mislabel rows. It inspects only token-bearing runtime instances and verifies the current image path and creation token together before displaying the executable filename, PID, and group. Failed inspection or a reused PID is omitted; the popup never enumerates all system processes.
 
