@@ -6,6 +6,10 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+### Added
+
+- A manual Memory integrity guide in **System Tweaks > Check PC**, with a direct Windows Security Core isolation shortcut. The app does not change this security setting or manage its Undo.
+
 ### Fixed
 
 - Remove the leftover minimized Winit helper rectangle when hiding to the tray, including **Start minimized**. Keep the event helper available for paint delivery and leave unrelated windows untouched (issue #20).

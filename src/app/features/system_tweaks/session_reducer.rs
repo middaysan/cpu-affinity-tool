@@ -39,6 +39,7 @@ pub(crate) enum TuningRequest {
     },
     ConfirmDisplayTweak,
     RefreshPcChecks,
+    OpenCoreIsolation,
     ModuleAction {
         feature: FeatureId,
         action: super::presentation::ModuleAction,
@@ -619,6 +620,17 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             service.pc_checks = super::pc_checks::collect();
             Ok(())
         }
+        // This opens a manual guide destination, without acquiring a setting or Undo baseline.
+        TuningRequest::OpenCoreIsolation => os_api::gaming_diagnostics::open_settings(
+            os_api::gaming_diagnostics::SettingsPage::CoreIsolation,
+        )
+        .map_err(|error| {
+            service.native_failure(
+                ModuleError::new(ErrorKind::Unsupported, "Open Windows Security")
+                    .with_detail(error.to_string())
+                    .expect("bounded settings launch error"),
+            )
+        }),
         TuningRequest::ModuleAction { feature, action } => service
             .registry()
             .get(&feature)

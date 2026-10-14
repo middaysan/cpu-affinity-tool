@@ -1,4 +1,4 @@
-//! Read-only gaming observations and a closed set of native Settings destinations.
+//! Read-only gaming observations and fixed Windows Settings/Security destinations.
 //! No audio content, device restarts, driver policies or registry writes.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,9 +10,10 @@ pub enum SettingsPage {
     Display,
     Sound,
     Devices,
+    CoreIsolation,
 }
 impl SettingsPage {
-    /// Microsoft Launch Windows Settings URI reference. No caller-supplied URI.
+    /// Fixed Microsoft Windows Settings/Windows Security shortcuts; no caller-supplied URI.
     pub const fn uri(self) -> &'static str {
         match self {
             Self::GameMode => "ms-settings:gaming-gamemode",
@@ -22,6 +23,7 @@ impl SettingsPage {
             Self::Display => "ms-settings:display",
             Self::Sound => "ms-settings:sound",
             Self::Devices => "ms-settings:connecteddevices",
+            Self::CoreIsolation => "windowsdefender://coreisolation/",
         }
     }
 }
@@ -223,6 +225,10 @@ mod tests {
 
     #[test]
     fn gaming_settings_uris_are_fixed_native_pages() {
+        assert_eq!(
+            SettingsPage::CoreIsolation.uri(),
+            "windowsdefender://coreisolation/"
+        );
         assert_eq!(SettingsPage::GameMode.uri(), "ms-settings:gaming-gamemode");
         assert_eq!(
             SettingsPage::BackgroundCapture.uri(),

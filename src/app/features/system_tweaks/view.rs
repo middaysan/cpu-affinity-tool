@@ -21,6 +21,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+const MEMORY_INTEGRITY_HELP: &str = "Opens Windows Security > Device security > Core isolation. Find Memory integrity on that page; its label is translated in localized Windows. Windows does not expose a supported way for this app to highlight that switch.\n\nMemory integrity protects the Windows kernel. Turning it off reduces protection; a performance gain is not guaranteed. Choose the setting yourself in Windows and restart only if Windows asks you to.\n\nThis app does not read or change this setting and does not save an Undo baseline. To restore your choice, return to the same Windows page. If the shortcut is unavailable, open Windows Security > Device security > Core isolation details manually.";
+
 pub(crate) fn save_error_message(error: SaveError) -> &'static str {
     match error {
         SaveError::Storage => "Could not save. Your previous settings are retained.",
@@ -361,6 +363,39 @@ fn draw_pc_checks(app: &mut AppState, ui: &mut egui::Ui, pending: bool) {
                 }
             });
     }
+    ui.add_space(8.0);
+    section_heading(ui, "WINDOWS SECURITY", Some("Manual choice"));
+    glass_frame(ui).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - 112.0 - ui.spacing().item_spacing.x).max(0.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, 25.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(egui::RichText::new("Memory integrity").size(11.0).strong());
+                    help_button(app, ui, "Memory integrity", MEMORY_INTEGRITY_HELP);
+                },
+            );
+            if ui
+                .add_enabled(
+                    !pending,
+                    egui::Button::new(egui::RichText::new("Open settings").size(10.5))
+                        .min_size(egui::vec2(112.0, 25.0)),
+                )
+                .clicked()
+            {
+                submit(app, TuningRequest::OpenCoreIsolation);
+            }
+        });
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("Turning this off reduces protection · Undo in Windows")
+                    .size(9.5)
+                    .color(palette(ui).text_secondary),
+            )
+            .wrap(),
+        );
+    });
 }
 fn draw_operation_state(app: &mut AppState, ui: &mut egui::Ui) {
     let snapshot = app.tuning_snapshot();
@@ -1982,6 +2017,26 @@ mod tests {
             section_text(&output).contains("FOR GAMES"),
             "system settings are selected initially"
         );
+        finish(&mut app);
+    }
+
+    #[test]
+    fn pc_checks_has_manual_memory_integrity_guide_without_running_checks() {
+        let mut app =
+            empty_modules_app(Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))));
+        app.ui.tuning.selected_section = TuningPageSection::PcChecks;
+        let revision = app.tuning_snapshot().revision;
+        let context = egui::Context::default();
+        section_frame(&context, &mut app, vec![]);
+        let output = section_frame(&context, &mut app, vec![]);
+        let text = section_text(&output);
+        assert!(text.contains("Memory integrity"));
+        assert!(text.contains("Open settings"));
+        assert!(text.contains("Turning this off reduces protection"));
+        assert!(text.contains("Undo in Windows"));
+        assert!(app.tuning_snapshot().pc_checks.is_empty());
+        assert_eq!(app.tuning_snapshot().revision, revision);
+        assert_eq!(app.tuning_snapshot().operation, TuningOperationState::Idle);
         finish(&mut app);
     }
 
