@@ -145,6 +145,7 @@ mod preference_contract_tests {
                 let legacy = TargetIdentity::User {
                     sid: "S-1-5-21-1".into(),
                     logon,
+                    session: None,
                 };
                 assert_eq!(
                     module.canonical_target(&legacy).unwrap(),
@@ -159,6 +160,7 @@ mod preference_contract_tests {
                     .canonical_target(&TargetIdentity::User {
                         sid: "S-1-5-21-2".into(),
                         logon: 78,
+                        session: None,
                     })
                     .unwrap(),
                 expected
@@ -195,6 +197,7 @@ mod preference_contract_tests {
                 canonical_account_target(&TargetIdentity::User {
                     sid: sid.into(),
                     logon: 77,
+                    session: None,
                 })
                 .is_err(),
                 "{sid}"
@@ -208,6 +211,7 @@ mod preference_contract_tests {
         let missing_logon = TargetIdentity::User {
             sid: "S-1-5-21-1".into(),
             logon: 0,
+            session: None,
         };
         assert!(!missing_logon.valid());
         assert!(canonical_account_target(&missing_logon).is_err());
@@ -239,10 +243,12 @@ mod preference_contract_tests {
         let old = TargetIdentity::User {
             sid: "S-1-5-21-1".into(),
             logon: 77,
+            session: None,
         };
         let current = TargetIdentity::User {
             sid: "S-1-5-21-1".into(),
             logon: 78,
+            session: None,
         };
         let modules: Vec<Arc<dyn Module>> = vec![
             Arc::new(mouse_acceleration::MouseAcceleration),
@@ -278,6 +284,7 @@ mod preference_contract_tests {
                     device_name: "display1".into(),
                     adapter_id: "adapter1".into(),
                     monitor_id: "monitor1".into(),
+                    user_session: None,
                 })
                 .unwrap(),
         };
@@ -295,6 +302,7 @@ mod preference_contract_tests {
         let target = TargetIdentity::User {
             sid: "S-1-5-21-1".into(),
             logon: 77,
+            session: None,
         };
         for (module, id, field_name, desired) in [
             (
@@ -357,6 +365,7 @@ mod preference_contract_tests {
                     device_name: "display1".into(),
                     adapter_id: "adapter1".into(),
                     monitor_id: "monitor1".into(),
+                    user_session: None,
                 })
                 .unwrap(),
         };

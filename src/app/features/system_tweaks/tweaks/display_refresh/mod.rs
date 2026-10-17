@@ -53,6 +53,7 @@ fn display(target: &TargetIdentity) -> Result<DisplayTarget, ModuleError> {
     if !(TargetIdentity::User {
         sid: value.user_sid.clone(),
         logon: value.user_logon,
+        session: value.user_session,
     })
     .valid()
         || value.device_name.is_empty()

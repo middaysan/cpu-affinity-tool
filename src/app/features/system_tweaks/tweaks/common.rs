@@ -65,20 +65,26 @@ pub(super) fn automatic_modes() -> Vec<ActivationMode> {
     vec![ActivationMode::Session, ActivationMode::ForegroundSession]
 }
 pub(super) fn user_targets() -> Vec<TargetIdentity> {
-    gaming::interactive_user()
+    gaming::interactive_session_user()
         .map(|user| {
             vec![TargetIdentity::User {
                 sid: user.sid,
                 logon: user.logon,
+                session: user.session,
             }]
         })
         .unwrap_or_default()
 }
 pub(super) fn user(target: &TargetIdentity) -> Result<gaming::UserIdentity, ModuleError> {
     match target {
-        TargetIdentity::User { sid, logon } if target.valid() => Ok(gaming::UserIdentity {
+        TargetIdentity::User {
+            sid,
+            logon,
+            session,
+        } if target.valid() => Ok(gaming::UserIdentity {
             sid: sid.clone(),
             logon: *logon,
+            session: *session,
         }),
         _ => Err(error(ErrorKind::Unsupported, "user target")),
     }
@@ -98,16 +104,19 @@ pub(crate) fn canonical_account_target(
     }
 }
 pub(super) fn account_targets() -> Vec<TargetIdentity> {
-    user_targets()
-        .iter()
-        .filter_map(|target| canonical_account_target(target).ok())
-        .collect()
+    gaming::interactive_user()
+        .map(|user| vec![TargetIdentity::Account { sid: user.sid }])
+        .unwrap_or_default()
 }
 pub(super) fn account_user(target: &TargetIdentity) -> Result<gaming::UserIdentity, ModuleError> {
     let TargetIdentity::Account { sid } = canonical_account_target(target)? else {
         return Err(error(ErrorKind::Unsupported, "account target"));
     };
-    Ok(gaming::UserIdentity { sid, logon: 0 })
+    Ok(gaming::UserIdentity {
+        sid,
+        logon: 0,
+        session: None,
+    })
 }
 pub(super) fn observed_account_user(
     target: &TargetIdentity,
@@ -153,6 +162,7 @@ pub(super) fn error(kind: ErrorKind, operation: &'static str) -> ModuleError {
 }
 pub(super) fn native(operation: &'static str, failure: GamingError) -> ModuleError {
     let (kind, code) = match &failure {
+        GamingError::Session { code, .. } => (ErrorKind::SessionUnavailable, *code),
         GamingError::Unsupported(_) => (ErrorKind::Unsupported, None),
         GamingError::Denied { code, .. } => (ErrorKind::Denied, Some(*code)),
         GamingError::Native { code, .. } => (
@@ -200,16 +210,11 @@ pub(super) fn observation(result: Result<String, ModuleError>) -> ModuleObservat
     }
 }
 pub(super) fn observed_user(target: &TargetIdentity) -> Result<gaming::UserIdentity, ModuleError> {
-    let actual = gaming::interactive_user().map_err(|e| native("interactive user", e))?;
     if matches!(target, TargetIdentity::Machine) {
-        return Ok(actual);
+        return gaming::interactive_session_user().map_err(|e| native("interactive user", e));
     }
-    let expected = user(target)?;
-    if actual == expected {
-        Ok(expected)
-    } else {
-        Err(native("interactive user", GamingError::Changed))
-    }
+    // The native read already pins and rechecks this exact account/session.
+    user(target)
 }
 pub(super) fn u32_value(bytes: &[u8]) -> Result<u32, ModuleError> {
     Ok(u32::from_le_bytes(bytes.try_into().map_err(|_| {

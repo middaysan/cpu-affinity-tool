@@ -1108,6 +1108,7 @@ impl Module for SessionSetting {
             TargetIdentity::User {
                 sid: "S-1-5-21-1".into(),
                 logon,
+                session: None,
             }
         }]
     }
@@ -1427,6 +1428,7 @@ fn durable_account_old_logon_reload_keeps_baseline_and_undo_available() {
             TargetIdentity::User {
                 sid: "S-1-5-21-1".into(),
                 logon: 78,
+                session: None,
             },
         )
         .unwrap();
@@ -1537,6 +1539,7 @@ fn durable_account_ambiguous_legacy_aliases_do_not_overwrite_evidence() {
         alias.key.target = TargetIdentity::User {
             sid: "S-1-5-21-1".into(),
             logon: 78,
+            session: None,
         };
         alias.baseline = vec![44];
         document.fields.push(alias);

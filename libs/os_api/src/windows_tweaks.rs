@@ -34,6 +34,7 @@ impl GpuTarget {
         UserIdentity {
             sid: self.user_sid.clone(),
             logon: self.user_logon,
+            session: None,
         }
     }
 }
@@ -47,12 +48,15 @@ pub struct DisplayTarget {
     pub device_name: String,
     pub adapter_id: String,
     pub monitor_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_session: Option<crate::gaming::InteractiveSession>,
 }
 impl DisplayTarget {
     pub fn user(&self) -> UserIdentity {
         UserIdentity {
             sid: self.user_sid.clone(),
             logon: self.user_logon,
+            session: self.user_session,
         }
     }
 }

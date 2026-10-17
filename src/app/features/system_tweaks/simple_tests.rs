@@ -173,6 +173,7 @@ impl Module for Setting {
             TargetIdentity::User {
                 sid: "S-1-5-21-1".into(),
                 logon: 1,
+                session: None,
             }
         } else {
             TargetIdentity::Machine

@@ -13,10 +13,12 @@ System Tweaks has a Windows-only production catalog and a compact manual Apply/U
 The 2026-10-18 actual debug-MCP GUI run passed all seven compact managed-card
 Apply/restart/Undo paths and display Keep/restart/Undo, expiry and close-before-
 confirmation paths with independent native readback and final restoration.
-See `tuning-native-probe.md` for the host scope. The separate session-bound
-logout/login row below remains pending actual user sign-out; its prepared task
-and same-logon refusal do not count as that result. Explorer drag/drop remains
-the separately recorded known failing row.
+See `tuning-native-probe.md` for the host scope. The user subsequently signed
+out/in; the corrected build passed real retained-journal retirement, current
+value preservation and a second startup through MCP while the old LSA record
+still existed. This covers the session-bound row on this host; it is not a
+reboot/RDP/OEM matrix. Explorer drag/drop remains the separately recorded known
+failing row.
 
 | Scenario | Expected result | Release-blocking if it fails |
 | --- | --- | --- |
@@ -41,7 +43,7 @@ the separately recorded known failing row.
 | Compact **System Tweaks** | **System**, **GPU / network** and **Check PC** sections expose the current compact catalog, with direct Apply/Undo, current values, scope and help. Opening or switching sections changes no setting; Check PC runs only on request. Saved manual changes survive restart and remain undoable. Profiles and triggers are not exposed; previous owned settings appear only in the conditional legacy Undo block. | Yes |
 | Display refresh confirmation | A compatible refresh change requires confirmation within 15 seconds. Expiry or closing before confirmation attempts exact restoration; failed restoration remains visible with its recovery evidence. | Yes |
 | Unknown tuning data | Future/unsupported configuration remains retained and read-only without raw payloads or an enabled apply action. Existing owned fields retain recovery evidence and cannot be silently replaced by a new baseline. | Yes |
-| Session-bound tweak after a new Windows logon | Applied mouse/accessibility/display settings never authorize writes into another logon. When a verified same-account native query proves the old session absent, its old target and shared owners retire durably and unrelated tweaks remain usable. A still-present session or failed query retains evidence and reports recovery required. | Yes |
+| Session-bound tweak after a new Windows logon | Applied mouse/accessibility/display settings never authorize writes into another interactive instance. Verified WTS lifetime can retire the old target/shared owners even while its LSA token record remains. New targets include SessionId/LogonTime to handle number reuse; legacy targets require sufficient native evidence. Lock/RDP disconnect stay live. Denied, incomplete or racing queries retain evidence and show session-verification failure. | Yes |
 | Mixed accessibility shortcut flags | Apply with one inactive shortcut requiring change and others already off. Undo restores only the changed flags, preserving subsequent Windows changes to untouched siblings. Equal existing owners retain their shared original until the last Undo. | Yes |
 | Pending or refused tweak/rule save | The UI stays responsive; failed saving preserves previous saved settings, logical identities and the current editable rule draft. Pending actions show their own result, and a stale settings edit cannot overwrite a newer saved preference. | Yes |
 | Hidden polling and bounded System Tweaks shutdown | Hide/restore does not lose pending status. Hidden pages skip capability inventory while owned-field inspection, display-confirmation expiry and recovery continue. Close and tray Quit stop new launches and poll cleanup; timeout/fault reports recovery required without claiming restoration or starting a replacement worker. Saved manual changes remain until explicitly undone. | Yes |

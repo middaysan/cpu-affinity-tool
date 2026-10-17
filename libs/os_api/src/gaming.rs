@@ -1,12 +1,25 @@
 //! Small typed Windows gaming-setting values. Native functions live in Windows.
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(windows, test))]
+pub(crate) mod session;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GamingError {
     Unsupported(&'static str),
-    Denied { operation: &'static str, code: u32 },
-    Native { operation: &'static str, code: u32 },
+    Denied {
+        operation: &'static str,
+        code: u32,
+    },
+    Native {
+        operation: &'static str,
+        code: u32,
+    },
     Changed,
+    Session {
+        reason: &'static str,
+        code: Option<u32>,
+    },
     InvalidValue,
 }
 impl std::fmt::Display for GamingError {
@@ -20,6 +33,22 @@ impl std::error::Error for GamingError {}
 pub struct UserIdentity {
     pub sid: String,
     pub logon: u64,
+    pub session: Option<InteractiveSession>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InteractiveSession {
+    pub session_id: u32,
+    pub logon_time: i64,
+}
+impl InteractiveSession {
+    pub fn valid(self) -> bool {
+        self.session_id != 0
+            && self.session_id != u32::MAX
+            && self.logon_time > 0
+            && self.logon_time != i64::MAX
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -35,7 +64,7 @@ pub(crate) fn session_expiry_with(
     {
         return Err(GamingError::Changed);
     }
-    if expected == current {
+    if expected.logon == current.logon && expected.session.is_none() {
         return Ok(false);
     }
     query(expected.logon)
@@ -75,8 +104,17 @@ pub(crate) fn verified_session_user(
     actual: Result<UserIdentity, GamingError>,
 ) -> Result<UserIdentity, GamingError> {
     let actual = actual?;
-    if expected == &actual {
+    if expected.sid == actual.sid
+        && expected.logon == actual.logon
+        && expected
+            .session
+            .is_none_or(|epoch| Some(epoch) == actual.session)
+    {
         Ok(actual)
+    } else if expected.sid == actual.sid {
+        Err(session::unknown(
+            "The saved interactive session is not the current desktop",
+        ))
     } else {
         Err(GamingError::Changed)
     }
@@ -250,10 +288,10 @@ pub const POWER_MODE_PERFORMANCE: GuidValue =
 pub use crate::windows::gaming::read_user_setting_validation;
 #[cfg(windows)]
 pub use crate::windows::gaming::{
-    cpu_topology, interactive_user, power_schemes, read_accessibility, read_cpu_sets, read_mouse,
-    read_power_mode, read_power_plan, read_priority, read_process_policy, session_has_ended,
-    write_accessibility, write_cpu_sets, write_mouse, write_power_mode, write_power_plan,
-    write_priority, write_process_policy,
+    cpu_topology, interactive_session_user, interactive_user, power_schemes, read_accessibility,
+    read_cpu_sets, read_mouse, read_power_mode, read_power_plan, read_priority,
+    read_process_policy, session_has_ended, write_accessibility, write_cpu_sets, write_mouse,
+    write_power_mode, write_power_plan, write_priority, write_process_policy,
 };
 
 #[cfg(not(windows))]
@@ -269,6 +307,7 @@ mod unavailable {
     }
     functions! {
         fn interactive_user() -> UserIdentity;
+        fn interactive_session_user() -> UserIdentity;
         fn session_has_ended(user:&UserIdentity) -> bool;
         fn power_schemes(user:&UserIdentity) -> Vec<PowerScheme>;
         fn read_power_plan(user:&UserIdentity) -> GuidValue;
@@ -300,10 +339,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recorded_epoch_protects_reused_luid_and_legacy_queries_stay_conservative() {
+        let old = UserIdentity {
+            sid: "S-1-5-21-1".into(),
+            logon: 7,
+            session: Some(InteractiveSession {
+                session_id: 1,
+                logon_time: 10,
+            }),
+        };
+        let current = UserIdentity {
+            session: Some(InteractiveSession {
+                session_id: 1,
+                logon_time: 20,
+            }),
+            ..old.clone()
+        };
+        assert!(matches!(
+            verified_session_user(&old, Ok(current.clone())),
+            Err(GamingError::Session { .. })
+        ));
+        assert!(session_expiry_with(&old, &current, |_| Ok(true)).unwrap());
+        let legacy = UserIdentity {
+            session: None,
+            ..old.clone()
+        };
+        assert_eq!(
+            verified_session_user(&legacy, Ok(current.clone())),
+            Ok(current.clone())
+        );
+        assert!(
+            !session_expiry_with(&legacy, &current, |_| panic!(
+                "legacy LUID alone cannot prove reuse"
+            ))
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn session_expiry_requires_same_account_and_positive_native_evidence() {
         let old = UserIdentity {
             sid: "S-1-5-21-1".into(),
             logon: 7,
+            session: None,
         };
         let current = UserIdentity {
             logon: 8,
@@ -348,6 +426,7 @@ mod tests {
         let old = UserIdentity {
             sid: "S-1-5-21-1".into(),
             logon: 77,
+            session: None,
         };
         let current = UserIdentity {
             logon: 78,
@@ -368,6 +447,7 @@ mod tests {
         let different = UserIdentity {
             sid: "S-1-5-21-2".into(),
             logon: 78,
+            session: None,
         };
         assert_eq!(
             admitted_account_user(&old, Ok(different)),
@@ -384,6 +464,7 @@ mod tests {
         let old = UserIdentity {
             sid: "S-1-5-21-1".into(),
             logon: 77,
+            session: None,
         };
         let current = UserIdentity {
             logon: 78,
@@ -391,7 +472,9 @@ mod tests {
         };
         assert_eq!(
             verified_session_user(&old, Ok(current)),
-            Err(GamingError::Changed)
+            Err(session::unknown(
+                "The saved interactive session is not the current desktop"
+            ))
         );
         assert_eq!(
             verified_session_user(&old, Ok(old.clone())),

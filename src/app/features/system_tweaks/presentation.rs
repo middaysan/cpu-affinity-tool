@@ -38,6 +38,7 @@ pub(crate) fn card_controls(
 
 pub(crate) fn status_label(status: ModuleStatus) -> &'static str {
     match status {
+        ModuleStatus::SessionUnverified => "Session could not be verified",
         ModuleStatus::Unmanaged => "Unmanaged",
         ModuleStatus::Unsupported => "Unavailable",
         ModuleStatus::PermissionDenied => "Permission denied",

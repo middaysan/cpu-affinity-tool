@@ -90,6 +90,8 @@ pub enum TargetIdentity {
     User {
         sid: String,
         logon: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<os_api::gaming::InteractiveSession>,
     },
     Process {
         pid: u32,
@@ -113,8 +115,16 @@ impl TargetIdentity {
         match self {
             Self::Machine => true,
             Self::Account { sid } => os_api::gaming::valid_account_sid(sid),
-            Self::User { sid, logon } => {
-                sid.starts_with("S-1-") && sid.len() <= 184 && !sid.contains('\0') && *logon != 0
+            Self::User {
+                sid,
+                logon,
+                session,
+            } => {
+                sid.starts_with("S-1-")
+                    && sid.len() <= 184
+                    && !sid.contains('\0')
+                    && *logon != 0
+                    && session.is_none_or(os_api::gaming::InteractiveSession::valid)
             }
             Self::Process {
                 pid,
@@ -168,6 +178,7 @@ pub enum Capability {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
+    SessionUnavailable,
     InvalidConfig,
     Unsupported,
     Denied,
@@ -227,6 +238,7 @@ pub struct ModuleDescriptor {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleStatus {
+    SessionUnverified,
     Unmanaged,
     Unsupported,
     PermissionDenied,

@@ -1,5 +1,6 @@
 //! Narrow, conditional Windows operations. All process work uses one retained handle.
 pub(crate) mod cpu_power;
+mod session;
 use super::{OS, common::HandleGuard};
 use crate::gaming::*;
 use crate::tuning::TuningNativeError;
@@ -100,7 +101,7 @@ fn caller_matches_shell(
 }
 
 /// Cross-account elevation, missing shells and impersonation cannot write user settings.
-pub fn interactive_user() -> Result<UserIdentity, GamingError> {
+fn interactive_context() -> Result<(UserIdentity, u32), GamingError> {
     let mut thread_token = HANDLE::default();
     match unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut thread_token) } {
         Ok(()) => {
@@ -161,14 +162,39 @@ pub fn interactive_user() -> Result<UserIdentity, GamingError> {
     {
         return Err(GamingError::Changed);
     }
+    Ok((
+        UserIdentity {
+            sid: caller.sid().to_string(),
+            // Persist the same desktop identity before and after UAC elevation.
+            logon: first.token().authentication_id(),
+            session: None,
+        },
+        first.token().session_id(),
+    ))
+}
+pub fn interactive_user() -> Result<UserIdentity, GamingError> {
+    interactive_context().map(|(user, _)| user)
+}
+pub fn interactive_session_user() -> Result<UserIdentity, GamingError> {
+    let before = interactive_context()?;
+    let epoch = session::current(before.1)?;
+    if interactive_context()? != before {
+        return Err(crate::gaming::session::unknown(
+            "Desktop context changed during session verification",
+        ));
+    }
     Ok(UserIdentity {
-        sid: caller.sid().to_string(),
-        // Persist the same desktop identity before and after UAC elevation.
-        logon: first.token().authentication_id(),
+        session: Some(epoch),
+        ..before.0
     })
 }
-fn verify_user(expected: &UserIdentity) -> Result<(), GamingError> {
-    verified_session_user(expected, interactive_user()).map(|_| ())
+pub(super) fn verify_user(expected: &UserIdentity) -> Result<(), GamingError> {
+    let actual = if expected.session.is_some() {
+        interactive_session_user()
+    } else {
+        interactive_user()
+    };
+    verified_session_user(expected, actual).map(|_| ())
 }
 
 fn logon_session_query_result(error: u32) -> Result<bool, GamingError> {
@@ -179,25 +205,17 @@ fn logon_session_query_result(error: u32) -> Result<bool, GamingError> {
     }
 }
 
-/// An absent exact LSA session is positive expiry; denial or changed context is not.
+/// WTS identifies the interactive instance; surviving LSA tokens do not keep it alive.
 pub fn session_has_ended(expected: &UserIdentity) -> Result<bool, GamingError> {
-    let current = interactive_user()?;
-    let result = session_expiry_with(expected, &current, |logon| {
-        let luid = LUID {
-            LowPart: logon as u32,
-            HighPart: (logon >> 32) as i32,
-        };
-        let mut data = ptr::null_mut();
-        let status = unsafe { LsaGetLogonSessionData(&luid, &mut data) };
-        if !data.is_null() {
-            // LSA owns this allocation regardless of the session metadata contents.
-            unsafe {
-                let _ = LsaFreeReturnBuffer(data.cast());
-            }
-        }
-        logon_session_query_result(unsafe { LsaNtStatusToWinError(status) })
+    let before = interactive_context()?;
+    let result = session_expiry_with(expected, &before.0, |_| {
+        session::has_ended(expected, before.1)
     });
-    verify_user(&current)?;
+    if interactive_context()? != before {
+        return Err(crate::gaming::session::unknown(
+            "Desktop context changed during lifetime verification",
+        ));
+    }
     result
 }
 
@@ -226,6 +244,21 @@ mod session_expiry_tests {
             ..current
         };
         assert!(session_has_ended(&absent).unwrap());
+    }
+
+    #[test]
+    #[ignore = "Requires an explicitly verified logged-off desktop LUID; read-only"]
+    fn native_retained_lsa_logon_is_retired_after_interactive_logoff() {
+        let current = interactive_user().unwrap();
+        let old = UserIdentity {
+            logon: std::env::var("CPU_AFFINITY_TEST_OLD_LOGON")
+                .expect("explicit old same-account LUID")
+                .parse()
+                .unwrap(),
+            ..current.clone()
+        };
+        assert_ne!(old, current, "never use the current desktop as the fixture");
+        assert!(session_has_ended(&old).unwrap());
     }
 }
 pub(super) fn admit_account(expected: &UserIdentity) -> Result<UserIdentity, GamingError> {

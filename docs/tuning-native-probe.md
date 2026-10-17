@@ -2,7 +2,7 @@
 
 ## Compact GUI acceptance through debug MCP (2026-10-18)
 
-The isolated optimized debug build passed actual egui input and independent
+The earlier isolated optimized debug build passed actual egui input and independent
 native readback on this Windows 11 host, both without elevation and in a final
 elevated repeat. Seven cards made real changes: AC power preference, Game Mode,
 background clips, windowed games, mouse acceleration, accessibility hotkeys and
@@ -28,25 +28,46 @@ encoding regression now requires UTF-8 bytes on stdout. Separate fixture errors
 would be zeroed) were corrected without weakening production admission or mouse
 preservation. Failed reports remain local alongside the successful evidence.
 
-A separate next-logon fixture is prepared for mouse, accessibility and display.
-It records real old-session baselines but finishes preparation at the exact
-original Windows values. The observer requires a new same-account logon and
-positive old-session absence, compares fresh values before/after retirement,
-checks durable empty ownership/disabled intents and reopens the app once more.
-It has not yet run at a new Windows login. Preparation and same-logon refusal
-are not acceptance evidence for logout/login; the temporary task expires and
-removes itself after its one observed run. No logout or reboot is automated.
+A separate fixture retained real old-session mouse/accessibility/display
+baselines while finishing preparation at the original Windows values. The user
+then signed out and back in. The automatic observer stopped at an early display
+inventory read and removed its task. A later read verified the new logon but
+found the old LSA record still present; the previous LSA-only implementation
+therefore did not admit retirement. Those unsuccessful reports remain separate.
+
+The corrected build was tested through MCP against the exact retained journal
+at its original saved-source path. Its five fields and three owners retired,
+all three compact intents became disabled, and a second normal start confirmed
+empty durable ownership and available current mouse/hotkey/display cards.
+Independent current-value reads before and after both launches were identical;
+the frozen pre-fix reader still found the old LSA record. Both exits were zero
+and original user state bytes were unchanged. The built-in chat MCP confirmed
+the clean state and orderly closure. The first GUI pass exposed an old-format
+identity comparison in card observation; its regression failed before correction
+and passed afterwards. The final replay waits for the actual worker observations,
+not merely the first idle snapshot. No additional sign-out/reboot was automated.
 
 ## Session lifetime regression checks (2026-10-17)
 
-Mouse, accessibility and display recovery now distinguish a Manual activation
-from the lifetime of its temporary Windows session. The existing worker may
-retire an expired module target and shared owners only after
-[`LsaGetLogonSessionData`](https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-lsagetlogonsessiondata)
-reports that exact old logon absent, with the same current account/desktop context
-verified before and after. No old-session setting is read or written into a new
-logon. Present sessions, different accounts and read failures are not expiry.
-Persistent account-scoped settings retain their existing restoration behavior.
+Mouse, accessibility and display recovery distinguish a Manual activation from
+the lifetime of its temporary interactive Windows session. The existing worker
+uses bounded read-only WTS queries, with the same current account/Explorer/UAC
+context verified before and after. New targets retain the terminal SessionId and
+WTS LogonTime, so reusing a terminal number does not reuse the old instance.
+Legacy targets retain their original encoding and use verified LSA metadata to
+locate their terminal; an existing legacy terminal cannot be retired by guessing
+its old WTS epoch. Direct session-not-found results also require a consistent
+successful inventory; access failures or a missing entry alone are not proof.
+Lock and RDP disconnect remain live instances. No old-session setting is read or
+written into a new logon. Persistent account-scoped settings are unchanged.
+
+The earlier LSA-only criterion was insufficient: Microsoft documents that an
+[LSA logon record lives until its token references are released](https://learn.microsoft.com/en-us/windows/win32/secauthn/lsa-logon-sessions).
+After the user's actual sign-out/sign-in, this host retained its old Winlogon
+LSA record while WTS showed that terminal gone and a new terminal active.
+LogoffTime was infinite in both records. The read-only old-logon regression
+failed before this correction and passed afterwards. Session query uncertainty
+now uses "Session could not be verified", separately from external setting drift.
 
 Regression fixtures cover User and display-like Device targets across saved-state
 reload, startup retirement, uncertain/denied lifetime reads, subsequent Undo,
@@ -62,8 +83,11 @@ The explicit read-only Windows probe passed for the actual current desktop logon
 cargo test --locked --manifest-path libs/os_api/Cargo.toml native_session_expiry_reads_current_and_absent_logon_without_mutation -- --ignored --test-threads=1
 ```
 
-These fixtures and native reads do not constitute a new actual sign-out/reboot
-or settings Apply/Undo GUI run. The remaining compact GUI smoke remains separate.
+The current retained-journal GUI result above uses the user's actual sign-out
+and new logon. It does not certify a further reboot, simultaneous RDP sessions
+or all Windows/OEM configurations. Lock/disconnect, reused identities, denied
+queries, legacy serialization and session-specific error classification also
+have deterministic regression coverage.
 
 The earlier canonical continuity/configuration-receipt and handle-transfer lab engine was removed during the four-stage simplification. Its commands and examples no longer exist. Historical source and reports are available in Git at `e275b2661a64676933e04eda391190c05c3c3af4`; those experiments are not acceptance evidence for the new gaming modules.
 

@@ -206,6 +206,7 @@ fn user_target(user: &UserIdentity) -> TargetIdentity {
     TargetIdentity::User {
         sid: user.sid.clone(),
         logon: user.logon,
+        session: None,
     }
 }
 fn process_target(process: &ProcessIdentity) -> TargetIdentity {

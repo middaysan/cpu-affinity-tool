@@ -1,6 +1,6 @@
 //! Conditional per-user preference writes and documented GDI refresh changes.
 //! No policy, Game Bar disablement, services or driver-specific settings.
-use super::gaming::admit_account;
+use super::gaming::{admit_account, verify_user};
 use crate::{
     gaming::{self, GamingError, UserIdentity},
     windows_tweaks::*,
@@ -31,9 +31,6 @@ fn io_error(operation: &'static str, error: io::Error) -> GamingError {
     } else {
         GamingError::Native { operation, code }
     }
-}
-fn verify_user(user: &UserIdentity) -> Result<(), GamingError> {
-    gaming::verified_session_user(user, gaming::interactive_user()).map(|_| ())
 }
 fn read_raw(path: &str, name: &str) -> Result<Option<winreg::RegValue<'static>>, GamingError> {
     let key = match RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(path, KEY_READ) {
@@ -406,6 +403,7 @@ fn qualified_target(
         device_name: text(&adapter.DeviceName)?,
         adapter_id: text(&adapter.DeviceID)?,
         monitor_id: text(&monitor.DeviceID)?,
+        user_session: user.session,
     };
     if result.adapter_id.is_empty() || result.monitor_id.is_empty() {
         return Err(GamingError::Unsupported(
@@ -415,7 +413,7 @@ fn qualified_target(
     Ok(result)
 }
 pub fn primary_display_target() -> Result<DisplayTarget, GamingError> {
-    let user = gaming::interactive_user()?;
+    let user = gaming::interactive_session_user()?;
     for index in 0..64 {
         let Some(adapter) = adapter(index) else {
             break;

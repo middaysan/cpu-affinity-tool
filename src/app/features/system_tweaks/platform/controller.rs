@@ -299,6 +299,7 @@ impl Controller {
     pub fn status(&self, owner: &OwnerKey) -> Option<ModuleStatus> {
         if let Some(e) = self.errors.get(owner) {
             return Some(match e.kind {
+                ErrorKind::SessionUnavailable => ModuleStatus::SessionUnverified,
                 ErrorKind::ExternalChange => ModuleStatus::ExternalChange,
                 ErrorKind::Denied => ModuleStatus::PermissionDenied,
                 _ => ModuleStatus::PartialFailure,
@@ -395,7 +396,10 @@ impl Controller {
             failed.contains_key(owner)
                 || !matches!(
                     error.kind,
-                    ErrorKind::ExternalChange | ErrorKind::Read | ErrorKind::Denied
+                    ErrorKind::ExternalChange
+                        | ErrorKind::Read
+                        | ErrorKind::Denied
+                        | ErrorKind::SessionUnavailable
                 )
         });
         self.errors.extend(failed);

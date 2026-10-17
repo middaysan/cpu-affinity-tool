@@ -186,10 +186,95 @@ fn tweak_ac_preset_never_owns_or_changes_battery_power_mode() {
             &TargetIdentity::User {
                 sid: "S-1-5-21-1".into(),
                 logon: 1,
+                session: None,
             },
             &config,
         )
         .unwrap();
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].key.field.as_str(), "user_power_mode_ac");
+}
+#[test]
+fn interactive_session_metadata_preserves_legacy_targets_and_round_trips_new_epochs() {
+    use crate::app::features::system_tweaks::platform::contract::TargetIdentity;
+    use os_api::gaming::InteractiveSession;
+    let legacy = serde_json::json!({"User":{"sid":"S-1-5-21-1","logon":7}});
+    let old: TargetIdentity = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&old).unwrap(), legacy);
+    assert!(old.valid());
+    let current = TargetIdentity::User {
+        sid: "S-1-5-21-1".into(),
+        logon: 7,
+        session: Some(InteractiveSession {
+            session_id: 2,
+            logon_time: 100,
+        }),
+    };
+    let bytes = serde_json::to_vec(&current).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<TargetIdentity>(&bytes).unwrap(),
+        current
+    );
+    assert_ne!(old, current);
+    let invalid = TargetIdentity::User {
+        sid: "S-1-5-21-1".into(),
+        logon: 7,
+        session: Some(InteractiveSession {
+            session_id: 2,
+            logon_time: 0,
+        }),
+    };
+    assert!(!invalid.valid());
+    let display = serde_json::json!({
+        "user_sid":"S-1-5-21-1", "user_logon":7, "device_name":"display",
+        "adapter_id":"adapter", "monitor_id":"monitor"
+    });
+    let parsed: os_api::windows_tweaks::DisplayTarget =
+        serde_json::from_value(display.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), display);
+    assert!(parsed.user_session.is_none());
+}
+
+#[test]
+fn session_query_failure_has_its_own_status_instead_of_external_drift() {
+    use super::common::native;
+    use crate::app::features::system_tweaks::{
+        platform::contract::{ErrorKind, ModuleStatus},
+        presentation::status_label,
+    };
+    let error = native(
+        "read",
+        os_api::gaming::GamingError::Session {
+            reason: "Cannot verify the saved interactive session",
+            code: Some(5),
+        },
+    );
+    assert_eq!(error.kind, ErrorKind::SessionUnavailable);
+    assert_eq!(error.native.unwrap().code, 5);
+    assert_eq!(
+        status_label(ModuleStatus::SessionUnverified),
+        "Session could not be verified"
+    );
+    assert_eq!(
+        native("read", os_api::gaming::GamingError::Changed).kind,
+        ErrorKind::ExternalChange
+    );
+}
+
+#[test]
+fn session_card_observation_passes_the_epoch_to_the_native_read_guard() {
+    let expected = os_api::gaming::UserIdentity {
+        sid: "S-1-5-21-1".into(),
+        logon: 77,
+        session: Some(os_api::gaming::InteractiveSession {
+            session_id: 2,
+            logon_time: 100,
+        }),
+    };
+    let target = TargetIdentity::User {
+        sid: expected.sid.clone(),
+        logon: expected.logon,
+        session: expected.session,
+    };
+    assert_eq!(common::observed_user(&target).unwrap(), expected);
 }
