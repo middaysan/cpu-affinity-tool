@@ -2,7 +2,34 @@
 
 This file records reviewed RustSec findings that remain in the lockfile so release checks do not silently normalize known advisories.
 
-## Current dependency update (2026-10-13)
+## Current audit review (2026-10-17)
+
+Both lockfiles were rechecked against RustSec database commit `999ec89d5d3f10f20be14750ec8c2d8b44e0ac9b` (2026-10-17). Both audits pass without advisory ignores and report zero vulnerabilities. The separate `libs/os_api` lockfile has no informational warnings. No dependency or lockfile was changed for this review.
+
+The application lockfile reports these informational findings:
+
+| Package | Advisory | Kind | Windows stable graph | Linux beta graph |
+| --- | --- | --- | --- | --- |
+| `proc-macro-error 1.0.4` | `RUSTSEC-2024-0370` | Unmaintained | Absent | Absent |
+| `glib 0.18.5` | `RUSTSEC-2024-0429` | Unsound | Absent | Absent |
+| `zbus_names 4.3.4` | `RUSTSEC-2026-0371` | Unmaintained | Absent | Present |
+| `zvariant 5.15.0` | `RUSTSEC-2026-0370` | Unmaintained | Absent | Present |
+| `zvariant_derive 5.15.0` | `RUSTSEC-2026-0372` | Unmaintained | Absent | Present |
+
+The three new findings were published on 2026-10-16. These standalone crates moved into `zbus 6`: `names`, `wire`, and its derive macros. They remain transitive dependencies of the selected Linux beta graph; their maintenance notices do not report a vulnerability. Retain the locked versions for this change and follow the upstream dependency stack's migration rather than forcing a major transitive upgrade or adding advisory ignores. Re-evaluate when that stack supports `zbus 6`, when supported target features change, or when a security advisory affects the retained versions. The unused `proc-macro-error` and `glib` findings remain subject to the same target-reachability check.
+
+Audit and selected normal/build graph checks:
+
+```bash
+cargo audit
+cargo audit --file libs/os_api/Cargo.lock
+cargo tree --locked --features windows --target x86_64-pc-windows-msvc -e normal,build
+cargo tree --locked --features linux --target x86_64-unknown-linux-gnu -e normal,build
+```
+
+The former `quick-xml` vulnerabilities remain resolved by `wayland-scanner 0.31.11` with `quick-xml 0.41.0`. The dated dependency-update and advisory assessments below are historical and apply to the versions recorded there.
+
+## Dependency update (2026-10-13)
 
 - Rechecked both updated lockfiles against RustSec database commit `6aed84668c23d7f535077a9fe918bf1fa0f6a5bc` (2026-10-13).
 - The application and separate `libs/os_api` audits pass without advisory exceptions and report zero vulnerabilities. Both include the yanked-package lookup.
@@ -10,15 +37,6 @@ This file records reviewed RustSec findings that remain in the lockfile so relea
 - The application lockfile still reports `proc-macro-error 1.0.4` (`RUSTSEC-2024-0370`, unmaintained) and `glib 0.18.5` (`RUSTSEC-2024-0429`, unsound) as informational warnings. Neither package is present in the selected Windows stable or Linux beta dependency graph, as checked with `cargo tree --locked --features windows --target x86_64-pc-windows-msvc -i <package>` and the equivalent Linux feature/target command. They remain in Cargo's all-target/optional dependency resolution; do not replace upstream GTK components with private forks to alter an unused graph.
 - The separate OS API lockfile reports no informational warnings.
 - All direct registry dependencies match their latest non-yanked stable releases at the check date. A final `cargo update --dry-run --verbose` proposes no compatible changes. Three older TOML-family versions remain constrained by the unused GTK build graph's upstream exact requirements (`proc-macro-crate 2.0.2` pins `toml_datetime =0.6.3` and `toml_edit =0.20.2`); no application override or vendored fork is introduced.
-
-Current commands (no ignores):
-
-```bash
-cargo audit
-cargo audit --file libs/os_api/Cargo.lock
-```
-
-The assessments below are historical and apply to the versions recorded there.
 
 ## v1.6.3 recheck (2026-09-20)
 

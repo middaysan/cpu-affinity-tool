@@ -43,7 +43,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Confirm the matching Windows debug symbols exist at `target/release/cpu_affinity_tool.pdb`.
 - If `assets/cpu_presets.json` changed, confirm the binary was rebuilt after that change because presets are embedded via `include_str!`.
 - Confirm a clean checkout contains `assets/fonts/InterVariable.ttf` before building because the font is embedded with `include_bytes!`.
-- Run `cargo audit`; reconcile every vulnerability before release. The two current `quick-xml` exceptions and their build-time reachability assessment are documented in `docs/dependency-advisories.md`; do not ignore any additional advisory.
+- Run `cargo audit` and `cargo audit --file libs/os_api/Cargo.lock` without advisory ignores; reconcile every vulnerability before release. The former `quick-xml` findings are resolved. Review informational warnings and their selected-target reachability against the dated assessment in `docs/dependency-advisories.md`; investigate any new finding rather than treating it as an accepted exception.
 
 ## Manual Smoke
 
