@@ -34,6 +34,20 @@ readiness result through `Module::observe_tweak`; display refresh uses one mode
 inventory instead of repeated driver tests. Apply and Undo retain independent
 native validation and never use a UI snapshot as mutation authority.
 
+Session observations run only for enabled non-manual associations or retained
+Session owners, once per second and after accepted requests. Manual-only and
+undone configurations perform no session enumeration or repeated saved-state
+verification on queue timeouts. Inspection, confirmation expiry and shutdown
+keep their independent safety checks.
+
+After proven session expiry, compact intent is withdrawn and an unowned card
+discovers its current target. At the shared 64-profile limit, only disabled
+hidden intents without associations or controller evidence can be reclaimed;
+legacy profiles, pending restoration and monotonic IDs remain intact. An
+interrupted intent publication must not pin an unowned card to an old session.
+The transient retired editor is absent. Tests wait for asynchronous saves through
+explicit fixture helpers, preserving production queue-acceptance semantics.
+
 A resource is an exact target plus a stable owned-field ID. Equal requests share the first baseline. A newly unowned field already matching the requested value creates no owner or baseline, including within a partially changed tweak; existing owners still share their first original. Conflicting requests fail before writing. Last-owner restoration compares the current owned field with the app-written token and preserves other fields. A module must never turn a read error into a default, infer success from its desired value or recapture an uncertain baseline.
 
 Persistent account settings use `Account { sid }`; GPU preferences use the account SID and executable path. Their module-owned `canonical_target` codec maps legacy logon-bearing targets to the same resource during recovery and acquisition, preserving the first baseline across Windows sign-ins. Ambiguous canonical keys block recovery without publishing or discarding the old evidence. Saved legacy manual targets remain readable; comparisons use the same codec. Parsing an account SID grants no native authority: each operation verifies the live caller/Explorer/UAC identity, requires the same account and pins its exact current logon until readback completes. Mouse, accessibility and display changes remain session-scoped. Their `target_has_expired` hook accepts only a read-only native proof that the exact previous logon no longer exists, with a verified same-account current desktop before and after the query. Reconciliation then retires that module target and its shared ownership without reading or writing the new session. Publication failure retains the original evidence. A different logon alone, a still-present old session or a denied/failed query remains blocked and can be retried with Undo; it never authorizes a cross-session write.

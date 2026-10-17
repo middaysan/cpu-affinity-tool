@@ -519,6 +519,7 @@ mod tests {
                     let option = label(&output, choice)
                         .unwrap_or_else(|| panic!("missing history option {choice}"));
                     output = click(&mut app, &context, height, option);
+                    app.wait_for_test_save();
                     assert_eq!(app.cpu_load_history_seconds(), seconds);
                     assert!(
                         label(&output, "Application settings").is_some(),

@@ -1019,6 +1019,7 @@ fn preference_save_and_reopen_preserve_classic_monitoring() {
     })));
     let mut app = AppState::new_for_test(storage.clone(), 8);
     app.set_cpu_load_enabled(false).unwrap();
+    app.wait_for_test_save();
     assert!(!app.cpu_load_enabled());
     assert!(storage.read().unwrap().process_monitoring_enabled);
     let restored =

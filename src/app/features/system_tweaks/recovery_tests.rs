@@ -980,14 +980,28 @@ fn durable_operation_feedback_withdrawn_conflicts_keep_real_recovery_errors() {
 }
 
 #[test]
-fn durable_operation_feedback_autonomous_saved_source_retry_clears_its_error() {
+fn durable_operation_feedback_active_session_saved_source_retry_clears_its_error() {
     use super::{config::ModulePreference, TuningOperationState};
-    use crate::app::models::{AppStateStorage, RunningApps};
+    use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, RunningApps};
     use std::time::{Duration, Instant};
 
     let directory = OwnedDirectory::new();
     let path = directory.0.join("state.json");
-    let mut state = AppStateStorage::test_fixture(|_| {});
+    let mut state = AppStateStorage::test_fixture(|state| {
+        state.groups = vec![CoreGroup {
+            name: "Session fixture".into(),
+            cores: vec![],
+            programs: vec![AppToRun::new_installed(
+                "fixture".into(),
+                "fixture".into(),
+                os_api::PriorityClass::Normal,
+                false,
+            )],
+            is_hidden: false,
+            run_all_button: false,
+        }];
+        state.rule_identities = None;
+    });
     state.try_save_to_path(&path).unwrap();
     let module = Setting::new("scalar", false);
     let mut registry = Registry::default();
@@ -995,15 +1009,23 @@ fn durable_operation_feedback_autonomous_saved_source_retry_clears_its_error() {
     let mut service =
         super::Tuning::from_registry(registry).headless(state, Box::new(SavedFile(path.clone())));
     service.start_selected_recovery();
-    service
+    let profile = service
         .create_profile(
             "Saved configuration".into(),
             vec![ModulePreference {
                 feature: module.descriptor().id,
-                enabled: false,
-                mode: ActivationMode::Manual,
+                enabled: true,
+                mode: ActivationMode::Session,
                 config: module.config(12),
             }],
+        )
+        .unwrap();
+    service
+        .bind_rule(
+            service.rules().group_id_for_index(0).unwrap(),
+            service.rules().rule_id_for_index(0, 0).unwrap(),
+            profile,
+            ActivationEligibility::Running,
         )
         .unwrap();
     let unrelated = ModuleError::new(ErrorKind::Denied, "fixture action");
@@ -1199,6 +1221,17 @@ fn ended_manual_session_resources_retire_without_writing_into_new_logon() {
             reopened.undo_all_tweaks().unwrap();
         }
         assert!(reopened.controller.is_empty() && reopened.controller.can_admit());
+        let super::config::TuningLoad::Known(config) = reopened.state().tuning.decode() else {
+            panic!("known recovered configuration")
+        };
+        assert!(
+            config
+                .profiles
+                .iter()
+                .filter(|profile| super::service::is_tweak_profile(profile))
+                .all(|profile| !profile.modules[0].enabled),
+            "expired compact intent is durably withdrawn"
+        );
         assert_eq!(
             setting.value(),
             vec![77],

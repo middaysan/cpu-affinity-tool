@@ -1,14 +1,12 @@
 //! Pure module-card decisions shared by the presenter and state-level tests.
+use super::platform::{
+    codec::ModuleEnvelope,
+    contract::{Effect, FeatureId, ModuleError, ModuleStatus, ResourceId, TargetIdentity},
+};
 #[cfg(test)]
-use super::platform::contract::{ActivationMode, Capability, ModuleAccess};
 use super::{
     config::ModulePreference,
-    platform::{
-        codec::ModuleEnvelope,
-        contract::{
-            Effect, FeatureId, ModuleError, ModuleStatus, ProfileId, ResourceId, TargetIdentity,
-        },
-    },
+    platform::contract::{ActivationMode, Capability, ModuleAccess, ProfileId},
 };
 
 #[cfg(test)]
@@ -179,14 +177,6 @@ pub(crate) fn preference_with_enabled(
     preference
 }
 
-pub(crate) struct EditorDraft {
-    pub profile: ProfileId,
-    #[cfg(test)]
-    pub expected: Option<ModulePreference>,
-    pub candidate: ModulePreference,
-    pub pending_save_revision: Option<u64>,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum TuningPageSection {
     #[default]
@@ -204,7 +194,6 @@ pub(crate) struct TuningUiSession {
     pub tweak_options: Option<(FeatureId, TargetIdentity, ModuleEnvelope)>,
     #[cfg(test)]
     pub selected_profile: Option<ProfileId>,
-    pub editor: Option<EditorDraft>,
     pub error: Option<&'static str>,
 }
 

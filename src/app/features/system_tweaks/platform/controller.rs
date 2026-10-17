@@ -165,6 +165,17 @@ impl Controller {
     pub(crate) fn owner_record(&self, owner: &OwnerKey) -> Option<&OwnerRecord> {
         self.records.get(owner)
     }
+    pub(crate) fn retains_profile(&self, profile: ProfileId) -> bool {
+        self.fields
+            .values()
+            .any(|field| field.owners.iter().any(|owner| owner.profile() == profile))
+            || self
+                .records
+                .keys()
+                .chain(self.pending.iter())
+                .chain(self.errors.keys())
+                .any(|owner| owner.profile() == profile)
+    }
     pub(crate) fn is_durable(&self) -> bool {
         self.store.is_some()
     }

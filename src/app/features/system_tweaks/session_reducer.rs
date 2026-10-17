@@ -301,6 +301,8 @@ impl TuningRuntime {
                         BTreeMap::new()
                     };
                     let mut next_cards = Instant::now();
+                    let mut next_sessions = Instant::now();
+                    let mut session_work = session_work_needed(&service, &actors);
                     let mut cards_were_visible = false;
                     let mut next_display_retry = Instant::now();
                     loop {
@@ -331,6 +333,12 @@ impl TuningRuntime {
                         if expire_display {
                             operation = TuningOperationState::Idle;
                             service.expire_display_tweak(false);
+                            session_work = session_work_needed(&service, &actors);
+                            next_sessions = Instant::now();
+                            if session_work {
+                                *observed_state.write().unwrap() = service.state().clone();
+                                bridge.request_refresh();
+                            }
                             next_cards = Instant::now();
                             let completed = Arc::new(snapshot(
                                 &service,
@@ -443,19 +451,24 @@ impl TuningRuntime {
                                     },
                                 };
                                 let observation = if modules_enabled {
-                                    *observed_state.write().unwrap() = service.state().clone();
-                                    bridge.request_refresh();
-                                    // Keep the pending latch until the completed snapshot has been published.
-                                    bridge.refresh(Instant::now(), &running, &observed_state);
-                                    let observation =
-                                        worker_observation(&owned, &bridge, &mut actors);
-                                    reconcile_sessions(
-                                        &mut service,
-                                        observation.as_ref(),
-                                        &mut actors,
-                                    );
+                                    session_work = session_work_needed(&service, &actors);
+                                    if session_work {
+                                        *observed_state.write().unwrap() = service.state().clone();
+                                        bridge.request_refresh();
+                                        // Native work stays under the pending latch until publication.
+                                        bridge.refresh(Instant::now(), &running, &observed_state);
+                                        let observation =
+                                            worker_observation(&owned, &bridge, &mut actors);
+                                        reconcile_sessions(
+                                            &mut service,
+                                            observation.as_ref(),
+                                            &mut actors,
+                                        );
+                                        session_work = session_work_needed(&service, &actors);
+                                        next_sessions = Instant::now() + Duration::from_secs(1);
+                                    }
                                     service.controller.inspect();
-                                    observation
+                                    worker_observation(&owned, &bridge, &mut actors)
                                 } else {
                                     Arc::new(ExecutionObservation::Unknown(
                                         UnknownReason::Unavailable,
@@ -478,9 +491,19 @@ impl TuningRuntime {
                                 if !modules_enabled {
                                     continue;
                                 }
-                                bridge.refresh(Instant::now(), &running, &observed_state);
+                                if session_work && Instant::now() >= next_sessions {
+                                    bridge.refresh(Instant::now(), &running, &observed_state);
+                                    let observation =
+                                        worker_observation(&owned, &bridge, &mut actors);
+                                    reconcile_sessions(
+                                        &mut service,
+                                        observation.as_ref(),
+                                        &mut actors,
+                                    );
+                                    session_work = session_work_needed(&service, &actors);
+                                    next_sessions = Instant::now() + Duration::from_secs(1);
+                                }
                                 let observation = worker_observation(&owned, &bridge, &mut actors);
-                                reconcile_sessions(&mut service, observation.as_ref(), &mut actors);
                                 let idle = {
                                     let admission = owned.admission.lock().unwrap();
                                     !admission.pending && admission.closing.is_none()
@@ -805,6 +828,25 @@ fn worker_observation(
     let _ = (shared, actors);
     bridge.latest()
 }
+fn session_work_needed(service: &HeadlessTuning, actors: &BTreeMap<OwnerKey, Actor>) -> bool {
+    if !service.native_admitted || service.legacy_recovery {
+        return false;
+    }
+    if !actors.is_empty() || service.controller.owners().iter().any(OwnerKey::is_session) {
+        return true;
+    }
+    let TuningLoad::Known(config) = service.state().tuning.decode() else {
+        return false;
+    };
+    config.associations.iter().any(|association| {
+        config.profiles.iter().any(|profile| {
+            profile.id == association.profile
+                && profile.modules.iter().any(|preference| {
+                    preference.enabled && preference.mode != ActivationMode::Manual
+                })
+        })
+    })
+}
 fn reconcile_sessions(
     service: &mut HeadlessTuning,
     observation: &ExecutionObservation,
@@ -1071,7 +1113,8 @@ fn tweak_cards(
                     .iter()
                     .rev()
                     .filter(|p| {
-                        super::service::is_tweak_profile(p)
+                        module.editor().selects_saved_exe()
+                            && super::service::is_tweak_profile(p)
                             && p.modules[0].feature == descriptor.id
                             && p.modules[0].enabled
                     })
@@ -1950,6 +1993,225 @@ mod card_tests {
         .into_iter()
         .next()
         .unwrap()
+    }
+    #[test]
+    fn followup_unowned_saved_session_intent_uses_the_current_card_target() {
+        let (mut service, setting, primary) = display_selection_fixture();
+        let feature = setting.descriptor().id;
+        let target = primary.lock().unwrap().clone();
+        service.apply_tweak(feature.clone(), target).unwrap();
+        service.confirm_display_tweak().unwrap();
+        let saved = service.state().clone();
+        let registry = service.registry().clone();
+        drop(service);
+        *primary.lock().unwrap() = TargetIdentity::Device {
+            identity: "monitor-new-session".into(),
+        };
+        setting
+            .fields
+            .lock()
+            .unwrap()
+            .insert(ResourceId::new("value").unwrap(), vec![7]);
+        // An empty recovery document can outlive a crash between retirement and
+        // saved-intent publication. It must not pin a new card to the old session.
+        let mut reopened =
+            super::super::Tuning::from_registry(registry).headless(saved, Box::new(NoSave));
+        reopened.admit_test_modules();
+        let card = display_selection_card(&reopened);
+        assert_eq!(card.target.as_ref(), Some(&*primary.lock().unwrap()));
+        assert!(card.ready && !card.owned);
+        reopened.apply_tweak(feature, card.target.unwrap()).unwrap();
+    }
+
+    #[test]
+    fn followup_completed_hidden_intents_do_not_exhaust_the_profile_limit() {
+        let (mut service, setting, primary) = display_selection_fixture();
+        let feature = setting.descriptor().id;
+        let legacy = service
+            .create_profile(
+                "Saved custom profile".into(),
+                vec![ModulePreference {
+                    feature: feature.clone(),
+                    enabled: false,
+                    mode: ActivationMode::Manual,
+                    config: setting.config(12),
+                }],
+            )
+            .unwrap();
+        let mut last_profile = 0;
+        for index in 0..80 {
+            *primary.lock().unwrap() = TargetIdentity::Device {
+                identity: format!("monitor-{index}"),
+            };
+            let target = primary.lock().unwrap().clone();
+            service.apply_tweak(feature.clone(), target).unwrap();
+            service.confirm_display_tweak().unwrap();
+            let TuningLoad::Known(config) = service.state().tuning.decode() else {
+                panic!("known configuration")
+            };
+            assert!(config.next_profile > last_profile);
+            last_profile = config.next_profile;
+            service.undo_tweak(&feature).unwrap();
+            assert!(service.controller.is_empty());
+            assert_eq!(setting.value(), vec![7]);
+        }
+        let TuningLoad::Known(config) = service.state().tuning.decode() else {
+            panic!("known configuration")
+        };
+        assert!(config.profiles.iter().any(|profile| profile.id == legacy));
+        assert!(config.manual_targets.iter().all(|target| config
+            .profiles
+            .iter()
+            .any(|profile| profile.id == target.profile)));
+    }
+
+    #[test]
+    fn followup_capacity_reclamation_preserves_failed_undo_evidence() {
+        let setting = Setting::new("display_refresh", false);
+        let other = Setting::new("simple_tweak", false);
+        let primary = Arc::new(Mutex::new(TargetIdentity::Device {
+            identity: "monitor-a".into(),
+        }));
+        let mut registry = Registry::default();
+        registry
+            .register(Arc::new(MovingDisplay(setting.clone(), primary.clone())))
+            .unwrap();
+        registry.register(other.clone()).unwrap();
+        let mut service = super::super::Tuning::from_registry(registry)
+            .headless(AppStateStorage::test_fixture(|_| {}), Box::new(NoSave));
+        service.admit_test_modules();
+        let feature = setting.descriptor().id;
+        for index in 0..64 {
+            let target = TargetIdentity::Device {
+                identity: format!("monitor-{index}"),
+            };
+            *primary.lock().unwrap() = target.clone();
+            service.apply_tweak(feature.clone(), target).unwrap();
+            service.confirm_display_tweak().unwrap();
+            service.undo_tweak(&feature).unwrap();
+        }
+        let target = primary.lock().unwrap().clone();
+        service
+            .apply_tweak(feature.clone(), target.clone())
+            .unwrap();
+        service.confirm_display_tweak().unwrap();
+        *setting.fail_at.lock().unwrap() = Some(ResourceId::new("value").unwrap());
+        assert_eq!(service.undo_tweak(&feature), Err(SaveError::Recovering));
+        let owner = service.controller.owners().into_iter().next().unwrap();
+        let saved = service.state().tuning.raw().unwrap().to_string();
+        let next = TargetIdentity::Device {
+            identity: "monitor-next".into(),
+        };
+        *primary.lock().unwrap() = next.clone();
+        assert!(service
+            .apply_tweak(other.descriptor().id, TargetIdentity::Machine)
+            .is_err());
+        assert_eq!(service.state().tuning.raw(), Some(saved.as_str()));
+        assert!(service.controller.retains_profile(owner.profile()));
+        assert_eq!(service.controller.target(&owner), Some(target));
+        *setting.fail_at.lock().unwrap() = None;
+        service.undo_tweak(&feature).unwrap();
+        service.apply_tweak(feature, next).unwrap();
+    }
+
+    #[test]
+    fn followup_session_work_requires_an_enabled_bound_session_or_retained_owner() {
+        use crate::app::models::CoreGroup;
+        let module = Setting::new("scalar", false);
+        let mut registry = Registry::default();
+        registry.register(module.clone()).unwrap();
+        let state = AppStateStorage::test_fixture(|state| {
+            state.groups = vec![CoreGroup {
+                name: "Fixture".into(),
+                cores: vec![],
+                programs: vec![AppToRun::new_installed(
+                    "fixture".into(),
+                    "fixture".into(),
+                    os_api::PriorityClass::Normal,
+                    false,
+                )],
+                is_hidden: false,
+                run_all_button: false,
+            }];
+            state.rule_identities = None;
+        });
+        let mut service =
+            super::super::Tuning::from_registry(registry).headless(state, Box::new(NoSave));
+        service.admit_test_modules();
+        let actors = BTreeMap::new();
+        assert!(!session_work_needed(&service, &actors));
+        let profile = service
+            .create_profile(
+                "Session".into(),
+                vec![ModulePreference {
+                    feature: module.descriptor().id,
+                    enabled: true,
+                    mode: ActivationMode::Session,
+                    config: module.config(12),
+                }],
+            )
+            .unwrap();
+        assert!(!session_work_needed(&service, &actors));
+        service
+            .bind_rule(
+                service.rules().group_id_for_index(0).unwrap(),
+                service.rules().rule_id_for_index(0, 0).unwrap(),
+                profile,
+                ActivationEligibility::Running,
+            )
+            .unwrap();
+        assert!(session_work_needed(&service, &actors));
+        service.disable_profile(profile).unwrap();
+        assert!(!session_work_needed(&service, &actors));
+    }
+
+    #[test]
+    fn followup_manual_only_worker_does_not_reverify_saved_state_on_idle_ticks() {
+        use std::sync::atomic::AtomicUsize;
+        struct CountedSource(Arc<AtomicUsize>);
+        impl super::super::StatePersistence for CountedSource {
+            fn save(
+                &mut self,
+                _: &mut AppStateStorage,
+            ) -> Result<super::super::service::SavedState, SaveError> {
+                Ok(super::super::service::SavedState::Unavailable)
+            }
+            fn source_path(&self) -> Option<std::path::PathBuf> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+        }
+        let setting = Setting::new("simple_tweak", false);
+        let mut registry = Registry::default();
+        registry.register(setting.clone()).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut service = super::super::Tuning::from_registry(registry).headless(
+            AppStateStorage::test_fixture(|_| {}),
+            Box::new(CountedSource(reads.clone())),
+        );
+        service.admit_test_modules();
+        service
+            .apply_tweak(setting.descriptor().id, TargetIdentity::Machine)
+            .unwrap();
+        service.undo_all_tweaks().unwrap();
+        let baseline = reads.load(Ordering::SeqCst);
+        let runtime = TuningRuntime::start(
+            service,
+            Arc::new(tokio::sync::RwLock::new(RunningApps::default())),
+        );
+        let until = Instant::now() + Duration::from_secs(2);
+        while reads.load(Ordering::SeqCst) == baseline {
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(1));
+        }
+        let before = reads.load(Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(175));
+        let after = reads.load(Ordering::SeqCst);
+        runtime.begin_shutdown();
+        assert_eq!(
+            after, before,
+            "manual-only idle does not verify a session source"
+        );
     }
     #[test]
     fn accepted_classic_save_precedes_pending_display_expiry() {

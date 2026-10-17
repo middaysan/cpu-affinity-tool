@@ -534,28 +534,23 @@ impl AppState {
                 self.ui.file_drop_hover_target = None;
             }
         }
-        #[cfg(test)]
-        {
-            // Existing state-level unit tests wait for the same authority. Real
-            // application requests and public fixture flows remain nonblocking.
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while matches!(
-                self.tuning.snapshot().operation,
-                crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
-            ) && std::time::Instant::now() < until
-            {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            self.poll_tuning();
-            return matches!(
-                self.tuning.snapshot().operation,
-                crate::app::features::system_tweaks::TuningOperationState::Idle
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_test_save(&mut self) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while matches!(
+            self.tuning.snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ) {
+            assert!(
+                std::time::Instant::now() < until,
+                "queued save did not complete"
             );
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        #[cfg(not(test))]
-        {
-            true
-        }
+        self.poll_tuning();
     }
 
     fn reconcile_rules(&mut self) {
@@ -2196,6 +2191,105 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn followup_classic_save_reports_acceptance_before_gated_completion() {
+        use crate::app::features::system_tweaks::{
+            service::{SavedState, StatePersistence},
+            SaveError, TuningOperationState, TuningRuntime,
+        };
+        use std::sync::mpsc;
+        struct GatedSave {
+            entered: mpsc::SyncSender<()>,
+            release: mpsc::Receiver<()>,
+            fail: bool,
+        }
+        impl StatePersistence for GatedSave {
+            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                self.entered.send(()).unwrap();
+                if self
+                    .release
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .is_err()
+                    || self.fail
+                {
+                    Err(SaveError::Storage)
+                } else {
+                    Ok(SavedState::Unavailable)
+                }
+            }
+        }
+        for fail in [false, true] {
+            let mut app = sample_state();
+            let original = app.persistent_state.read().unwrap().clone();
+            let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+            let (release_tx, release_rx) = mpsc::sync_channel(1);
+            let runtime = TuningRuntime::start(
+                crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                    .headless(
+                        original.clone(),
+                        Box::new(GatedSave {
+                            entered: entered_tx,
+                            release: release_rx,
+                            fail,
+                        }),
+                    )
+                    .without_modules(),
+                app.runtime.running_apps_handle(),
+            );
+            app.replace_tuning_for_test(runtime, Default::default());
+            let mut candidate = original.clone();
+            candidate.theme_index = 2;
+            let accepted = app.enqueue_legacy(
+                super::TuningRequest::SaveBase {
+                    candidate: Box::new(candidate),
+                    expected_revision: 0,
+                },
+                None,
+            );
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            let pending = matches!(
+                app.tuning_snapshot().operation,
+                TuningOperationState::Pending { .. }
+            );
+            let before = app.persistent_state.read().unwrap().theme_index;
+            let _ = release_tx.send(());
+            assert!(
+                accepted,
+                "acceptance is independent of persistence completion"
+            );
+            assert!(
+                pending,
+                "the gated save must still be pending after enqueue returns"
+            );
+            assert_eq!(before, original.theme_index);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while matches!(
+                app.tuning_snapshot().operation,
+                TuningOperationState::Pending { .. }
+            ) {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            app.poll_tuning();
+            assert_eq!(
+                app.get_theme_index(),
+                if fail { original.theme_index } else { 2 }
+            );
+            assert!(app.pending_legacy.is_none());
+            assert_eq!(
+                matches!(
+                    app.tuning_snapshot().operation,
+                    TuningOperationState::Refused {
+                        error: SaveError::Storage,
+                        ..
+                    }
+                ),
+                fail
+            );
+        }
+    }
     #[cfg(all(target_os = "windows", feature = "windows"))]
     #[test]
     fn cpu_load_retention_save_preserves_existing_candidate_and_other_preferences() {
@@ -2204,6 +2298,7 @@ mod tests {
         let theme = app.get_theme_index();
         assert_eq!(app.cpu_load_history_seconds(), 300);
         app.set_cpu_load_history_seconds(30).unwrap();
+        app.wait_for_test_save();
         assert_eq!(app.cpu_load_history_seconds(), 30);
         assert_eq!(
             app.persistent_state
@@ -2239,6 +2334,7 @@ mod tests {
         app.pending_legacy = None;
         assert!(app.set_cpu_load_history_seconds(60).is_err());
         app.set_cpu_load_history_seconds(1800).unwrap();
+        app.wait_for_test_save();
         let reloaded: AppStateStorage = serde_json::from_str(
             &serde_json::to_string(&*app.persistent_state.read().unwrap()).unwrap(),
         )
@@ -2291,10 +2387,12 @@ mod tests {
             crate::app::features::system_tweaks::TuningRequest::RemoveRule { group, rule },
             None,
         ));
+        app.wait_for_test_save();
         assert!(app.persistent_state.read().unwrap().groups[0]
             .programs
             .is_empty());
         app.set_theme_index(2);
+        app.wait_for_test_save();
         assert_eq!(app.get_theme_index(), 2);
         assert_eq!(app.persistent_state.read().unwrap().tuning.raw(), Some(raw));
     }
@@ -2326,6 +2424,7 @@ mod tests {
         app.ensure_current_edit_loaded();
         app.ui.app_edit_state.current_edit.as_mut().unwrap().name = "Unsaved draft".into();
         app.commit_current_app_edit_session();
+        app.wait_for_test_save();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while matches!(
             app.tuning_snapshot().operation,
@@ -2344,6 +2443,7 @@ mod tests {
         );
         assert!(matches!(app.ui.current_window, WindowRoute::AppRunSettings));
         app.set_theme_index(2);
+        app.wait_for_test_save();
         assert_eq!(app.get_theme_index(), 0);
     }
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -2728,6 +2828,7 @@ mod tests {
             ),
             MoveRuleToGroupOutcome::Moved
         );
+        app.wait_for_test_save();
 
         assert_eq!(
             app.run_group_program(source_group_id, moved_rule_id),
@@ -2779,6 +2880,7 @@ mod tests {
         app.ui.current_window = WindowRoute::Groups(GroupRoute::Create);
 
         app.commit_group_form_session();
+        app.wait_for_test_save();
 
         assert!(matches!(
             app.ui.current_window,
@@ -2840,6 +2942,7 @@ mod tests {
         edit_first_rule(&mut app, updated);
 
         app.commit_current_app_edit_session();
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         let updated = &state.groups[0].programs[0];
@@ -2868,6 +2971,7 @@ mod tests {
         edit_first_rule(&mut app, updated);
 
         app.commit_current_app_edit_session();
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(
@@ -2893,6 +2997,7 @@ mod tests {
         edit_first_rule(&mut app, updated);
 
         app.commit_current_app_edit_session();
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert!(state.groups[0].programs[0].additional_processes.is_empty());
@@ -2913,6 +3018,7 @@ mod tests {
         edit_first_rule(&mut app, updated);
 
         app.commit_current_app_edit_session();
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(
@@ -2934,6 +3040,7 @@ mod tests {
 
         let outcome =
             app.move_rule_to_group_at(source_group_id, moved_rule_id.clone(), target_group_id, 0);
+        app.wait_for_test_save();
 
         assert_eq!(outcome, MoveRuleToGroupOutcome::Moved);
         let state = app.persistent_state.read().unwrap();
@@ -2961,6 +3068,7 @@ mod tests {
 
         let outcome =
             app.move_rule_to_group_at(source_group_id, moved_rule_id.clone(), target_group_id, 1);
+        app.wait_for_test_save();
 
         assert_eq!(outcome, MoveRuleToGroupOutcome::Moved);
         let state = app.persistent_state.read().unwrap();
@@ -2988,6 +3096,7 @@ mod tests {
 
         let outcome =
             app.move_rule_to_group_at(group_id.clone(), first_rule_id.clone(), group_id, 3);
+        app.wait_for_test_save();
 
         assert_eq!(outcome, MoveRuleToGroupOutcome::Moved);
         let state = app.persistent_state.read().unwrap();
@@ -3021,6 +3130,7 @@ mod tests {
             ),
             MoveRuleToGroupOutcome::SamePosition
         );
+        app.wait_for_test_save();
         assert_eq!(app.save_count(), 0);
 
         let duplicate = app.persistent_state.read().unwrap().groups[0].programs[0].clone();
@@ -3033,6 +3143,7 @@ mod tests {
             app.move_rule_to_group_at(source_group_id, moved_rule_id, target_group_id, 0),
             MoveRuleToGroupOutcome::DuplicateInTarget
         );
+        app.wait_for_test_save();
         let state = app.persistent_state.read().unwrap();
         assert_eq!(state.groups[0].programs.len(), 1);
         assert_eq!(state.groups[1].programs.len(), 1);
@@ -3045,17 +3156,22 @@ mod tests {
         let mut app = sample_state();
 
         app.set_theme_index(2);
+        app.wait_for_test_save();
         assert_eq!(app.get_theme_index(), 2);
         assert_eq!(app.save_count(), 1);
         app.set_theme_index(2);
+        app.wait_for_test_save();
         app.set_theme_index(99);
+        app.wait_for_test_save();
         assert_eq!(app.get_theme_index(), 2);
         assert_eq!(app.save_count(), 1);
         app.set_theme_index(0);
+        app.wait_for_test_save();
         assert_eq!(app.get_theme_index(), 0);
         assert_eq!(app.save_count(), 2);
 
         app.toggle_process_monitoring();
+        app.wait_for_test_save();
         assert!(app.is_process_monitoring_enabled());
         assert_eq!(app.save_count(), 3);
     }
@@ -3065,9 +3181,11 @@ mod tests {
         let mut app = sample_state();
         assert!(!app.start_minimized());
         app.set_start_minimized(true).unwrap();
+        app.wait_for_test_save();
         assert!(app.start_minimized());
         assert_eq!(app.save_count(), 1);
         app.set_start_minimized(true).unwrap();
+        app.wait_for_test_save();
         assert_eq!(app.save_count(), 1);
         let json = serde_json::to_string(&*app.persistent_state.read().unwrap()).unwrap();
         let restored: AppStateStorage = serde_json::from_str(&json).unwrap();
@@ -3080,6 +3198,7 @@ mod tests {
                 .start_minimized
         );
         app.set_start_minimized(false).unwrap();
+        app.wait_for_test_save();
         assert!(!app.start_minimized());
         assert_eq!(app.save_count(), 2);
     }
@@ -3090,13 +3209,16 @@ mod tests {
         let group_id = group_id(&app, 0);
 
         app.set_group_is_hidden(group_id.clone(), true);
+        app.wait_for_test_save();
         assert!(app.persistent_state.read().unwrap().groups[0].is_hidden);
         assert_eq!(app.save_count(), 1);
 
         app.set_group_is_hidden(group_id, true);
+        app.wait_for_test_save();
         assert_eq!(app.save_count(), 1);
 
         app.set_group_is_hidden(GroupId("missing-group".to_string()), false);
+        app.wait_for_test_save();
         assert_eq!(app.save_count(), 1);
     }
 
@@ -3107,8 +3229,11 @@ mod tests {
         let first_group_id = group_id(&app, 0);
 
         assert!(!app.move_group_to_index(first_group_id, 0));
+        app.wait_for_test_save();
         assert!(!app.move_group_to_index(GroupId("missing-group".to_string()), 1));
+        app.wait_for_test_save();
         assert!(!app.move_group_to_index(group_id(&app, 0), 99));
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(state.groups[0].name, "Games");
@@ -3145,6 +3270,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(app.move_group_to_index(original_ids[0].clone(), 2));
+        app.wait_for_test_save();
 
         let names = app
             .persistent_state
@@ -3177,11 +3303,13 @@ mod tests {
         app.ui.group_form.core_selection[2] = true;
 
         app.commit_group_form_session();
+        app.wait_for_test_save();
         assert_eq!(app.persistent_state.read().unwrap().groups.len(), 2);
         assert_eq!(app.save_count(), 1);
 
         app.ui.group_form.editing_group_id = Some(group_id(&app, 1));
         app.delete_current_group_form_target();
+        app.wait_for_test_save();
         assert_eq!(app.persistent_state.read().unwrap().groups.len(), 1);
         assert_eq!(app.save_count(), 2);
     }
@@ -3195,6 +3323,7 @@ mod tests {
         });
 
         app.delete_current_app_edit_target();
+        app.wait_for_test_save();
 
         assert!(app.persistent_state.read().unwrap().groups[0]
             .programs
@@ -3207,6 +3336,7 @@ mod tests {
         let mut app = sample_state();
 
         app.delete_current_app_edit_target();
+        app.wait_for_test_save();
 
         assert_eq!(app.save_count(), 0);
     }
@@ -3218,6 +3348,7 @@ mod tests {
         app.ui.file_drop_hover_target = Some(target_group_id.clone());
 
         assert!(!app.consume_dropped_files_into_group(target_group_id));
+        app.wait_for_test_save();
 
         assert!(app.ui.file_drop_hover_target.is_none());
         assert!(app.ui.dropped_files.is_none());
@@ -3231,6 +3362,7 @@ mod tests {
         app.ui.file_drop_hover_target = Some(GroupId("stale-group".to_string()));
 
         assert!(!app.consume_dropped_files_into_group(GroupId("stale-group".to_string())));
+        app.wait_for_test_save();
 
         assert!(app.ui.file_drop_hover_target.is_none());
         assert!(app.ui.dropped_files.is_none());
@@ -3253,6 +3385,7 @@ mod tests {
         app.ui.file_drop_hover_target = Some(target_group_id.clone());
 
         assert!(app.consume_dropped_files_into_group(target_group_id));
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(state.groups[0].programs.len(), 1);
@@ -3277,6 +3410,7 @@ mod tests {
             group_id(&app, 0),
             vec![r"C:\valid.exe".into(), r"C:\broken".into()],
         );
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(state.groups[0].programs.len(), 2);
@@ -3294,6 +3428,7 @@ mod tests {
         let mut app = sample_state();
 
         app.add_selected_files_to_group(group_id(&app, 0), vec![r"C:\broken".into()]);
+        app.wait_for_test_save();
 
         assert_eq!(
             app.persistent_state.read().unwrap().groups[0]
@@ -3588,6 +3723,7 @@ mod tests {
 
         app.open_installed_app_picker(group_id(&app, 0));
         assert!(app.confirm_selected_installed_app());
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         let added = &state.groups[0].programs[1];
@@ -3871,9 +4007,11 @@ mod tests {
         )];
         app.open_installed_app_picker(group.clone());
         app.set_installed_app_picker_query("spot".into());
-        // The test-only enqueue wait expires while this accepted save remains gated.
+        // Queue acceptance returns before the gated save can complete.
         let _ = app.confirm_selected_installed_app();
-        entered_rx.try_recv().unwrap();
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
         assert!(matches!(
             app.tuning_snapshot().operation,
             crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
@@ -3923,7 +4061,9 @@ mod tests {
         let files = vec![PathBuf::from(r"C:\Dropped.exe")];
         app.ui.dropped_files = Some(files.clone());
         let _ = app.consume_dropped_files_into_group(group.clone());
-        entered_rx.try_recv().unwrap();
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
         assert!(matches!(
             app.tuning_snapshot().operation,
             crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
@@ -3966,7 +4106,9 @@ mod tests {
         let gate = ImportGate(Some(release_tx));
         app.ui.dropped_files = Some(vec![PathBuf::from(r"C:\Dropped.exe")]);
         let _ = app.consume_dropped_files_into_group(group.clone());
-        entered_rx.try_recv().unwrap();
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
         assert!(matches!(
             app.tuning_snapshot().operation,
             crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
@@ -4144,6 +4286,7 @@ mod tests {
 
         app.set_windows_event_log_diagnostics_enabled(false)
             .unwrap();
+        app.wait_for_test_save();
 
         assert!(!state.read().unwrap().windows_event_log_diagnostics_enabled);
         assert!(!app.windows_event_log_worker_is_active());

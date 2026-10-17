@@ -1,6 +1,6 @@
 #[cfg(test)]
 use crate::app::features::system_tweaks::{
-    config::ModulePreference, platform::contract::ProfileId, presentation::EditorDraft,
+    config::ModulePreference, platform::contract::ProfileId,
 };
 use crate::app::{
     features::system_tweaks::{
@@ -55,35 +55,6 @@ fn current_preference(
             mode: m.mode,
             config: m.config.clone(),
         })
-}
-// Retained drafts may finish publishing while this page is open after an upgrade.
-fn synchronize_previous_editor(app: &mut AppState) {
-    let Some(draft) = app.ui.tuning.editor.as_ref() else {
-        return;
-    };
-    let Some(before) = draft.pending_save_revision else {
-        return;
-    };
-    let snapshot = app.tuning_snapshot();
-    let saved = snapshot
-        .profiles
-        .iter()
-        .find(|p| p.id == draft.profile)
-        .and_then(|p| {
-            p.modules
-                .iter()
-                .find(|m| m.feature == draft.candidate.feature)
-        });
-    let published = saved.is_some_and(|saved| {
-        saved.enabled == draft.candidate.enabled
-            && saved.mode == draft.candidate.mode
-            && saved.config == draft.candidate.config
-    });
-    if snapshot.revision > before && published {
-        app.ui.tuning.editor = None;
-    } else if matches!(snapshot.operation, TuningOperationState::Refused { .. }) {
-        app.ui.tuning.editor.as_mut().unwrap().pending_save_revision = None;
-    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TweakActionKind {
@@ -163,7 +134,6 @@ pub(crate) fn draw_system_tweaks(app: &mut AppState, root_ui: &mut egui::Ui) {
     if !app.modules_enabled() {
         return;
     }
-    synchronize_previous_editor(app);
     let snapshot = app.tuning_snapshot();
     let editable = matches!(
         snapshot.configuration,
@@ -1667,7 +1637,7 @@ mod tests {
     }
 
     #[test]
-    fn modules_ui_own_successful_save_closes_editor_without_stale_warning() {
+    fn modules_ui_legacy_preference_save_publishes_without_stale_warning() {
         use crate::app::features::system_tweaks::platform::registry::Module;
         let (mut app, setting, _, profile) = ui_fixture();
         let preference = ModulePreference {
@@ -1676,29 +1646,23 @@ mod tests {
             mode: ActivationMode::Session,
             config: setting.config(12),
         };
-        app.ui.tuning.editor = Some(EditorDraft {
-            profile,
-            expected: None,
-            candidate: preference.clone(),
-            pending_save_revision: Some(app.tuning_snapshot().revision),
-        });
         app.request_tuning(TuningRequest::SetModulePreference {
             profile,
-            preference: Box::new(preference),
+            preference: Box::new(preference.clone()),
             expected: None,
         })
         .unwrap();
         wait_saved(&mut app);
         let text = rendered_text(&mut app);
-        assert!(
-            app.ui.tuning.editor.is_none(),
-            "a confirmed own save must close the editor"
+        assert_eq!(
+            current_preference(&app, profile, &setting.descriptor()),
+            Some(preference)
         );
         assert!(!text.contains("Saved settings changed"));
         finish(&mut app);
     }
     #[test]
-    fn modules_ui_saved_edit_closes_even_when_native_restoration_needs_attention() {
+    fn modules_ui_saved_preference_is_visible_when_restoration_needs_attention() {
         use crate::app::features::system_tweaks::platform::contract::{
             ResourceId, ResourceKey, TargetIdentity,
         };
@@ -1734,12 +1698,6 @@ mod tests {
             config: setting.config(13),
             ..original.clone()
         };
-        app.ui.tuning.editor = Some(EditorDraft {
-            profile,
-            expected: Some(original.clone()),
-            candidate: candidate.clone(),
-            pending_save_revision: Some(app.tuning_snapshot().revision),
-        });
         app.request_tuning(TuningRequest::SetModulePreference {
             profile,
             preference: Box::new(candidate.clone()),
@@ -1760,10 +1718,6 @@ mod tests {
         );
         let text = rendered_text(&mut app);
         assert!(
-            app.ui.tuning.editor.is_none(),
-            "a saved edit must not become stale when restoration fails"
-        );
-        assert!(
             text.contains("Could not complete this action")
                 || text.contains("Recovery needs attention")
         );
@@ -1775,7 +1729,7 @@ mod tests {
         finish(&mut app);
     }
     #[test]
-    fn modules_ui_failed_save_retains_editable_draft() {
+    fn modules_ui_failed_legacy_save_preserves_saved_preference_and_allows_retry() {
         use crate::app::features::system_tweaks::platform::registry::Module;
         let (mut app, setting, fail, profile) = ui_fixture();
         let preference = ModulePreference {
@@ -1785,12 +1739,7 @@ mod tests {
             config: setting.config(13),
         };
         fail.store(true, std::sync::atomic::Ordering::SeqCst);
-        app.ui.tuning.editor = Some(EditorDraft {
-            profile,
-            expected: None,
-            candidate: preference.clone(),
-            pending_save_revision: Some(app.tuning_snapshot().revision),
-        });
+        let before = current_preference(&app, profile, &setting.descriptor());
         app.request_tuning(TuningRequest::SetModulePreference {
             profile,
             preference: Box::new(preference.clone()),
@@ -1799,16 +1748,28 @@ mod tests {
         .unwrap();
         wait_saved(&mut app);
         rendered_text(&mut app);
-        assert_eq!(app.ui.tuning.editor.as_ref().unwrap().candidate, preference);
-        assert!(
-            app.ui
-                .tuning
-                .editor
-                .as_ref()
-                .unwrap()
-                .pending_save_revision
-                .is_none(),
-            "failed save must allow retry"
+        assert_eq!(
+            current_preference(&app, profile, &setting.descriptor()),
+            before
+        );
+        assert!(matches!(
+            app.tuning_snapshot().operation,
+            TuningOperationState::Refused {
+                error: SaveError::Storage,
+                ..
+            }
+        ));
+        fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        app.request_tuning(TuningRequest::SetModulePreference {
+            profile,
+            preference: Box::new(preference.clone()),
+            expected: before,
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        assert_eq!(
+            current_preference(&app, profile, &setting.descriptor()),
+            Some(preference)
         );
         finish(&mut app);
     }

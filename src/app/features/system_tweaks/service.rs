@@ -618,7 +618,7 @@ impl HeadlessTuning {
             return Ok(());
         }
         self.verify_saved()?;
-        let config = self.configured()?;
+        let mut config = self.configured()?;
         self.controller.forget_withdrawn_rejections(|owner| {
             !config.profiles.iter().any(|profile| {
                 profile.id == owner.profile()
@@ -630,6 +630,7 @@ impl HeadlessTuning {
             })
         });
         let mut failed = false;
+        let mut retired_intent = false;
         for owner in self.controller.owners() {
             if owner.is_session() {
                 continue;
@@ -644,7 +645,24 @@ impl HeadlessTuning {
                 .is_some_and(|module| module.accepts_target(&target));
             if !accepted {
                 match self.controller.retire_expired_target(&owner) {
-                    Ok(true) => continue,
+                    Ok(true) => {
+                        for profile in &mut config.profiles {
+                            if is_tweak_profile(profile)
+                                && profile.modules[0].feature == *owner.feature()
+                                && config.manual_targets.iter().any(|selected| {
+                                    selected.profile == profile.id
+                                        && module.as_ref().is_some_and(|module| {
+                                            module.canonical_target(&selected.target).as_ref()
+                                                == Ok(&target)
+                                        })
+                                })
+                            {
+                                retired_intent |= profile.modules[0].enabled;
+                                profile.modules[0].enabled = false;
+                            }
+                        }
+                        continue;
+                    }
                     Ok(false) => {}
                     Err(error) => {
                         self.native_failure(error);
@@ -714,6 +732,12 @@ impl HeadlessTuning {
                     .recover_owner(&owner, RecoveryIntent::Restore)
                     .is_err();
             }
+        }
+        if retired_intent {
+            let mut candidate = self.state.clone();
+            candidate.tuning =
+                TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
+            self.publish(candidate, self.rules.clone())?;
         }
         if failed {
             if let Some(error) = self.controller.error() {
@@ -887,6 +911,30 @@ impl HeadlessTuning {
         let profile = if let Some(profile) = existing {
             profile
         } else {
+            if config.profiles.len() >= 64
+                && self.native_admitted
+                && !self.legacy_recovery
+                && self.controller.can_admit()
+                && self.display_confirmation.is_none()
+            {
+                let completed: std::collections::BTreeSet<_> = config
+                    .profiles
+                    .iter()
+                    .filter(|profile| {
+                        is_tweak_profile(profile)
+                            && !profile.modules[0].enabled
+                            && !config.associations.iter().any(|a| a.profile == profile.id)
+                            && !self.controller.retains_profile(profile.id)
+                    })
+                    .map(|profile| profile.id)
+                    .collect();
+                config
+                    .profiles
+                    .retain(|profile| !completed.contains(&profile.id));
+                config
+                    .manual_targets
+                    .retain(|target| !completed.contains(&target.profile));
+            }
             if config.profiles.len() >= 64 {
                 return Err(SaveError::Invalid);
             }
