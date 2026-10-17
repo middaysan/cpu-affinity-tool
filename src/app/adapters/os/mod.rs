@@ -20,6 +20,11 @@ pub fn set_current_process_priority(priority: PriorityClass) -> Result<(), Strin
     os_api::OS::set_current_process_priority(priority)
 }
 
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub fn pin_current_process_to_last_cpu() -> Result<usize, String> {
+    os_api::OS::pin_current_process_to_last_cpu()
+}
+
 pub fn get_cpu_model() -> String {
     os_api::OS::get_cpu_model()
 }

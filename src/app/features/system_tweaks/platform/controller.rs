@@ -611,6 +611,7 @@ impl Controller {
                 for key in &keys {
                     let field = &self.fields[key];
                     if field.written == field.desired {
+                        field.module.confirm_applied(key, &field.written)?;
                         continue;
                     }
                     let (module, current, desired) = (
@@ -699,6 +700,9 @@ impl Controller {
             }
             self.persist()?;
             result?;
+        } else {
+            // A prior write may have stored the baseline but failed its runtime refresh.
+            field.module.confirm_applied(key, &field.baseline)?;
         }
         let field = self.fields.remove(key).unwrap();
         let record = self.records.get(owner).cloned();

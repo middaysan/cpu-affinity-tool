@@ -19,6 +19,8 @@ pub(super) fn build_default_state() -> AppStateStorage {
         // A newly created state must begin protecting any rules the user adds.
         // Existing state keeps its persisted preference during normal loading.
         process_monitoring_enabled: true,
+        cpu_load_monitoring_enabled: true,
+        cpu_load_history_seconds: 300,
         windows_event_log_diagnostics_enabled: true,
         start_minimized: false,
         rule_identities: None,

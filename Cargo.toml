@@ -47,3 +47,9 @@ windows = []
 linux = []
 diagnostics-test-controls = []
 tuning-test-controls = ["os_api/tuning-test-controls"]
+render-profiling = ["os_api/render-profiling"]
+debug-mcp = ["render-profiling"]
+
+[target.'cfg(windows)'.dev-dependencies]
+# Only the opt-in native GUI cost probe needs a test-thread event loop.
+winit = { version = "0.30.13", default-features = false }

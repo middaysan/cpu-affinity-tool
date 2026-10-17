@@ -1,7 +1,7 @@
 use crate::app::models::{CoreInfo, CoreType, CpuSchema};
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    content_frame, form_text_edit, ghost_button, glass_frame, inset_frame, inter_semibold_family,
+    close_button, content_frame, form_text_edit, glass_frame, inset_frame, inter_semibold_family,
     paint_focus_ring, paint_selected_tone_feedback, palette, toned_button, ToneRole, ToneTokens,
     UiPalette, BUTTON_FONT_SIZE, FORM_INPUT_HEIGHT,
 };
@@ -27,6 +27,15 @@ fn draw_group_form_ui(
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.label(RichText::new("Group name").strong());
             group_name_input(ui, &mut groups.group_name).request_focus();
+            if is_edit {
+                if let Some(id) = &groups.editing_group_id {
+                    ui.add(egui::Label::new(
+                        RichText::new(format!("Group ID: {}", id.0)).size(9.0).weak(),
+                    ).truncate()).on_hover_text(format!(
+                        "{}\nInternal saved identity, retained when the group is renamed or reordered.", id.0,
+                    ));
+                }
+            }
         });
 
         ui.add_space(6.0);
@@ -389,10 +398,7 @@ pub fn create_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    if ghost_button(ui, egui::Button::new("Close"))
-                        .on_hover_text("Close")
-                        .clicked()
-                    {
+                    if close_button(ui).on_hover_text("Close").clicked() {
                         cancel_clicked = true;
                     }
                 });
@@ -443,10 +449,7 @@ pub fn edit_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    if ghost_button(ui, egui::Button::new("Close"))
-                        .on_hover_text("Close")
-                        .clicked()
-                    {
+                    if close_button(ui).on_hover_text("Close").clicked() {
                         cancel_clicked = true;
                     }
                 });
@@ -484,6 +487,30 @@ pub fn edit_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn edit_shows_the_existing_group_id_without_changing_it() {
+        use crate::app::{models::AppStateStorage, runtime::AppState, shared::ids::GroupId};
+        use eframe::egui;
+        use std::sync::{Arc, RwLock};
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+        let mut app = AppState::new_for_test(
+            Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
+            20,
+        );
+        app.ui.group_form.editing_group_id = Some(GroupId("g-kept".into()));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            super::edit_group_window(&mut app, ui)
+        });
+        output.textures_delta.clear();
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.job.text == "Group ID: g-kept")));
+        assert_eq!(
+            app.ui.group_form.editing_group_id,
+            Some(GroupId("g-kept".into()))
+        );
+    }
+
     use super::{
         core_tile_text, core_tile_tokens, core_tile_widget_info, draw_core_buttons_for_test,
         group_name_input, selected_core_tile_fill, CORE_TILE_WIDTH,

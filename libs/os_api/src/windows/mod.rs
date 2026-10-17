@@ -1,5 +1,6 @@
 mod common;
 mod cpu;
+pub(crate) mod cpu_load;
 mod event_log;
 pub(crate) mod gaming;
 mod gaming_diagnostics;
@@ -8,6 +9,7 @@ mod launch;
 pub(crate) mod pc_checks;
 mod processes;
 mod scheduling;
+mod self_affinity;
 mod shell;
 pub(crate) mod tuning;
 mod window;

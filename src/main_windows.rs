@@ -65,21 +65,26 @@ fn main() {
         println!("DEBUG: Reactive mode: YES (Wait-based event loop)");
         println!("========================================================");
     }
+    // Restrict our process before creating Tokio/GUI/background workers.
+    let scheduling_messages = app::startup::prepare_background_scheduling_with(
+        app::adapters::os::set_current_process_priority,
+        app::adapters::os::pin_current_process_to_last_cpu,
+    );
+    #[cfg(feature = "render-profiling")]
+    let _render_profile_session = match app::features::diagnostics::render_profile::start_from_env()
+    {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(EXIT_GUI_STARTUP_ERROR);
+        }
+    };
     // Creating tokio runtime manually
     let rt = Runtime::new().expect("failed to create tokio runtime");
     let _guard = rt.enter();
 
     #[cfg(debug_assertions)]
     println!("DEBUG: Tokio runtime created and entered.");
-
-    // Set self-priority to Below Normal to avoid interfering with high-load apps
-    #[warn(unused_variables)]
-    if let Err(_e) =
-        app::adapters::os::set_current_process_priority(os_api::PriorityClass::BelowNormal)
-    {
-        #[cfg(debug_assertions)]
-        eprintln!("DEBUG: Failed to set self priority: {}", _e);
-    }
 
     let options = NativeOptions {
         run_and_return: true,
@@ -103,10 +108,28 @@ fn main() {
             "CPU Affinity Tool",
             options,
             Box::new(move |cc| {
+                #[cfg(feature = "render-profiling")]
+                if let Some(gl) = &cc.gl {
+                    use eframe::glow::HasContext;
+                    let description = unsafe {
+                        format!(
+                            "{} / {} / {}",
+                            gl.get_parameter_string(eframe::glow::VENDOR),
+                            gl.get_parameter_string(eframe::glow::RENDERER),
+                            gl.get_parameter_string(eframe::glow::VERSION)
+                        )
+                    };
+                    app::features::diagnostics::render_profile::renderer(
+                        description.chars().take(512).collect(),
+                    );
+                }
                 let startup_requires_forwarding =
                     matches!(&startup_intent, StartupIntent::RunRule { .. })
                         && forwarding_runtime.is_some();
                 let mut app = App::new_without_startup_intent(cc);
+                for message in scheduling_messages {
+                    app.state.log_manager.add_sticky_once(message);
+                }
                 let forwarding_ready = app.install_forwarding_runtime(
                     forwarding_runtime.take(),
                     forwarding_warning,
@@ -152,6 +175,70 @@ fn windows_viewport() -> eframe::egui::ViewportBuilder {
 
 #[cfg(test)]
 mod viewport_tests {
+    #[test]
+    fn startup_self_scheduling_keeps_topology_and_tokio_workers_correct() {
+        use std::os::windows::process::CommandExt;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "viewport_tests::native_startup_scheduling_probe",
+                "--nocapture",
+            ])
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    #[test]
+    #[ignore = "isolated own-process startup/Tokio probe invoked by its parent test"]
+    fn native_startup_scheduling_probe() {
+        let threads = crate::app::features::topology::detect_total_threads(0);
+        let messages = crate::app::startup::prepare_background_scheduling_with(
+            crate::app::adapters::os::set_current_process_priority,
+            crate::app::adapters::os::pin_current_process_to_last_cpu,
+        );
+        assert!(messages[0].contains("BelowNormal"));
+        assert_eq!(
+            crate::app::features::topology::detect_total_threads(0),
+            threads,
+            "self affinity must not hide the machine's CPU topology"
+        );
+        if messages[1].contains("requires one Windows processor group") {
+            return;
+        }
+        assert!(
+            messages[1].starts_with("Own process: CPU"),
+            "{:?}",
+            messages
+        );
+        let mask = os_api::OS::get_process_affinity(std::process::id()).unwrap();
+        assert_eq!(mask.count_ones(), 1);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            tokio::spawn(async move {
+                assert_eq!(
+                    os_api::OS::get_process_affinity(std::process::id()).unwrap(),
+                    mask
+                );
+                assert_eq!(
+                    os_api::OS::get_process_priority(std::process::id()).unwrap(),
+                    os_api::PriorityClass::BelowNormal
+                );
+            })
+            .await
+            .unwrap();
+        });
+        println!("STARTUP_SELF_SCHEDULING threads={threads} mask=0x{mask:X} tokio_worker=true logs={messages:?}");
+    }
+
     #[test]
     fn compact_layout_window_keeps_fixed_width_and_resizable_height() {
         let viewport = super::windows_viewport();

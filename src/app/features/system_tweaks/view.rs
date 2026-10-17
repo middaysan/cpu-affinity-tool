@@ -11,8 +11,8 @@ use crate::app::{
     },
     runtime::AppState,
     shell::presenters::shared_elements::{
-        content_frame, glass_frame, paint_focus_ring, palette, row_fill, toned_sized_button,
-        ToneRole,
+        close_button, content_frame, glass_frame, paint_focus_ring, palette, row_fill,
+        toned_sized_button, ToneRole,
     },
 };
 use eframe::egui;
@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MEMORY_INTEGRITY_HELP: &str = "Opens Windows Security > Device security > Core isolation. Find Memory integrity on that page; its label is translated in localized Windows. Windows does not expose a supported way for this app to highlight that switch.\n\nMemory integrity protects the Windows kernel. Turning it off reduces protection; a performance gain is not guaranteed. Choose the setting yourself in Windows and restart only if Windows asks you to.\n\nThis app does not read or change this setting and does not save an Undo baseline. To restore your choice, return to the same Windows page. If the shortcut is unavailable, open Windows Security > Device security > Core isolation details manually.";
+const MEMORY_INTEGRITY_HELP: &str = "Opens Windows Security > Device security > Core isolation. Find Memory integrity on that page; its label is translated in localized Windows. This shortcut opens the page only, without focusing or highlighting the switch.\n\nMemory integrity protects the Windows kernel. Turning it off reduces protection; a performance gain is not guaranteed. Choose the setting yourself in Windows and restart only if Windows asks you to.\n\nThis app does not read or change this setting and does not save an Undo baseline. To restore your choice, return to the same Windows page. If the shortcut is unavailable, open Windows Security > Device security > Core isolation details manually.";
 
 pub(crate) fn save_error_message(error: SaveError) -> &'static str {
     match error {
@@ -221,13 +221,14 @@ pub(crate) fn draw_system_tweaks(app: &mut AppState, root_ui: &mut egui::Ui) {
                             ui.add_space(4.0);
                             section_heading(ui, "FOR GAMES", None);
                             draw_section(app, ui, TweakSection::Games, pending || !editable);
+                            draw_memory_integrity_guide(app, ui, pending);
                             ui.add_space(8.0);
                             section_heading(ui, "FOR COMFORT", Some("No FPS increase"));
                             draw_section(app, ui, TweakSection::Comfort, pending || !editable);
+                            draw_previous_settings(app, ui, pending || !editable);
                         }
                         TuningPageSection::Hardware => draw_hardware(app, ui, pending || !editable),
                         TuningPageSection::PcChecks => draw_pc_checks(app, ui, pending),
-                        TuningPageSection::Previous => draw_previous_settings(app, ui, pending || !editable),
                     }
                 });
         });
@@ -235,60 +236,63 @@ pub(crate) fn draw_system_tweaks(app: &mut AppState, root_ui: &mut egui::Ui) {
 }
 
 fn draw_section_selector(app: &mut AppState, ui: &mut egui::Ui) {
-    egui::Frame::NONE
-        .fill(row_fill(ui))
-        .stroke(ui.visuals().widgets.inactive.bg_stroke)
-        .corner_radius(6.0)
-        .inner_margin(egui::Margin::same(2))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.spacing_mut().button_padding.x = 3.0;
-            ui.horizontal(|ui| {
-                let width = ui.available_width() / 4.0;
-                for (section, title, help) in [
-                    (
-                        TuningPageSection::System,
-                        "System",
-                        "System settings: games and comfort",
-                    ),
-                    (
-                        TuningPageSection::Hardware,
-                        "GPU / network",
-                        "Graphics preference and network guides",
-                    ),
-                    (
-                        TuningPageSection::PcChecks,
-                        "Check PC",
-                        "Read-only hardware information. Choose Check PC inside to run the check.",
-                    ),
-                    (
-                        TuningPageSection::Previous,
-                        "Restore",
-                        "Previous settings: restore saved configurations",
-                    ),
-                ] {
-                    let selected = app.ui.tuning.selected_section == section;
-                    let label = egui::RichText::new(title).size(10.5);
-                    let button = egui::Button::new(if selected { label.strong() } else { label })
-                        .selected(selected);
-                    let response = if selected {
-                        toned_sized_button(ui, [width, 28.0], button, ToneRole::Selected)
-                    } else {
-                        let response = ui.add_sized(
-                            [width, 28.0],
-                            button
-                                .fill(egui::Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::NONE),
-                        );
-                        paint_focus_ring(ui, &response);
-                        response
-                    };
-                    if response.on_hover_text(help).clicked() {
-                        app.ui.tuning.selected_section = section;
+    let track_width = ui.available_width().min(300.0);
+    let sections = [
+        (
+            TuningPageSection::System,
+            "System",
+            "System settings: games and comfort",
+        ),
+        (
+            TuningPageSection::Hardware,
+            "GPU / network",
+            "Graphics preference and network guides",
+        ),
+        (
+            TuningPageSection::PcChecks,
+            "Check PC",
+            "Read-only hardware information. Choose Check PC inside to run the check.",
+        ),
+    ];
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(((ui.available_width() - track_width) * 0.5).max(0.0));
+        egui::Frame::NONE
+            .fill(row_fill(ui))
+            .stroke(ui.visuals().widgets.inactive.bg_stroke)
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::same(2))
+            .show(ui, |ui| {
+                ui.set_width((track_width - 4.0).max(1.0));
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.spacing_mut().button_padding.x = 3.0;
+                ui.horizontal(|ui| {
+                    let width = ui.available_width() / 3.0;
+                    for (section, title, help) in sections {
+                        let selected = app.ui.tuning.selected_section == section;
+                        let label = egui::RichText::new(title).size(10.0);
+                        let button =
+                            egui::Button::new(if selected { label.strong() } else { label })
+                                .selected(selected);
+                        let response = if selected {
+                            toned_sized_button(ui, [width, 20.0], button, ToneRole::Selected)
+                        } else {
+                            let response = ui.add_sized(
+                                [width, 20.0],
+                                button
+                                    .fill(egui::Color32::TRANSPARENT)
+                                    .stroke(egui::Stroke::NONE),
+                            );
+                            paint_focus_ring(ui, &response);
+                            response
+                        };
+                        if response.on_hover_text(help).clicked() {
+                            app.ui.tuning.selected_section = section;
+                        }
                     }
-                }
+                });
             });
-        });
+    });
 }
 
 fn draw_hardware(app: &mut AppState, ui: &mut egui::Ui, pending: bool) {
@@ -363,39 +367,44 @@ fn draw_pc_checks(app: &mut AppState, ui: &mut egui::Ui, pending: bool) {
                 }
             });
     }
-    ui.add_space(8.0);
-    section_heading(ui, "WINDOWS SECURITY", Some("Manual choice"));
-    glass_frame(ui).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            let width = (ui.available_width() - 112.0 - ui.spacing().item_spacing.x).max(0.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(width, 25.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(egui::RichText::new("Memory integrity").size(11.0).strong());
-                    help_button(app, ui, "Memory integrity", MEMORY_INTEGRITY_HELP);
-                },
-            );
-            if ui
-                .add_enabled(
-                    !pending,
-                    egui::Button::new(egui::RichText::new("Open settings").size(10.5))
-                        .min_size(egui::vec2(112.0, 25.0)),
+}
+
+fn draw_memory_integrity_guide(app: &mut AppState, ui: &mut egui::Ui, pending: bool) {
+    glass_frame(ui)
+        .inner_margin(egui::Margin::symmetric(10, 9))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let width = (ui.available_width() - 112.0 - ui.spacing().item_spacing.x).max(0.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width, 25.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_width(width);
+                        ui.label(egui::RichText::new("Memory integrity").size(11.0).strong());
+                        help_button(app, ui, "Memory integrity", MEMORY_INTEGRITY_HELP);
+                    },
+                );
+                if ui
+                    .add_enabled(
+                        !pending,
+                        egui::Button::new(egui::RichText::new("Open settings").size(10.5))
+                            .min_size(egui::vec2(112.0, 25.0)),
+                    )
+                    .clicked()
+                {
+                    submit(app, TuningRequest::OpenCoreIsolation);
+                }
+            });
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("Turning this off reduces protection · Undo in Windows")
+                        .size(9.5)
+                        .color(palette(ui).text_secondary),
                 )
-                .clicked()
-            {
-                submit(app, TuningRequest::OpenCoreIsolation);
-            }
+                .wrap(),
+            );
         });
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new("Turning this off reduces protection · Undo in Windows")
-                    .size(9.5)
-                    .color(palette(ui).text_secondary),
-            )
-            .wrap(),
-        );
-    });
 }
 fn draw_operation_state(app: &mut AppState, ui: &mut egui::Ui) {
     let snapshot = app.tuning_snapshot();
@@ -523,6 +532,29 @@ fn draw_tweak(app: &mut AppState, ui: &mut egui::Ui, card: &TweakCard, pending: 
                     title.weak()
                 });
                 help_button(app, ui, card.spec.title, &tweak_help_text(card));
+                let draft = app
+                    .tuning_editors()
+                    .editor(&card.feature)
+                    .and_then(|editor| editor.tweak_options(card.config.as_ref()));
+                if let Some(draft) = draft {
+                    let available = platform_available
+                        && !pending
+                        && !card.owned
+                        && card.target.is_some()
+                        && matches!(card.capability, Capability::Available);
+                    if ui
+                        .add_enabled(available, egui::Button::new("Settings…").small())
+                        .on_hover_text(if card.owned {
+                            "Undo this tweak before changing its settings."
+                        } else {
+                            "Choose a CPU frequency ceiling and high-clock preference."
+                        })
+                        .clicked()
+                    {
+                        app.ui.tuning.tweak_options =
+                            Some((card.feature.clone(), card.target.clone().unwrap(), draft));
+                    }
+                }
             });
             ui.label(
                 egui::RichText::new(card.spec.scope)
@@ -561,6 +593,24 @@ fn draw_tweak(app: &mut AppState, ui: &mut egui::Ui, card: &TweakCard, pending: 
                         );
                         if let Some(observed) = &card.observed {
                             response.on_hover_text(&observed.summary);
+                        }
+                        if let Some(summary) = card.config.as_ref().and_then(|config| {
+                            app.tuning_editors()
+                                .editor(&card.feature)?
+                                .tweak_summary(config)
+                        }) {
+                            let summary = format!(
+                                "{}: {summary}",
+                                if card.owned { "Requested" } else { "Saved" }
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(summary)
+                                        .size(10.0)
+                                        .color(palette(ui).text_muted),
+                                )
+                                .wrap(),
+                            );
                         }
                         if card.owned {
                             if let Some(baseline) = &card.baseline {
@@ -629,11 +679,26 @@ fn draw_tweak(app: &mut AppState, ui: &mut egui::Ui, card: &TweakCard, pending: 
                                 match controls.action {
                                     CompactAction::Apply => {
                                         if let Some(target) = card.target.clone() {
+                                            let options = app
+                                                .tuning_editors()
+                                                .editor(&card.feature)
+                                                .and_then(|editor| {
+                                                    editor.tweak_options(card.config.as_ref())
+                                                });
                                             submit(
                                                 app,
-                                                TuningRequest::ApplyTweak {
-                                                    feature: card.feature.clone(),
-                                                    target,
+                                                match options {
+                                                    Some(config) => {
+                                                        TuningRequest::ApplyConfiguredTweak {
+                                                            feature: card.feature.clone(),
+                                                            target,
+                                                            config,
+                                                        }
+                                                    }
+                                                    None => TuningRequest::ApplyTweak {
+                                                        feature: card.feature.clone(),
+                                                        target,
+                                                    },
                                                 },
                                             );
                                         }
@@ -666,7 +731,11 @@ fn draw_tweak(app: &mut AppState, ui: &mut egui::Ui, card: &TweakCard, pending: 
                     _ => palette(ui).warning.fg,
                 };
                 let label = if status == ModuleStatus::VerifiedActive(Effect::Immediate) {
-                    "Current value verified"
+                    app.tuning_editors()
+                        .editor(&card.feature)
+                        .map_or("Current value verified", |editor| {
+                            editor.tweak_verified_label()
+                        })
                 } else {
                     status_label(status)
                 };
@@ -797,54 +866,62 @@ fn draw_pc_check(app: &mut AppState, ui: &mut egui::Ui, check: &PcCheck) {
 }
 fn draw_previous_settings(app: &mut AppState, ui: &mut egui::Ui, pending: bool) {
     let snapshot = app.tuning_snapshot();
-    if snapshot.profiles.is_empty() {
-        ui.label("No previous settings to restore.");
+    if !snapshot
+        .profiles
+        .iter()
+        .any(|profile| profile.modules.iter().any(|card| card.owned))
+    {
         return;
     }
-    ui.horizontal(|ui| {
-        ui.strong("Saved settings");
-        help_button(app, ui, "Previous settings", "Previously saved module settings are retained. Restore them here before replacing a conflicting setting.");
-    });
+    ui.add_space(8.0);
+    ui.label("Changes from an earlier version");
     for profile in &snapshot.profiles {
-        ui.push_id(profile.id.get(), |ui| {
-            glass_frame(ui).show(ui, |ui| {
-                ui.strong(&profile.name);
-                for card in &profile.modules {
-                    ui.horizontal_wrapped(|ui| {
-                        let title = ui.label(&card.title);
-                        if let Some(descriptor) =
-                            snapshot.catalog.iter().find(|d| d.id == card.feature)
+        for card in profile.modules.iter().filter(|card| card.owned) {
+            ui.push_id((profile.id.get(), &card.feature), |ui| {
+                glass_frame(ui).show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    let action_width = 112.0_f32.min(ui.available_width() * 0.42);
+                    let text_width =
+                        (ui.available_width() - action_width - ui.spacing().item_spacing.x)
+                            .max(1.0);
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(text_width, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                let title = ui.add(
+                                    egui::Label::new(egui::RichText::new(&card.title).strong())
+                                        .wrap(),
+                                );
+                                if let Some(descriptor) =
+                                    snapshot.catalog.iter().find(|d| d.id == card.feature)
+                                {
+                                    title.on_hover_text(descriptor.description);
+                                }
+                                if let Some(status) = card.status {
+                                    ui.small(status_label(status));
+                                }
+                            },
+                        );
+                        if ui
+                            .add_enabled_ui(!pending, |ui| {
+                                ui.add_sized([action_width, 26.0], egui::Button::new("Undo"))
+                            })
+                            .inner
+                            .clicked()
                         {
-                            title.on_hover_text(descriptor.description);
+                            submit(
+                                app,
+                                TuningRequest::UndoPreviousModule {
+                                    profile: profile.id,
+                                    feature: card.feature.clone(),
+                                },
+                            );
                         }
-                        ui.small(if card.enabled {
-                            "Saved enabled"
-                        } else {
-                            "Saved off"
-                        });
                     });
-                    if let Some(status) = card.status {
-                        ui.small(status_label(status));
-                    }
-                    if let Capability::Unsupported(reason) | Capability::Denied(reason) =
-                        &card.capability
-                    {
-                        ui.colored_label(palette(ui).warning.fg, reason);
-                    }
-                }
-                if ui
-                    .add_enabled(!pending, egui::Button::new("Restore previous settings"))
-                    .clicked()
-                {
-                    submit(
-                        app,
-                        TuningRequest::DisableProfile {
-                            profile: profile.id,
-                        },
-                    );
-                }
+                });
             });
-        });
+        }
     }
 }
 fn help_button(app: &mut AppState, ui: &mut egui::Ui, title: &'static str, help: &str) {
@@ -919,6 +996,51 @@ fn draw_dialogs(app: &mut AppState, context: &egui::Context) {
         }
         return;
     }
+    if let Some((feature, target, mut config)) = app.ui.tuning.tweak_options.clone() {
+        let mut cancel = false;
+        let mut apply = false;
+        let available = snapshot.tweak_cards.iter().any(|card| {
+            card.feature == feature
+                && card.target.as_ref() == Some(&target)
+                && !card.owned
+                && card.availability.is_available()
+                && matches!(card.capability, Capability::Available)
+        }) && !busy(&snapshot.operation);
+        let modal = egui::Modal::new(egui::Id::new("tweak-options")).show(context, |ui| {
+            ui.set_width(width);
+            ui.heading("AC power settings");
+            if let Some(editor) = app.tuning_editors().editor(&feature) {
+                editor.show_tweak_options(ui, &mut config);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    cancel = ui.button("Cancel").clicked();
+                    apply = ui
+                        .add_enabled(
+                            available && editor.accepts_config(&config),
+                            egui::Button::new("Apply"),
+                        )
+                        .clicked();
+                });
+            }
+        });
+        app.ui.tuning.tweak_options = Some((feature.clone(), target.clone(), config.clone()));
+        if cancel || modal.should_close() {
+            app.ui.tuning.tweak_options = None;
+        }
+        if apply
+            && submit(
+                app,
+                TuningRequest::ApplyConfiguredTweak {
+                    feature,
+                    target,
+                    config,
+                },
+            )
+        {
+            app.ui.tuning.tweak_options = None;
+        }
+        return;
+    }
     if let Some((title, help)) = app.ui.tuning.tweak_help.clone() {
         let mut close = false;
         let modal = egui::Modal::new(egui::Id::new("tweak-help")).show(context, |ui| {
@@ -933,7 +1055,7 @@ fn draw_dialogs(app: &mut AppState, context: &egui::Context) {
                         ui.add_space(6.0);
                     }
                 });
-            close = ui.button("Close").clicked();
+            close = close_button(ui).clicked();
         });
         if close || modal.should_close() {
             app.ui.tuning.tweak_help = None;
@@ -990,6 +1112,7 @@ mod tests {
         let mut app =
             empty_modules_app(Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))));
         let card = TweakCard {
+            config: None,
             feature: FeatureId::new("layout_setting").unwrap(),
             spec: TweakSpec {
                 order: 0,
@@ -1740,11 +1863,109 @@ mod tests {
         finish(&mut app);
     }
     #[test]
+    fn legacy_undo_hides_unused_profiles_without_changing_saved_data() {
+        use crate::app::features::system_tweaks::platform::registry::Module;
+        let (mut app, setting, _, profile) = ui_fixture();
+        app.request_tuning(TuningRequest::SetModulePreference {
+            profile,
+            preference: Box::new(ModulePreference {
+                feature: setting.descriptor().id,
+                enabled: true,
+                mode: ActivationMode::Manual,
+                config: setting.config(12),
+            }),
+            expected: None,
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        let saved = app.tuning_snapshot().state.tuning.clone();
+        app.ui.tuning.selected_section = TuningPageSection::System;
+        let text = rendered_text(&mut app);
+        assert!(!text.contains("Gaming"));
+        assert!(!text.contains("Test setting"));
+        assert!(!text.contains("Saved enabled"));
+        assert!(!text.contains("Changes from an earlier version"));
+        assert!(!text.contains("No previous settings to restore"));
+        assert_eq!(app.tuning_snapshot().state.tuning.raw(), saved.raw());
+        assert_eq!(setting.value(), vec![7]);
+        finish(&mut app);
+    }
+
+    #[test]
+    fn legacy_undo_shows_only_applied_settings_and_retains_retry_after_drift() {
+        use crate::app::features::system_tweaks::platform::registry::Module;
+        let (mut app, setting, _, profile) = ui_fixture();
+        app.request_tuning(TuningRequest::SetModulePreference {
+            profile,
+            preference: Box::new(ModulePreference {
+                feature: setting.descriptor().id,
+                enabled: true,
+                mode: ActivationMode::Manual,
+                config: setting.config(12),
+            }),
+            expected: None,
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        app.request_tuning(TuningRequest::ActivateManual {
+            profile,
+            feature: setting.descriptor().id,
+            target: setting.targets()[0].clone(),
+        })
+        .unwrap();
+        wait_saved(&mut app);
+        assert_eq!(setting.value(), vec![12]);
+        app.ui.tuning.selected_section = TuningPageSection::System;
+        let context = egui::Context::default();
+        section_frame(&context, &mut app, vec![]);
+        let output = section_frame(&context, &mut app, vec![]);
+        let text = section_text(&output);
+        assert!(!text.contains("Gaming"));
+        assert!(!text.contains("Saved enabled"));
+        assert!(text.contains("Test setting"));
+        assert!(text.contains("Undo"));
+        let undo_button = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "Undo" => {
+                        Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                    }
+                    _ => None,
+                })
+                .expect("applied old setting must retain its Undo action")
+        };
+
+        feedback_drift(&setting, 20);
+        click_section(&context, &mut app, undo_button(&output));
+        wait_saved(&mut app);
+        assert_eq!(
+            setting.value(),
+            vec![20],
+            "Undo must preserve an external edit"
+        );
+        let output = section_frame(&context, &mut app, vec![]);
+        assert!(section_text(&output).contains("Changed outside this app"));
+        assert!(section_text(&output).contains("Test setting"));
+        // Returning to the app-written value permits a guarded retry.
+        feedback_drift(&setting, 12);
+        click_section(&context, &mut app, undo_button(&output));
+        wait_saved(&mut app);
+        assert_eq!(setting.value(), vec![7]);
+        let output = section_frame(&context, &mut app, vec![]);
+        assert!(!section_text(&output).contains("Test setting"));
+        assert!(!section_text(&output).contains("Changes from an earlier version"));
+        assert!(!app.tuning_snapshot().profiles[0].modules[0].enabled);
+        finish(&mut app);
+    }
+
+    #[test]
     fn compact_tweaks_hides_profile_controls_and_retains_previous_settings() {
         let (mut app, _, _, _) = ui_fixture();
         let text = rendered_text(&mut app);
         assert!(text.contains("System Tweaks"));
-        assert!(text.contains("Restore"));
+        assert!(!text.contains("Restore"));
         assert!(!text.contains("Create profile"));
         assert!(!text.contains("Connect a game"));
         assert!(
@@ -1950,8 +2171,8 @@ mod tests {
             .iter()
             .find_map(|shape| match &shape.shape {
                 egui::Shape::Rect(rect)
-                    if (60.0..=110.0).contains(&rect.rect.width())
-                        && (24.0..=32.0).contains(&rect.rect.height())
+                    if (60.0..=140.0).contains(&rect.rect.width())
+                        && (18.0..=32.0).contains(&rect.rect.height())
                         && rect.rect.contains(position) =>
                 {
                     Some(rect.rect)
@@ -1996,7 +2217,8 @@ mod tests {
         let output = section_frame(&context, &mut app, vec![]);
         let mut previous_right = 0.0;
         let mut switch_top = None;
-        for title in ["System", "GPU / network", "Check PC", "Restore"] {
+        assert!(!section_text(&output).contains("Restore"));
+        for title in ["System", "GPU / network", "Check PC"] {
             let rect = section_button(&output, title);
             assert!(
                 rect.left() >= previous_right,
@@ -2021,10 +2243,84 @@ mod tests {
     }
 
     #[test]
-    fn pc_checks_has_manual_memory_integrity_guide_without_running_checks() {
+    fn memory_integrity_guide_fills_width_and_keeps_action_at_right() {
         let mut app =
             empty_modules_app(Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))));
-        app.ui.tuning.selected_section = TuningPageSection::PcChecks;
+        let context = egui::Context::default();
+        let mut available = egui::Rect::NOTHING;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                available = ui.available_rect_before_wrap();
+                draw_memory_integrity_guide(&mut app, ui, false);
+            },
+        );
+        output.textures_delta.clear();
+        finish(&mut app);
+        let label_rect = |title: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == title => {
+                        Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let title = label_rect("Memory integrity");
+        let action = label_rect("Open settings");
+        let card = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.contains(title.center())
+                        && rect.rect.contains(action.center()) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .min_by(|a, b| a.height().total_cmp(&b.height()))
+            .unwrap();
+        let button = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if (rect.rect.width() - 112.0).abs() < 0.1
+                        && rect.rect.contains(action.center()) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!((card.left() - available.left()).abs() <= 1.0);
+        assert!(
+            (card.right() - available.right()).abs() <= 1.0,
+            "Card must fill its parent: {card:?}, available: {available:?}"
+        );
+        assert!(
+            (8.0..=12.0).contains(&(card.right() - button.right())),
+            "Action must use the right column: {button:?}, card: {card:?}"
+        );
+        assert!(title.right() < button.left());
+    }
+
+    #[test]
+    fn system_games_has_manual_memory_integrity_guide_without_running_checks() {
+        let mut app =
+            empty_modules_app(Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))));
+        app.ui.tuning.selected_section = TuningPageSection::System;
         let revision = app.tuning_snapshot().revision;
         let context = egui::Context::default();
         section_frame(&context, &mut app, vec![]);
@@ -2034,6 +2330,17 @@ mod tests {
         assert!(text.contains("Open settings"));
         assert!(text.contains("Turning this off reduces protection"));
         assert!(text.contains("Undo in Windows"));
+        let games = text.find("FOR GAMES").unwrap();
+        let memory_integrity = text.find("Memory integrity").unwrap();
+        let comfort = text.find("FOR COMFORT").unwrap();
+        assert!(games < memory_integrity && memory_integrity < comfort);
+        assert_eq!(text.matches("Memory integrity").count(), 1);
+        app.ui.tuning.selected_section = TuningPageSection::PcChecks;
+        section_frame(&context, &mut app, vec![]);
+        let output = section_frame(&context, &mut app, vec![]);
+        let text = section_text(&output);
+        assert!(text.contains("Use Check PC"));
+        assert!(!text.contains("Memory integrity"));
         assert!(app.tuning_snapshot().pc_checks.is_empty());
         assert_eq!(app.tuning_snapshot().revision, revision);
         assert_eq!(app.tuning_snapshot().operation, TuningOperationState::Idle);
@@ -2063,9 +2370,6 @@ mod tests {
         assert!(app.tuning_snapshot().pc_checks.is_empty());
         assert_eq!(app.tuning_snapshot().revision, revision);
         assert_eq!(app.tuning_snapshot().operation, TuningOperationState::Idle);
-        click_section(&context, &mut app, section_button(&output, "Restore"));
-        let output = section_frame(&context, &mut app, vec![]);
-        assert!(section_text(&output).contains("No previous settings to restore"));
         click_section(&context, &mut app, section_button(&output, "System"));
         let output = section_frame(&context, &mut app, vec![]);
         assert!(section_text(&output).contains("FOR GAMES"));

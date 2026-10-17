@@ -12,6 +12,63 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[test]
+fn cpu_load_history_defaults_to_five_minutes_and_normalizes_bounded_persisted_choices() {
+    let original = sample_state();
+    let mut raw = serde_json::to_value(&original).unwrap();
+    raw.as_object_mut()
+        .unwrap()
+        .remove("cpu_load_history_seconds");
+    let loaded: AppStateStorage = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&loaded).unwrap()["cpu_load_history_seconds"],
+        300
+    );
+    for seconds in [30, 300, 1800] {
+        raw["cpu_load_history_seconds"] = json!(seconds);
+        let loaded: AppStateStorage = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["cpu_load_history_seconds"],
+            seconds
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.groups).unwrap(),
+            serde_json::to_value(&original.groups).unwrap()
+        );
+    }
+    for invalid in [0, 60, 301, 1801, u32::MAX] {
+        raw["cpu_load_history_seconds"] = json!(invalid);
+        let loaded: AppStateStorage = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["cpu_load_history_seconds"],
+            300
+        );
+    }
+}
+
+#[test]
+fn cpu_load_preference_defaults_on_and_survives_reload_without_changing_rules() {
+    let original = sample_state();
+    let mut raw = serde_json::to_value(&original).unwrap();
+    raw.as_object_mut()
+        .unwrap()
+        .remove("cpu_load_monitoring_enabled");
+    let mut loaded: AppStateStorage = serde_json::from_value(raw).unwrap();
+    assert!(loaded.cpu_load_monitoring_enabled);
+    loaded.cpu_load_monitoring_enabled = false;
+    let saved = serde_json::to_string(&loaded).unwrap();
+    let restored: AppStateStorage = serde_json::from_str(&saved).unwrap();
+    assert!(!restored.cpu_load_monitoring_enabled);
+    assert_eq!(
+        serde_json::to_value(&restored.groups).unwrap(),
+        serde_json::to_value(&original.groups).unwrap()
+    );
+    assert_eq!(
+        restored.process_monitoring_enabled,
+        original.process_monitoring_enabled
+    );
+}
+
 fn with_temp_state_path(test_name: &str, test_fn: impl FnOnce(&Path)) {
     let unique_suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)

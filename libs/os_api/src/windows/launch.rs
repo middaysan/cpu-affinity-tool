@@ -188,6 +188,11 @@ impl OS {
         if fields.affinity && mask == 0 {
             return Err("affinity mask is empty".into());
         }
+        let child_mask = super::self_affinity::launch_mask(
+            fields.affinity,
+            mask,
+            super::self_affinity::original_mask(),
+        );
 
         (|| unsafe {
             let cmdline = build_command_line(&file_path, &args);
@@ -234,7 +239,7 @@ impl OS {
 
             complete_suspended_launch(
                 || {
-                    if fields.affinity {
+                    if let Some(mask) = child_mask {
                         SetProcessAffinityMask(process, mask).map_err(|error| error.to_string())
                     } else {
                         Ok(())

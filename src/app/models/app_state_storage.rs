@@ -21,6 +21,20 @@ pub(crate) const fn default_windows_event_log_diagnostics_enabled() -> bool {
     true
 }
 
+const fn default_cpu_load_monitoring_enabled() -> bool {
+    true
+}
+
+const fn default_cpu_load_history_seconds() -> u32 {
+    300
+}
+
+fn deserialize_cpu_load_history_seconds<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u32, D::Error> {
+    u32::deserialize(deserializer).map(AppStateStorage::normalize_cpu_load_history_seconds)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateStorageMode {
     LegacySidecar,
@@ -51,6 +65,10 @@ pub struct AppStateStorage {
     pub theme_index: usize,
     /// Flag indicating whether process monitoring is enabled
     pub process_monitoring_enabled: bool,
+    /// Read-only CPU load graphs; independent of affinity/priority protection.
+    pub cpu_load_monitoring_enabled: bool,
+    /// Memory-only CPU history window: 30 seconds, 5 minutes or 30 minutes.
+    pub cpu_load_history_seconds: u32,
     /// Start in the tray on Windows when a usable tray icon is available.
     pub start_minimized: bool,
     /// Enables the Windows-only, read-only Application Event Log diagnostic lookup.
@@ -82,6 +100,13 @@ struct StateFields {
     theme_index: usize,
     #[serde(default)]
     process_monitoring_enabled: bool,
+    #[serde(default = "default_cpu_load_monitoring_enabled")]
+    cpu_load_monitoring_enabled: bool,
+    #[serde(
+        default = "default_cpu_load_history_seconds",
+        deserialize_with = "deserialize_cpu_load_history_seconds"
+    )]
+    cpu_load_history_seconds: u32,
     #[serde(default)]
     start_minimized: bool,
     #[serde(default = "default_windows_event_log_diagnostics_enabled")]
@@ -97,6 +122,8 @@ const STATE_FIELDS: &[&str] = &[
     "cpu_schema",
     "theme_index",
     "process_monitoring_enabled",
+    "cpu_load_monitoring_enabled",
+    "cpu_load_history_seconds",
     "start_minimized",
     "windows_event_log_diagnostics_enabled",
     "rule_identities",
@@ -146,6 +173,8 @@ impl<'de> Deserialize<'de> for AppStateStorage {
             cpu_schema: fields.cpu_schema,
             theme_index: fields.theme_index,
             process_monitoring_enabled: fields.process_monitoring_enabled,
+            cpu_load_monitoring_enabled: fields.cpu_load_monitoring_enabled,
+            cpu_load_history_seconds: fields.cpu_load_history_seconds,
             start_minimized: fields.start_minimized,
             windows_event_log_diagnostics_enabled: fields.windows_event_log_diagnostics_enabled,
             rule_identities: fields.rule_identities,
@@ -174,6 +203,14 @@ impl Serialize for AppStateStorage {
         )?;
         map.serialize_entry("start_minimized", &self.start_minimized)?;
         map.serialize_entry(
+            "cpu_load_monitoring_enabled",
+            &self.cpu_load_monitoring_enabled,
+        )?;
+        map.serialize_entry(
+            "cpu_load_history_seconds",
+            &Self::normalize_cpu_load_history_seconds(self.cpu_load_history_seconds),
+        )?;
+        map.serialize_entry(
             "windows_event_log_diagnostics_enabled",
             &self.windows_event_log_diagnostics_enabled,
         )?;
@@ -191,6 +228,13 @@ impl Serialize for AppStateStorage {
 }
 
 impl AppStateStorage {
+    pub(crate) const fn normalize_cpu_load_history_seconds(seconds: u32) -> u32 {
+        match seconds {
+            30 | 300 | 1800 => seconds,
+            _ => default_cpu_load_history_seconds(),
+        }
+    }
+
     pub(crate) fn save_blocked(&self) -> bool {
         matches!(self.save_admission, SaveAdmission::Blocked { .. })
             || self.version > CURRENT_APP_STATE_VERSION

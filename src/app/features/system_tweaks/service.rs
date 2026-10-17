@@ -3,6 +3,7 @@ use super::{
     config::*,
     persistence::{self, RecoveryStore},
     platform::{
+        codec::ModuleEnvelope,
         contract::*,
         controller::{Controller, OwnerKey, RecoveryIntent},
         registry::Registry,
@@ -328,6 +329,27 @@ impl HeadlessTuning {
                 .manual_targets
                 .retain(|t| t.profile != profile || t.feature != feature);
         }
+        self.save_config(config)
+    }
+    pub(crate) fn undo_previous_module(
+        &mut self,
+        profile: ProfileId,
+        feature: &FeatureId,
+    ) -> Result<(), SaveError> {
+        let mut config = self.configured()?;
+        let selected = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile)
+            .ok_or(SaveError::Invalid)?;
+        let preference = selected
+            .modules
+            .iter_mut()
+            .find(|m| &m.feature == feature)
+            .ok_or(SaveError::Invalid)?;
+        // Keep the original payload/targets; reconciliation restores only this module's owners.
+        // Withdrawal must also work for retired or unsupported saved configurations.
+        preference.enabled = false;
         self.save_config(config)
     }
     pub(crate) fn disable_profile(&mut self, profile: ProfileId) -> Result<(), SaveError> {
@@ -755,6 +777,22 @@ impl HeadlessTuning {
         feature: FeatureId,
         target: TargetIdentity,
     ) -> Result<(), SaveError> {
+        self.apply_tweak_with_options(feature, target, None)
+    }
+    pub(crate) fn apply_configured_tweak(
+        &mut self,
+        feature: FeatureId,
+        target: TargetIdentity,
+        config: ModuleEnvelope,
+    ) -> Result<(), SaveError> {
+        self.apply_tweak_with_options(feature, target, Some(config))
+    }
+    fn apply_tweak_with_options(
+        &mut self,
+        feature: FeatureId,
+        target: TargetIdentity,
+        requested: Option<ModuleEnvelope>,
+    ) -> Result<(), SaveError> {
         let module = self
             .registry
             .get(&feature)
@@ -781,25 +819,42 @@ impl HeadlessTuning {
         if module.descriptor().access != ModuleAccess::Managed {
             return Err(SaveError::Invalid);
         }
+        if requested.is_some()
+            && self
+                .controller
+                .owners()
+                .iter()
+                .any(|owner| owner.feature() == &feature)
+        {
+            // Editing an active preset cannot replace its original recovery intent.
+            return Err(SaveError::Invalid);
+        }
         // Explicit EXE choices survive between actions. Other cards discover
         // their current target unless a saved intent or restoration owner pins it.
         if module.editor().selects_saved_exe() {
             self.tweak_targets.insert(feature.clone(), target.clone());
         }
-        if module
-            .editor()
-            .tweak_ready(&target)
-            .map_err(|e| self.native_failure(e))?
+        if requested.is_none()
+            && module
+                .editor()
+                .tweak_ready(&target)
+                .map_err(|e| self.native_failure(e))?
         {
             return Ok(());
         }
-        let desired = module
-            .editor()
-            .tweak_config(&target)
-            .map_err(|e| self.native_failure(e))?;
+        let desired = match requested.as_ref() {
+            Some(config) => module.editor().prepare_tweak_options(&target, config),
+            None => module.editor().tweak_config(&target),
+        }
+        .map_err(|e| self.native_failure(e))?;
         self.registry
             .validate_config(&desired)
             .map_err(|_| SaveError::Invalid)?;
+        let already_suitable = requested.is_some()
+            && module
+                .editor()
+                .tweak_ready_for_config(&target, Some(&desired))
+                .map_err(|e| self.native_failure(e))?;
         let mut config = self.configured()?;
         let existing = config
             .profiles
@@ -841,7 +896,7 @@ impl HeadlessTuning {
             .unwrap();
         selected.modules = vec![ModulePreference {
             feature: feature.clone(),
-            enabled: true,
+            enabled: !already_suitable,
             mode: ActivationMode::Manual,
             config: desired,
         }];
@@ -862,6 +917,9 @@ impl HeadlessTuning {
                 self.display_confirmation = None;
             }
             return Err(error);
+        }
+        if already_suitable {
+            return Ok(());
         }
         if let Err(error) = self.activate_manual(profile, feature, target) {
             if display {

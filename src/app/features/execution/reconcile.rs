@@ -73,6 +73,7 @@ pub async fn run_process_settings_monitor(
 
     loop {
         interval.tick().await;
+        crate::render_profile_scope!(Reconcile);
 
         let (state_snapshot, monitoring_enabled) = {
             let state = match app_state.read() {

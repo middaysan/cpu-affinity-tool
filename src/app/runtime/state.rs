@@ -178,6 +178,8 @@ pub struct AppState {
     pub(crate) rules: RulesContext,
     pub(crate) ui: UiSession,
     pub(crate) runtime: RuntimeRegistry,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) cpu_load: crate::app::features::cpu_load::CpuLoadRuntime,
     pub(crate) log_manager: LogManager,
     #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
     #[cfg_attr(
@@ -223,6 +225,12 @@ impl AppState {
             }
         }
         let runtime = RuntimeRegistry::new();
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let cpu_load = crate::app::features::cpu_load::CpuLoadRuntime::new(
+            runtime.running_apps_handle(),
+            true,
+            persistent_state.clone(),
+        );
         let saved = persistent_state
             .read()
             .expect("newly created state lock")
@@ -247,6 +255,8 @@ impl AppState {
             rules,
             ui: UiSession::new(effective_total_threads()),
             runtime,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            cpu_load,
             tuning,
             tuning_editors,
             tuning_adopted_revision: 0,
@@ -281,6 +291,12 @@ impl AppState {
             }
         }
         let runtime = RuntimeRegistry::new();
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let cpu_load = crate::app::features::cpu_load::CpuLoadRuntime::new(
+            runtime.running_apps_handle(),
+            false,
+            persistent_state.clone(),
+        );
         let saved = persistent_state
             .read()
             .expect("newly created state lock")
@@ -301,6 +317,8 @@ impl AppState {
             rules,
             ui: UiSession::new(total_threads),
             runtime,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            cpu_load,
             tuning,
             tuning_editors,
             tuning_adopted_revision: 0,
@@ -413,10 +431,15 @@ impl AppState {
         self.tuning_seen = Some(snapshot);
         changed
     }
+    pub(crate) fn set_tuning_cards_visible(&self, visible: bool) {
+        self.tuning.set_cards_visible(visible);
+    }
     pub(crate) fn tuning_poll_interval(&self) -> Option<std::time::Duration> {
         self.tuning.poll_interval()
     }
     pub(crate) fn begin_tuning_shutdown(&mut self) {
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        self.cpu_load.shutdown();
         self.tuning.begin_shutdown();
     }
     #[cfg(test)]
@@ -426,6 +449,10 @@ impl AppState {
     pub(crate) fn tuning_shutdown_outcome(
         &self,
     ) -> Option<crate::app::features::system_tweaks::platform::controller::ShutdownResult> {
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        if !self.cpu_load.is_stopped() {
+            return None;
+        }
         self.tuning.snapshot().shutdown_outcome
     }
 
@@ -1377,6 +1404,132 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn cpu_load_enabled(&self) -> bool {
+        self.cpu_load.preference_override.unwrap_or_else(|| {
+            self.persistent_state
+                .read()
+                .map(|s| s.cpu_load_monitoring_enabled)
+                .unwrap_or(false)
+        })
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn cpu_load_history_seconds(&self) -> u32 {
+        self.cpu_load.history_seconds_override.unwrap_or_else(|| {
+            self.persistent_state
+                .read()
+                .map(|state| {
+                    AppStateStorage::normalize_cpu_load_history_seconds(
+                        state.cpu_load_history_seconds,
+                    )
+                })
+                .unwrap_or(300)
+        })
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn set_cpu_load_history_seconds(&mut self, seconds: u32) -> Result<(), String> {
+        if !matches!(seconds, 30 | 300 | 1800) {
+            return Err(
+                "Choose a CPU history duration of 30 seconds, 5 minutes or 30 minutes.".into(),
+            );
+        }
+        if self.pending_legacy.is_some()
+            || matches!(
+                self.tuning.snapshot().operation,
+                crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+            )
+        {
+            return Err(
+                "Wait for the current settings change to finish, then change CPU history.".into(),
+            );
+        }
+        let (draft, revision) = self
+            .base_draft()
+            .ok_or("Could not update CPU history. Please try again.")?;
+        draft
+            .write()
+            .map_err(|_| "Could not update CPU history.")?
+            .cpu_load_history_seconds = seconds;
+        if !self.persist_draft(draft, revision, self.rules.clone(), None) {
+            return Err("Could not save CPU history. Please try again.".into());
+        }
+        self.cpu_load.history_seconds_override = Some(seconds);
+        self.cpu_load.preference_error = None;
+        self.cpu_load.set_history_seconds(seconds);
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn set_cpu_load_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        // Disabling takes effect now, even if persistence is unavailable.
+        if !enabled {
+            self.cpu_load.preference_override = Some(false);
+            self.cpu_load.configure(false, false);
+        }
+        let (draft, revision) = self
+            .base_draft()
+            .ok_or("Could not update CPU monitoring. Please try again.")?;
+        draft
+            .write()
+            .map_err(|_| "Could not update CPU monitoring.")?
+            .cpu_load_monitoring_enabled = enabled;
+        if !self.persist_draft(draft, revision, self.rules.clone(), None) {
+            return Err("Could not save CPU monitoring. Please try again.".into());
+        }
+        self.cpu_load.preference_override = Some(enabled);
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn poll_cpu_load(&mut self, visible: bool) {
+        if self.pending_legacy.is_none() {
+            if let Some(wanted) = self.cpu_load.preference_override {
+                let saved = self
+                    .persistent_state
+                    .read()
+                    .map(|s| s.cpu_load_monitoring_enabled)
+                    .unwrap_or(false);
+                if saved == wanted {
+                    self.cpu_load.preference_override = None;
+                } else {
+                    self.cpu_load.preference_error = Some("CPU monitoring changed for this session, but could not be saved. Try again in App settings.".into());
+                }
+            }
+            if let Some(wanted) = self.cpu_load.history_seconds_override {
+                let saved = self
+                    .persistent_state
+                    .read()
+                    .map(|state| state.cpu_load_history_seconds)
+                    .unwrap_or(300);
+                if saved == wanted {
+                    self.cpu_load.history_seconds_override = None;
+                } else {
+                    self.cpu_load.preference_error = Some("CPU history changed for this session, but could not be saved. Try again in App settings.".into());
+                }
+            }
+        }
+        let enabled = self.cpu_load_enabled();
+        let history_seconds = self.cpu_load_history_seconds();
+        self.cpu_load.set_history_seconds(history_seconds);
+        self.cpu_load.configure(enabled, visible);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn cpu_load_memory_estimate(&self) -> String {
+        let apps = self
+            .persistent_state
+            .read()
+            .map(|s| s.groups.iter().map(|g| g.programs.len()).sum())
+            .unwrap_or_default();
+        self.cpu_load.memory_estimate(
+            self.ui.group_form.core_selection.len(),
+            apps,
+            self.cpu_load_history_seconds(),
+        )
+    }
+
     #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
     pub fn set_start_minimized(&mut self, enabled: bool) -> Result<(), String> {
         let (draft, revision) = self
@@ -1398,22 +1551,38 @@ impl AppState {
         Ok(())
     }
 
-    /// Revalidates only tracked instances; never performs a full process enumeration.
-    pub(crate) fn tracked_processes_snapshot(&mut self) -> Vec<TrackedProcessSnapshot> {
-        self.tracked_processes_snapshot_with_inspector(
+    pub(crate) fn refresh_tracked_processes(&mut self, now: std::time::Instant) {
+        self.refresh_tracked_processes_with_inspector(
+            now,
             crate::app::adapters::os::get_process_image_path_and_instance_token,
-        )
+        );
     }
 
+    fn refresh_tracked_processes_with_inspector(
+        &mut self,
+        now: std::time::Instant,
+        inspect: impl FnMut(u32) -> Result<(PathBuf, u64), String>,
+    ) {
+        if self.ui.tracked_processes.refresh_due(now) {
+            let rows = self.tracked_processes_snapshot_with_inspector(inspect);
+            self.ui.tracked_processes.publish(now, rows);
+        }
+    }
+
+    /// Revalidates only tracked instances; None means temporarily unavailable,
+    /// whereas Some(empty) is a completed empty roster.
     fn tracked_processes_snapshot_with_inspector(
         &mut self,
         mut inspect: impl FnMut(u32) -> Result<(PathBuf, u64), String>,
-    ) -> Vec<TrackedProcessSnapshot> {
+    ) -> Option<Vec<TrackedProcessSnapshot>> {
+        if self.persistent_state.is_poisoned() {
+            return None;
+        }
         let central = self.build_central_panel_snapshot();
         let handle = self.runtime.running_apps_handle();
         let instances = {
             let Ok(running) = handle.try_read() else {
-                return Vec::new();
+                return None;
             };
             let mut instances = Vec::new();
             for group in central.groups {
@@ -1456,7 +1625,7 @@ impl AppState {
             });
         }
 
-        tracked
+        Some(tracked)
     }
 
     pub fn open_installed_app_picker(&mut self, group_id: GroupId) {
@@ -2024,6 +2193,57 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn cpu_load_retention_save_preserves_existing_candidate_and_other_preferences() {
+        let mut app = sample_state();
+        let classic = app.is_process_monitoring_enabled();
+        let theme = app.get_theme_index();
+        assert_eq!(app.cpu_load_history_seconds(), 300);
+        app.set_cpu_load_history_seconds(30).unwrap();
+        assert_eq!(app.cpu_load_history_seconds(), 30);
+        assert_eq!(
+            app.persistent_state
+                .read()
+                .unwrap()
+                .cpu_load_history_seconds,
+            30
+        );
+        app.pending_legacy = Some(super::PendingLegacy {
+            id: 12345,
+            revision: 77,
+            completion: Some(super::LegacyCompletion::Group(
+                None,
+                "Keep draft".into(),
+                vec![true],
+                false,
+            )),
+        });
+        assert!(app.set_cpu_load_history_seconds(1800).is_err());
+        let pending = app.pending_legacy.as_ref().unwrap();
+        assert_eq!((pending.id, pending.revision), (12345, 77));
+        assert!(
+            matches!(&pending.completion, Some(super::LegacyCompletion::Group(None, name, _, false)) if name == "Keep draft")
+        );
+        assert_eq!(app.cpu_load_history_seconds(), 30);
+        assert_eq!(
+            app.persistent_state
+                .read()
+                .unwrap()
+                .cpu_load_history_seconds,
+            30
+        );
+        app.pending_legacy = None;
+        assert!(app.set_cpu_load_history_seconds(60).is_err());
+        app.set_cpu_load_history_seconds(1800).unwrap();
+        let reloaded: AppStateStorage = serde_json::from_str(
+            &serde_json::to_string(&*app.persistent_state.read().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reloaded.cpu_load_history_seconds, 1800);
+        assert_eq!(app.is_process_monitoring_enabled(), classic);
+        assert_eq!(app.get_theme_index(), theme);
+    }
     #[cfg(not(all(target_os = "windows", feature = "windows")))]
     #[test]
     fn linux_modules_route_is_unavailable() {
@@ -3106,6 +3326,82 @@ mod tests {
     }
 
     #[test]
+    fn tracked_process_refresh_keeps_last_rows_on_busy_and_limits_inspection_to_one_hz() {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+        let mut app = sample_state();
+        let central = app.build_central_panel_snapshot();
+        let group = &central.groups[0];
+        let program = &group.programs[0];
+        assert!(app.runtime.add_running_app_with_token(
+            &program.app_key,
+            701,
+            1001,
+            group.group_id.clone(),
+            program.rule_id.clone(),
+        ));
+        let inspections = Cell::new(0);
+        let inspect = |pid| {
+            inspections.set(inspections.get() + 1);
+            assert_eq!(pid, 701);
+            Ok((PathBuf::from("sample.exe"), 1001))
+        };
+        let start = Instant::now();
+        app.refresh_tracked_processes_with_inspector(start, inspect);
+        let first = app.ui.tracked_processes.rows.clone();
+        assert_eq!(first.len(), 1);
+        let pointer = app.ui.tracked_processes.rows.as_ptr();
+        for millis in 1..1000 {
+            app.refresh_tracked_processes_with_inspector(
+                start + Duration::from_millis(millis),
+                inspect,
+            );
+        }
+        assert_eq!(
+            inspections.get(),
+            1,
+            "GUI frames must not repeat native inspections"
+        );
+        assert_eq!(app.ui.tracked_processes.rows.as_ptr(), pointer);
+
+        let handle = app.runtime.running_apps_handle();
+        let writer = handle.try_write().unwrap();
+        app.refresh_tracked_processes_with_inspector(start + Duration::from_secs(1), inspect);
+        assert_eq!(
+            app.ui.tracked_processes.rows, first,
+            "Busy is not an empty roster"
+        );
+        assert!(app.ui.tracked_processes.updating);
+        drop(writer);
+        app.refresh_tracked_processes_with_inspector(start + Duration::from_millis(1500), inspect);
+        assert_eq!(
+            inspections.get(),
+            1,
+            "Busy retries also respect the one-second cadence"
+        );
+        app.refresh_tracked_processes_with_inspector(start + Duration::from_secs(2), inspect);
+        assert_eq!(inspections.get(), 2);
+        assert!(!app.ui.tracked_processes.updating);
+        assert_eq!(
+            app.ui.tracked_processes.rows.as_ptr(),
+            pointer,
+            "unchanged rows keep their allocation"
+        );
+
+        handle
+            .try_write()
+            .unwrap()
+            .mutate_membership(|apps| apps.remove_app(&program.app_key));
+        app.refresh_tracked_processes_with_inspector(start + Duration::from_secs(3), inspect);
+        assert!(
+            app.ui.tracked_processes.rows.is_empty(),
+            "a completed empty snapshot must clear old rows"
+        );
+        assert!(!app.ui.tracked_processes.updating);
+        assert_eq!(inspections.get(), 2);
+    }
+
+    #[test]
     fn tracked_process_snapshot_lists_only_runtime_confirmed_pids() {
         let mut app = sample_state();
         let central = app.build_central_panel_snapshot();
@@ -3132,7 +3428,8 @@ mod tests {
                 703 => Err("exited or inaccessible".to_string()),
                 704 => Ok((PathBuf::from("apps/helper.exe"), 1004)),
                 _ => panic!("must not inspect untracked processes"),
-            }),
+            })
+            .unwrap(),
             vec![
                 TrackedProcessSnapshot {
                     group_name: "Games".to_string(),
@@ -3171,11 +3468,13 @@ mod tests {
             owner.rule_id.clone(),
         ));
         let mut inspections = 0;
-        let rows = app.tracked_processes_snapshot_with_inspector(|pid| {
-            inspections += 1;
-            assert_eq!(pid, 701);
-            Ok((PathBuf::from("sample.exe"), 1001))
-        });
+        let rows = app
+            .tracked_processes_snapshot_with_inspector(|pid| {
+                inspections += 1;
+                assert_eq!(pid, 701);
+                Ok((PathBuf::from("sample.exe"), 1001))
+            })
+            .unwrap();
         assert_eq!(
             rows,
             vec![TrackedProcessSnapshot {
@@ -3194,6 +3493,7 @@ mod tests {
             .tracked_processes_snapshot_with_inspector(|_| {
                 panic!("stale runtime ownership must not be inspected")
             })
+            .unwrap()
             .is_empty());
     }
 
@@ -3213,6 +3513,7 @@ mod tests {
             .tracked_processes_snapshot_with_inspector(|_| {
                 panic!("a PID without an instance token must not be inspected")
             })
+            .unwrap()
             .is_empty());
 
         let handle = app.runtime.running_apps_handle();
@@ -3221,7 +3522,7 @@ mod tests {
             .tracked_processes_snapshot_with_inspector(|_| {
                 panic!("a busy runtime must not fall back to unverified PIDs")
             })
-            .is_empty());
+            .is_none());
     }
 
     #[test]

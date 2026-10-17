@@ -130,6 +130,7 @@ pub async fn run_running_app_monitor(
 
     loop {
         interval.tick().await;
+        crate::render_profile_scope!(Discovery);
 
         let configured_programs = {
             let state = match app_state.read() {

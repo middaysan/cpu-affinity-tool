@@ -54,6 +54,54 @@ fn setup(user: bool) -> (Arc<Setting>, Registry, Arc<Mutex<Memory>>, Controller)
     (module, registry, memory, controller)
 }
 #[test]
+fn matching_stored_bytes_do_not_hide_failed_runtime_refresh_on_reload_or_undo() {
+    let (module, registry, memory, mut controller) = setup(false);
+    controller
+        .acquire(
+            owner(1),
+            module.clone(),
+            TargetIdentity::Machine,
+            module.config(12),
+        )
+        .unwrap();
+    drop(controller);
+    let mut controller = Controller::restore(
+        Box::new(Store(memory.clone())),
+        "C:/owned/state.json".into(),
+        &registry,
+    )
+    .unwrap();
+    *module.fail_confirmation.lock().unwrap() = true;
+    assert!(controller
+        .recover_owner(&owner(1), RecoveryIntent::Keep)
+        .is_err());
+    assert!(!controller.is_empty());
+    *module.fail_confirmation.lock().unwrap() = false;
+    controller
+        .recover_owner(&owner(1), RecoveryIntent::Keep)
+        .unwrap();
+    // Reproduce a prior restore that wrote baseline but failed its runtime refresh.
+    module
+        .fields
+        .lock()
+        .unwrap()
+        .insert(ResourceId::new("value").unwrap(), vec![7]);
+    *module.fail_confirmation.lock().unwrap() = true;
+    assert!(controller
+        .recover_owner(&owner(1), RecoveryIntent::Restore)
+        .is_err());
+    assert!(
+        !controller.is_empty(),
+        "The original stays durable until runtime settlement succeeds"
+    );
+    *module.fail_confirmation.lock().unwrap() = false;
+    controller
+        .recover_owner(&owner(1), RecoveryIntent::Restore)
+        .unwrap();
+    assert!(controller.is_empty());
+    assert_eq!(module.value(), vec![7]);
+}
+#[test]
 fn durable_prewrite_failure_writes_nothing_and_keeps_evidence() {
     let (module, _, memory, mut controller) = setup(false);
     memory.lock().unwrap().fail = Some(1);
@@ -674,6 +722,103 @@ fn durable_disk_lease_ambiguous_artifact_unknown_and_source_mismatch_block() {
     .is_err());
 }
 struct SavedFile(PathBuf);
+
+#[test]
+fn legacy_undo_after_restart_retains_drift_evidence_and_other_modules() {
+    use super::{config::ModulePreference, SaveError};
+    use crate::app::models::AppStateStorage;
+
+    let directory = OwnedDirectory::new();
+    let path = directory.0.join("state.json");
+    let mut state = AppStateStorage::test_fixture(|_| {});
+    state.try_save_to_path(&path).unwrap();
+    let first = Setting::new("scalar", false);
+    let second = Setting::new("other", true);
+    let mut registry = Registry::default();
+    registry.register(first.clone()).unwrap();
+    registry.register(second.clone()).unwrap();
+    let mut service = super::Tuning::from_registry(registry.clone())
+        .headless(state, Box::new(SavedFile(path.clone())));
+    service
+        .start_recovery(Box::new(DiskRecoveryStore::open(&directory.0).unwrap()))
+        .unwrap();
+    let preferences: Vec<_> = [&first, &second]
+        .iter()
+        .map(|module| ModulePreference {
+            feature: module.descriptor().id,
+            enabled: true,
+            mode: ActivationMode::Manual,
+            config: module.config(12),
+        })
+        .collect();
+    let profile = service
+        .create_profile("Hidden old profile".into(), preferences.clone())
+        .unwrap();
+    for module in [&first, &second] {
+        service
+            .activate_manual(profile, module.descriptor().id, module.targets()[0].clone())
+            .unwrap();
+    }
+    drop(service);
+    let load_service = || {
+        super::Tuning::from_registry(registry.clone()).headless(
+            AppStateStorage::read_saved_for_tuning(&path).unwrap(),
+            Box::new(SavedFile(path.clone())),
+        )
+    };
+    let mut service = load_service();
+    service
+        .start_recovery(Box::new(DiskRecoveryStore::open(&directory.0).unwrap()))
+        .unwrap();
+    assert_eq!(first.value(), vec![12]);
+    assert_eq!(second.value(), vec![12]);
+    first
+        .fields
+        .lock()
+        .unwrap()
+        .insert(ResourceId::new("value").unwrap(), vec![20]);
+    assert_eq!(
+        service.undo_previous_module(profile, &first.descriptor().id),
+        Err(SaveError::Recovering)
+    );
+    assert_eq!(first.value(), vec![20]);
+    assert_eq!(service.controller.owners().len(), 2);
+    drop(service);
+
+    // A failed Undo remains recoverable after another independent disk reload.
+    let mut service = load_service();
+    assert_eq!(
+        service.start_recovery(Box::new(DiskRecoveryStore::open(&directory.0).unwrap())),
+        Err(SaveError::Recovering)
+    );
+    assert_eq!(service.controller.owners().len(), 2);
+    first
+        .fields
+        .lock()
+        .unwrap()
+        .insert(ResourceId::new("value").unwrap(), vec![12]);
+    service.begin_operation();
+    service
+        .undo_previous_module(profile, &first.descriptor().id)
+        .unwrap();
+    assert_eq!(first.value(), vec![7]);
+    assert_eq!(
+        second.value(),
+        vec![12],
+        "Undo is scoped to one module, not its whole profile"
+    );
+    let super::config::TuningLoad::Known(config) = service.state().tuning.decode() else {
+        panic!()
+    };
+    assert_eq!(config.profiles[0].modules[0].config, preferences[0].config);
+    assert!(!config.profiles[0].modules[0].enabled);
+    assert_eq!(config.profiles[0].modules[1], preferences[1]);
+    service
+        .undo_previous_module(profile, &second.descriptor().id)
+        .unwrap();
+    assert_eq!(second.value(), vec![7]);
+    assert!(service.controller.is_empty());
+}
 
 #[test]
 fn durable_operation_feedback_withdrawn_conflicts_keep_real_recovery_errors() {

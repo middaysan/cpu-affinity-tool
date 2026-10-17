@@ -14,6 +14,20 @@ use os_api::{
 };
 const ID: &str = "display_refresh";
 const FIELD: &str = "display_refresh_mode";
+fn read_card(target: &TargetIdentity) -> Result<(String, bool), ModuleError> {
+    let target = display(target)
+        .or_else(|_| native_api::primary_display_target().map_err(|e| native("read", e)))?;
+    let modes = native_api::display_modes(&target).map_err(|e| native("read", e))?;
+    let highest = native_api::highest_compatible_mode(modes.current, &modes.compatible);
+    Ok((
+        format!(
+            "{} Hz · highest {} Hz",
+            modes.current.frequency,
+            highest.map_or(modes.current.frequency, |m| m.frequency)
+        ),
+        highest == Some(modes.current),
+    ))
+}
 fn restorable_baseline(modes: &native_api::DisplayModes) -> Result<(), ModuleError> {
     if !modes.compatible.contains(&modes.current) {
         return Err(error(
@@ -167,19 +181,18 @@ impl Module for DisplayRefresh {
         display(target).is_ok_and(|target| native_api::display_modes(&target).is_ok())
     }
     fn observe(&self, target: &TargetIdentity) -> ModuleObservation {
-        let result = (|| {
-            let target = display(target)
-                .or_else(|_| native_api::primary_display_target().map_err(|e| native("read", e)))?;
-            let modes = native_api::display_modes(&target).map_err(|e| native("read", e))?;
-            let high = native_api::highest_compatible_mode(modes.current, &modes.compatible)
-                .map(|mode| mode.frequency)
-                .unwrap_or(modes.current.frequency);
-            Ok(format!(
-                "{} Hz · highest {} Hz",
-                modes.current.frequency, high
-            ))
-        })();
-        observation(result)
+        observation(read_card(target).map(|(label, _)| label))
+    }
+    fn observe_tweak(
+        &self,
+        target: &TargetIdentity,
+        _: Option<&ModuleEnvelope>,
+    ) -> (ModuleObservation, Result<bool, ModuleError>) {
+        let result = read_card(target);
+        (
+            observation(result.clone().map(|(label, _)| label)),
+            result.map(|(_, ready)| ready),
+        )
     }
     fn fields(
         &self,

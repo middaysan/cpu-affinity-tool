@@ -18,6 +18,7 @@ use crate::app::{
 use std::{
     collections::BTreeMap,
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, SyncSender, TrySendError},
         Arc, Mutex, RwLock,
     },
@@ -29,7 +30,16 @@ pub(crate) enum TuningRequest {
         feature: FeatureId,
         target: TargetIdentity,
     },
+    ApplyConfiguredTweak {
+        feature: FeatureId,
+        target: TargetIdentity,
+        config: ModuleEnvelope,
+    },
     UndoTweak {
+        feature: FeatureId,
+    },
+    UndoPreviousModule {
+        profile: ProfileId,
         feature: FeatureId,
     },
     UndoAllTweaks,
@@ -45,7 +55,7 @@ pub(crate) enum TuningRequest {
         action: super::presentation::ModuleAction,
     },
     // Legacy headless configuration commands remain supported for compatibility
-    // and fixtures. The compact page offers previous-profile restoration only.
+    // and fixtures. The compact page only exposes Undo for applied old settings.
     #[cfg_attr(not(test), allow(dead_code))]
     CreateProfile {
         name: String,
@@ -56,6 +66,7 @@ pub(crate) enum TuningRequest {
         preference: Box<ModulePreference>,
         expected: Option<ModulePreference>,
     },
+    #[cfg_attr(not(test), allow(dead_code))]
     DisableProfile {
         profile: ProfileId,
     },
@@ -134,6 +145,7 @@ pub(crate) enum TuningConfigurationState {
 pub(crate) struct ModuleCard {
     pub feature: FeatureId,
     pub title: String,
+    pub owned: bool,
     pub enabled: bool,
     pub mode: ActivationMode,
     pub config: ModuleEnvelope,
@@ -145,6 +157,7 @@ pub(crate) struct ModuleCard {
 #[derive(Clone, Debug)]
 pub(crate) struct ProfileCard {
     pub id: ProfileId,
+    #[cfg(test)]
     pub name: String,
     pub modules: Vec<ModuleCard>,
 }
@@ -178,6 +191,7 @@ pub(crate) struct TweakCard {
     pub ready: bool,
     pub owned: bool,
     pub baseline: Option<String>,
+    pub config: Option<ModuleEnvelope>,
     pub capability: Capability,
     pub availability: super::platforms::TweakAvailability,
 }
@@ -194,6 +208,7 @@ struct Admission {
 }
 struct Shared {
     modules_enabled: bool,
+    cards_visible: AtomicBool,
     admission: Mutex<Admission>,
     latest: Mutex<Arc<TuningSnapshot>>,
     #[cfg(test)]
@@ -233,6 +248,7 @@ impl TuningRuntime {
         let modules_enabled = service.modules_enabled;
         let shared = Arc::new(Shared {
             modules_enabled,
+            cards_visible: AtomicBool::new(false),
             admission: Mutex::new(Admission {
                 sender,
                 next: Some(1),
@@ -285,8 +301,14 @@ impl TuningRuntime {
                         BTreeMap::new()
                     };
                     let mut next_cards = Instant::now();
+                    let mut cards_were_visible = false;
                     let mut next_display_retry = Instant::now();
                     loop {
+                        let cards_visible = owned.cards_visible.load(Ordering::Acquire);
+                        if cards_visible && !cards_were_visible {
+                            next_cards = Instant::now();
+                        }
+                        cards_were_visible = cards_visible;
                         // Reserve the existing latch before an autonomous save changes
                         // revision. Native work and snapshot construction run unlocked.
                         let expire_display = {
@@ -316,7 +338,7 @@ impl TuningRuntime {
                                 bridge.latest(),
                                 false,
                                 None,
-                                true,
+                                cards_visible,
                             ));
                             let mut admission = owned.admission.lock().unwrap();
                             *owned.latest.lock().unwrap() = completed;
@@ -394,7 +416,7 @@ impl TuningRuntime {
                                 bridge.latest(),
                                 true,
                                 Some(outcome),
-                                true,
+                                false,
                             ));
                             let mut admission = owned.admission.lock().unwrap();
                             *owned.latest.lock().unwrap() = completed;
@@ -446,7 +468,7 @@ impl TuningRuntime {
                                     observation,
                                     false,
                                     None,
-                                    true,
+                                    cards_visible,
                                 ));
                                 let mut admission = owned.admission.lock().unwrap();
                                 *owned.latest.lock().unwrap() = completed;
@@ -472,7 +494,7 @@ impl TuningRuntime {
                                         observation,
                                         false,
                                         None,
-                                        true,
+                                        cards_visible,
                                     ));
                                     let admission = owned.admission.lock().unwrap();
                                     if !admission.pending && admission.closing.is_none() {
@@ -546,6 +568,9 @@ impl TuningRuntime {
             latest
         }
     }
+    pub(crate) fn set_cards_visible(&self, visible: bool) {
+        self.shared.cards_visible.store(visible, Ordering::Release);
+    }
     pub(crate) fn begin_shutdown(&self) {
         self.shared
             .admission
@@ -610,6 +635,11 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
     }
     match request {
         TuningRequest::ApplyTweak { feature, target } => service.apply_tweak(feature, target),
+        TuningRequest::ApplyConfiguredTweak {
+            feature,
+            target,
+            config,
+        } => service.apply_configured_tweak(feature, target, config),
         TuningRequest::UndoTweak { feature } => service.undo_tweak(&feature),
         TuningRequest::UndoAllTweaks => service.undo_all_tweaks(),
         TuningRequest::SelectTweakTarget { feature, target } => {
@@ -644,6 +674,9 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             preference,
             expected,
         } => service.set_module_preference(profile, *preference, expected),
+        TuningRequest::UndoPreviousModule { profile, feature } => {
+            service.undo_previous_module(profile, &feature)
+        }
         TuningRequest::DisableProfile { profile } => service.disable_profile(profile),
         TuningRequest::RemoveProfile { profile } => service.remove_profile(profile),
         TuningRequest::BindRule {
@@ -1062,10 +1095,29 @@ fn tweak_cards(
         // Keep retained legacy intents and the controller's stable account key
         // referring to one card, without a new baseline or native work here.
         let target = target.and_then(|target| module.canonical_target(&target).ok());
-        let observed = if observe && availability.is_available() {
-            target.as_ref().map(|target| module.observe(target))
+        let saved_config = config
+            .profiles
+            .iter()
+            .rev()
+            .find(|p| {
+                super::service::is_tweak_profile(p)
+                    && p.modules[0].feature == descriptor.id
+                    && config.manual_targets.iter().any(|t| {
+                        t.profile == p.id
+                            && module.canonical_target(&t.target).ok().as_ref() == target.as_ref()
+                    })
+            })
+            .map(|p| p.modules[0].config.clone());
+        let (observed, ready) = if observe && availability.is_available() {
+            target
+                .as_ref()
+                .map(|target| {
+                    let (value, ready) = module.observe_tweak(target, saved_config.as_ref());
+                    (Some(value), ready.ok())
+                })
+                .unwrap_or((None, None))
         } else {
-            None
+            (None, None)
         };
         // Target discovery may fail while the diagnostic read still explains why.
         // Retain that explanation, without treating it as authority to write.
@@ -1100,13 +1152,10 @@ fn tweak_cards(
                     |o| o.capability.clone(),
                 )
             };
-        let suitable = if observe && matches!(capability, Capability::Available) {
-            target
-                .as_ref()
-                .and_then(|target| module.editor().tweak_ready(target).ok())
-        } else {
-            None
-        };
+        // Retain choices after Undo, but never use saved native bindings for a new Apply.
+        let suitable = matches!(capability, Capability::Available)
+            .then_some(ready)
+            .flatten();
         let owner = owners.iter().find(|owner| {
             owner.feature() == &descriptor.id
                 && config
@@ -1133,6 +1182,7 @@ fn tweak_cards(
             Some(ModuleStatus::Unmanaged)
         };
         cards.push(TweakCard {
+            config: saved_config,
             availability,
             feature: descriptor.id.clone(),
             spec,
@@ -1220,8 +1270,9 @@ fn snapshot(
                 .take(256)
                 .collect()
         };
-        let observed = observe_module
-            .then(|| module.observe(targets.first().unwrap_or(&TargetIdentity::Machine)));
+        let observed = (observe_module
+            && (module.editor().tweak().is_none() || targets.is_empty()))
+        .then(|| module.observe(targets.first().unwrap_or(&TargetIdentity::Machine)));
         let capability =
             if let super::platforms::TweakAvailability::Unavailable(reason) = availability {
                 Capability::Unsupported(reason.into())
@@ -1234,6 +1285,7 @@ fn snapshot(
         let card = ModuleCard {
             feature: descriptor.id.clone(),
             title: descriptor.title.into(),
+            owned: false,
             enabled: false,
             mode: ActivationMode::Manual,
             config: module.editor().default_config(),
@@ -1265,6 +1317,7 @@ fn snapshot(
                     .unwrap_or(ModuleCard {
                         feature: preference.feature.clone(),
                         title: preference.feature.as_str().into(),
+                        owned: false,
                         enabled: false,
                         mode: preference.mode,
                         config: preference.config.clone(),
@@ -1321,11 +1374,10 @@ fn snapshot(
                         Capability::Unsupported("Saved configuration unavailable".into());
                 }
                 let owners = service.controller.owners();
-                if card.enabled
-                    || owners.iter().any(|owner| {
-                        owner.profile() == profile.id && owner.feature() == &card.feature
-                    })
-                {
+                card.owned = owners
+                    .iter()
+                    .any(|owner| owner.profile() == profile.id && owner.feature() == &card.feature);
+                if card.enabled || card.owned {
                     if let Some(status) = service.controller.status_for(profile.id, &card.feature) {
                         card.status = Some(status);
                     }
@@ -1337,6 +1389,7 @@ fn snapshot(
             }
             profiles.push(ProfileCard {
                 id: profile.id,
+                #[cfg(test)]
                 name: profile.name,
                 modules,
             });
@@ -1382,6 +1435,92 @@ fn snapshot(
 #[cfg(test)]
 mod card_tests {
     use super::*;
+
+    #[test]
+    fn cpu19_hidden_cards_do_not_refresh_but_visible_cards_use_one_observation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counted(Arc<Setting>, Arc<AtomicUsize>);
+        impl Module for Counted {
+            fn descriptor(&self) -> ModuleDescriptor {
+                self.0.descriptor()
+            }
+            fn editor(&self) -> &dyn ModuleEditor {
+                self.0.editor()
+            }
+            fn targets(&self) -> Vec<TargetIdentity> {
+                self.0.targets()
+            }
+            fn observe(&self, _: &TargetIdentity) -> ModuleObservation {
+                panic!("Compact cards must use their combined observation")
+            }
+            fn observe_tweak(
+                &self,
+                target: &TargetIdentity,
+                saved: Option<&ModuleEnvelope>,
+            ) -> (ModuleObservation, Result<bool, ModuleError>) {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                (
+                    self.0.observe(target),
+                    self.0.editor().tweak_ready_for_config(target, saved),
+                )
+            }
+            fn fields(
+                &self,
+                t: &TargetIdentity,
+                c: &ModuleEnvelope,
+            ) -> Result<Vec<FieldChange>, ModuleError> {
+                self.0.fields(t, c)
+            }
+            fn read(&self, k: &ResourceKey) -> Result<Vec<u8>, ModuleError> {
+                self.0.read(k)
+            }
+            fn write(&self, k: &ResourceKey, e: &[u8], d: &[u8]) -> Result<(), ModuleError> {
+                self.0.write(k, e, d)
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = Registry::default();
+        registry
+            .register(Arc::new(Counted(
+                Setting::new("simple_tweak", false),
+                calls.clone(),
+            )))
+            .unwrap();
+        let service = super::super::Tuning::from_registry(registry).headless(
+            AppStateStorage::test_fixture(|_| {}),
+            Box::new(super::super::service::SelectedStatePersistence),
+        );
+        let runtime = TuningRuntime::start(
+            service,
+            Arc::new(tokio::sync::RwLock::new(RunningApps::default())),
+        );
+        thread::sleep(Duration::from_millis(1100));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "closed page performs no card reads"
+        );
+        runtime.set_cards_visible(true);
+        let until = Instant::now() + Duration::from_secs(2);
+        while calls.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(5));
+        }
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one combined observation on open"
+        );
+        runtime.set_cards_visible(false);
+        thread::sleep(Duration::from_millis(1100));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "hiding stops periodic card reads"
+        );
+        runtime.begin_shutdown();
+    }
     use crate::app::features::system_tweaks::{
         platform::registry::{FieldChange, Module, ModuleObservation, Registry},
         presentation::ModuleEditor,
@@ -1945,6 +2084,7 @@ mod card_tests {
         let template = ModuleCard {
             feature: module.descriptor().id,
             title: "Test tweak".into(),
+            owned: false,
             enabled: false,
             mode: ActivationMode::Manual,
             config: module.default_config(),

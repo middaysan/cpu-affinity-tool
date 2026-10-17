@@ -1,9 +1,13 @@
 mod catalog;
+pub mod cpu_load;
 pub mod gaming;
+pub mod gaming_cpu_power;
 pub mod gaming_diagnostics;
 pub mod pc_checks;
 pub mod platform;
 mod process;
+#[cfg(all(target_os = "windows", feature = "render-profiling"))]
+pub mod render_profile;
 mod shortcut;
 pub mod tuning;
 pub mod windows_tweaks;

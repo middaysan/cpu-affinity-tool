@@ -24,7 +24,15 @@ Legacy process QoS requires Windows 10 1709+; the retained timer-policy experime
 
 `Module` supplies a descriptor, typed configuration validator/tweak metadata, available targets, read-only observation, desired field changes, exact field reads and conditional writes. Optional actions retain refresh, bounded CSV import and fixed Windows Settings pages for compatibility. The compact System Tweaks presenter reads cached snapshots; native calls run on the existing application worker. Legacy editor fixtures remain test-only.
 
-The current UI uses direct Apply/Undo, without visible profiles or triggers. One horizontal segmented switch stays visible above scrolling content: System (the default), GPU / network, Check PC and Restore. Full descriptions appear in hover help. Section selection is transient and dispatches no native request; Check PC reads only after its explicit action. Global errors, Undo and display confirmation remain available across sections. Hidden manual intents reuse the schema-v11 profile/target persistence. Previous configurations remain readable and restorable; classic affinity/priority stays in Affinity groups. GPU preference qualifies a selected saved EXE before dispatch. Already-suitable values create no owner/baseline. Display changes carry a durable unconfirmed intent and 15-second keep/undo timer; failed withdrawal retains evidence. Hardware guides and explicit cached PC checks make no native writes.
+The current UI uses direct Apply/Undo, without visible profiles or triggers. One horizontal segmented switch stays visible above scrolling content: System (the default), GPU / network and Check PC. Full descriptions appear in hover help. Section selection is transient and dispatches no native request; Check PC reads only after its explicit action. Global errors, Undo and display confirmation remain available across sections. Hidden manual intents reuse the schema-v11 profile/target persistence. Previous configurations remain readable and restorable; classic affinity/priority stays in Affinity groups. GPU preference qualifies a selected saved EXE before dispatch. Already-suitable values create no owner/baseline. Display changes carry a durable unconfirmed intent and 15-second keep/undo timer; failed withdrawal retains evidence. Hardware guides and explicit cached PC checks make no native writes.
+
+Full card capabilities refresh on the existing worker only while the page is
+visible and uncovered. Hidden snapshots retain health and operation feedback;
+owned-field inspection, session reconciliation, confirmation expiry and shutdown
+recovery continue. Compact adapters may share one native observation and
+readiness result through `Module::observe_tweak`; display refresh uses one mode
+inventory instead of repeated driver tests. Apply and Undo retain independent
+native validation and never use a UI snapshot as mutation authority.
 
 A resource is an exact target plus a stable owned-field ID. Equal requests share the first baseline. Conflicting requests fail before writing. Last-owner restoration compares the current owned field with the app-written token and preserves other fields. A module must never turn a read error into a default, infer success from its desired value or recapture an uncertain baseline.
 

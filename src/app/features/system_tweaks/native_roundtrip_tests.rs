@@ -35,6 +35,95 @@ use std::{
 
 type TestResult<T = ()> = Result<T, String>;
 static NATIVE_SERIAL: Mutex<()> = Mutex::new(());
+/// Test-only legacy fixture: retired CPU options remain verifiable for recovery.
+fn legacy_cpu_configuration(
+    module: &dyn Module,
+    user: &UserIdentity,
+    options: os_api::gaming_cpu_power::CpuPowerOptions,
+) -> TestResult<ModuleEnvelope> {
+    let requests = checked(os_api::gaming_cpu_power::prepare_requests(user, &options))?;
+    let mut config = module.editor().default_config();
+    config.payload = json!({"ac":"Performance","dc":"Balanced","ac_only":true,
+        "cpu":{"maximum_mhz":options.performance_mhz,"efficient_mhz":options.efficient_mhz,
+        "keep_high":options.keep_high,"allow_parking":options.allow_parking,"requests":requests}});
+    if !module.editor().accepts_config(&config) {
+        return Err("Invalid retained CPU fixture".into());
+    }
+    Ok(config)
+}
+#[test]
+#[ignore = "Explicit read-only CPU power preparation; no setting or recovery writes"]
+fn native_cpu_power_prepare_readonly() -> TestResult {
+    let user = checked(gaming::interactive_user())?;
+    for high in [false, true] {
+        let requests = checked(os_api::gaming_cpu_power::prepare_requests(
+            &user,
+            &os_api::gaming_cpu_power::CpuPowerOptions {
+                performance_mhz: 4500,
+                keep_high: high,
+                ..Default::default()
+            },
+        ))?;
+        eprintln!(
+            "CPU AC high={high}: {}",
+            checked(serde_json::to_string(&requests))?
+        );
+    }
+    Ok(())
+}
+#[test]
+#[ignore = "ROOT: separate hybrid AC ceilings and both parking choices; exact disk-reloaded Undo"]
+fn native_roundtrip_tweak_cpu_power_hybrid_parking() -> TestResult {
+    let _serial = NATIVE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let user = checked(gaming::interactive_user())?;
+    let hybrid = checked(os_api::gaming_cpu_power::hybrid_cores(&user))?;
+    eprintln!("Two verified CPU classes: {hybrid}");
+    let original_plan = checked(gaming::read_power_plan(&user))?;
+    let original_dc = checked(gaming::read_power_mode(&user, gaming::PowerSource::Dc))?;
+    for (high, parking) in [(false, true), (true, false)] {
+        let registry = tweaks::registry();
+        let module = module(&registry, "power_mode");
+        let target = user_target(&user);
+        assert_eq!(module.observe(&target).capability, Capability::Available);
+        let desired = legacy_cpu_configuration(
+            module.as_ref(),
+            &user,
+            os_api::gaming_cpu_power::CpuPowerOptions {
+                performance_mhz: 4500,
+                efficient_mhz: hybrid.then_some(2500),
+                keep_high: high,
+                allow_parking: Some(parking),
+            },
+        )?;
+        let requests: Vec<os_api::gaming_cpu_power::CpuPowerRequest> = checked(
+            serde_json::from_value(desired.payload["cpu"]["requests"].clone()),
+        )?;
+        for request in &requests {
+            use os_api::gaming_cpu_power::CpuPowerSetting::*;
+            match request.key.setting {
+                Frequency if hybrid => assert_eq!(request.value, 2500),
+                Frequency1 if hybrid => assert_eq!(request.value, 4500),
+                ParkingMinimum | ParkingMinimum1 => {
+                    assert_eq!(request.value, if parking { 0 } else { 100 })
+                }
+                _ => {}
+            }
+        }
+        eprintln!(
+            "New CPU policy high={high}, parking={parking}, changed fields={}",
+            requests.len()
+        );
+        roundtrip(registry, module, target, desired, || {
+            assert_eq!(checked(gaming::read_power_plan(&user))?, original_plan);
+            assert_eq!(
+                checked(gaming::read_power_mode(&user, gaming::PowerSource::Dc))?,
+                original_dc
+            );
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
 
 #[test]
 #[ignore = "Explicit read-only diagnosis: inspect compact tweak targets and values; no apply or recovery writes"]
@@ -719,6 +808,110 @@ fn native_roundtrip_tweak_power_ac_only() -> TestResult {
         "power_mode",
         user_target(&checked(gaming::interactive_user())?),
     )
+}
+#[test]
+#[ignore = "ROOT: AC CPU limit/high-clock request, exact absent/DWORD baseline, disk reload and Undo; no parking or battery changes"]
+fn native_roundtrip_tweak_cpu_power_options() -> TestResult {
+    let _serial = NATIVE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let user = checked(gaming::interactive_user())?;
+    let target = user_target(&user);
+    let original_dc = checked(gaming::read_power_mode(&user, gaming::PowerSource::Dc))?;
+    let original_plan = checked(gaming::read_power_plan(&user))?;
+    for high in [false, true] {
+        let registry = tweaks::registry();
+        let module = module(&registry, "power_mode");
+        let desired = legacy_cpu_configuration(
+            module.as_ref(),
+            &user,
+            os_api::gaming_cpu_power::CpuPowerOptions {
+                performance_mhz: 4500,
+                keep_high: high,
+                ..Default::default()
+            },
+        )?;
+        assert!(desired.payload["cpu"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["key"]["setting"] == "Frequency"));
+        let prepared = desired.payload["cpu"]["requests"].as_array().unwrap();
+        eprintln!(
+            "AC CPU requests, high={high}: {}",
+            serde_json::to_string(prepared).unwrap()
+        );
+        // The other power source, original plan and parking fields remain unowned and unchanged.
+        let processor = windows::core::GUID::from_u128(0x54533251_82be_4824_96c1_47b60b740d00);
+        let parking = windows::core::GUID::from_u128(0x0cc5b647_c1df_4637_891a_dec35c318583);
+        let parking1 = windows::core::GUID::from_u128(0x0cc5b647_c1df_4637_891a_dec35c318584);
+        let plan = windows::core::GUID::from_u128(u128::from_be_bytes(original_plan.0));
+        let read_parking = || -> TestResult<Vec<u32>> {
+            [parking, parking1]
+                .into_iter()
+                .map(|setting| {
+                    let mut value = 0;
+                    let result = unsafe {
+                        windows::Win32::System::Power::PowerReadACValueIndex(
+                            None,
+                            Some(&plan),
+                            Some(&processor),
+                            Some(&setting),
+                            &mut value,
+                        )
+                    };
+                    if result.0 != 0 {
+                        return Err(format!("Read-only parking check: {}", result.0));
+                    }
+                    Ok(value)
+                })
+                .collect()
+        };
+        let untouched = read_parking()?;
+        roundtrip(registry, module, target.clone(), desired, || {
+            assert_eq!(
+                checked(gaming::read_power_mode(&user, gaming::PowerSource::Dc))?,
+                original_dc
+            );
+            assert_eq!(checked(gaming::read_power_plan(&user))?, original_plan);
+            assert_eq!(read_parking()?, untouched);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+#[test]
+#[ignore = "ROOT: restore the explicitly selected retained CPU-power test journal; never recapture originals"]
+fn native_roundtrip_tweak_cpu_power_00_restore_retained() -> TestResult {
+    let _serial = NATIVE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let directory = PathBuf::from(
+        std::env::var_os("CPU_POWER_TEST_RECOVERY_DIRECTORY")
+            .ok_or("No explicitly selected test journal")?,
+    );
+    let document: super::persistence::RecoveryDocument = checked(serde_json::from_slice(
+        &checked(fs::read(directory.join("recovery-v1.json")))?,
+    ))?;
+    checked(document.validate())?;
+    assert!(!document.fields.is_empty());
+    assert!(document
+        .fields
+        .iter()
+        .all(|field| field.module.as_str() == "power_mode"
+            && field.key.field.as_str().starts_with("cpu_ac_")
+            && field.baseline == [0]));
+    let registry = tweaks::registry();
+    let module = module(&registry, "power_mode");
+    let mut controller = checked(Controller::restore(
+        Box::new(checked(DiskRecoveryStore::open(&directory))?),
+        checked(source_identifier(&directory.join("state.json")))?,
+        &registry,
+    ))?;
+    for owner in controller.owners() {
+        checked(controller.recover_owner(&owner, RecoveryIntent::Restore))?;
+    }
+    assert!(controller.is_empty());
+    for field in document.fields {
+        assert_eq!(checked(module.read(&field.key))?, field.baseline);
+    }
+    Ok(())
 }
 fn mode_name(value: gaming::GuidValue) -> TestResult<&'static str> {
     if value == gaming::POWER_MODE_BALANCED {

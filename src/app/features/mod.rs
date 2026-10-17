@@ -1,3 +1,5 @@
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub(crate) mod cpu_load;
 pub mod diagnostics;
 pub mod execution;
 pub mod preferences;

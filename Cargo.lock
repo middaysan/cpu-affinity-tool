@@ -720,6 +720,7 @@ dependencies = [
  "tokio",
  "tray-icon",
  "windows",
+ "winit",
  "winres",
 ]
 

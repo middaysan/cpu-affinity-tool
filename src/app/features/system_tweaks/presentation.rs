@@ -77,6 +77,36 @@ pub(crate) trait ModuleEditor: Send + Sync {
     fn tweak_ready(&self, _target: &TargetIdentity) -> Result<bool, ModuleError> {
         Ok(false)
     }
+    /// Optional module-owned controls. Opening them performs no native work.
+    fn tweak_options(&self, _saved: Option<&ModuleEnvelope>) -> Option<ModuleEnvelope> {
+        None
+    }
+    fn show_tweak_options(&self, _ui: &mut eframe::egui::Ui, _config: &mut ModuleEnvelope) {}
+    /// Resolve native targets on the worker before persisting a new manual intent.
+    fn prepare_tweak_options(
+        &self,
+        _target: &TargetIdentity,
+        _config: &ModuleEnvelope,
+    ) -> Result<ModuleEnvelope, ModuleError> {
+        Err(ModuleError::new(
+            super::platform::contract::ErrorKind::InvalidConfig,
+            "tweak options",
+        ))
+    }
+    fn tweak_ready_for_config(
+        &self,
+        target: &TargetIdentity,
+        _saved: Option<&ModuleEnvelope>,
+    ) -> Result<bool, ModuleError> {
+        self.tweak_ready(target)
+    }
+    fn tweak_summary(&self, _config: &ModuleEnvelope) -> Option<String> {
+        None
+    }
+    /// Describe the value actually read back, without implying a measured hardware effect.
+    fn tweak_verified_label(&self) -> &'static str {
+        "Current value verified"
+    }
     fn selects_saved_exe(&self) -> bool {
         false
     }
@@ -163,7 +193,6 @@ pub(crate) enum TuningPageSection {
     System,
     Hardware,
     PcChecks,
-    Previous,
 }
 
 #[derive(Default)]
@@ -172,6 +201,7 @@ pub(crate) struct TuningUiSession {
     pub tweak_help: Option<(&'static str, String)>,
     pub confirm_undo_all: bool,
     pub tweak_target: Option<TargetIdentity>,
+    pub tweak_options: Option<(FeatureId, TargetIdentity, ModuleEnvelope)>,
     #[cfg(test)]
     pub selected_profile: Option<ProfileId>,
     pub editor: Option<EditorDraft>,

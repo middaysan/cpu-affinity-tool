@@ -103,6 +103,7 @@ pub struct UiPalette {
     pub success: ToneTokens,
     pub warning: ToneTokens,
     pub danger: ToneTokens,
+    pub close: ToneTokens,
     pub drag_idle: Color32,
     pub drag_active: Color32,
     pub drop_target: Color32,
@@ -173,6 +174,13 @@ const DARK_PALETTE: UiPalette = UiPalette {
         fill: Color32::from_rgb(41, 26, 29),
         hover_fill: Color32::from_rgb(55, 35, 39),
         active_fill: Color32::from_rgb(34, 22, 24),
+        border: Color32::from_rgb(112, 65, 72),
+    },
+    close: ToneTokens {
+        fg: Color32::from_rgb(239, 211, 216),
+        fill: Color32::from_rgb(67, 31, 38),
+        hover_fill: Color32::from_rgb(83, 38, 47),
+        active_fill: Color32::from_rgb(55, 25, 31),
         border: Color32::from_rgb(112, 65, 72),
     },
     drag_idle: Color32::from_rgb(112, 121, 129),
@@ -246,6 +254,13 @@ const LIGHT_PALETTE: UiPalette = UiPalette {
         hover_fill: Color32::from_rgb(232, 210, 213),
         active_fill: Color32::from_rgb(232, 210, 213),
         border: Color32::from_rgb(201, 151, 156),
+    },
+    close: ToneTokens {
+        fg: Color32::from_rgb(255, 243, 246),
+        fill: Color32::from_rgb(134, 53, 65),
+        hover_fill: Color32::from_rgb(151, 61, 75),
+        active_fill: Color32::from_rgb(115, 44, 55),
+        border: Color32::from_rgb(122, 48, 60),
     },
     drag_idle: Color32::from_rgb(123, 135, 143),
     drag_active: Color32::from_rgb(73, 104, 117),
@@ -413,6 +428,16 @@ pub fn toned_button(ui: &mut egui::Ui, button: egui::Button<'_>, role: ToneRole)
     toned_button_with_tokens(ui, button, tokens)
 }
 
+/// Shared dismissal control; callers retain ownership of their close action.
+pub fn close_button(ui: &mut egui::Ui) -> egui::Response {
+    toned_sized_button_with_tokens(
+        ui,
+        [44.0, 21.0],
+        egui::Button::new(egui::RichText::new("Close").size(BUTTON_FONT_SIZE)).corner_radius(5.0),
+        palette(ui).close,
+    )
+}
+
 pub fn toned_button_with_tokens(
     ui: &mut egui::Ui,
     button: egui::Button<'_>,
@@ -555,25 +580,31 @@ pub fn row_fill(ui: &egui::Ui) -> Color32 {
     palette(ui).row
 }
 
-pub fn drag_grip(ui: &mut egui::Ui, accessible_label: &'static str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 20.0), egui::Sense::drag());
-    let response = response
-        .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text(accessible_label);
-    let colors = palette(ui);
-    let color = if response.hovered() || response.dragged() {
-        colors.drag_active
-    } else {
-        colors.drag_idle
-    };
-    for x in [-2.0, 2.0] {
-        for y in [-3.0, 0.0, 3.0] {
-            ui.painter()
-                .circle_filled(rect.center() + egui::vec2(x, y), 1.0, color);
-        }
-    }
+/// Reserve the whole name column for dragging, including space after short text.
+pub fn draggable_name(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    text: egui::RichText,
+    size: egui::Vec2,
+) -> egui::Response {
+    let accessible_label = text.text().to_owned();
+    let galley = egui::WidgetText::from(text).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        size.x,
+        egui::TextStyle::Body,
+    );
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let response = ui
+        .interact(rect, id, egui::Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::Grab);
+    ui.painter().galley(
+        egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+        galley,
+        ui.visuals().text_color(),
+    );
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, accessible_label)
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &accessible_label)
     });
     paint_focus_ring(ui, &response);
     response
@@ -601,6 +632,28 @@ fn strong_border(ui: &egui::Ui) -> Color32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn close_template_has_one_size_and_uses_each_themes_red_palette() {
+        use eframe::egui;
+        for dark in [true, false] {
+            let ctx = egui::Context::default();
+            ctx.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+            let mut rect = egui::Rect::NOTHING;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                rect = super::close_button(ui).rect;
+            });
+            output.textures_delta.clear();
+            assert_eq!(rect.size(), egui::vec2(44.0, 21.0));
+            let tokens = super::palette_for_dark_mode(dark).close;
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Rect(shape) if shape.rect == rect && shape.fill == tokens.fill && shape.stroke.color == tokens.border)));
+        }
+    }
+
     use super::{
         apply_tone_to_visuals, apply_widget_style, palette_for_dark_mode,
         selected_tone_feedback_stroke, ui_font_definitions, BUTTON_FONT_SIZE,
@@ -745,6 +798,7 @@ mod tests {
                 palette.success,
                 palette.warning,
                 palette.danger,
+                palette.close,
             ] {
                 for fill in [tone.fill, tone.hover_fill, tone.active_fill] {
                     assert!(

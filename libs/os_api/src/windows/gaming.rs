@@ -1,4 +1,5 @@
 //! Narrow, conditional Windows operations. All process work uses one retained handle.
+pub(crate) mod cpu_power;
 use super::{OS, common::HandleGuard};
 use crate::gaming::*;
 use crate::tuning::TuningNativeError;

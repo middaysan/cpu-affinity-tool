@@ -35,6 +35,17 @@ pub trait Module: Send + Sync {
         })
     }
     fn observe(&self, target: &TargetIdentity) -> ModuleObservation;
+    /// One compact card refresh; adapters can reuse one native read for both results.
+    fn observe_tweak(
+        &self,
+        target: &TargetIdentity,
+        saved: Option<&ModuleEnvelope>,
+    ) -> (ModuleObservation, Result<bool, ModuleError>) {
+        (
+            self.observe(target),
+            self.editor().tweak_ready_for_config(target, saved),
+        )
+    }
     fn fields(
         &self,
         target: &TargetIdentity,
@@ -43,6 +54,11 @@ pub trait Module: Send + Sync {
     fn read(&self, key: &ResourceKey) -> Result<Vec<u8>, ModuleError>;
     /// Compare and write on the same validated native handle. Empty bytes may encode absence.
     fn write(&self, key: &ResourceKey, expected: &[u8], desired: &[u8]) -> Result<(), ModuleError>;
+    /// Some stored settings need a guarded runtime refresh even when bytes already match.
+    /// Called only for retained ownership, before recovery/Undo evidence is retired.
+    fn confirm_applied(&self, _key: &ResourceKey, _expected: &[u8]) -> Result<(), ModuleError> {
+        Ok(())
+    }
     fn action(&self, action: ModuleAction) -> Result<(), ModuleError> {
         match action {
             ModuleAction::Refresh => Ok(()),

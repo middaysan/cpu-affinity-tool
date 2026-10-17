@@ -18,6 +18,7 @@ pub(crate) struct Setting {
     pub(super) writes: Arc<Mutex<usize>>,
     actions: Arc<Mutex<Vec<String>>>,
     pub(super) fail_at: Mutex<Option<ResourceId>>,
+    pub(super) fail_confirmation: Mutex<bool>,
     observation_gate: Mutex<Option<Arc<(Mutex<bool>, std::sync::Condvar)>>>,
     observation_entered: std::sync::atomic::AtomicBool,
     user: bool,
@@ -45,6 +46,7 @@ impl Setting {
             writes: Arc::new(Mutex::new(0)),
             actions: Arc::new(Mutex::new(vec![])),
             fail_at: Mutex::new(None),
+            fail_confirmation: Mutex::new(false),
             observation_gate: Mutex::new(None),
             observation_entered: std::sync::atomic::AtomicBool::new(false),
             user,
@@ -106,6 +108,27 @@ impl ModuleEditor for Setting {
     }
     fn tweak_ready(&self, _: &TargetIdentity) -> Result<bool, ModuleError> {
         Ok(self.value() == vec![12])
+    }
+    fn prepare_tweak_options(
+        &self,
+        _: &TargetIdentity,
+        config: &ModuleEnvelope,
+    ) -> Result<ModuleEnvelope, ModuleError> {
+        if self.id.as_str() != "simple_tweak" || !self.accepts_config(config) {
+            return Err(ModuleError::new(ErrorKind::InvalidConfig, "test options"));
+        }
+        Ok(config.clone())
+    }
+    fn tweak_ready_for_config(
+        &self,
+        target: &TargetIdentity,
+        saved: Option<&ModuleEnvelope>,
+    ) -> Result<bool, ModuleError> {
+        match saved.filter(|_| self.id.as_str() == "simple_tweak") {
+            Some(config) => Ok(config.payload["value"].as_u64()
+                == self.value().first().map(|value| u64::from(*value))),
+            None => self.tweak_ready(target),
+        }
     }
     fn feature(&self) -> FeatureId {
         self.id.clone()
@@ -237,6 +260,15 @@ impl Module for Setting {
             .lock()
             .unwrap()
             .push(std::thread::current().name().unwrap_or("unknown").into());
+        Ok(())
+    }
+    fn confirm_applied(&self, key: &ResourceKey, expected: &[u8]) -> Result<(), ModuleError> {
+        if self.read(key)? != expected || *self.fail_confirmation.lock().unwrap() {
+            return Err(ModuleError::new(
+                ErrorKind::Verification,
+                "fixture runtime refresh",
+            ));
+        }
         Ok(())
     }
 }
@@ -493,6 +525,56 @@ fn manual_tweak_one_click_saves_without_association_and_exactly_restores() {
     service.undo_tweak(&module.id).unwrap();
     assert_eq!(module.value(), vec![7]);
     assert!(service.controller.is_empty());
+}
+#[test]
+fn configured_tweak_saves_choice_rejects_owned_edits_and_keeps_choice_after_undo() {
+    let module = Setting::new("simple_tweak", false);
+    let mut registry = Registry::default();
+    registry.register(module.clone()).unwrap();
+    let saved = Arc::new(Mutex::new(vec![]));
+    let mut service = super::Tuning::from_registry(registry).headless(
+        crate::app::models::AppStateStorage::test_fixture(|_| {}),
+        Box::new(MemorySave {
+            saved: saved.clone(),
+            fail: false,
+        }),
+    );
+    service.admit_test_modules();
+    service
+        .apply_configured_tweak(
+            module.id.clone(),
+            TargetIdentity::Machine,
+            module.config(20),
+        )
+        .unwrap();
+    assert_eq!(module.value(), vec![20]);
+    let count = saved.lock().unwrap().len();
+    assert!(service
+        .apply_configured_tweak(
+            module.id.clone(),
+            TargetIdentity::Machine,
+            module.config(21)
+        )
+        .is_err());
+    assert_eq!(saved.lock().unwrap().len(), count);
+    assert_eq!(module.value(), vec![20]);
+    service.undo_tweak(&module.id).unwrap();
+    assert_eq!(module.value(), vec![7]);
+    let super::config::TuningLoad::Known(config) = service.state().tuning.decode() else {
+        panic!()
+    };
+    assert_eq!(config.profiles[0].modules[0].config, module.config(20));
+    assert!(!config.profiles[0].modules[0].enabled);
+    // An already matching custom choice is remembered, without taking an Undo baseline.
+    service
+        .apply_configured_tweak(module.id.clone(), TargetIdentity::Machine, module.config(7))
+        .unwrap();
+    assert_eq!(module.value(), vec![7]);
+    assert!(service.controller.is_empty());
+    let super::config::TuningLoad::Known(config) = service.state().tuning.decode() else {
+        panic!()
+    };
+    assert!(!config.profiles[0].modules[0].enabled);
 }
 
 #[test]
@@ -1468,6 +1550,7 @@ fn simple_review_blocked_idle_observation_keeps_ui_requests_and_shutdown_respons
         service,
         Arc::new(tokio::sync::RwLock::new(Default::default())),
     ));
+    runtime.set_cards_visible(true);
     let entered = std::time::Instant::now();
     while !module
         .observation_entered

@@ -30,6 +30,8 @@ use tokio::sync::RwLock as TokioRwLock;
 
 pub struct App {
     pub state: AppState,
+    #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+    debug_mcp: Option<diagnostics::debug_mcp::Bridge>,
     tray_runtime: Option<TrayRuntime>,
     #[cfg(test)]
     forwarded_command_rx: Option<Receiver<ForwardedIpcCommand>>,
@@ -258,9 +260,19 @@ impl App {
         #[cfg(not(target_os = "windows"))]
         let tray_res = init_tray(cc.egui_ctx.clone());
 
+        #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+        let debug_mcp =
+            diagnostics::debug_mcp::Bridge::start(&cc.egui_ctx).unwrap_or_else(|error| {
+                state
+                    .log_manager
+                    .add_sticky_once(format!("Debug MCP: {error}"));
+                None
+            });
         match tray_res {
             Ok(tray_runtime) => Self {
                 state,
+                #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+                debug_mcp,
                 tray_runtime: Some(tray_runtime),
                 #[cfg(test)]
                 forwarded_command_rx: None,
@@ -282,6 +294,8 @@ impl App {
                     .add_sticky_once(format!("Tray init failed: {e}"));
                 Self {
                     state,
+                    #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+                    debug_mcp,
                     tray_runtime: None,
                     #[cfg(test)]
                     forwarded_command_rx: None,
@@ -418,6 +432,8 @@ impl App {
     fn new_for_test(state: AppState) -> Self {
         Self {
             state,
+            #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+            debug_mcp: None,
             tray_runtime: None,
             #[cfg(test)]
             forwarded_command_rx: None,
@@ -437,7 +453,23 @@ impl App {
 }
 
 impl eframe::App for App {
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+        if let Some(bridge) = &mut self.debug_mcp {
+            bridge.raw_input(&mut self.state, ctx, input);
+        }
+        super::render_preparation::pace_scroll(ctx, input, self.state.cpu_load.graph.is_some());
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(all(target_os = "windows", feature = "render-profiling"))]
+        diagnostics::render_profile::begin_logic(ctx.cumulative_frame_nr());
+        #[cfg(all(target_os = "windows", feature = "render-profiling"))]
+        if ctx.input(|i| i.key_pressed(egui::Key::F8)) {
+            diagnostics::render_profile::note("user_stutter_marker");
+        }
+        crate::render_profile_scope!(GuiLogic);
         if ctx.input(|input| input.viewport().close_requested()) {
             self.begin_close(ctx);
             if self.state.tuning_shutdown_outcome().is_none() {
@@ -458,11 +490,23 @@ impl eframe::App for App {
             }
             return;
         }
+        let tuning_visible =
+            !self.is_hidden && matches!(self.state.ui.current_window, WindowRoute::Tuning);
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let tuning_visible = tuning_visible && self.state.cpu_load.graph.is_none();
+        self.state.set_tuning_cards_visible(tuning_visible);
         if self.state.poll_tuning() {
             ctx.request_repaint();
         }
         if let Some(interval) = self.state.tuning_poll_interval() {
             ctx.request_repaint_after(interval);
+        }
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        {
+            self.state.poll_cpu_load(!self.is_hidden);
+            if self.state.cpu_load_enabled() && !self.is_hidden {
+                ctx.request_repaint_after(Duration::from_secs(1));
+            }
         }
         self.handle_monitor_events(ctx);
         #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -507,11 +551,48 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        #[cfg(all(target_os = "windows", feature = "render-profiling"))]
+        diagnostics::render_profile::begin_logic(ui.ctx().cumulative_frame_nr());
+        #[cfg(all(target_os = "windows", feature = "render-profiling"))]
+        let _profile_frame = diagnostics::render_profile::frame_end(
+            diagnostics::render_profile::View {
+                mode: if self.state.cpu_load.graph.is_some() {
+                    if self.state.cpu_load.show_processes {
+                        "process_table"
+                    } else {
+                        "cpu_graph"
+                    }
+                } else {
+                    match &self.state.ui.current_window {
+                        WindowRoute::Groups(_) => "groups",
+                        WindowRoute::Logs => "logs",
+                        WindowRoute::Tuning => "tweaks",
+                        _ => "other",
+                    }
+                },
+                selected_cpu: self.state.cpu_load.selected_cpu,
+                all_cpus: self.state.cpu_load.show_all_cpus,
+                input_events: ui.ctx().input(|i| i.events.len()),
+                pass: ui.ctx().current_pass_index(),
+            },
+            _frame.info().cpu_usage,
+        );
+        crate::render_profile_scope!(GuiUi);
         if self.closing_requested || self.is_hidden {
             return;
         }
 
-        self.render_main_ui(ui);
+        #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+        if let Some(bridge) = &self.debug_mcp {
+            bridge.begin_ui(ui.ctx());
+        }
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let draw_active = self.state.cpu_load.graph.is_none();
+        #[cfg(not(all(target_os = "windows", feature = "windows")))]
+        let draw_active = true;
+        self.render_main_ui(ui, draw_active);
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        crate::app::features::cpu_load::view::draw_modal(&mut self.state, ui.ctx());
         if self.state.runtime.take_status_read_pending() {
             // A cached status read must not consume the only runtime notification.
             ui.ctx().request_repaint_after(Duration::from_millis(50));
@@ -520,6 +601,12 @@ impl eframe::App for App {
         {
             self.windows_event_log_first_frame_rendered = true;
         }
+        #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+        if let Some(bridge) = &mut self.debug_mcp {
+            bridge.end_ui(&mut self.state, ui.ctx());
+        }
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        super::render_preparation::warm_fonts(ui.ctx());
     }
 }
 
@@ -745,6 +832,33 @@ mod tests {
             }))),
             4,
         )
+    }
+
+    #[test]
+    fn cpu19_modal_skips_background_content_and_restores_it_on_close() {
+        fn contains(shape: &egui::Shape, text: &str) -> bool {
+            match shape {
+                egui::Shape::Text(t) => t.galley.text().contains(text),
+                egui::Shape::Vec(shapes) => shapes.iter().any(|s| contains(s, text)),
+                _ => false,
+            }
+        }
+        let mut app = App::new_for_test(sample_state());
+        app.state.ui.current_window =
+            crate::app::shell::WindowRoute::Groups(crate::app::shell::GroupRoute::Create);
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+        for visible in [true, false, true] {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.render_main_ui(ui, visible)
+            });
+            let rendered = output
+                .shapes
+                .iter()
+                .any(|s| contains(&s.shape, "CPU topology"));
+            output.textures_delta.clear();
+            assert_eq!(rendered, visible);
+        }
     }
 
     fn app_to_run(name: &str, autorun: bool) -> AppToRun {
@@ -1334,6 +1448,8 @@ impl App {
 
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         self.is_hidden = true;
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        self.state.poll_cpu_load(false);
 
         #[cfg(target_os = "windows")]
         if let Err(error) = crate::app::adapters::os::normalize_winit_event_target_window() {
@@ -1402,10 +1518,24 @@ impl App {
         }
     }
 
-    fn render_main_ui(&mut self, ui: &mut egui::Ui) {
-        header::draw_top_panel(&mut self.state, ui);
-        footer::draw_bottom_panel(&mut self.state, ui);
-        Self::draw_active_view(&mut self.state, ui);
+    fn render_main_ui(&mut self, ui: &mut egui::Ui, draw_active: bool) {
+        {
+            crate::render_profile_scope!(Header);
+            header::draw_top_panel(&mut self.state, ui);
+        }
+        {
+            crate::render_profile_scope!(Footer);
+            footer::draw_bottom_panel(&mut self.state, ui);
+        }
+        {
+            crate::render_profile_scope!(Central);
+            if draw_active {
+                Self::draw_active_view(&mut self.state, ui);
+            } else {
+                // The opaque CPU modal owns the content; keep only the shared chrome.
+                egui::CentralPanel::default().show(ui, |_| {});
+            }
+        }
     }
 
     fn draw_active_view(app_state: &mut AppState, ui: &mut egui::Ui) {

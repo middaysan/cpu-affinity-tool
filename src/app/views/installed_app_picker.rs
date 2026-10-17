@@ -1,6 +1,6 @@
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    danger_color, ghost_button, inter_medium_family, palette,
+    close_button, danger_color, inter_medium_family, palette,
 };
 use eframe::egui::{
     self, Align, CentralPanel, Context, Key, Layout, RichText, ScrollArea, Stroke, TextEdit,
@@ -62,7 +62,7 @@ pub fn draw_installed_app_picker(app: &mut AppState, root_ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading(RichText::new(heading).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ghost_button(ui, egui::Button::new("Close"))
+                if close_button(ui)
                     .on_hover_text("Close")
                     .clicked()
                 {
