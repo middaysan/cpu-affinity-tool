@@ -19,7 +19,9 @@ limits are documented in [the performance probe report](cpu19-performance-probe.
 
 Logging stops after five minutes or 64 MiB; the app continues running. An
 explicit duration is supported: `./Start-render-test.ps1 -Seconds 180`
-(10–900 seconds). Preparation errors appear in `TEST-ERROR.txt`.
+(10–3600 seconds). Preparation errors appear in `TEST-ERROR.txt`. The default
+remains five minutes; the longer explicit limit supports retention-window soak
+tests. The 64 MiB file and bounded queue limits still apply.
 
 The script makes an isolated sidecar copy of saved groups/rules, disables
 autorun, affinity/priority enforcement, tuning and the startup Event Log query,

@@ -42,6 +42,8 @@ pub struct App {
     #[cfg(target_os = "windows")]
     winit_window: Option<Arc<winit::window::Window>>,
     #[cfg(all(target_os = "windows", feature = "windows"))]
+    file_drop_guard: Option<os_api::WindowFileDropGuard>,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
     crash_report_viewport_focused: Option<bool>,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     windows_event_log_first_frame_rendered: bool,
@@ -52,6 +54,56 @@ pub struct App {
 }
 
 const MONITOR_EVENT_GUI_DRAIN_LIMIT: usize = 64;
+
+fn file_import_allowed(route: &WindowRoute, graph_open: bool) -> bool {
+    matches!(route, WindowRoute::Groups(GroupRoute::List)) && !graph_open
+}
+
+#[test]
+fn file_import_requires_visible_group_cards_without_a_graph() {
+    for route in [
+        WindowRoute::Logs,
+        WindowRoute::Tuning,
+        WindowRoute::AppRunSettings,
+        WindowRoute::InstalledAppPicker,
+        WindowRoute::Groups(GroupRoute::Edit),
+    ] {
+        assert!(!file_import_allowed(&route, false));
+    }
+    assert!(file_import_allowed(
+        &WindowRoute::Groups(GroupRoute::List),
+        false
+    ));
+    assert!(!file_import_allowed(
+        &WindowRoute::Groups(GroupRoute::List),
+        true
+    ));
+}
+
+#[cfg(all(target_os = "windows", feature = "windows"))]
+fn append_shell_drop(
+    input: &mut egui::RawInput,
+    drop: os_api::WindowFileDrop,
+    pixels_per_point: f32,
+) {
+    #[derive(Debug)]
+    struct ShellFile(PathBuf);
+    impl egui::DroppedFile for ShellFile {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Err("File import uses paths only".into())
+        }
+    }
+    let position = egui::pos2(drop.position[0] as f32, drop.position[1] as f32) / pixels_per_point;
+    input.events.push(egui::Event::PointerMoved(position));
+    input.dropped_files.extend(
+        drop.paths
+            .into_iter()
+            .map(|path| Arc::new(ShellFile(path)) as egui::DroppedFileHandle),
+    );
+}
 
 #[cfg(any(test, target_os = "windows"))]
 fn set_taskbar_visibility_with(
@@ -285,6 +337,23 @@ impl App {
         #[cfg(target_os = "windows")]
         let tray_res = init_tray(cc.egui_ctx.clone());
 
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let file_drop_guard = hwnd.and_then(|hwnd| {
+            let repaint = cc.egui_ctx.clone();
+            match os_api::WindowFileDropGuard::install(
+                hwnd.0 as usize,
+                Arc::new(move || repaint.request_repaint()),
+            ) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    state.log_manager.add_important_sticky_once(format!(
+                        "Shell file drops unavailable: {error}"
+                    ));
+                    None
+                }
+            }
+        });
+
         #[cfg(not(target_os = "windows"))]
         let tray_res = init_tray(cc.egui_ctx.clone());
 
@@ -316,6 +385,8 @@ impl App {
                 #[cfg(target_os = "windows")]
                 winit_window: cc.winit_window().cloned(),
                 #[cfg(all(target_os = "windows", feature = "windows"))]
+                file_drop_guard,
+                #[cfg(all(target_os = "windows", feature = "windows"))]
                 crash_report_viewport_focused: None,
                 #[cfg(all(target_os = "windows", feature = "windows"))]
                 windows_event_log_first_frame_rendered: false,
@@ -341,6 +412,8 @@ impl App {
                     hwnd,
                     #[cfg(target_os = "windows")]
                     winit_window: cc.winit_window().cloned(),
+                    #[cfg(all(target_os = "windows", feature = "windows"))]
+                    file_drop_guard,
                     #[cfg(all(target_os = "windows", feature = "windows"))]
                     crash_report_viewport_focused: None,
                     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -479,6 +552,8 @@ impl App {
             #[cfg(target_os = "windows")]
             winit_window: None,
             #[cfg(all(target_os = "windows", feature = "windows"))]
+            file_drop_guard: None,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
             crash_report_viewport_focused: None,
             #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log_first_frame_rendered: false,
@@ -493,6 +568,15 @@ impl App {
 impl eframe::App for App {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        if !self.closing_requested && self.state.ui.dropped_files.is_none() {
+            if let Some(drop) = self
+                .file_drop_guard
+                .as_ref()
+                .and_then(|guard| guard.next_drop())
+            {
+                append_shell_drop(input, drop, ctx.pixels_per_point());
+            }
+        }
         #[cfg(all(debug_assertions, feature = "debug-mcp"))]
         if let Some(bridge) = &mut self.debug_mcp {
             bridge.raw_input(&mut self.state, ctx, input);
@@ -906,6 +990,48 @@ mod tests {
         assert!(output.viewport_output[&egui::ViewportId::ROOT]
             .commands
             .contains(&egui::ViewportCommand::Visible(true)));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    fn shell_drop_uses_release_coordinates_at_current_dpi_without_reading_files() {
+        let paths = vec![
+            PathBuf::from(r"C:\Missing\Пример.exe"),
+            PathBuf::from(r"C:\Missing\two.lnk"),
+        ];
+        let mut input = egui::RawInput::default();
+        input
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(300.0, 400.0)));
+        super::append_shell_drop(
+            &mut input,
+            os_api::WindowFileDrop {
+                paths: paths.clone(),
+                position: [150, 225],
+            },
+            1.5,
+        );
+        let ctx = egui::Context::default();
+        let mut app = App::new_for_test(sample_state());
+        ctx.run_ui(input, |ui| app.handle_file_drops(ui.ctx()))
+            .textures_delta
+            .clear();
+        assert_eq!(app.state.ui.dropped_files, Some(paths));
+        assert_eq!(
+            app.state.ui.file_drop_position,
+            Some(egui::pos2(100.0, 150.0))
+        );
+        let later = egui::RawInput {
+            events: vec![egui::Event::PointerMoved(egui::pos2(10.0, 20.0))],
+            ..Default::default()
+        };
+        ctx.run_ui(later, |ui| app.handle_file_drops(ui.ctx()))
+            .textures_delta
+            .clear();
+        assert_eq!(
+            app.state.ui.file_drop_position,
+            Some(egui::pos2(100.0, 150.0))
+        );
     }
 
     #[test]
@@ -1826,6 +1952,13 @@ impl App {
     }
 
     fn handle_file_drops(&mut self, ctx: &egui::Context) {
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let graph_open = self.state.cpu_load.graph.is_some();
+        #[cfg(not(all(target_os = "windows", feature = "windows")))]
+        let graph_open = false;
+        if !file_import_allowed(&self.state.ui.current_window, graph_open) {
+            return;
+        }
         if ctx.input(|i| i.raw.dropped_files.is_empty()) {
             return;
         }
@@ -1840,6 +1973,8 @@ impl App {
 
         if !files.is_empty() {
             self.state.ui.dropped_files = Some(files);
+            self.state.ui.file_drop_position =
+                ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()));
         }
     }
 

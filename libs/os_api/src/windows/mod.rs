@@ -2,6 +2,7 @@ mod common;
 mod cpu;
 pub(crate) mod cpu_load;
 mod event_log;
+mod file_drop;
 pub(crate) mod gaming;
 mod gaming_diagnostics;
 mod ipc;
@@ -16,6 +17,7 @@ mod window;
 pub(crate) mod windows_tweaks;
 
 pub use event_log::WindowsApplicationFailure;
+pub use file_drop::{WindowFileDrop, WindowFileDropGuard};
 
 pub use ipc::{
     LocalIpcClientError, LocalIpcEndpoint, LocalIpcGuard, LocalIpcRequest, LocalIpcServer,

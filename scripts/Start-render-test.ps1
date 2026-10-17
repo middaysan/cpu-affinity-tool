@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([ValidateRange(10,900)][int]$Seconds = 300, [switch]$SelfTest)
+param([ValidateRange(10,3600)][int]$Seconds = 300, [switch]$SelfTest)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'

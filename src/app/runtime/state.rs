@@ -531,6 +531,7 @@ impl AppState {
                 // The accepted completion now owns this input, independently of
                 // pointer hover and any fresh drop received while saving.
                 self.ui.dropped_files = None;
+                self.ui.file_drop_position = None;
                 self.ui.file_drop_hover_target = None;
             }
         }
@@ -843,12 +844,14 @@ impl AppState {
 
         if files.is_empty() {
             self.ui.dropped_files = None;
+            self.ui.file_drop_position = None;
             self.ui.file_drop_hover_target = None;
             return false;
         }
 
         let Some(group_index) = self.group_index_for_id(&group_id) else {
             self.ui.dropped_files = None;
+            self.ui.file_drop_position = None;
             self.ui.file_drop_hover_target = None;
             return false;
         };
@@ -906,6 +909,7 @@ impl AppState {
                     && self.ui.file_drop_hover_target.as_ref() == Some(&group)
                 {
                     self.ui.dropped_files = None;
+                    self.ui.file_drop_position = None;
                     self.ui.file_drop_hover_target = None;
                 }
             }

@@ -17,15 +17,18 @@ See `tuning-native-probe.md` for the host scope. The user subsequently signed
 out/in; the corrected build passed real retained-journal retirement, current
 value preservation and a second startup through MCP while the old LSA record
 still existed. This covers the session-bound row on this host; it is not a
-reboot/RDP/OEM matrix. Explorer drag/drop remains the separately recorded known
-failing row.
+reboot/RDP/OEM matrix. On the same Windows 11 host, ordinary Explorer-to-elevated-
+debug-window EXE drops were subsequently verified by the user in multiple target
+groups at 175% scaling; the native Shell path and its regression coverage are
+described in `explorer-file-drops.md`. This is host acceptance, not a Windows 10,
+RDP or every-launcher-format certification.
 
 | Scenario | Expected result | Release-blocking if it fails |
 | --- | --- | --- |
 | Cold start with existing `state.json` | App starts, loads saved state, and shows the expected groups, apps, and theme without corruption prompts; an interrupted save must leave a complete prior or new file rather than a truncated state file | Yes |
 | Add app via **Add installed...** | Selected app is added once, remains visible, and survives restart after save | Yes |
 | Add app via **Add file...** | Selected path or launcher is added once, remains visible, and survives restart after save | Yes |
-| Add app via drag-drop | Dropped app is added exactly once to the intended group. Known failing case: dragging from ordinary Explorer into the elevated release GUI is blocked by Windows before hover/drop events arrive. Same-integrity/headless import tests do not certify this case; native acceptance remains unresolved. | Yes |
+| Add app via drag-drop | Ordinary Explorer can drop into the elevated GUI; the app is imported once into the intended group without launching it. The original release point survives DPI conversion and later pointer movement. Native acceptance must supplement same-process/headless tests; see `explorer-file-drops.md`. | Yes |
 | `.lnk` launch path | Shortcut resolves to the real target and preserves arguments when launched | Yes |
 | `.url` / URI-handler path | Registered handler resolves and launches the correct target when such a handler is available on the test machine | Yes, if the release contract depends on supported URI launch flows |
 | **Fix** on a mismatched running app | Saved affinity and priority are applied without launching or focusing; protected/green appears only after every setting call succeeds | Yes |

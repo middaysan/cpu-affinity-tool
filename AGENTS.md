@@ -84,6 +84,7 @@ Key directories:
 - `src/app/models/` - persisted schema, domain and runtime-independent data types, CPU preset and meta helpers, `LogManager`, and running-app tracking structures
 - `src/app/models/app_state_storage/` - internal persistence modules for state path resolution, storage I/O, migrations, and schema refresh; `app_state_storage.rs` remains the public storage schema and API entrypoint
 - `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, including startup-only own-process scheduling in `self_affinity.rs` and suspended-launch affinity inheritance handling in `launch.rs`; Linux remains a single-file desktop beta backend
+- `libs/os_api/src/windows/file_drop.rs` - GUI-thread Shell file-drop registration for the Windows root, with window-scoped UIPI exceptions, bounded path-only payloads and captured physical release coordinates; no worker or process-wide filter
 - `assets/` - icon, screenshot, bundled Inter UI font and license, `cpu_presets.json`, and social-preview guidance
 - `design/` - standalone HTML design reference for the approved compact Inter-based interface; it loads only repository-local assets and is not runtime input
 - `docs/` - release/process documentation and user-facing comparison/rationale references
@@ -423,6 +424,7 @@ Internal backend structure:
 - Linux backend remains a single-file minimal backend and is not forced into parity with the Windows internal layout
 
 Windows release-path surface:
+- Windows root file import uses Shell `WM_DROPFILES` rather than Winit's OLE target, allowing ordinary Explorer to send paths to the elevated GUI. Only that root's drop, copy-data and Shell global-data-transfer messages are admitted. Bounded input retains the original client release point through DPI conversion and pending saves; imports never launch the dropped target. Shell reports the final drop and the system acceptance cursor, without OLE hover previews. Registration/filter/procedure ownership is released on window teardown. Linux input is unchanged; see `docs/explorer-file-drops.md` for native acceptance evidence and limits.
 - tray integration
 - tray initialization falls back to a reachable normal window when the icon cannot be created; it never hides the window without a usable tray
 - taskbar and focus behavior
@@ -559,7 +561,7 @@ Release-impacting artifacts:
 
 Privilege model:
 - Windows release binary embeds `app.manifest` with `requestedExecutionLevel=requireAdministrator` and `uiAccess="false"`
-- Known Windows release limitation: Explorer-to-app OLE file drops are blocked when Explorer is non-elevated and the GUI is elevated. The EXE/LNK/URL import handlers remain, but headless/same-integrity tests do not certify this external drop path. Restoring elevated file drops remains a native integration issue; the existing release smoke scenario remains blocking.
+- Windows file imports use the root-scoped Shell path described above instead of OLE across the elevation boundary. Native smoke must verify ordinary Explorer imports into the exact chosen group without launching the target; headless/same-integrity tests alone do not certify that external path. The existing release smoke scenario remains blocking if it fails.
 - Windows CI and the stable release workflow verify the built release exe's embedded manifest resource after `cargo build --release --features windows --bin cpu-affinity-tool`
 - local test/debug binaries do not embed the administrator manifest so CI and local `cargo test` can run without elevation
 - `tuning-test-controls` is an explicit nonshipping root/os_api feature for development and lab tuning probes; isolated fixtures and default preflight do not certify canonical ProgramData, elevated cross-user or reboot behavior

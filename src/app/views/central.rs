@@ -45,6 +45,7 @@ enum CentralAction {
     },
     LogMessage(String),
     ConsumeDroppedFiles(GroupId),
+    DiscardDroppedFiles,
 }
 
 #[derive(Clone)]
@@ -319,7 +320,13 @@ fn render_groups(
         .dropped_files
         .as_ref()
         .is_some_and(|files| !files.is_empty());
-    let file_drop_pos = ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()));
+    let file_drop_pos = if has_dropped_files {
+        app.ui
+            .file_drop_position
+            .or_else(|| ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos())))
+    } else {
+        ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()))
+    };
     let groups_len = snapshot.groups.len();
 
     for (group_index, group) in snapshot.groups.iter().enumerate() {
@@ -806,6 +813,8 @@ fn render_groups(
         hovered_file_drop_group,
     ) {
         actions.push(CentralAction::ConsumeDroppedFiles(group_id));
+    } else if has_dropped_files && app.ui.file_drop_position.is_some() {
+        actions.push(CentralAction::DiscardDroppedFiles);
     }
 
     actions
@@ -1045,6 +1054,11 @@ fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
             CentralAction::ConsumeDroppedFiles(group_id) => {
                 let _ = app.consume_dropped_files_into_group(group_id);
             }
+            CentralAction::DiscardDroppedFiles => {
+                app.ui.dropped_files = None;
+                app.ui.file_drop_position = None;
+                app.ui.file_drop_hover_target = None;
+            }
         }
     }
 }
@@ -1055,6 +1069,61 @@ mod tests {
     use crate::app::models::AppToRun;
     use crate::app::runtime::{CentralGroupSnapshot, CentralProgramSnapshot};
     use os_api::PriorityClass;
+
+    #[test]
+    fn file_import_uses_the_recorded_release_position_and_discards_outside_drops() {
+        use std::sync::{Arc, RwLock};
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+        let mut app = AppState::new_for_test(
+            Arc::new(RwLock::new(
+                crate::app::models::AppStateStorage::test_fixture(|_| {}),
+            )),
+            20,
+        );
+        let snapshot = CentralPanelSnapshot {
+            groups: vec![group("g", "G", vec![])],
+        };
+        for (position, accepted) in [
+            (egui::pos2(30.0, 30.0), true),
+            (egui::pos2(-10.0, -10.0), false),
+        ] {
+            app.ui.dropped_files = Some(vec![PathBuf::from(r"C:\one.exe")]);
+            app.ui.file_drop_position = Some(position);
+            let mut actions = vec![];
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 600.0),
+                    )),
+                    events: vec![egui::Event::PointerMoved(if accepted {
+                        egui::pos2(350.0, 550.0)
+                    } else {
+                        egui::pos2(30.0, 30.0)
+                    })],
+                    ..Default::default()
+                },
+                |ui| {
+                    actions = render_groups(&mut app, ui, &ctx, &snapshot);
+                },
+            )
+            .textures_delta
+            .clear();
+            assert_eq!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, CentralAction::ConsumeDroppedFiles(id) if id.0 == "g")),
+                accepted
+            );
+            assert_eq!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, CentralAction::DiscardDroppedFiles)),
+                !accepted
+            );
+        }
+    }
 
     #[test]
     fn short_group_and_app_names_drag_from_their_padded_name_area_without_grips() {

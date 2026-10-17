@@ -1,6 +1,15 @@
 use super::*;
 
 #[test]
+fn explicitly_requested_soak_duration_is_supported_and_still_bounded() {
+    assert_eq!(profile_duration(Some("2400")), Duration::from_secs(2400));
+    assert_eq!(profile_duration(Some("999999")), Duration::from_secs(3600));
+    assert_eq!(profile_duration(Some("0")), Duration::from_secs(10));
+    assert_eq!(profile_duration(None), Duration::from_secs(300));
+    assert_eq!(profile_duration(Some("invalid")), Duration::from_secs(300));
+}
+
+#[test]
 fn stats_keep_total_max_count_and_unknown_cycles_without_wraparound() {
     let mut stat = Stat::default();
     stat.add(10, Some(20));

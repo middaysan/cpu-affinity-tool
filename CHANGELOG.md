@@ -8,6 +8,7 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Fixed
 
+- Restore file imports from ordinary Explorer into the elevated Windows window through root-scoped Shell drops. Keep the original release point at the current DPI so files enter the chosen group even if the pointer moves before rendering; importing never launches the target.
 - Honor **Start minimized** before creating the Windows main window, including cold saved-rule shortcuts, without showing/focusing it or moving it offscreen. Restore through the tray preserves the window position, ignores stale minimized events and keeps errors reachable when the tray or cold shortcut forwarding cannot start. A minimal local eframe patch preserves an explicitly hidden root after its first paint.
 
 ### Added

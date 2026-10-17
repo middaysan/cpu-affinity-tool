@@ -177,6 +177,7 @@ fn main() {
 
 fn windows_viewport(start_hidden: bool) -> eframe::egui::ViewportBuilder {
     eframe::egui::ViewportBuilder::default()
+        .with_drag_and_drop(false)
         .with_visible(!start_hidden)
         .with_active(!start_hidden)
         .with_taskbar(!start_hidden)
@@ -188,6 +189,13 @@ fn windows_viewport(start_hidden: bool) -> eframe::egui::ViewportBuilder {
 
 #[cfg(test)]
 mod viewport_tests {
+    #[test]
+    fn shell_file_drops_replace_the_elevated_ole_drop_target() {
+        for hidden in [false, true] {
+            assert_eq!(super::windows_viewport(hidden).drag_and_drop, Some(false));
+        }
+    }
+
     #[test]
     fn startup_self_scheduling_keeps_topology_and_tokio_workers_correct() {
         use std::os::windows::process::CommandExt;

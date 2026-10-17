@@ -499,15 +499,20 @@ impl Drop for Session {
         }
     }
 }
+fn profile_duration(seconds: Option<&str>) -> Duration {
+    Duration::from_secs(
+        seconds
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(300)
+            .clamp(10, 3600),
+    )
+}
+
 pub(crate) fn start_from_env() -> Result<Option<Session>, String> {
     let Some(path) = std::env::var_os("CPU_AFFINITY_RENDER_LOG") else {
         return Ok(None);
     };
-    let duration = std::env::var("CPU_AFFINITY_RENDER_SECONDS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(300)
-        .clamp(10, 900);
+    let duration = profile_duration(std::env::var("CPU_AFFINITY_RENDER_SECONDS").ok().as_deref());
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -527,7 +532,7 @@ pub(crate) fn start_from_env() -> Result<Option<Session>, String> {
                 BufWriter::with_capacity(64 * 1024, file),
                 &worker,
                 rx,
-                Duration::from_secs(duration),
+                duration,
             );
             worker.enabled.store(false, Ordering::Relaxed);
             let _ = done_tx.send(result);

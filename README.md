@@ -43,7 +43,7 @@ This is a control tool, not a promise of better FPS.
 - Keep a new rule's descendant-process management off unless its child processes are known to need the same settings
 - Autorun selected apps with the tool
 - Create Windows desktop shortcuts for saved rules so a configured app can use a quick shortcut launch
-- Add targets by drag and drop
+- Add targets by drag and drop, including ordinary Explorer into the elevated Windows app ([native input details](docs/explorer-file-drops.md))
 - Inspect launches, corrections, and monitoring events in **Logs**
 - Review locally saved **Crash reports** after a main application panic or native UI-loop error; reports are never uploaded automatically
 - Open the active data folder directly from **Logs**

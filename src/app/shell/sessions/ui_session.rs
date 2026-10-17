@@ -40,6 +40,7 @@ pub struct UiSession {
     pub group_form: GroupFormSession,
     pub app_edit_state: RuleEditorSession,
     pub dropped_files: Option<Vec<PathBuf>>,
+    pub file_drop_position: Option<eframe::egui::Pos2>,
     pub file_drop_hover_target: Option<GroupId>,
     pub installed_app_picker: InstalledAppPickerSession,
     #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
@@ -79,6 +80,7 @@ impl UiSession {
                 shortcut_result: None,
             },
             dropped_files: None,
+            file_drop_position: None,
             file_drop_hover_target: None,
             installed_app_picker: InstalledAppPickerSession::default(),
             #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
