@@ -1,6 +1,6 @@
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    content_frame, danger_color, form_text_edit, ghost_button, glass_frame, success_color,
+    close_button, content_frame, danger_color, form_text_edit, glass_frame, success_color,
     toned_button, ToneRole,
 };
 use crate::app::shell::sessions::RuleShortcutResult;
@@ -95,7 +95,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                 );
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ghost_button(ui, egui::Button::new("Close"))
+                if close_button(ui)
                     .on_hover_text("Close")
                     .clicked()
                 {

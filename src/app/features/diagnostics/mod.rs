@@ -4,6 +4,36 @@ use crate::app::models::{
 use regex::Regex;
 use std::sync::{Arc, RwLock};
 
+#[cfg(all(target_os = "windows", feature = "render-profiling"))]
+pub(crate) mod render_profile;
+
+#[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+pub(crate) mod debug_mcp;
+
+#[cfg(all(not(debug_assertions), feature = "debug-mcp"))]
+compile_error!("debug-mcp is forbidden in release builds; use the debug profile");
+
+#[macro_export]
+macro_rules! debug_mcp_control {
+    ($id:expr, $response:expr) => {
+        #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+        $crate::app::features::diagnostics::debug_mcp::control($id, &$response);
+        #[cfg(not(all(target_os = "windows", debug_assertions, feature = "debug-mcp")))]
+        let _ = &$response;
+    };
+}
+
+/// Entirely absent from ordinary builds, including the clock reads.
+#[macro_export]
+macro_rules! render_profile_scope {
+    ($stage:ident) => {
+        #[cfg(all(target_os = "windows", feature = "render-profiling"))]
+        let _render_profile_scope = $crate::app::features::diagnostics::render_profile::span(
+            $crate::app::features::diagnostics::render_profile::Stage::$stage,
+        );
+    };
+}
+
 #[cfg(all(test, not(all(target_os = "windows", feature = "windows"))))]
 #[allow(dead_code)]
 pub mod crash_reports;

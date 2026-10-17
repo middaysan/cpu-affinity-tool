@@ -33,7 +33,7 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     CentralPanel::default()
         .frame(content_frame(root_ui))
         .show(root_ui, |ui| {
-            ui.heading(RichText::new("Activity").strong());
+            ui.heading(RichText::new("Logs").strong());
             ui.label(
                 RichText::new("Recent launches, corrections, and monitoring events")
                     .small()
@@ -101,7 +101,7 @@ pub fn draw_logs_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if entries.is_empty() {
-                            ui.label(RichText::new("No activity yet").small().weak().italics());
+                            ui.label(RichText::new("No log entries yet").small().weak().italics());
                         }
                         for (index, entry) in entries.iter().rev().enumerate() {
                             egui::Frame::NONE

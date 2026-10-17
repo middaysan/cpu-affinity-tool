@@ -49,6 +49,14 @@ jobs:
       - name: Run tests
         run: cargo test --features windows --bin cpu-affinity-tool
 
+      - name: Check debug launcher isolation
+        shell: pwsh
+        run: ./scripts/Start-mcp-debug.ps1 -SelfTest
+
+      - name: Run Windows tuning recovery probes
+        shell: pwsh
+        run: ./scripts/test-windows-tuning-recovery.ps1
+
       - name: Verify committed lockfiles
         run: git diff --exit-code -- Cargo.lock libs/os_api/Cargo.lock
 

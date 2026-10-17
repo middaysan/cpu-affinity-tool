@@ -747,16 +747,41 @@ impl OS {
         priority: PriorityClass,
         apply_changes: bool,
     ) -> Result<ProcessSettingsApplyOutcome, String> {
-        if mask == 0 {
+        Self::apply_process_fields_if_instance(
+            pid,
+            expected_instance_token,
+            mask,
+            priority,
+            crate::gaming::ProcessSettingsFields::default(),
+            apply_changes,
+        )
+    }
+    pub fn apply_process_fields_if_instance(
+        pid: u32,
+        expected_instance_token: u64,
+        mask: usize,
+        priority: PriorityClass,
+        fields: crate::gaming::ProcessSettingsFields,
+        apply_changes: bool,
+    ) -> Result<ProcessSettingsApplyOutcome, String> {
+        if fields.affinity && mask == 0 {
             return Err("affinity mask is empty".to_string());
         }
         if Self::get_process_instance_token(pid)? != expected_instance_token {
             return Err("process instance no longer matches the tracked PID".to_string());
         }
-        let previous_affinity = Self::get_process_affinity(pid)?;
-        let previous_priority = Self::get_process_priority(pid)?;
-        let affinity_changed = previous_affinity != mask;
-        let priority_changed = previous_priority != priority;
+        let previous_affinity = if fields.affinity {
+            Self::get_process_affinity(pid)?
+        } else {
+            0
+        };
+        let previous_priority = if fields.priority {
+            Self::get_process_priority(pid)?
+        } else {
+            PriorityClass::Normal
+        };
+        let affinity_changed = fields.affinity && previous_affinity != mask;
+        let priority_changed = fields.priority && previous_priority != priority;
         if apply_changes && affinity_changed {
             Self::set_process_affinity_by_pid(pid, mask)?;
         }
@@ -813,6 +838,36 @@ impl OS {
         Self::reap_child(child);
 
         Ok(pid)
+    }
+
+    pub fn run_with_fields(
+        file_path: PathBuf,
+        args: Vec<String>,
+        cores: &[usize],
+        priority: PriorityClass,
+        fields: crate::gaming::ProcessSettingsFields,
+    ) -> Result<crate::gaming::ProcessLaunch, String> {
+        let mask = if fields.affinity {
+            let mask = Self::compose_mask_from_cores(cores)?;
+            let _ = Self::cpuset_from_mask(mask)?;
+            mask
+        } else {
+            0
+        };
+        let child = Self::spawn(&file_path, &args)?;
+        let pid = child.id();
+        let creation_token = Self::get_process_instance_token(pid);
+        if fields.affinity {
+            let _ = Self::set_affinity_for_pid(pid, mask);
+        }
+        if fields.priority {
+            let _ = Self::set_priority_for_pid(pid as pid_t, priority);
+        }
+        Self::reap_child(child);
+        creation_token.map(|creation_token| crate::gaming::ProcessLaunch {
+            pid,
+            creation_token,
+        })
     }
 
     pub fn snapshot_process_tree() -> Result<ProcessTree, String> {

@@ -17,3 +17,5 @@ pub mod logs;
 pub mod run_settings;
 #[path = "../../views/shared_elements.rs"]
 pub mod shared_elements;
+#[path = "../../features/system_tweaks/view.rs"]
+pub mod system_tweaks;

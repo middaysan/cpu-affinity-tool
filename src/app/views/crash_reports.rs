@@ -20,7 +20,7 @@ pub fn draw_crash_reports_window(app: &mut AppState, root_ui: &mut egui::Ui) {
     CentralPanel::default()
         .frame(content_frame(root_ui))
         .show(root_ui, |ui| {
-            if ui.small_button("← Back to Activity").clicked() {
+            if ui.small_button("← Back to Logs").clicked() {
                 app.set_current_window(WindowRoute::Logs);
             }
             ui.heading(RichText::new("Crash reports").strong());

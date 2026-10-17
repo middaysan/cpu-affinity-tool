@@ -140,6 +140,67 @@ fn windows_ci_and_stable_release_share_the_symbol_build_contract() {
 }
 
 #[test]
+fn windows_ci_and_stable_release_require_isolated_tuning_recovery() {
+    for workflow in [
+        include_str!("../../.github/workflows/ci.yml"),
+        include_str!("../../.github/workflows/release.yml"),
+    ] {
+        let step = yaml_named_step(workflow, "Run Windows tuning recovery probes")
+            .expect("Windows CI and stable release must run forced-process tuning recovery probes");
+        assert!(
+            yaml_step_has_active_text(&step, "shell: pwsh")
+                && yaml_step_has_active_text(
+                    &step,
+                    "run: ./scripts/test-windows-tuning-recovery.ps1",
+                ),
+            "both Windows workflows must use the same isolated recovery gate"
+        );
+    }
+
+    let script = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/test-windows-tuning-recovery.ps1"),
+    )
+    .expect("the tuning recovery probe helper must exist");
+    for required in [
+        "windows,tuning-test-controls",
+        "cpu-affinity-tool",
+        "app::features::system_tweaks::recovery_tests::",
+        "--locked",
+        "--test-threads=1",
+        "forced_exit_after_intent_recovers_without_a_target_write",
+        "forced_exit_after_physical_write_restores_exact_original_baseline",
+        "forced_exit_after_verified_progress_reloads_and_restores_original",
+    ] {
+        assert!(
+            script.contains(required),
+            "recovery gate is missing {required}"
+        );
+    }
+    assert!(
+        !include_str!("../../scripts/build-windows-release.ps1").contains("tuning-test-controls"),
+        "isolated tuning controls must not enter the shipping release build"
+    );
+}
+
+#[test]
+fn tuning_controls_are_absent_from_shipping_artifacts() {
+    let manifest = include_str!("../../libs/os_api/Cargo.toml");
+    assert!(!manifest.contains("tuning-canonical-probe"));
+    let build = include_str!("../../scripts/build-windows-release.ps1");
+    assert!(!build.contains("tuning-test-controls") && !build.contains("tuning-canonical-probe"));
+    let release = include_str!("../../.github/workflows/release.yml");
+    let shipping_build = yaml_named_step(release, "Build Windows release binary").unwrap();
+    let upload = yaml_named_step(release, "Upload Windows release artifacts").unwrap();
+    assert!(!yaml_step_has_active_text(
+        &shipping_build,
+        "tuning-test-controls"
+    ));
+    assert!(!yaml_step_has_active_text(
+        &upload,
+        "tuning-canonical-probe"
+    ));
+}
+#[test]
 fn contract_parsers_scope_exact_keys_and_named_steps() {
     let cargo_toml = r#"
 [profile.release]

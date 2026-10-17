@@ -44,11 +44,11 @@ This is a control tool, not a promise of better FPS.
 - Autorun selected apps with the tool
 - Create Windows desktop shortcuts for saved rules so a configured app can use a quick shortcut launch
 - Add targets by drag and drop
-- Inspect launches, corrections, and monitoring events in **Activity**
+- Inspect launches, corrections, and monitoring events in **Logs**
 - Review locally saved **Crash reports** after a main application panic or native UI-loop error; reports are never uploaded automatically
-- Open the active data folder directly from **Activity**
-- Choose light, dark, or system theme in **Settings**
-- Enable **Start minimized** in Settings to open the next Windows session in the tray (not Windows login autostart)
+- Open the active data folder directly from **Logs**
+- Choose light, dark, or system theme in **App settings**
+- Enable **Start minimized** in App settings to open the next Windows session in the tray (not Windows login autostart)
 - Hover the monitor status to inspect verified process filenames, PIDs, and owning groups
 
 ## When it helps
@@ -77,7 +77,7 @@ For a longer explanation, see [docs/why.md](docs/why.md).
 6. On Windows, optionally open the saved rule settings and create a desktop shortcut for quick shortcut launch.
 7. Launch the app from the tool or shortcut and keep **Monitoring active** if you want settings re-applied automatically. New rules manage their verified root process by default; enable descendant management only when you intentionally want child processes to receive the same settings. Use the pause/resume icon to the left of the status when you want to suspend or resume corrections. Monitoring is enabled for a new configuration; existing saved preferences are preserved.
 
-On Windows, if CPU Affinity Tool closes because of a main application panic or its native UI loop returns an error, open **Activity** and select **Crash reports**. After the next completed background scan, **Activity** retains a summary of the newest validated report even if normal activity is cleared. The app normally keeps the newest 20 complete reports, up to 256 KiB each, under the active data directory. If repeated startup failures prevent normal background cleanup, each writer stops after it observes 64 managed files instead of adding synchronous cleanup to application startup; simultaneous GUI processes can exceed that safety ceiling slightly. **Show in Explorer** is available only through a verified non-elevated Windows shell; otherwise the path remains copyable and no editor is launched. Review a report before sharing it because it may contain local paths or system details; make and redact a copy if needed. Forced termination, native faults, out-of-memory termination, and background task panics may not produce a report. For a native crash that does not create one of these reports, see the manual, opt-in [Windows LocalDumps guide](docs/windows-native-crash-diagnostics.md).
+On Windows, if CPU Affinity Tool closes because of a main application panic or its native UI loop returns an error, open **Logs** and select **Crash reports**. After the next completed background scan, **Logs** retains a summary of the newest validated report even if normal activity is cleared. The app normally keeps the newest 20 complete reports, up to 256 KiB each, under the active data directory. If repeated startup failures prevent normal background cleanup, each writer stops after it observes 64 managed files instead of adding synchronous cleanup to application startup; simultaneous GUI processes can exceed that safety ceiling slightly. **Show in Explorer** is available only through a verified non-elevated Windows shell; otherwise the path remains copyable and no editor is launched. Review a report before sharing it because it may contain local paths or system details; make and redact a copy if needed. Forced termination, native faults, out-of-memory termination, and background task panics may not produce a report. For a native crash that does not create one of these reports, see the manual, opt-in [Windows LocalDumps guide](docs/windows-native-crash-diagnostics.md).
 
 ## Comparison
 
@@ -178,7 +178,7 @@ Linux beta notes:
 - Linux still does not have a stable published release artifact
 - tray/taskbar/focus behavior still does not have Windows parity
 
-Windows-only Event Log diagnostics are enabled by default and perform one bounded local lookup of recent `Application Error` records after the first rendered frame, with at most one delayed retry when that lookup succeeds but finds nothing. Activity shows only a sanitized Record ID, UTC time, exception code, faulting-module basename, module version, faulting offset, and process creation time when Windows supplied valid values. The lookup is not proof of a crash cause, never uploads data, and can be disabled from Activity. It does not create dumps, modify Windows Error Reporting, or change registry settings.
+Windows-only Event Log diagnostics are enabled by default and perform one bounded local lookup of recent `Application Error` records after the first rendered frame, with at most one delayed retry when that lookup succeeds but finds nothing. Logs shows only a sanitized Record ID, UTC time, exception code, faulting-module basename, module version, faulting offset, and process creation time when Windows supplied valid values. The lookup is not proof of a crash cause, never uploads data, and can be disabled from Logs. It does not create dumps, modify Windows Error Reporting, or change registry settings.
 
 Useful verification commands:
 
@@ -190,6 +190,7 @@ cargo test --manifest-path libs/os_api/Cargo.toml
 cargo test --features windows --bin cpu-affinity-tool
 cargo build --release --features windows --bin cpu-affinity-tool
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-crash-reports.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-tuning-recovery.ps1
 cargo test --features linux --bin cpu-affinity-tool-linux
 cargo build --release --features linux --bin cpu-affinity-tool-linux
 ```

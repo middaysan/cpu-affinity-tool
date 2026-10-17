@@ -17,6 +17,9 @@ use crate::app::features::shortcut::{
     create_saved_rule_shortcut, CreateRuleShortcutError, RuleShortcutPlatform,
     SystemRuleShortcutPlatform,
 };
+use crate::app::features::system_tweaks::{
+    SaveError, Tuning, TuningRequest, TuningRuntime, TuningSnapshot,
+};
 use crate::app::models::cpu_schema::CpuSchema;
 use crate::app::models::{
     effective_total_threads, AddAppsOutcome, AppRuntimeKey, AppStateStorage, AppStatus, AppToRun,
@@ -134,6 +137,40 @@ pub(crate) struct TrackedProcessSnapshot {
     pub process_name: String,
     pub pid: u32,
 }
+#[cfg(test)]
+struct TestStatePersistence;
+#[cfg(test)]
+impl crate::app::features::system_tweaks::StatePersistence for TestStatePersistence {
+    fn save(
+        &mut self,
+        _candidate: &mut AppStateStorage,
+    ) -> Result<crate::app::features::system_tweaks::service::SavedState, SaveError> {
+        Ok(crate::app::features::system_tweaks::service::SavedState::Unavailable)
+    }
+}
+
+enum LegacyCompletion {
+    Rule(
+        crate::app::shell::sessions::RuleEditorTarget,
+        Option<AppToRun>,
+    ),
+    Group(Option<GroupId>, String, Vec<bool>, bool),
+    Import(ImportIntent, String),
+}
+enum ImportIntent {
+    Files(GroupId, Vec<PathBuf>),
+    Installed {
+        group: GroupId,
+        entry: InstalledAppCatalogEntry,
+        selected: Option<usize>,
+        query: String,
+    },
+}
+struct PendingLegacy {
+    id: u64,
+    revision: u64,
+    completion: Option<LegacyCompletion>,
+}
 
 /// Facade combining persisted, transient UI, and runtime tracking state.
 pub struct AppState {
@@ -141,6 +178,8 @@ pub struct AppState {
     pub(crate) rules: RulesContext,
     pub(crate) ui: UiSession,
     pub(crate) runtime: RuntimeRegistry,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) cpu_load: crate::app::features::cpu_load::CpuLoadRuntime,
     pub(crate) log_manager: LogManager,
     #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
     #[cfg_attr(
@@ -155,13 +194,23 @@ pub struct AppState {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     windows_event_log_disabled_for_session: bool,
     shortcut_creation_role: ShortcutCreationRole,
+    tuning: TuningRuntime,
+    tuning_editors: crate::app::features::system_tweaks::platform::registry::Registry,
+    tuning_adopted_revision: u64,
+    tuning_seen: Option<Arc<TuningSnapshot>>,
+    pending_legacy: Option<PendingLegacy>,
+    tuning_shutdown_reported:
+        Option<crate::app::features::system_tweaks::platform::controller::ShutdownResult>,
     #[cfg(test)]
     save_count: usize,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        let storage = StorageAdapter::load();
+        Self::from_storage(StorageAdapter::load())
+    }
+
+    pub(crate) fn from_storage(storage: StorageAdapter) -> Self {
         #[cfg(all(target_os = "windows", feature = "windows"))]
         let crash_report_directory = StorageAdapter::active_data_dir().join(REPORT_DIRECTORY_NAME);
         #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -178,11 +227,45 @@ impl AppState {
                 state.rule_identities = Some(rules.to_persisted_identities());
             }
         }
+        let runtime = RuntimeRegistry::new();
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let cpu_load = crate::app::features::cpu_load::CpuLoadRuntime::new(
+            runtime.running_apps_handle(),
+            true,
+            persistent_state.clone(),
+        );
+        let saved = persistent_state
+            .read()
+            .expect("newly created state lock")
+            .clone();
+        let registered = Tuning::from_registry(
+            crate::app::features::system_tweaks::platforms::registry_with_scheduling(
+                runtime.scheduling_handle(),
+            ),
+        );
+        let tuning_editors = registered.registry().clone();
+        let service = registered.headless_selected(saved);
+        let tuning = TuningRuntime::start(
+            if crate::app::features::system_tweaks::MODULES_ENABLED {
+                service
+            } else {
+                service.without_modules()
+            },
+            runtime.running_apps_handle(),
+        );
         Self {
             persistent_state,
             rules,
             ui: UiSession::new(effective_total_threads()),
-            runtime: RuntimeRegistry::new(),
+            runtime,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            cpu_load,
+            tuning,
+            tuning_editors,
+            tuning_adopted_revision: 0,
+            tuning_seen: None,
+            pending_legacy: None,
+            tuning_shutdown_reported: None,
             log_manager: LogManager::default(),
             #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
             crash_reports,
@@ -210,11 +293,41 @@ impl AppState {
                 state.rule_identities = Some(rules.to_persisted_identities());
             }
         }
+        let runtime = RuntimeRegistry::new();
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        let cpu_load = crate::app::features::cpu_load::CpuLoadRuntime::new(
+            runtime.running_apps_handle(),
+            false,
+            persistent_state.clone(),
+        );
+        let saved = persistent_state
+            .read()
+            .expect("newly created state lock")
+            .clone();
+        let registered = Tuning::from_registry(Default::default());
+        let tuning_editors = registered.registry().clone();
+        let service = registered.headless(saved, Box::new(TestStatePersistence));
+        let tuning = TuningRuntime::start(
+            if crate::app::features::system_tweaks::MODULES_ENABLED {
+                service
+            } else {
+                service.without_modules()
+            },
+            runtime.running_apps_handle(),
+        );
         Self {
             persistent_state,
             rules,
             ui: UiSession::new(total_threads),
-            runtime: RuntimeRegistry::new(),
+            runtime,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            cpu_load,
+            tuning,
+            tuning_editors,
+            tuning_adopted_revision: 0,
+            tuning_seen: None,
+            pending_legacy: None,
+            tuning_shutdown_reported: None,
             log_manager: LogManager::default(),
             #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
             crash_reports: CrashReportManager::new_idle(PathBuf::new()),
@@ -231,6 +344,120 @@ impl AppState {
     pub(crate) fn set_shortcut_creation_role(&mut self, role: ShortcutCreationRole) {
         self.shortcut_creation_role = role;
     }
+    pub(crate) fn tuning_snapshot(&self) -> Arc<TuningSnapshot> {
+        self.tuning.snapshot()
+    }
+    pub(crate) fn modules_enabled(&self) -> bool {
+        self.tuning.modules_enabled()
+    }
+    pub(crate) fn tuning_editors(
+        &self,
+    ) -> &crate::app::features::system_tweaks::platform::registry::Registry {
+        &self.tuning_editors
+    }
+    #[cfg(test)]
+    pub(crate) fn replace_tuning_for_test(
+        &mut self,
+        runtime: TuningRuntime,
+        editors: crate::app::features::system_tweaks::platform::registry::Registry,
+    ) {
+        let snapshot = runtime.snapshot();
+        *self.persistent_state.write().unwrap() = (*snapshot.state).clone();
+        self.rules = snapshot.rules.clone();
+        self.tuning_adopted_revision = snapshot.revision;
+        self.tuning_seen = None;
+        self.tuning = runtime;
+        self.tuning_editors = editors;
+    }
+    pub(crate) fn request_tuning(&mut self, request: TuningRequest) -> Result<u64, SaveError> {
+        self.tuning.request(request)
+    }
+    pub(crate) fn poll_tuning(&mut self) -> bool {
+        let snapshot = self.tuning.snapshot();
+        let changed = self
+            .tuning_seen
+            .as_ref()
+            .is_none_or(|seen| !Arc::ptr_eq(seen, &snapshot));
+        if snapshot.revision > self.tuning_adopted_revision {
+            let Ok(mut projection) = self.persistent_state.try_write() else {
+                return false;
+            };
+            *projection = (*snapshot.state).clone();
+            self.rules = snapshot.rules.clone();
+            self.tuning_adopted_revision = snapshot.revision;
+            #[cfg(test)]
+            {
+                self.save_count += 1;
+            }
+        }
+        if let Some(outcome) = snapshot.shutdown_outcome {
+            if self.tuning_shutdown_reported != Some(outcome) {
+                if let Some(message) = crate::app::shell::events::ShellEvent::Tuning(
+                    crate::app::shell::events::TuningDiagnostic::shutdown(outcome),
+                )
+                .tuning_log_message()
+                {
+                    self.log_manager.add_important_sticky_once(message);
+                }
+                self.tuning_shutdown_reported = Some(outcome);
+            }
+        }
+        if self.pending_legacy.as_ref().is_some_and(|pending| !matches!(snapshot.operation, crate::app::features::system_tweaks::TuningOperationState::Pending { id } if id == pending.id)) {
+            let pending = self.pending_legacy.take().unwrap();
+            if matches!(snapshot.operation, crate::app::features::system_tweaks::TuningOperationState::Idle) && snapshot.revision > pending.revision {
+                match pending.completion {
+                    Some(LegacyCompletion::Rule(target, draft)) if self.ui.app_edit_state.target.as_ref() == Some(&target) && self.ui.app_edit_state.current_edit == draft => self.close_app_run_settings(),
+                    Some(LegacyCompletion::Group(target, name, selection, run_all)) if self.ui.group_form.editing_group_id == target && self.ui.group_form.group_name == name && self.ui.group_form.core_selection == selection && self.ui.group_form.run_all_enabled == run_all => self.cancel_group_form_session(),
+                    Some(LegacyCompletion::Import(intent, message)) => {
+                        match intent {
+                            ImportIntent::Installed { group, entry, selected, query } if matches!(self.ui.current_window, WindowRoute::InstalledAppPicker) && self.ui.installed_app_picker.target_group_id.as_ref() == Some(&group) && self.ui.installed_app_picker.selected_entry_index == selected && self.ui.installed_app_picker.query == query && selected.and_then(|index| self.ui.installed_app_picker.entries.get(index)) == Some(&entry) => self.close_installed_app_picker(),
+                            _ => {},
+                        }
+                        self.log_manager.add_entry(message);
+                    }
+                    _ => {},
+                }
+            } else {
+                if let Some(LegacyCompletion::Import(ImportIntent::Files(group, files), _)) = pending.completion {
+                    if self.ui.dropped_files.is_none() {
+                        self.ui.dropped_files = Some(files);
+                        self.ui.file_drop_hover_target = Some(group);
+                        self.log_manager.add_important_sticky_once("App targets were not saved. The files and target group were retained for retry.".into());
+                    } else {
+                        self.log_manager.add_important_sticky_once(format!("App targets were not saved for group {}: {files:?}. A newer file selection was preserved; select these files again to retry.", group.0));
+                    }
+                } else {
+                    self.log_manager.add_important_sticky_once("Settings were not saved. The draft and saved values were retained.".into());
+                }
+            }
+        }
+        self.tuning_seen = Some(snapshot);
+        changed
+    }
+    pub(crate) fn set_tuning_cards_visible(&self, visible: bool) {
+        self.tuning.set_cards_visible(visible);
+    }
+    pub(crate) fn tuning_poll_interval(&self) -> Option<std::time::Duration> {
+        self.tuning.poll_interval()
+    }
+    pub(crate) fn begin_tuning_shutdown(&mut self) {
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        self.cpu_load.shutdown();
+        self.tuning.begin_shutdown();
+    }
+    #[cfg(test)]
+    pub(crate) fn tuning_shutdown_complete(&self) -> bool {
+        self.tuning.snapshot().shutdown_complete
+    }
+    pub(crate) fn tuning_shutdown_outcome(
+        &self,
+    ) -> Option<crate::app::features::system_tweaks::platform::controller::ShutdownResult> {
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        if !self.cpu_load.is_stopped() {
+            return None;
+        }
+        self.tuning.snapshot().shutdown_outcome
+    }
 
     #[cfg(test)]
     #[cfg_attr(not(feature = "windows"), allow(dead_code))]
@@ -243,43 +470,87 @@ impl AppState {
         self.save_count
     }
 
-    fn persist_state(&mut self) -> bool {
-        self.reconcile_rules();
-
-        if let Ok(mut state) = self.persistent_state.write() {
-            state.mark_ready_for_current_schema_save(self.rules.to_persisted_identities());
-        } else {
-            self.log_manager
-                .add_sticky_once("WARNING: persistent_state lock poisoned during save".into());
-            return false;
-        }
-
-        #[cfg(test)]
-        {
-            self.save_count += 1;
-            true
-        }
-
-        #[cfg(not(test))]
-        {
-            let save_result = match self.persistent_state.write() {
-                Ok(mut state) => state.try_save_state(),
-                Err(_) => {
-                    self.log_manager.add_sticky_once(
-                        "WARNING: persistent_state lock poisoned during save".into(),
-                    );
-                    return false;
-                }
+    fn base_draft(&self) -> Option<(Arc<RwLock<AppStateStorage>>, u64)> {
+        self.persistent_state.try_read().ok().map(|saved| {
+            (
+                Arc::new(RwLock::new(saved.clone())),
+                self.tuning_adopted_revision,
+            )
+        })
+    }
+    fn persist_draft(
+        &mut self,
+        draft: Arc<RwLock<AppStateStorage>>,
+        expected_revision: u64,
+        mut identities: RulesContext,
+        completion: Option<LegacyCompletion>,
+    ) -> bool {
+        let candidate = {
+            let Ok(projection) = draft.read() else {
+                return false;
             };
-
-            if let Err(err) = save_result {
-                self.log_manager
-                    .add_important_sticky_once(format!("ERROR: Failed to save state: {err}"));
+            identities.reconcile_with_storage(&projection);
+            let mut candidate = projection.clone();
+            candidate.mark_ready_for_current_schema_save(identities.to_persisted_identities());
+            candidate
+        };
+        self.enqueue_legacy(
+            TuningRequest::SaveBase {
+                candidate: Box::new(candidate),
+                expected_revision,
+            },
+            completion,
+        )
+    }
+    fn enqueue_legacy(
+        &mut self,
+        request: TuningRequest,
+        completion: Option<LegacyCompletion>,
+    ) -> bool {
+        let revision = self.tuning.snapshot().revision;
+        let id = match self.tuning.request(request) {
+            Ok(id) => id,
+            Err(error) => {
+                self.log_manager.add_important_sticky_once(format!("Settings were not queued: {error:?}. Saved values and the draft were retained."));
                 return false;
             }
-
-            true
+        };
+        self.pending_legacy = Some(PendingLegacy {
+            id,
+            revision,
+            completion,
+        });
+        if let Some(LegacyCompletion::Import(ImportIntent::Files(group, files), _)) = self
+            .pending_legacy
+            .as_ref()
+            .and_then(|pending| pending.completion.as_ref())
+        {
+            if self.ui.dropped_files.as_ref() == Some(files)
+                && self.ui.file_drop_hover_target.as_ref() == Some(group)
+            {
+                // The accepted completion now owns this input, independently of
+                // pointer hover and any fresh drop received while saving.
+                self.ui.dropped_files = None;
+                self.ui.file_drop_hover_target = None;
+            }
         }
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_test_save(&mut self) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while matches!(
+            self.tuning.snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ) {
+            assert!(
+                std::time::Instant::now() < until,
+                "queued save did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        self.poll_tuning();
     }
 
     fn reconcile_rules(&mut self) {
@@ -354,8 +625,11 @@ impl AppState {
             return;
         };
 
-        if rules::set_group_is_hidden(&self.persistent_state, group_index, is_hidden) {
-            let _ = self.persist_state();
+        let Some((draft, revision)) = self.base_draft() else {
+            return;
+        };
+        if rules::set_group_is_hidden(&draft, group_index, is_hidden) {
+            let _ = self.persist_draft(draft, revision, self.rules.clone(), None);
         }
     }
 
@@ -386,10 +660,14 @@ impl AppState {
             return false;
         };
 
-        let moved = rules::move_group_to_index(&self.persistent_state, source_index, target_index);
+        let Some((draft, revision)) = self.base_draft() else {
+            return false;
+        };
+        let moved = rules::move_group_to_index(&draft, source_index, target_index);
         if moved {
-            self.rules.move_group_to_index(source_index, target_index);
-            let _ = self.persist_state();
+            let mut identities = self.rules.clone();
+            identities.move_group_to_index(source_index, target_index);
+            return self.persist_draft(draft, revision, identities, None);
         }
         moved
     }
@@ -465,7 +743,7 @@ impl AppState {
             }
         };
 
-        let (moving_key, moving_name, target_group_name) = match read_result {
+        let (_moving_key, moving_name, target_group_name) = match read_result {
             Ok(values) => values,
             Err(message) => {
                 self.log_manager.add_entry(message);
@@ -473,55 +751,17 @@ impl AppState {
             }
         };
 
-        let moved = match self.persistent_state.write() {
-            Ok(mut state) => {
-                let duplicate_exists = source_group_index != target_group_index
-                    && state
-                        .groups
-                        .get(target_group_index)
-                        .map(|group| {
-                            group
-                                .programs
-                                .iter()
-                                .any(|program| program.get_key() == moving_key)
-                        })
-                        .unwrap_or(false);
-                if duplicate_exists {
-                    return MoveRuleToGroupOutcome::DuplicateInTarget;
-                }
-
-                rules::move_rule_between_groups_at(
-                    &mut state,
-                    source_group_index,
-                    source_rule_index,
-                    target_group_index,
-                    target_rule_index,
-                )
-            }
-            Err(_) => return MoveRuleToGroupOutcome::LockFailed,
-        };
-
-        if moved.is_none() {
-            return MoveRuleToGroupOutcome::MissingRule;
-        }
-        if self
-            .rules
-            .move_rule_between_groups_at(
-                source_group_index,
-                source_rule_index,
-                target_group_index,
-                target_rule_index,
-            )
-            .is_none()
-        {
-            self.reconcile_rules();
-            self.log_manager.add_important_sticky_once(
-                "ERROR: Failed to move rule identity after moving app rule".to_string(),
-            );
+        if !self.enqueue_legacy(
+            TuningRequest::MoveRule {
+                group: source_group_id,
+                rule: rule_id,
+                target: target_group_id,
+                index: target_rule_index,
+            },
+            None,
+        ) {
             return MoveRuleToGroupOutcome::LockFailed;
         }
-
-        let _ = self.persist_state();
         let message = if source_group_index == target_group_index {
             format!("Reordered app '{moving_name}' in group '{target_group_name}'")
         } else {
@@ -540,94 +780,143 @@ impl AppState {
             return;
         };
 
-        let attempted_count = paths.len();
         let group_name = self.get_group_name(group_index).unwrap_or_default();
         self.log_manager.add_entry(format!(
             "Adding app targets to group: {group_name}, paths: {paths:?}"
         ));
 
-        let outcome = rules::add_apps_to_group(&self.persistent_state, group_index, paths);
-        self.handle_add_apps_outcome(group_index, &group_name, attempted_count, outcome);
+        let Some((draft, revision)) = self.base_draft() else {
+            return;
+        };
+        self.ui.dropped_files = Some(paths.clone());
+        self.ui.file_drop_hover_target = Some(group_id.clone());
+        let intent = ImportIntent::Files(group_id, paths.clone());
+        let outcome = rules::add_apps_to_group(&draft, group_index, paths);
+        self.handle_add_apps_outcome(draft, revision, group_index, &group_name, outcome, intent);
     }
 
     pub fn add_installed_app_to_group(
         &mut self,
         group_id: GroupId,
         entry: InstalledAppCatalogEntry,
-    ) {
+    ) -> bool {
         let Some(group_index) = self.group_index_for_id(&group_id) else {
-            return;
+            return false;
         };
 
         let group_name = self.get_group_name(group_index).unwrap_or_default();
         let app_name = entry.name.clone();
-        let outcome = rules::add_installed_app_to_group(&self.persistent_state, group_index, entry);
+        let Some((draft, revision)) = self.base_draft() else {
+            return false;
+        };
+        let completion = LegacyCompletion::Import(
+            ImportIntent::Installed {
+                group: group_id,
+                entry: entry.clone(),
+                selected: self.ui.installed_app_picker.selected_entry_index,
+                query: self.ui.installed_app_picker.query.clone(),
+            },
+            format!("Added installed app '{app_name}' to group: {group_name}"),
+        );
+        let outcome = rules::add_installed_app_to_group(&draft, group_index, entry);
 
-        if outcome.added_count > 0 {
-            self.rules
-                .append_rules_to_group(group_index, outcome.added_count);
-            let _ = self.persist_state();
-            self.log_manager.add_entry(format!(
-                "Added installed app '{app_name}' to group: {group_name}"
-            ));
-        }
+        let queued = if outcome.added_count > 0 {
+            let mut identities = self.rules.clone();
+            identities.append_rules_to_group(group_index, outcome.added_count);
+            self.persist_draft(draft, revision, identities, Some(completion))
+        } else {
+            false
+        };
 
         if let Some(err) = outcome.first_error {
             self.log_manager
                 .add_entry(format!("Error adding installed app '{app_name}': {err}"));
         }
+        queued
     }
 
     pub fn consume_dropped_files_into_group(&mut self, group_id: GroupId) -> bool {
-        self.ui.file_drop_hover_target = None;
-        let Some(files) = self.ui.dropped_files.take() else {
+        let Some(files) = self.ui.dropped_files.clone() else {
+            self.ui.file_drop_hover_target = None;
             return false;
         };
 
         if files.is_empty() {
+            self.ui.dropped_files = None;
+            self.ui.file_drop_hover_target = None;
             return false;
         }
 
         let Some(group_index) = self.group_index_for_id(&group_id) else {
+            self.ui.dropped_files = None;
+            self.ui.file_drop_hover_target = None;
             return false;
         };
+        self.ui.file_drop_hover_target = Some(group_id.clone());
 
-        let files_count = files.len();
         let group_name = self.get_group_name(group_index).unwrap_or_default();
 
-        let outcome = rules::add_apps_to_group(&self.persistent_state, group_index, files);
-        self.handle_add_apps_outcome(group_index, &group_name, files_count, outcome);
-
-        true
+        let Some((draft, revision)) = self.base_draft() else {
+            return false;
+        };
+        let outcome = rules::add_apps_to_group(&draft, group_index, files.clone());
+        self.handle_add_apps_outcome(
+            draft,
+            revision,
+            group_index,
+            &group_name,
+            outcome,
+            ImportIntent::Files(group_id, files),
+        )
     }
 
     fn handle_add_apps_outcome(
         &mut self,
+        draft: Arc<RwLock<AppStateStorage>>,
+        revision: u64,
         group_index: usize,
         group_name: &str,
-        attempted_count: usize,
         outcome: AddAppsOutcome,
-    ) {
-        if outcome.added_count > 0 {
-            self.rules
-                .append_rules_to_group(group_index, outcome.added_count);
-            let _ = self.persist_state();
-
-            if outcome.added_count == attempted_count {
-                self.log_manager
-                    .add_entry(format!("Added app targets to group: {group_name}"));
+        intent: ImportIntent,
+    ) -> bool {
+        let attempted_count = match &intent {
+            ImportIntent::Files(_, files) => files.len(),
+            ImportIntent::Installed { .. } => 1,
+        };
+        let queued = if outcome.added_count > 0 {
+            let mut identities = self.rules.clone();
+            identities.append_rules_to_group(group_index, outcome.added_count);
+            let message = if outcome.added_count == attempted_count {
+                format!("Added app targets to group: {group_name}")
             } else {
-                self.log_manager.add_entry(format!(
+                format!(
                     "Added {} app targets to group: {}",
                     outcome.added_count, group_name
-                ));
+                )
+            };
+            self.persist_draft(
+                draft,
+                revision,
+                identities,
+                Some(LegacyCompletion::Import(intent, message)),
+            )
+        } else {
+            if let ImportIntent::Files(group, files) = intent {
+                if self.ui.dropped_files.as_ref() == Some(&files)
+                    && self.ui.file_drop_hover_target.as_ref() == Some(&group)
+                {
+                    self.ui.dropped_files = None;
+                    self.ui.file_drop_hover_target = None;
+                }
             }
-        }
+            false
+        };
 
         if let Some(err) = outcome.first_error {
             self.log_manager
                 .add_entry(format!("Error adding app targets: {err}"));
         }
+        queued
     }
 
     pub fn get_theme_index(&self) -> usize {
@@ -643,14 +932,20 @@ impl AppState {
     }
 
     pub fn set_theme_index(&mut self, theme_index: usize) {
-        if preferences::set_theme_index(&self.persistent_state, theme_index) {
-            let _ = self.persist_state();
+        let Some((draft, revision)) = self.base_draft() else {
+            return;
+        };
+        if preferences::set_theme_index(&draft, theme_index) {
+            let _ = self.persist_draft(draft, revision, self.rules.clone(), None);
         }
     }
 
     pub fn toggle_process_monitoring(&mut self) {
-        preferences::toggle_process_monitoring(&self.persistent_state);
-        let _ = self.persist_state();
+        let Some((draft, revision)) = self.base_draft() else {
+            return;
+        };
+        preferences::toggle_process_monitoring(&draft);
+        let _ = self.persist_draft(draft, revision, self.rules.clone(), None);
     }
 
     pub fn is_process_monitoring_enabled(&self) -> bool {
@@ -661,6 +956,15 @@ impl AppState {
     }
 
     pub fn commit_group_form_session(&mut self) {
+        let Some((draft, revision)) = self.base_draft() else {
+            return;
+        };
+        let completion = LegacyCompletion::Group(
+            self.ui.group_form.editing_group_id.clone(),
+            self.ui.group_form.group_name.clone(),
+            self.ui.group_form.core_selection.clone(),
+            self.ui.group_form.run_all_enabled,
+        );
         let should_save = if let Some(group_id) = self.ui.group_form.editing_group_id.clone() {
             let Some(index) = self.group_index_for_id(&group_id) else {
                 self.ui.reset_group_form();
@@ -670,7 +974,7 @@ impl AppState {
             };
 
             match rules::update_group_properties(
-                &self.persistent_state,
+                &draft,
                 index,
                 self.ui.group_form.group_name.clone(),
                 &self.ui.group_form.core_selection,
@@ -684,7 +988,7 @@ impl AppState {
             }
         } else {
             match rules::create_group(
-                &self.persistent_state,
+                &draft,
                 &self.ui.group_form.group_name,
                 &self.ui.group_form.core_selection,
                 self.ui.group_form.run_all_enabled,
@@ -698,30 +1002,27 @@ impl AppState {
         };
 
         if should_save {
+            let mut identities = self.rules.clone();
             if self.ui.group_form.editing_group_id.is_none() {
-                self.rules.append_group();
+                identities.append_group();
             }
-            let _ = self.persist_state();
+            let _ = self.persist_draft(draft, revision, identities, Some(completion));
         }
-
-        self.ui.reset_group_form();
-        self.ui
-            .set_current_window(WindowRoute::Groups(GroupRoute::List));
     }
 
     pub fn delete_current_group_form_target(&mut self) {
         if let Some(group_id) = self.ui.group_form.editing_group_id.clone() {
-            if let Some(index) = self.group_index_for_id(&group_id) {
-                if rules::remove_group(&self.persistent_state, index) {
-                    self.rules.remove_group(index);
-                    let _ = self.persist_state();
-                }
-            }
+            let completion = LegacyCompletion::Group(
+                Some(group_id.clone()),
+                self.ui.group_form.group_name.clone(),
+                self.ui.group_form.core_selection.clone(),
+                self.ui.group_form.run_all_enabled,
+            );
+            let _ = self.enqueue_legacy(
+                TuningRequest::RemoveGroup { group: group_id },
+                Some(completion),
+            );
         }
-
-        self.ui.reset_group_form();
-        self.ui
-            .set_current_window(WindowRoute::Groups(GroupRoute::List));
     }
 
     pub fn cancel_group_form_session(&mut self) {
@@ -731,6 +1032,11 @@ impl AppState {
     }
 
     pub fn set_current_window(&mut self, window: WindowRoute) {
+        let window = if matches!(window, WindowRoute::Tuning) && !self.modules_enabled() {
+            WindowRoute::Groups(GroupRoute::List)
+        } else {
+            window
+        };
         let leaving_installed_app_picker =
             matches!(self.ui.current_window, WindowRoute::InstalledAppPicker)
                 && !matches!(window, WindowRoute::InstalledAppPicker);
@@ -1096,11 +1402,139 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn cpu_load_enabled(&self) -> bool {
+        self.cpu_load.preference_override.unwrap_or_else(|| {
+            self.persistent_state
+                .read()
+                .map(|s| s.cpu_load_monitoring_enabled)
+                .unwrap_or(false)
+        })
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn cpu_load_history_seconds(&self) -> u32 {
+        self.cpu_load.history_seconds_override.unwrap_or_else(|| {
+            self.persistent_state
+                .read()
+                .map(|state| {
+                    AppStateStorage::normalize_cpu_load_history_seconds(
+                        state.cpu_load_history_seconds,
+                    )
+                })
+                .unwrap_or(300)
+        })
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn set_cpu_load_history_seconds(&mut self, seconds: u32) -> Result<(), String> {
+        if !matches!(seconds, 30 | 300 | 1800) {
+            return Err(
+                "Choose a CPU history duration of 30 seconds, 5 minutes or 30 minutes.".into(),
+            );
+        }
+        if self.pending_legacy.is_some()
+            || matches!(
+                self.tuning.snapshot().operation,
+                crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+            )
+        {
+            return Err(
+                "Wait for the current settings change to finish, then change CPU history.".into(),
+            );
+        }
+        let (draft, revision) = self
+            .base_draft()
+            .ok_or("Could not update CPU history. Please try again.")?;
+        draft
+            .write()
+            .map_err(|_| "Could not update CPU history.")?
+            .cpu_load_history_seconds = seconds;
+        if !self.persist_draft(draft, revision, self.rules.clone(), None) {
+            return Err("Could not save CPU history. Please try again.".into());
+        }
+        self.cpu_load.history_seconds_override = Some(seconds);
+        self.cpu_load.preference_error = None;
+        self.cpu_load.set_history_seconds(seconds);
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn set_cpu_load_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        // Disabling takes effect now, even if persistence is unavailable.
+        if !enabled {
+            self.cpu_load.preference_override = Some(false);
+            self.cpu_load.configure(false, false);
+        }
+        let (draft, revision) = self
+            .base_draft()
+            .ok_or("Could not update CPU monitoring. Please try again.")?;
+        draft
+            .write()
+            .map_err(|_| "Could not update CPU monitoring.")?
+            .cpu_load_monitoring_enabled = enabled;
+        if !self.persist_draft(draft, revision, self.rules.clone(), None) {
+            return Err("Could not save CPU monitoring. Please try again.".into());
+        }
+        self.cpu_load.preference_override = Some(enabled);
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn poll_cpu_load(&mut self, visible: bool) {
+        if self.pending_legacy.is_none() {
+            if let Some(wanted) = self.cpu_load.preference_override {
+                let saved = self
+                    .persistent_state
+                    .read()
+                    .map(|s| s.cpu_load_monitoring_enabled)
+                    .unwrap_or(false);
+                if saved == wanted {
+                    self.cpu_load.preference_override = None;
+                } else {
+                    self.cpu_load.preference_error = Some("CPU monitoring changed for this session, but could not be saved. Try again in App settings.".into());
+                }
+            }
+            if let Some(wanted) = self.cpu_load.history_seconds_override {
+                let saved = self
+                    .persistent_state
+                    .read()
+                    .map(|state| state.cpu_load_history_seconds)
+                    .unwrap_or(300);
+                if saved == wanted {
+                    self.cpu_load.history_seconds_override = None;
+                } else {
+                    self.cpu_load.preference_error = Some("CPU history changed for this session, but could not be saved. Try again in App settings.".into());
+                }
+            }
+        }
+        let enabled = self.cpu_load_enabled();
+        let history_seconds = self.cpu_load_history_seconds();
+        self.cpu_load.set_history_seconds(history_seconds);
+        self.cpu_load.configure(enabled, visible);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn cpu_load_memory_estimate(&self) -> String {
+        let apps = self
+            .persistent_state
+            .read()
+            .map(|s| s.groups.iter().map(|g| g.programs.len()).sum())
+            .unwrap_or_default();
+        self.cpu_load.memory_estimate(
+            self.ui.group_form.core_selection.len(),
+            apps,
+            self.cpu_load_history_seconds(),
+        )
+    }
+
     #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
     pub fn set_start_minimized(&mut self, enabled: bool) -> Result<(), String> {
-        let previous = {
-            let mut state = self
-                .persistent_state
+        let (draft, revision) = self
+            .base_draft()
+            .ok_or_else(|| "Could not update the startup preference.".to_string())?;
+        {
+            let mut state = draft
                 .write()
                 .map_err(|_| "Could not update the startup preference.".to_string())?;
             let previous = state.start_minimized;
@@ -1108,33 +1542,45 @@ impl AppState {
                 return Ok(());
             }
             state.start_minimized = enabled;
-            previous
-        };
-        if !self.persist_state() {
-            if let Ok(mut state) = self.persistent_state.write() {
-                state.start_minimized = previous;
-            }
+        }
+        if !self.persist_draft(draft, revision, self.rules.clone(), None) {
             return Err("Could not save Start minimized. Please try again.".to_string());
         }
         Ok(())
     }
 
-    /// Revalidates only tracked instances; never performs a full process enumeration.
-    pub(crate) fn tracked_processes_snapshot(&mut self) -> Vec<TrackedProcessSnapshot> {
-        self.tracked_processes_snapshot_with_inspector(
+    pub(crate) fn refresh_tracked_processes(&mut self, now: std::time::Instant) {
+        self.refresh_tracked_processes_with_inspector(
+            now,
             crate::app::adapters::os::get_process_image_path_and_instance_token,
-        )
+        );
     }
 
+    fn refresh_tracked_processes_with_inspector(
+        &mut self,
+        now: std::time::Instant,
+        inspect: impl FnMut(u32) -> Result<(PathBuf, u64), String>,
+    ) {
+        if self.ui.tracked_processes.refresh_due(now) {
+            let rows = self.tracked_processes_snapshot_with_inspector(inspect);
+            self.ui.tracked_processes.publish(now, rows);
+        }
+    }
+
+    /// Revalidates only tracked instances; None means temporarily unavailable,
+    /// whereas Some(empty) is a completed empty roster.
     fn tracked_processes_snapshot_with_inspector(
         &mut self,
         mut inspect: impl FnMut(u32) -> Result<(PathBuf, u64), String>,
-    ) -> Vec<TrackedProcessSnapshot> {
+    ) -> Option<Vec<TrackedProcessSnapshot>> {
+        if self.persistent_state.is_poisoned() {
+            return None;
+        }
         let central = self.build_central_panel_snapshot();
         let handle = self.runtime.running_apps_handle();
         let instances = {
             let Ok(running) = handle.try_read() else {
-                return Vec::new();
+                return None;
             };
             let mut instances = Vec::new();
             for group in central.groups {
@@ -1177,7 +1623,7 @@ impl AppState {
             });
         }
 
-        tracked
+        Some(tracked)
     }
 
     pub fn open_installed_app_picker(&mut self, group_id: GroupId) {
@@ -1371,9 +1817,8 @@ impl AppState {
             return false;
         };
 
-        self.add_installed_app_to_group(group_id, entry);
-        self.close_installed_app_picker();
-        true
+        self.ui.installed_app_picker.selected_entry_index = Some(entry_index);
+        self.add_installed_app_to_group(group_id, entry)
     }
 
     pub fn open_app_run_settings(&mut self, group_id: GroupId, rule_id: RuleId) {
@@ -1429,32 +1874,43 @@ impl AppState {
                     updated_app.sync_primary_process_name_after_path_edit(&original);
                 }
 
-                if rules::update_rule(&self.persistent_state, group_idx, prog_idx, updated_app) {
-                    let _ = self.persist_state();
-                }
+                let completion = LegacyCompletion::Rule(
+                    target.clone(),
+                    self.ui.app_edit_state.current_edit.clone(),
+                );
+                let _ = self.enqueue_legacy(
+                    TuningRequest::EditRule {
+                        group: target.group_id,
+                        rule: target.rule_id,
+                        app: Box::new(updated_app),
+                    },
+                    Some(completion),
+                );
             }
         }
-
-        self.close_app_run_settings();
     }
 
     pub fn delete_current_app_edit_target(&mut self) {
         if let Some(target) = self.ui.app_edit_state.target.clone() {
-            if let Some((group_idx, prog_idx)) =
-                self.rule_indices_for_ids(&target.group_id, &target.rule_id)
-            {
-                if let Some(path) =
-                    rules::remove_rule_from_group(&self.persistent_state, group_idx, prog_idx)
-                {
-                    self.rules.remove_rule(group_idx, prog_idx);
-                    let _ = self.persist_state();
+            let label = self
+                .rule_indices_for_ids(&target.group_id, &target.rule_id)
+                .and_then(|(group, rule)| self.get_group_program(group, rule))
+                .map(|app| app.launch_target_label());
+            let completion =
+                LegacyCompletion::Rule(target.clone(), self.ui.app_edit_state.current_edit.clone());
+            if self.enqueue_legacy(
+                TuningRequest::RemoveRule {
+                    group: target.group_id,
+                    rule: target.rule_id,
+                },
+                Some(completion),
+            ) {
+                if let Some(label) = label {
                     self.log_manager
-                        .add_entry(format!("Removing app: {}", path));
+                        .add_entry(format!("Queued app removal: {label}"));
                 }
             }
         }
-
-        self.close_app_run_settings();
     }
 
     pub fn clear_logs(&mut self) {
@@ -1473,7 +1929,7 @@ impl AppState {
             self.windows_event_log.disable();
             self.windows_event_log_disabled_for_session = true;
         }
-        let previous = {
+        {
             let state = match self.persistent_state.read() {
                 Ok(state) => state,
                 Err(_) => {
@@ -1483,19 +1939,17 @@ impl AppState {
                     )
                 }
             };
-            state.windows_event_log_diagnostics_enabled
-        };
-        if let Err(error) =
-            preferences::set_windows_event_log_diagnostics(&self.persistent_state, enabled)
-        {
+            let _ = state.windows_event_log_diagnostics_enabled;
+        }
+        let (draft, revision) = self
+            .base_draft()
+            .ok_or_else(|| "could not read the diagnostics preference".to_string())?;
+        if let Err(error) = preferences::set_windows_event_log_diagnostics(&draft, enabled) {
             return Err(format!(
                 "{error}; diagnostics remain disabled for this session"
             ));
         }
-        if !self.persist_state() {
-            if let Ok(mut state) = self.persistent_state.write() {
-                state.windows_event_log_diagnostics_enabled = previous;
-            }
+        if !self.persist_draft(draft, revision, self.rules.clone(), None) {
             if enabled {
                 return Err("could not save the Windows Event Log diagnostics setting; diagnostics remain disabled for this session".to_string());
             }
@@ -1737,24 +2191,272 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn followup_classic_save_reports_acceptance_before_gated_completion() {
+        use crate::app::features::system_tweaks::{
+            service::{SavedState, StatePersistence},
+            SaveError, TuningOperationState, TuningRuntime,
+        };
+        use std::sync::mpsc;
+        struct GatedSave {
+            entered: mpsc::SyncSender<()>,
+            release: mpsc::Receiver<()>,
+            fail: bool,
+        }
+        impl StatePersistence for GatedSave {
+            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                self.entered.send(()).unwrap();
+                if self
+                    .release
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .is_err()
+                    || self.fail
+                {
+                    Err(SaveError::Storage)
+                } else {
+                    Ok(SavedState::Unavailable)
+                }
+            }
+        }
+        for fail in [false, true] {
+            let mut app = sample_state();
+            let original = app.persistent_state.read().unwrap().clone();
+            let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+            let (release_tx, release_rx) = mpsc::sync_channel(1);
+            let runtime = TuningRuntime::start(
+                crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                    .headless(
+                        original.clone(),
+                        Box::new(GatedSave {
+                            entered: entered_tx,
+                            release: release_rx,
+                            fail,
+                        }),
+                    )
+                    .without_modules(),
+                app.runtime.running_apps_handle(),
+            );
+            app.replace_tuning_for_test(runtime, Default::default());
+            let mut candidate = original.clone();
+            candidate.theme_index = 2;
+            let accepted = app.enqueue_legacy(
+                super::TuningRequest::SaveBase {
+                    candidate: Box::new(candidate),
+                    expected_revision: 0,
+                },
+                None,
+            );
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            let pending = matches!(
+                app.tuning_snapshot().operation,
+                TuningOperationState::Pending { .. }
+            );
+            let before = app.persistent_state.read().unwrap().theme_index;
+            let _ = release_tx.send(());
+            assert!(
+                accepted,
+                "acceptance is independent of persistence completion"
+            );
+            assert!(
+                pending,
+                "the gated save must still be pending after enqueue returns"
+            );
+            assert_eq!(before, original.theme_index);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while matches!(
+                app.tuning_snapshot().operation,
+                TuningOperationState::Pending { .. }
+            ) {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            app.poll_tuning();
+            assert_eq!(
+                app.get_theme_index(),
+                if fail { original.theme_index } else { 2 }
+            );
+            assert!(app.pending_legacy.is_none());
+            assert_eq!(
+                matches!(
+                    app.tuning_snapshot().operation,
+                    TuningOperationState::Refused {
+                        error: SaveError::Storage,
+                        ..
+                    }
+                ),
+                fail
+            );
+        }
+    }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn cpu_load_retention_save_preserves_existing_candidate_and_other_preferences() {
+        let mut app = sample_state();
+        let classic = app.is_process_monitoring_enabled();
+        let theme = app.get_theme_index();
+        assert_eq!(app.cpu_load_history_seconds(), 300);
+        app.set_cpu_load_history_seconds(30).unwrap();
+        app.wait_for_test_save();
+        assert_eq!(app.cpu_load_history_seconds(), 30);
+        assert_eq!(
+            app.persistent_state
+                .read()
+                .unwrap()
+                .cpu_load_history_seconds,
+            30
+        );
+        app.pending_legacy = Some(super::PendingLegacy {
+            id: 12345,
+            revision: 77,
+            completion: Some(super::LegacyCompletion::Group(
+                None,
+                "Keep draft".into(),
+                vec![true],
+                false,
+            )),
+        });
+        assert!(app.set_cpu_load_history_seconds(1800).is_err());
+        let pending = app.pending_legacy.as_ref().unwrap();
+        assert_eq!((pending.id, pending.revision), (12345, 77));
+        assert!(
+            matches!(&pending.completion, Some(super::LegacyCompletion::Group(None, name, _, false)) if name == "Keep draft")
+        );
+        assert_eq!(app.cpu_load_history_seconds(), 30);
+        assert_eq!(
+            app.persistent_state
+                .read()
+                .unwrap()
+                .cpu_load_history_seconds,
+            30
+        );
+        app.pending_legacy = None;
+        assert!(app.set_cpu_load_history_seconds(60).is_err());
+        app.set_cpu_load_history_seconds(1800).unwrap();
+        app.wait_for_test_save();
+        let reloaded: AppStateStorage = serde_json::from_str(
+            &serde_json::to_string(&*app.persistent_state.read().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reloaded.cpu_load_history_seconds, 1800);
+        assert_eq!(app.is_process_monitoring_enabled(), classic);
+        assert_eq!(app.get_theme_index(), theme);
+    }
+    #[cfg(not(all(target_os = "windows", feature = "windows")))]
+    #[test]
+    fn linux_modules_route_is_unavailable() {
+        let mut app = sample_state();
+        app.set_current_window(WindowRoute::Tuning);
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::Groups(GroupRoute::List)
+        ));
+    }
+
+    #[cfg(not(all(target_os = "windows", feature = "windows")))]
+    #[test]
+    fn linux_modules_requests_are_refused_without_idle_module_polling() {
+        let mut app = sample_state();
+        assert_eq!(
+            app.request_tuning(
+                crate::app::features::system_tweaks::TuningRequest::CreateProfile {
+                    name: "Unavailable".into(),
+                }
+            ),
+            Err(crate::app::features::system_tweaks::SaveError::Invalid)
+        );
+        assert_eq!(app.tuning_poll_interval(), None);
+        assert!(app.tuning_snapshot().catalog.is_empty());
+        assert!(app.tuning_snapshot().profiles.is_empty());
+    }
+
+    #[cfg(not(all(target_os = "windows", feature = "windows")))]
+    #[test]
+    fn linux_modules_disabled_preserves_raw_data_during_classic_rule_changes() {
+        let original = sample_state();
+        let mut saved = original.persistent_state.read().unwrap().clone();
+        saved.version = 11;
+        saved.loaded_version = 11;
+        let raw = r#"{ "version": 77, "future": { "preserve": [1, 2] } }"#;
+        saved.tuning = serde_json::from_str(raw).unwrap();
+        let mut app = AppState::new_for_test(Arc::new(RwLock::new(saved)), 2);
+        let group = app.rules.group_id_for_index(0).unwrap();
+        let rule = app.rules.rule_id_for_index(0, 0).unwrap();
+        assert!(app.enqueue_legacy(
+            crate::app::features::system_tweaks::TuningRequest::RemoveRule { group, rule },
+            None,
+        ));
+        app.wait_for_test_save();
+        assert!(app.persistent_state.read().unwrap().groups[0]
+            .programs
+            .is_empty());
+        app.set_theme_index(2);
+        app.wait_for_test_save();
+        assert_eq!(app.get_theme_index(), 2);
+        assert_eq!(app.persistent_state.read().unwrap().tuning.raw(), Some(raw));
+    }
+
+    #[test]
+    fn p4_legacy_save_failure_keeps_saved_values_ids_and_rule_editor() {
+        use crate::app::features::system_tweaks::{
+            service::{SavedState, StatePersistence},
+            SaveError, TuningOperationState, TuningRuntime,
+        };
+        struct Failing;
+        impl StatePersistence for Failing {
+            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                Err(SaveError::Storage)
+            }
+        }
+        let mut app = sample_state();
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(state, Box::new(Failing)),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        let group = app.rules.group_id_for_index(0).unwrap();
+        let rule = app.rules.rule_id_for_index(0, 0).unwrap();
+        let identities = app.rules.to_persisted_identities();
+        app.open_app_run_settings(group, rule);
+        app.ensure_current_edit_loaded();
+        app.ui.app_edit_state.current_edit.as_mut().unwrap().name = "Unsaved draft".into();
+        app.commit_current_app_edit_session();
+        app.wait_for_test_save();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while matches!(
+            app.tuning_snapshot().operation,
+            TuningOperationState::Pending { .. }
+        ) && std::time::Instant::now() < deadline
+        {
+            app.poll_tuning();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.poll_tuning();
+        assert_ne!(app.get_group_program(0, 0).unwrap().name, "Unsaved draft");
+        assert_eq!(app.rules.to_persisted_identities(), identities);
+        assert_eq!(
+            app.ui.app_edit_state.current_edit.as_ref().unwrap().name,
+            "Unsaved draft"
+        );
+        assert!(matches!(app.ui.current_window, WindowRoute::AppRunSettings));
+        app.set_theme_index(2);
+        app.wait_for_test_save();
+        assert_eq!(app.get_theme_index(), 0);
+    }
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use super::RuleShortcutDisabledReason;
     use super::{AppState, MoveRuleToGroupOutcome, RunRuleOutcome, TrackedProcessSnapshot};
-    use crate::app::features::diagnostics::crash_reports::CrashReportManager;
-    #[cfg(all(target_os = "windows", feature = "windows"))]
-    use crate::app::features::diagnostics::windows_event_log::WindowsEventLogManager;
-    use crate::app::features::execution::RuntimeRegistry;
     use crate::app::features::rules::RulesContext;
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use crate::app::features::shortcut::{
         CreateRuleShortcutError, RuleShortcutPlatform, ShortcutWriteError,
     };
-    use crate::app::models::{
-        AppStateStorage, AppToRun, CoreGroup, CpuSchema, LaunchTarget, LogManager,
-    };
+    use crate::app::models::{AppStateStorage, AppToRun, CoreGroup, CpuSchema, LaunchTarget};
     use crate::app::shared::ids::{GroupId, RuleId};
     use crate::app::shell::sessions::{RuleEditorTarget, RuleShortcutResult, ShortcutCreationRole};
-    use crate::app::shell::UiSession;
     use crate::app::shell::{GroupRoute, WindowRoute};
     use os_api::PriorityClass;
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -1818,9 +2520,9 @@ mod tests {
     }
 
     fn sample_state() -> AppState {
-        let persistent_state = Arc::new(RwLock::new(AppStateStorage {
-            version: 5,
-            groups: vec![CoreGroup {
+        let persistent_state = Arc::new(RwLock::new(AppStateStorage::test_fixture(|state| {
+            state.version = 5;
+            state.groups = vec![CoreGroup {
                 name: "Games".to_string(),
                 cores: vec![0, 1],
                 programs: vec![AppToRun::new_path(
@@ -1832,39 +2534,28 @@ mod tests {
                 )],
                 is_hidden: false,
                 run_all_button: true,
-            }],
-            cpu_schema: CpuSchema {
+            }];
+            state.cpu_schema = CpuSchema {
                 model: "Test CPU".to_string(),
                 clusters: Vec::new(),
-            },
-            theme_index: 0,
-            process_monitoring_enabled: false,
-            windows_event_log_diagnostics_enabled: true,
-            start_minimized: false,
-            rule_identities: None,
-            loaded_version: 5,
-            pending_pre_v6_backup: false,
-        }));
+            };
+            state.theme_index = 0;
+            state.process_monitoring_enabled = false;
+            state.windows_event_log_diagnostics_enabled = true;
+            state.start_minimized = false;
+            state.rule_identities = None;
+            state.loaded_version = 5;
+            state.pending_pre_v6_backup = false;
+            state.tuning = Default::default();
+        })));
 
         let rules = persistent_state
             .read()
             .map(|state| RulesContext::from_storage(&state))
             .unwrap();
 
-        AppState {
-            persistent_state,
-            rules,
-            ui: UiSession::new(4),
-            runtime: RuntimeRegistry::new(),
-            log_manager: LogManager::default(),
-            crash_reports: CrashReportManager::new_idle(PathBuf::new()),
-            #[cfg(all(target_os = "windows", feature = "windows"))]
-            windows_event_log: WindowsEventLogManager::new_idle(),
-            #[cfg(all(target_os = "windows", feature = "windows"))]
-            windows_event_log_disabled_for_session: false,
-            shortcut_creation_role: ShortcutCreationRole::Primary,
-            save_count: 0,
-        }
+        let _ = rules;
+        AppState::new_for_test(persistent_state, 4)
     }
 
     fn group_id(app: &AppState, index: usize) -> GroupId {
@@ -1890,6 +2581,17 @@ mod tests {
                 run_all_button: false,
             });
         app.reconcile_rules();
+        rebase_sample_fixture(app);
+    }
+    fn rebase_sample_fixture(app: &mut AppState) {
+        let mut saved = app.persistent_state.read().unwrap().clone();
+        saved.mark_ready_for_current_schema_save(app.rules.to_persisted_identities());
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(saved, Box::new(super::TestStatePersistence)),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
     }
 
     fn sample_app(name: &str) -> AppToRun {
@@ -2126,6 +2828,7 @@ mod tests {
             ),
             MoveRuleToGroupOutcome::Moved
         );
+        app.wait_for_test_save();
 
         assert_eq!(
             app.run_group_program(source_group_id, moved_rule_id),
@@ -2172,15 +2875,16 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_group_form_session_preserves_invalid_create_closeout() {
+    fn test_commit_group_form_session_keeps_invalid_create_draft_visible() {
         let mut app = sample_state();
         app.ui.current_window = WindowRoute::Groups(GroupRoute::Create);
 
         app.commit_group_form_session();
+        app.wait_for_test_save();
 
         assert!(matches!(
             app.ui.current_window,
-            WindowRoute::Groups(GroupRoute::List)
+            WindowRoute::Groups(GroupRoute::Create)
         ));
         assert!(app.ui.group_form.group_name.is_empty());
         assert!(app
@@ -2238,6 +2942,7 @@ mod tests {
         edit_first_rule(&mut app, updated);
 
         app.commit_current_app_edit_session();
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         let updated = &state.groups[0].programs[0];
@@ -2266,6 +2971,7 @@ mod tests {
         edit_first_rule(&mut app, updated);
 
         app.commit_current_app_edit_session();
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(
@@ -2291,6 +2997,7 @@ mod tests {
         edit_first_rule(&mut app, updated);
 
         app.commit_current_app_edit_session();
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert!(state.groups[0].programs[0].additional_processes.is_empty());
@@ -2311,6 +3018,7 @@ mod tests {
         edit_first_rule(&mut app, updated);
 
         app.commit_current_app_edit_session();
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(
@@ -2332,6 +3040,7 @@ mod tests {
 
         let outcome =
             app.move_rule_to_group_at(source_group_id, moved_rule_id.clone(), target_group_id, 0);
+        app.wait_for_test_save();
 
         assert_eq!(outcome, MoveRuleToGroupOutcome::Moved);
         let state = app.persistent_state.read().unwrap();
@@ -2350,6 +3059,7 @@ mod tests {
         app.persistent_state.write().unwrap().groups[1].programs =
             vec![sample_app("TargetFirst"), sample_app("TargetSecond")];
         app.reconcile_rules();
+        rebase_sample_fixture(&mut app);
 
         let source_group_id = group_id(&app, 0);
         let target_group_id = group_id(&app, 1);
@@ -2358,6 +3068,7 @@ mod tests {
 
         let outcome =
             app.move_rule_to_group_at(source_group_id, moved_rule_id.clone(), target_group_id, 1);
+        app.wait_for_test_save();
 
         assert_eq!(outcome, MoveRuleToGroupOutcome::Moved);
         let state = app.persistent_state.read().unwrap();
@@ -2377,6 +3088,7 @@ mod tests {
             .programs
             .extend([sample_app("Second"), sample_app("Third")]);
         app.reconcile_rules();
+        rebase_sample_fixture(&mut app);
         let group_id = group_id(&app, 0);
         let first_rule_id = rule_id(&app, 0, 0);
         let second_rule_id = rule_id(&app, 0, 1);
@@ -2384,6 +3096,7 @@ mod tests {
 
         let outcome =
             app.move_rule_to_group_at(group_id.clone(), first_rule_id.clone(), group_id, 3);
+        app.wait_for_test_save();
 
         assert_eq!(outcome, MoveRuleToGroupOutcome::Moved);
         let state = app.persistent_state.read().unwrap();
@@ -2417,6 +3130,7 @@ mod tests {
             ),
             MoveRuleToGroupOutcome::SamePosition
         );
+        app.wait_for_test_save();
         assert_eq!(app.save_count(), 0);
 
         let duplicate = app.persistent_state.read().unwrap().groups[0].programs[0].clone();
@@ -2429,6 +3143,7 @@ mod tests {
             app.move_rule_to_group_at(source_group_id, moved_rule_id, target_group_id, 0),
             MoveRuleToGroupOutcome::DuplicateInTarget
         );
+        app.wait_for_test_save();
         let state = app.persistent_state.read().unwrap();
         assert_eq!(state.groups[0].programs.len(), 1);
         assert_eq!(state.groups[1].programs.len(), 1);
@@ -2441,17 +3156,22 @@ mod tests {
         let mut app = sample_state();
 
         app.set_theme_index(2);
+        app.wait_for_test_save();
         assert_eq!(app.get_theme_index(), 2);
         assert_eq!(app.save_count(), 1);
         app.set_theme_index(2);
+        app.wait_for_test_save();
         app.set_theme_index(99);
+        app.wait_for_test_save();
         assert_eq!(app.get_theme_index(), 2);
         assert_eq!(app.save_count(), 1);
         app.set_theme_index(0);
+        app.wait_for_test_save();
         assert_eq!(app.get_theme_index(), 0);
         assert_eq!(app.save_count(), 2);
 
         app.toggle_process_monitoring();
+        app.wait_for_test_save();
         assert!(app.is_process_monitoring_enabled());
         assert_eq!(app.save_count(), 3);
     }
@@ -2461,9 +3181,11 @@ mod tests {
         let mut app = sample_state();
         assert!(!app.start_minimized());
         app.set_start_minimized(true).unwrap();
+        app.wait_for_test_save();
         assert!(app.start_minimized());
         assert_eq!(app.save_count(), 1);
         app.set_start_minimized(true).unwrap();
+        app.wait_for_test_save();
         assert_eq!(app.save_count(), 1);
         let json = serde_json::to_string(&*app.persistent_state.read().unwrap()).unwrap();
         let restored: AppStateStorage = serde_json::from_str(&json).unwrap();
@@ -2476,6 +3198,7 @@ mod tests {
                 .start_minimized
         );
         app.set_start_minimized(false).unwrap();
+        app.wait_for_test_save();
         assert!(!app.start_minimized());
         assert_eq!(app.save_count(), 2);
     }
@@ -2486,13 +3209,16 @@ mod tests {
         let group_id = group_id(&app, 0);
 
         app.set_group_is_hidden(group_id.clone(), true);
+        app.wait_for_test_save();
         assert!(app.persistent_state.read().unwrap().groups[0].is_hidden);
         assert_eq!(app.save_count(), 1);
 
         app.set_group_is_hidden(group_id, true);
+        app.wait_for_test_save();
         assert_eq!(app.save_count(), 1);
 
         app.set_group_is_hidden(GroupId("missing-group".to_string()), false);
+        app.wait_for_test_save();
         assert_eq!(app.save_count(), 1);
     }
 
@@ -2503,8 +3229,11 @@ mod tests {
         let first_group_id = group_id(&app, 0);
 
         assert!(!app.move_group_to_index(first_group_id, 0));
+        app.wait_for_test_save();
         assert!(!app.move_group_to_index(GroupId("missing-group".to_string()), 1));
+        app.wait_for_test_save();
         assert!(!app.move_group_to_index(group_id(&app, 0), 99));
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(state.groups[0].name, "Games");
@@ -2541,6 +3270,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(app.move_group_to_index(original_ids[0].clone(), 2));
+        app.wait_for_test_save();
 
         let names = app
             .persistent_state
@@ -2573,11 +3303,13 @@ mod tests {
         app.ui.group_form.core_selection[2] = true;
 
         app.commit_group_form_session();
+        app.wait_for_test_save();
         assert_eq!(app.persistent_state.read().unwrap().groups.len(), 2);
         assert_eq!(app.save_count(), 1);
 
         app.ui.group_form.editing_group_id = Some(group_id(&app, 1));
         app.delete_current_group_form_target();
+        app.wait_for_test_save();
         assert_eq!(app.persistent_state.read().unwrap().groups.len(), 1);
         assert_eq!(app.save_count(), 2);
     }
@@ -2591,6 +3323,7 @@ mod tests {
         });
 
         app.delete_current_app_edit_target();
+        app.wait_for_test_save();
 
         assert!(app.persistent_state.read().unwrap().groups[0]
             .programs
@@ -2603,6 +3336,7 @@ mod tests {
         let mut app = sample_state();
 
         app.delete_current_app_edit_target();
+        app.wait_for_test_save();
 
         assert_eq!(app.save_count(), 0);
     }
@@ -2614,6 +3348,7 @@ mod tests {
         app.ui.file_drop_hover_target = Some(target_group_id.clone());
 
         assert!(!app.consume_dropped_files_into_group(target_group_id));
+        app.wait_for_test_save();
 
         assert!(app.ui.file_drop_hover_target.is_none());
         assert!(app.ui.dropped_files.is_none());
@@ -2627,6 +3362,7 @@ mod tests {
         app.ui.file_drop_hover_target = Some(GroupId("stale-group".to_string()));
 
         assert!(!app.consume_dropped_files_into_group(GroupId("stale-group".to_string())));
+        app.wait_for_test_save();
 
         assert!(app.ui.file_drop_hover_target.is_none());
         assert!(app.ui.dropped_files.is_none());
@@ -2649,6 +3385,7 @@ mod tests {
         app.ui.file_drop_hover_target = Some(target_group_id.clone());
 
         assert!(app.consume_dropped_files_into_group(target_group_id));
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(state.groups[0].programs.len(), 1);
@@ -2673,6 +3410,7 @@ mod tests {
             group_id(&app, 0),
             vec![r"C:\valid.exe".into(), r"C:\broken".into()],
         );
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         assert_eq!(state.groups[0].programs.len(), 2);
@@ -2690,6 +3428,7 @@ mod tests {
         let mut app = sample_state();
 
         app.add_selected_files_to_group(group_id(&app, 0), vec![r"C:\broken".into()]);
+        app.wait_for_test_save();
 
         assert_eq!(
             app.persistent_state.read().unwrap().groups[0]
@@ -2725,6 +3464,82 @@ mod tests {
     }
 
     #[test]
+    fn tracked_process_refresh_keeps_last_rows_on_busy_and_limits_inspection_to_one_hz() {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+        let mut app = sample_state();
+        let central = app.build_central_panel_snapshot();
+        let group = &central.groups[0];
+        let program = &group.programs[0];
+        assert!(app.runtime.add_running_app_with_token(
+            &program.app_key,
+            701,
+            1001,
+            group.group_id.clone(),
+            program.rule_id.clone(),
+        ));
+        let inspections = Cell::new(0);
+        let inspect = |pid| {
+            inspections.set(inspections.get() + 1);
+            assert_eq!(pid, 701);
+            Ok((PathBuf::from("sample.exe"), 1001))
+        };
+        let start = Instant::now();
+        app.refresh_tracked_processes_with_inspector(start, inspect);
+        let first = app.ui.tracked_processes.rows.clone();
+        assert_eq!(first.len(), 1);
+        let pointer = app.ui.tracked_processes.rows.as_ptr();
+        for millis in 1..1000 {
+            app.refresh_tracked_processes_with_inspector(
+                start + Duration::from_millis(millis),
+                inspect,
+            );
+        }
+        assert_eq!(
+            inspections.get(),
+            1,
+            "GUI frames must not repeat native inspections"
+        );
+        assert_eq!(app.ui.tracked_processes.rows.as_ptr(), pointer);
+
+        let handle = app.runtime.running_apps_handle();
+        let writer = handle.try_write().unwrap();
+        app.refresh_tracked_processes_with_inspector(start + Duration::from_secs(1), inspect);
+        assert_eq!(
+            app.ui.tracked_processes.rows, first,
+            "Busy is not an empty roster"
+        );
+        assert!(app.ui.tracked_processes.updating);
+        drop(writer);
+        app.refresh_tracked_processes_with_inspector(start + Duration::from_millis(1500), inspect);
+        assert_eq!(
+            inspections.get(),
+            1,
+            "Busy retries also respect the one-second cadence"
+        );
+        app.refresh_tracked_processes_with_inspector(start + Duration::from_secs(2), inspect);
+        assert_eq!(inspections.get(), 2);
+        assert!(!app.ui.tracked_processes.updating);
+        assert_eq!(
+            app.ui.tracked_processes.rows.as_ptr(),
+            pointer,
+            "unchanged rows keep their allocation"
+        );
+
+        handle
+            .try_write()
+            .unwrap()
+            .mutate_membership(|apps| apps.remove_app(&program.app_key));
+        app.refresh_tracked_processes_with_inspector(start + Duration::from_secs(3), inspect);
+        assert!(
+            app.ui.tracked_processes.rows.is_empty(),
+            "a completed empty snapshot must clear old rows"
+        );
+        assert!(!app.ui.tracked_processes.updating);
+        assert_eq!(inspections.get(), 2);
+    }
+
+    #[test]
     fn tracked_process_snapshot_lists_only_runtime_confirmed_pids() {
         let mut app = sample_state();
         let central = app.build_central_panel_snapshot();
@@ -2751,7 +3566,8 @@ mod tests {
                 703 => Err("exited or inaccessible".to_string()),
                 704 => Ok((PathBuf::from("apps/helper.exe"), 1004)),
                 _ => panic!("must not inspect untracked processes"),
-            }),
+            })
+            .unwrap(),
             vec![
                 TrackedProcessSnapshot {
                     group_name: "Games".to_string(),
@@ -2790,11 +3606,13 @@ mod tests {
             owner.rule_id.clone(),
         ));
         let mut inspections = 0;
-        let rows = app.tracked_processes_snapshot_with_inspector(|pid| {
-            inspections += 1;
-            assert_eq!(pid, 701);
-            Ok((PathBuf::from("sample.exe"), 1001))
-        });
+        let rows = app
+            .tracked_processes_snapshot_with_inspector(|pid| {
+                inspections += 1;
+                assert_eq!(pid, 701);
+                Ok((PathBuf::from("sample.exe"), 1001))
+            })
+            .unwrap();
         assert_eq!(
             rows,
             vec![TrackedProcessSnapshot {
@@ -2813,6 +3631,7 @@ mod tests {
             .tracked_processes_snapshot_with_inspector(|_| {
                 panic!("stale runtime ownership must not be inspected")
             })
+            .unwrap()
             .is_empty());
     }
 
@@ -2832,6 +3651,7 @@ mod tests {
             .tracked_processes_snapshot_with_inspector(|_| {
                 panic!("a PID without an instance token must not be inspected")
             })
+            .unwrap()
             .is_empty());
 
         let handle = app.runtime.running_apps_handle();
@@ -2840,7 +3660,7 @@ mod tests {
             .tracked_processes_snapshot_with_inspector(|_| {
                 panic!("a busy runtime must not fall back to unverified PIDs")
             })
-            .is_empty());
+            .is_none());
     }
 
     #[test]
@@ -2903,6 +3723,7 @@ mod tests {
 
         app.open_installed_app_picker(group_id(&app, 0));
         assert!(app.confirm_selected_installed_app());
+        app.wait_for_test_save();
 
         let state = app.persistent_state.read().unwrap();
         let added = &state.groups[0].programs[1];
@@ -2921,6 +3742,430 @@ mod tests {
             WindowRoute::Groups(GroupRoute::List)
         ));
         assert!(app.ui.installed_app_picker.target_group_id.is_none());
+    }
+
+    struct ImportPersistence {
+        fail: Arc<std::sync::atomic::AtomicBool>,
+        gate: Option<std::sync::mpsc::Receiver<()>>,
+        entered: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl crate::app::features::system_tweaks::StatePersistence for ImportPersistence {
+        fn save(
+            &mut self,
+            _: &mut AppStateStorage,
+        ) -> Result<crate::app::features::system_tweaks::service::SavedState, super::SaveError>
+        {
+            if let Some(gate) = self.gate.take() {
+                self.entered.take().unwrap().send(()).unwrap();
+                gate.recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(super::SaveError::Storage)
+            } else {
+                Ok(crate::app::features::system_tweaks::service::SavedState::Unavailable)
+            }
+        }
+    }
+
+    struct ImportGate(Option<std::sync::mpsc::Sender<()>>);
+    impl Drop for ImportGate {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    fn install_import_persistence(
+        app: &mut AppState,
+        pending: bool,
+    ) -> (Arc<std::sync::atomic::AtomicBool>, ImportGate) {
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(
+                    state,
+                    Box::new(ImportPersistence {
+                        fail: fail.clone(),
+                        gate: pending.then_some(release_rx),
+                        entered: pending.then_some(entered_tx),
+                    }),
+                ),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        if pending {
+            let mut candidate = app.persistent_state.read().unwrap().clone();
+            candidate.mark_ready_for_current_schema_save(app.rules.to_persisted_identities());
+            app.request_tuning(
+                crate::app::features::system_tweaks::TuningRequest::SaveBase {
+                    candidate: Box::new(candidate),
+                    expected_revision: app.tuning_adopted_revision,
+                },
+            )
+            .unwrap();
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+        }
+        (fail, ImportGate(pending.then_some(release_tx)))
+    }
+
+    fn await_import_completion(app: &mut AppState) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while matches!(
+            app.tuning_snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.poll_tuning();
+    }
+
+    fn assert_import_not_saved(
+        app: &AppState,
+        identities: &crate::app::features::rules::PersistedRuleIdentities,
+    ) {
+        assert_eq!(
+            app.persistent_state.read().unwrap().groups[0]
+                .programs
+                .len(),
+            1
+        );
+        assert_eq!(&app.rules.to_persisted_identities(), identities);
+        assert!(!app
+            .log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.starts_with("Added ")));
+    }
+
+    fn assert_one_import_saved(app: &AppState, old_group: &GroupId, old_rule: &RuleId) {
+        assert_eq!(
+            app.persistent_state.read().unwrap().groups[0]
+                .programs
+                .len(),
+            2
+        );
+        assert_eq!(app.rules.group_id_for_index(0).as_ref(), Some(old_group));
+        assert_eq!(app.rules.rule_id_for_index(0, 0).as_ref(), Some(old_rule));
+        assert_ne!(app.rules.rule_id_for_index(0, 1).as_ref(), Some(old_rule));
+        assert_eq!(
+            app.log_manager
+                .entries
+                .iter()
+                .filter(|entry| entry.message.starts_with("Added "))
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_dropped_pending_retry() {
+        let mut app = sample_state();
+        let (_fail, gate) = install_import_persistence(&mut app, true);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        let files = vec![PathBuf::from(r"C:\Dropped.exe")];
+        app.ui.dropped_files = Some(files.clone());
+        app.ui.file_drop_hover_target = Some(group.clone());
+        assert!(!app.consume_dropped_files_into_group(group.clone()));
+        assert_eq!(app.ui.dropped_files.as_ref(), Some(&files));
+        assert_eq!(app.ui.file_drop_hover_target.as_ref(), Some(&group));
+        assert_import_not_saved(&app, &identities);
+        drop(gate);
+        await_import_completion(&mut app);
+        assert!(app.consume_dropped_files_into_group(group.clone()));
+        await_import_completion(&mut app);
+        assert!(app.ui.dropped_files.is_none());
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[test]
+    fn import_retention_installed_pending_retry() {
+        let mut app = sample_state();
+        let (_fail, gate) = install_import_persistence(&mut app, true);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        app.ui.installed_app_picker.entries = vec![InstalledAppCatalogEntry::new_aumid(
+            "Spotify",
+            "Spotify!App",
+            InstalledAppCatalogSource::WindowsAppsFolder,
+        )];
+        app.open_installed_app_picker(group.clone());
+        app.set_installed_app_picker_query("spot".into());
+        assert!(!app.confirm_selected_installed_app());
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::InstalledAppPicker
+        ));
+        assert_eq!(app.ui.installed_app_picker.query, "spot");
+        assert_eq!(app.ui.installed_app_picker.selected_entry_index, Some(0));
+        assert_import_not_saved(&app, &identities);
+        drop(gate);
+        await_import_completion(&mut app);
+        assert!(app.confirm_selected_installed_app());
+        await_import_completion(&mut app);
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::Groups(GroupRoute::List)
+        ));
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_dropped_storage_failure_retry() {
+        let mut app = sample_state();
+        let (fail, _gate) = install_import_persistence(&mut app, false);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        let files = vec![PathBuf::from(r"C:\Dropped.exe")];
+        app.ui.dropped_files = Some(files.clone());
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = app.consume_dropped_files_into_group(group.clone());
+        await_import_completion(&mut app);
+        assert_eq!(app.ui.dropped_files.as_ref(), Some(&files));
+        assert_import_not_saved(&app, &identities);
+        fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(app.consume_dropped_files_into_group(group.clone()));
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[test]
+    fn import_retention_installed_storage_failure_retry() {
+        let mut app = sample_state();
+        let (fail, _gate) = install_import_persistence(&mut app, false);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        app.ui.installed_app_picker.entries = vec![InstalledAppCatalogEntry::new_aumid(
+            "Spotify",
+            "Spotify!App",
+            InstalledAppCatalogSource::WindowsAppsFolder,
+        )];
+        app.open_installed_app_picker(group.clone());
+        app.set_installed_app_picker_query("spot".into());
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = app.confirm_selected_installed_app();
+        await_import_completion(&mut app);
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::InstalledAppPicker
+        ));
+        assert_eq!(
+            app.ui.installed_app_picker.target_group_id.as_ref(),
+            Some(&group)
+        );
+        assert_eq!(app.ui.installed_app_picker.query, "spot");
+        assert_eq!(app.ui.installed_app_picker.selected_entry_index, Some(0));
+        assert_import_not_saved(&app, &identities);
+        fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(app.confirm_selected_installed_app());
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[test]
+    fn import_retention_accepted_installed_waits_for_adoption() {
+        let mut app = sample_state();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(
+                    state,
+                    Box::new(ImportPersistence {
+                        fail: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        gate: Some(release_rx),
+                        entered: Some(entered_tx),
+                    }),
+                ),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        let gate = ImportGate(Some(release_tx));
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        app.ui.installed_app_picker.entries = vec![InstalledAppCatalogEntry::new_aumid(
+            "Spotify",
+            "Spotify!App",
+            InstalledAppCatalogSource::WindowsAppsFolder,
+        )];
+        app.open_installed_app_picker(group.clone());
+        app.set_installed_app_picker_query("spot".into());
+        // Queue acceptance returns before the gated save can complete.
+        let _ = app.confirm_selected_installed_app();
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(
+            app.tuning_snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ));
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::InstalledAppPicker
+        ));
+        assert_eq!(app.ui.installed_app_picker.query, "spot");
+        assert_eq!(app.ui.installed_app_picker.selected_entry_index, Some(0));
+        assert_import_not_saved(&app, &identities);
+        assert!(!app.confirm_selected_installed_app());
+        drop(gate);
+        await_import_completion(&mut app);
+        assert!(matches!(
+            app.ui.current_window,
+            WindowRoute::Groups(GroupRoute::List)
+        ));
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_accepted_dropped_preserves_new_target() {
+        let mut app = sample_state();
+        add_empty_group(&mut app, "Other group");
+        let group = group_id(&app, 0);
+        let other_group = group_id(&app, 1);
+        let old_rule = rule_id(&app, 0, 0);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(
+                    state,
+                    Box::new(ImportPersistence {
+                        fail: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        gate: Some(release_rx),
+                        entered: Some(entered_tx),
+                    }),
+                ),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        let gate = ImportGate(Some(release_tx));
+        let files = vec![PathBuf::from(r"C:\Dropped.exe")];
+        app.ui.dropped_files = Some(files.clone());
+        let _ = app.consume_dropped_files_into_group(group.clone());
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(
+            app.tuning_snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ));
+        // A fresh drop of the same files now belongs to another group.
+        app.ui.dropped_files = Some(files.clone());
+        app.ui.file_drop_hover_target = Some(other_group.clone());
+        drop(gate);
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
+        assert_eq!(app.ui.dropped_files.as_ref(), Some(&files));
+        assert_eq!(app.ui.file_drop_hover_target.as_ref(), Some(&other_group));
+        assert!(app.persistent_state.read().unwrap().groups[1]
+            .programs
+            .is_empty());
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_accepted_dropped_clears_transient_hover() {
+        let mut app = sample_state();
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(
+                    state,
+                    Box::new(ImportPersistence {
+                        fail: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        gate: Some(release_rx),
+                        entered: Some(entered_tx),
+                    }),
+                ),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        let gate = ImportGate(Some(release_tx));
+        app.ui.dropped_files = Some(vec![PathBuf::from(r"C:\Dropped.exe")]);
+        let _ = app.consume_dropped_files_into_group(group.clone());
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(
+            app.tuning_snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ));
+        // The pointer moved outside group rows; this is not a fresh drop.
+        app.ui.file_drop_hover_target = None;
+        drop(gate);
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
+        assert!(
+            app.ui.dropped_files.is_none(),
+            "accepted input must not survive as a second drop"
+        );
+        assert!(app.ui.file_drop_hover_target.is_none());
+        assert!(!app.consume_dropped_files_into_group(group.clone()));
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_selected_files_pending_retry() {
+        let mut app = sample_state();
+        let (_fail, gate) = install_import_persistence(&mut app, true);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        let files = vec![PathBuf::from(r"C:\Selected.exe")];
+        app.add_selected_files_to_group(group.clone(), files.clone());
+        assert_eq!(app.ui.dropped_files.as_ref(), Some(&files));
+        assert_eq!(app.ui.file_drop_hover_target.as_ref(), Some(&group));
+        assert_import_not_saved(&app, &identities);
+        drop(gate);
+        await_import_completion(&mut app);
+        assert!(app.consume_dropped_files_into_group(group.clone()));
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn import_retention_selected_files_storage_failure_retry() {
+        let mut app = sample_state();
+        let (fail, _gate) = install_import_persistence(&mut app, false);
+        let group = group_id(&app, 0);
+        let old_rule = rule_id(&app, 0, 0);
+        let identities = app.rules.to_persisted_identities();
+        let files = vec![PathBuf::from(r"C:\Selected.exe")];
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.add_selected_files_to_group(group.clone(), files.clone());
+        await_import_completion(&mut app);
+        assert_eq!(app.ui.dropped_files.as_ref(), Some(&files));
+        assert_eq!(app.ui.file_drop_hover_target.as_ref(), Some(&group));
+        assert_import_not_saved(&app, &identities);
+        fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(app.consume_dropped_files_into_group(group.clone()));
+        await_import_completion(&mut app);
+        assert_one_import_saved(&app, &group, &old_rule);
     }
 
     #[test]
@@ -3041,6 +4286,7 @@ mod tests {
 
         app.set_windows_event_log_diagnostics_enabled(false)
             .unwrap();
+        app.wait_for_test_save();
 
         assert!(!state.read().unwrap().windows_event_log_diagnostics_enabled);
         assert!(!app.windows_event_log_worker_is_active());

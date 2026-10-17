@@ -21,6 +21,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 
+#[cfg(test)]
+mod startup_visibility_probe;
+
 fn main() {
     let startup_args = std::env::args().skip(1).collect::<Vec<_>>();
     let startup_intent = match parse_startup_args(&startup_args) {
@@ -65,6 +68,20 @@ fn main() {
         println!("DEBUG: Reactive mode: YES (Wait-based event loop)");
         println!("========================================================");
     }
+    // Restrict our process before creating Tokio/GUI/background workers.
+    let scheduling_messages = app::startup::prepare_background_scheduling_with(
+        app::adapters::os::set_current_process_priority,
+        app::adapters::os::pin_current_process_to_last_cpu,
+    );
+    #[cfg(feature = "render-profiling")]
+    let _render_profile_session = match app::features::diagnostics::render_profile::start_from_env()
+    {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(EXIT_GUI_STARTUP_ERROR);
+        }
+    };
     // Creating tokio runtime manually
     let rt = Runtime::new().expect("failed to create tokio runtime");
     let _guard = rt.enter();
@@ -72,21 +89,16 @@ fn main() {
     #[cfg(debug_assertions)]
     println!("DEBUG: Tokio runtime created and entered.");
 
-    // Set self-priority to Below Normal to avoid interfering with high-load apps
-    #[warn(unused_variables)]
-    if let Err(_e) =
-        app::adapters::os::set_current_process_priority(os_api::PriorityClass::BelowNormal)
-    {
-        #[cfg(debug_assertions)]
-        eprintln!("DEBUG: Failed to set self priority: {}", _e);
-    }
-
+    let storage = app::adapters::storage::StorageAdapter::load();
+    let start_hidden = storage
+        .shared()
+        .read()
+        .map(|state| state.start_minimized)
+        .unwrap_or(false)
+        && app::adapters::os::supports_hide_to_tray();
     let options = NativeOptions {
         run_and_return: true,
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_min_inner_size([470.0, 600.0])
-            .with_max_inner_size([470.0, 1000.0])
-            .with_maximize_button(false), // Disable maximize button
+        viewport: windows_viewport(start_hidden),
         ..Default::default()
     };
 
@@ -106,10 +118,28 @@ fn main() {
             "CPU Affinity Tool",
             options,
             Box::new(move |cc| {
+                #[cfg(feature = "render-profiling")]
+                if let Some(gl) = &cc.gl {
+                    use eframe::glow::HasContext;
+                    let description = unsafe {
+                        format!(
+                            "{} / {} / {}",
+                            gl.get_parameter_string(eframe::glow::VENDOR),
+                            gl.get_parameter_string(eframe::glow::RENDERER),
+                            gl.get_parameter_string(eframe::glow::VERSION)
+                        )
+                    };
+                    app::features::diagnostics::render_profile::renderer(
+                        description.chars().take(512).collect(),
+                    );
+                }
                 let startup_requires_forwarding =
                     matches!(&startup_intent, StartupIntent::RunRule { .. })
                         && forwarding_runtime.is_some();
-                let mut app = App::new_without_startup_intent(cc);
+                let mut app = App::new_with_storage(cc, storage);
+                for message in scheduling_messages {
+                    app.state.log_manager.add_sticky_once(message);
+                }
                 let forwarding_ready = app.install_forwarding_runtime(
                     forwarding_runtime.take(),
                     forwarding_warning,
@@ -142,6 +172,106 @@ fn main() {
     if let Err(e) = res {
         eprintln!("Application error: {}", e);
         std::process::exit(EXIT_GUI_STARTUP_ERROR);
+    }
+}
+
+fn windows_viewport(start_hidden: bool) -> eframe::egui::ViewportBuilder {
+    eframe::egui::ViewportBuilder::default()
+        .with_visible(!start_hidden)
+        .with_active(!start_hidden)
+        .with_taskbar(!start_hidden)
+        .with_inner_size([400.0, 700.0])
+        .with_min_inner_size([400.0, 600.0])
+        .with_max_inner_size([400.0, 1000.0])
+        .with_maximize_button(false)
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    #[test]
+    fn startup_self_scheduling_keeps_topology_and_tokio_workers_correct() {
+        use std::os::windows::process::CommandExt;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "viewport_tests::native_startup_scheduling_probe",
+                "--nocapture",
+            ])
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    #[test]
+    #[ignore = "isolated own-process startup/Tokio probe invoked by its parent test"]
+    fn native_startup_scheduling_probe() {
+        let threads = crate::app::features::topology::detect_total_threads(0);
+        let messages = crate::app::startup::prepare_background_scheduling_with(
+            crate::app::adapters::os::set_current_process_priority,
+            crate::app::adapters::os::pin_current_process_to_last_cpu,
+        );
+        assert!(messages[0].contains("BelowNormal"));
+        assert_eq!(
+            crate::app::features::topology::detect_total_threads(0),
+            threads,
+            "self affinity must not hide the machine's CPU topology"
+        );
+        if messages[1].contains("requires one Windows processor group") {
+            return;
+        }
+        assert!(
+            messages[1].starts_with("Own process: CPU"),
+            "{:?}",
+            messages
+        );
+        let mask = os_api::OS::get_process_affinity(std::process::id()).unwrap();
+        assert_eq!(mask.count_ones(), 1);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            tokio::spawn(async move {
+                assert_eq!(
+                    os_api::OS::get_process_affinity(std::process::id()).unwrap(),
+                    mask
+                );
+                assert_eq!(
+                    os_api::OS::get_process_priority(std::process::id()).unwrap(),
+                    os_api::PriorityClass::BelowNormal
+                );
+            })
+            .await
+            .unwrap();
+        });
+        println!("STARTUP_SELF_SCHEDULING threads={threads} mask=0x{mask:X} tokio_worker=true logs={messages:?}");
+    }
+
+    #[test]
+    fn compact_layout_window_keeps_fixed_width_and_resizable_height() {
+        let viewport = super::windows_viewport(false);
+        let minimum = viewport.min_inner_size.unwrap();
+        let maximum = viewport.max_inner_size.unwrap();
+        assert_eq!(viewport.inner_size.unwrap().x, 400.0);
+        assert_eq!(minimum.x, 400.0);
+        assert_eq!(maximum.x, 400.0);
+        assert!(maximum.y > minimum.y);
+    }
+
+    #[test]
+    fn startup_preference_controls_initial_visibility_focus_and_taskbar() {
+        for hidden in [false, true] {
+            let viewport = super::windows_viewport(hidden);
+            assert_eq!(viewport.visible, Some(!hidden));
+            assert_eq!(viewport.active, Some(!hidden));
+            assert_eq!(viewport.taskbar, Some(!hidden));
+            assert!(viewport.position.is_none());
+        }
     }
 }
 

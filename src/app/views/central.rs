@@ -3,7 +3,7 @@ use crate::app::models::{AppRuntimeKey, AppStatus};
 use crate::app::runtime::{AppState, CentralPanelSnapshot};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::presenters::shared_elements::{
-    content_frame, drag_grip, ghost_button, group_frame, inset_frame, inter_medium_family,
+    content_frame, draggable_name, ghost_button, group_frame, inset_frame, inter_medium_family,
     inter_semibold_family, palette, row_fill, success_color, toned_sized_button, warning_color,
     ToneRole, BUTTON_FONT_SIZE,
 };
@@ -100,19 +100,30 @@ pub fn draw_central_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
         .show(root_ui, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.heading(RichText::new("Affinity groups").strong());
                     ui.label(
                         RichText::new("CPU placement and application rules")
                             .small()
                             .weak(),
                     );
-                });
-                ui.with_layout(Layout::right_to_left(Align::BOTTOM), |ui| {
                     ui.label(
                         RichText::new(format!("{group_count} groups · drag to reorder"))
                             .small()
                             .weak(),
                     );
+                });
+                ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                    if toned_sized_button(
+                        ui,
+                        [105.0, 25.0],
+                        egui::Button::new(
+                            RichText::new("+ New group").size(BUTTON_FONT_SIZE).strong(),
+                        ),
+                        ToneRole::Primary,
+                    )
+                    .clicked()
+                    {
+                        app.start_creating_group();
+                    }
                 });
             });
             ui.add_space(5.0);
@@ -321,13 +332,54 @@ fn render_groups(
             ui.set_width(ui.available_width());
             let colors = palette(ui);
             ui.horizontal(|ui| {
-                let group_grip_response = ui
-                    .push_id(("central-group-grip", group_id.0.as_str()), |ui| {
-                        drag_grip(ui, "Drag to reorder group; when focused, use Up or Down")
-                    })
-                    .inner;
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                crate::app::features::cpu_load::view::group_indicator(
+                    app,
+                    ui,
+                    &group_id,
+                    &group.name,
+                    &group.cores,
+                );
 
-                if group_grip_response.has_focus() {
+                let title_width = (ui.available_width() - 52.0).max(40.0);
+                let title = ui.allocate_ui_with_layout(
+                    egui::vec2(title_width, 32.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        let name = draggable_name(
+                            ui,
+                            egui::Id::new(("central-group-drag", group_id.0.as_str())),
+                            RichText::new(&group.name)
+                                .size(14.0)
+                                .family(inter_semibold_family())
+                                .strong(),
+                            egui::vec2(title_width, 18.0),
+                        )
+                        .on_hover_text(format!(
+                            "{}\nDrag to reorder group; when focused, use Up or Down",
+                            group.name
+                        ));
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format_core_summary(&group.cores))
+                                    .size(9.0)
+                                    .color(colors.text_muted),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(format_core_summary(&group.cores));
+                        name
+                    },
+                );
+                let title_response = title.inner;
+                let group_drag_payload = GroupDragPayload {
+                    group_id: group_id.clone(),
+                    preview_label: group.name.clone(),
+                    preview_width: title_response.rect.width().max(180.0),
+                };
+                title_response.dnd_set_drag_payload(group_drag_payload);
+
+                if title_response.has_focus() {
                     let move_direction = ui.input_mut(|input| {
                         if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
                             Some(GroupMoveDirection::Up)
@@ -346,47 +398,6 @@ fn render_groups(
                         });
                     }
                 }
-
-                egui::Frame::NONE
-                    .fill(colors.inset)
-                    .stroke(egui::Stroke::new(1.0, colors.border_strong))
-                    .corner_radius(6.0)
-                    .inner_margin(egui::Margin::symmetric(5, 3))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new((group_index + 1).to_string())
-                                .color(colors.text_secondary),
-                        );
-                    });
-
-                let title = ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(&group.name)
-                            .size(14.0)
-                            .family(inter_semibold_family())
-                            .strong(),
-                    );
-                    ui.label(
-                        RichText::new(format_core_summary(&group.cores))
-                            .size(9.0)
-                            .color(colors.text_muted),
-                    );
-                });
-                let title_response = ui
-                    .interact(
-                        title.response.rect,
-                        egui::Id::new(("central-group-drag", group_id.0.as_str())),
-                        egui::Sense::click_and_drag(),
-                    )
-                    .on_hover_cursor(egui::CursorIcon::Grab)
-                    .on_hover_text("Drag group to change its position");
-                let group_drag_payload = GroupDragPayload {
-                    group_id: group_id.clone(),
-                    preview_label: group.name.clone(),
-                    preview_width: title_response.rect.width().max(180.0),
-                };
-                group_grip_response.dnd_set_drag_payload(group_drag_payload.clone());
-                title_response.dnd_set_drag_payload(group_drag_payload);
 
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                     if ghost_button(
@@ -487,19 +498,6 @@ fn render_groups(
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
-                                let drag_response = ui
-                                    .push_id(
-                                        (
-                                            "central-rule-grip",
-                                            group_id.0.as_str(),
-                                            program.rule_id.0.as_str(),
-                                        ),
-                                        |ui| drag_grip(ui, "Drag to move application"),
-                                    )
-                                    .inner;
-
-                                let (rect, status_response) =
-                                    ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
                                 let color = match app_status_tone(app_status) {
                                     AppStatusTone::Neutral => palette(ui).neutral_status,
                                     AppStatusTone::Success => success_color(ui),
@@ -515,8 +513,28 @@ fn render_groups(
                                             )
                                         },
                                     );
-                                status_response.on_hover_text(status_tooltip.clone());
-                                ui.painter().circle_filled(rect.center(), 3.5, color);
+                                #[cfg(all(target_os = "windows", feature = "windows"))]
+                                crate::app::features::cpu_load::view::process_indicator(
+                                    app,
+                                    ui,
+                                    crate::app::features::cpu_load::RuleTarget {
+                                        group: group_id.clone(),
+                                        rule: program.rule_id.clone(),
+                                    },
+                                    &program.name,
+                                    app_status != AppStatus::NotRunning,
+                                    color,
+                                    &status_tooltip,
+                                );
+                                #[cfg(not(all(target_os = "windows", feature = "windows")))]
+                                {
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        Vec2::splat(8.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    response.on_hover_text(status_tooltip.clone());
+                                    ui.painter().circle_filled(rect.center(), 3.5, color);
+                                }
 
                                 let action_presentation = app_action_presentation(
                                     app_status,
@@ -529,25 +547,30 @@ fn render_groups(
                                 };
                                 let action_width = 42.0;
                                 let settings_width = 23.0;
-                                let status_width = (ui.available_width() * 0.28).clamp(88.0, 150.0);
+                                let status_width = (ui.available_width() * 0.28).clamp(70.0, 150.0);
                                 let name_width = (ui.available_width()
                                     - status_width
                                     - action_width
                                     - settings_width
                                     - 12.0)
-                                    .max(72.0);
-                                let name_response = ui.add_sized(
-                                    [name_width, 21.0],
-                                    egui::Label::new(
-                                        RichText::new(&program.name)
-                                            .size(BUTTON_FONT_SIZE)
-                                            .family(inter_medium_family())
-                                            .strong(),
-                                    )
-                                    .halign(Align::Min)
-                                    .truncate(),
-                                );
-                                name_response.on_hover_text(program.launch_target_detail.clone());
+                                    .max(48.0);
+                                let drag_response = draggable_name(
+                                    ui,
+                                    egui::Id::new((
+                                        "central-rule-drag",
+                                        group_id.0.as_str(),
+                                        program.rule_id.0.as_str(),
+                                    )),
+                                    RichText::new(&program.name)
+                                        .size(BUTTON_FONT_SIZE)
+                                        .family(inter_medium_family())
+                                        .strong(),
+                                    egui::vec2(name_width, 21.0),
+                                )
+                                .on_hover_text(format!(
+                                    "{}\nDrag to move application",
+                                    program.launch_target_detail
+                                ));
 
                                 ui.add_sized(
                                     [status_width, 21.0],
@@ -1032,6 +1055,206 @@ mod tests {
     use crate::app::models::AppToRun;
     use crate::app::runtime::{CentralGroupSnapshot, CentralProgramSnapshot};
     use os_api::PriorityClass;
+
+    #[test]
+    fn short_group_and_app_names_drag_from_their_padded_name_area_without_grips() {
+        use std::sync::{Arc, RwLock};
+        for group_drag in [true, false] {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+            ctx.all_styles_mut(crate::app::shell::presenters::shared_elements::apply_widget_style);
+            let mut app = AppState::new_for_test(
+                Arc::new(RwLock::new(
+                    crate::app::models::AppStateStorage::test_fixture(|_| {}),
+                )),
+                20,
+            );
+            let mut g = group("g", "G", vec![program("r", "X", app_key("X"))]);
+            g.run_all_button = false;
+            let mut h = group("h", "H", vec![]);
+            h.run_all_button = false;
+            let snapshot = CentralPanelSnapshot { groups: vec![g, h] };
+            let frame = |app: &mut AppState, events| {
+                let mut actions = Vec::new();
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 600.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        actions = render_groups(app, ui, &ctx, &snapshot);
+                    },
+                );
+                output.textures_delta.clear();
+                (output, actions)
+            };
+            for _ in 0..2 {
+                frame(&mut app, vec![]);
+            }
+            let id = if group_drag {
+                egui::Id::new(("central-group-drag", "h"))
+            } else {
+                egui::Id::new(("central-rule-drag", "g", "r"))
+            };
+            let response = ctx
+                .read_response(id)
+                .expect("name must own a stable drag hit target");
+            assert!(
+                response.rect.width() > 70.0,
+                "short names must retain the full allotted drag width"
+            );
+            if group_drag {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+                let (_, actions) = frame(
+                    &mut app,
+                    vec![egui::Event::Key {
+                        key: egui::Key::ArrowUp,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Default::default(),
+                    }],
+                );
+                assert!(actions.iter().any(|action| matches!(action, CentralAction::MoveGroupToIndex {group_id, target_index: 0} if group_id.0 == "h")),
+                    "keyboard reorder must remain available on the group name");
+            }
+            let start = response.rect.right_center() - egui::vec2(5.0, 0.0);
+            frame(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(start),
+                    egui::Event::PointerButton {
+                        pos: start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+            let (output, _) = frame(
+                &mut app,
+                vec![egui::Event::PointerMoved(start - egui::vec2(20.0, 0.0))],
+            );
+            if group_drag {
+                assert_eq!(
+                    egui::DragAndDrop::payload::<GroupDragPayload>(&ctx)
+                        .unwrap()
+                        .group_id,
+                    GroupId("h".into())
+                );
+            } else {
+                assert_eq!(
+                    egui::DragAndDrop::payload::<RuleDragPayload>(&ctx)
+                        .unwrap()
+                        .rule_id,
+                    RuleId("r".into())
+                );
+            }
+            assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Circle(circle) if circle.radius == 1.0)),
+                "the old six-dot drag grips must not remain");
+            let target_id =
+                egui::Id::new(("central-group-drag", if group_drag { "g" } else { "h" }));
+            let target = ctx.read_response(target_id).unwrap().rect.center();
+            frame(&mut app, vec![egui::Event::PointerMoved(target)]);
+            let (_, actions) = frame(
+                &mut app,
+                vec![egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+            );
+            if group_drag {
+                assert!(actions.iter().any(|action| matches!(action, CentralAction::MoveGroupToIndex {group_id, target_index: 0} if group_id.0 == "h")));
+            } else {
+                assert!(actions.iter().any(
+                    |action| matches!(action, CentralAction::MoveRuleToGroup {
+                    source_group_id, rule_id, target_group_id, target_rule_index: 0,
+                } if source_group_id.0 == "g" && rule_id.0 == "r" && target_group_id.0 == "h")
+                ));
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn cpu_meters_keep_long_names_and_actions_inside_400_pixels() {
+        use std::sync::{Arc, RwLock};
+        for monitoring in [true, false] {
+            let context = egui::Context::default();
+            context
+                .set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+            context
+                .all_styles_mut(crate::app::shell::presenters::shared_elements::apply_widget_style);
+            let mut app = AppState::new_for_test(
+                Arc::new(RwLock::new(
+                    crate::app::models::AppStateStorage::test_fixture(|state| {
+                        state.cpu_load_monitoring_enabled = monitoring
+                    }),
+                )),
+                20,
+            );
+            let mut group = group(
+                "g",
+                &"A long affinity group name ".repeat(5),
+                vec![program(
+                    "r",
+                    &"Long game executable name ".repeat(4),
+                    app_key("Game"),
+                )],
+            );
+            group.cores = (0..20).collect();
+            group.run_all_button = false;
+            let snapshot = CentralPanelSnapshot {
+                groups: vec![group],
+            };
+            for _ in 0..3 {
+                let mut content = egui::Rect::NOTHING;
+                let mut output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 600.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        render_groups(&mut app, ui, &context, &snapshot);
+                        content = ui.min_rect();
+                    },
+                );
+                output.textures_delta.clear();
+                assert!(
+                    !output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.job.text == "1")),
+                    "group ordinal badge must be absent"
+                );
+                assert!(
+                    content.right() <= 400.0,
+                    "content overflow with monitoring={monitoring}: {content:?}"
+                );
+                let edit = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.job.text.ends_with(" Edit") => {
+                            Some(text.galley.rect.translate(text.pos.to_vec2()))
+                        }
+                        _ => None,
+                    })
+                    .expect("group Edit action must remain visible");
+                assert!(
+                    edit.right() <= 400.0,
+                    "group Edit action is pushed out: {edit:?}"
+                );
+            }
+        }
+    }
 
     fn app_key(name: &str) -> AppRuntimeKey {
         AppToRun::new_path(

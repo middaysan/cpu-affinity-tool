@@ -95,6 +95,10 @@ impl MonitorEventSender {
             }
             Err(TrySendError::Full(event)) => match event {
                 DiagnosticEvent::RuntimeStateChanged => {}
+                DiagnosticEvent::Tuning(_) => {
+                    self.repaint_pending.store(true, Ordering::Release);
+                    wake_needed = true;
+                }
                 DiagnosticEvent::Monitor(_) => {
                     self.dropped_monitor_messages
                         .fetch_add(1, Ordering::Relaxed);

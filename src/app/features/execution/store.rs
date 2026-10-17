@@ -8,12 +8,17 @@ use tokio::sync::RwLock as TokioRwLock;
 
 pub(crate) type RunningAppStatusCache = Arc<RwLock<HashMap<AppRuntimeKey, AppStatus>>>;
 
-#[derive(Default)]
 pub struct ExecutionStore {
     running_apps: Arc<TokioRwLock<RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     running_apps_statuses: RunningAppStatusCache,
     status_read_pending: bool,
+    scheduling: Arc<crate::app::features::system_tweaks::tweaks::scheduling::SchedulingHandoff>,
+}
+impl Default for ExecutionStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -58,13 +63,16 @@ fn normalize_package_family_key(package_family_name: &str) -> String {
 
 impl ExecutionStore {
     pub fn new() -> Self {
+        let running_apps = RunningApps::default();
+        let scheduling = running_apps.scheduling.clone();
         Self {
-            running_apps: Arc::new(TokioRwLock::new(RunningApps::default())),
+            running_apps: Arc::new(TokioRwLock::new(running_apps)),
             installed_package_tracking: Arc::new(RwLock::new(
                 InstalledPackageTrackingState::default(),
             )),
             running_apps_statuses: Arc::new(RwLock::new(HashMap::new())),
             status_read_pending: false,
+            scheduling,
         }
     }
 
@@ -104,10 +112,10 @@ impl ExecutionStore {
         rule_id: RuleId,
     ) -> bool {
         match self.running_apps.try_write() {
-            Ok(mut apps) => {
+            Ok(mut apps) => apps.mutate_membership(|apps| {
                 apps.add_app(app_key, pid, group_id, rule_id);
                 true
-            }
+            }),
             Err(_) => false,
         }
     }
@@ -121,13 +129,13 @@ impl ExecutionStore {
         rule_id: RuleId,
     ) -> bool {
         match self.running_apps.try_write() {
-            Ok(mut apps) => {
+            Ok(mut apps) => apps.mutate_membership(|apps| {
                 apps.add_app(app_key, pid, group_id, rule_id);
                 if let Some(app) = apps.apps.get_mut(app_key) {
                     app.pid_instance_tokens.insert(pid, instance_token);
                 }
                 true
-            }
+            }),
             Err(_) => false,
         }
     }
@@ -146,7 +154,7 @@ impl ExecutionStore {
         instance_token: ProcessInstanceToken,
     ) -> bool {
         match self.running_apps.try_write() {
-            Ok(mut apps) => {
+            Ok(mut apps) => apps.mutate_membership(|apps| {
                 if let Some(app) = apps.apps.get_mut(app_key) {
                     if !app.pids.contains(&pid) {
                         app.pids.push(pid);
@@ -156,7 +164,7 @@ impl ExecutionStore {
                 } else {
                     false
                 }
-            }
+            }),
             Err(_) => false,
         }
     }
@@ -311,6 +319,11 @@ impl RuntimeRegistry {
             monitor_rx: None,
             wake: None,
         }
+    }
+    pub(crate) fn scheduling_handle(
+        &self,
+    ) -> Arc<crate::app::features::system_tweaks::tweaks::scheduling::SchedulingHandoff> {
+        self.store.scheduling.clone()
     }
 
     pub(crate) fn set_wake(&mut self, wake: MonitorWake) {
@@ -587,6 +600,7 @@ mod tests {
         let second = installed_app("Spotify Launcher", "Pkg!AppB", PriorityClass::Normal).get_key();
         running_apps.add_app(&first, 10, group_id(0), rule_id(0));
         running_apps.add_app(&second, 20, group_id(0), rule_id(1));
+        let before = running_apps.membership_generation();
 
         assert!(ensure_package_owner_claim(
             &mut tracking,
@@ -600,6 +614,7 @@ mod tests {
             "Pkg",
             &second
         ));
+        assert_eq!(running_apps.membership_generation(), before);
     }
 
     #[test]

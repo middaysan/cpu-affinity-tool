@@ -98,15 +98,6 @@ pub fn update_group_properties(
     }
 }
 
-pub fn remove_group(persistent_state: &Arc<RwLock<AppStateStorage>>, index: usize) -> bool {
-    let mut state = persistent_state.write().unwrap();
-    if index < state.groups.len() {
-        state.groups.remove(index);
-        return true;
-    }
-    false
-}
-
 pub fn load_group_for_edit(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     group_index: usize,
@@ -185,7 +176,8 @@ pub fn load_rule(
         .cloned()
 }
 
-pub fn update_rule(
+#[cfg(test)]
+fn update_rule(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     group_index: usize,
     program_index: usize,
@@ -201,7 +193,8 @@ pub fn update_rule(
     false
 }
 
-pub fn remove_rule_from_group(
+#[cfg(test)]
+fn remove_rule_from_group(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     group_index: usize,
     program_index: usize,
@@ -268,9 +261,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn sample_persistent_state() -> Arc<RwLock<AppStateStorage>> {
-        Arc::new(RwLock::new(AppStateStorage {
-            version: 5,
-            groups: vec![CoreGroup {
+        Arc::new(RwLock::new(AppStateStorage::test_fixture(|state| {
+            state.version = 5;
+            state.groups = vec![CoreGroup {
                 name: "Games".to_string(),
                 cores: vec![1, 3],
                 programs: vec![AppToRun {
@@ -287,19 +280,20 @@ mod tests {
                 }],
                 is_hidden: false,
                 run_all_button: true,
-            }],
-            cpu_schema: CpuSchema {
+            }];
+            state.cpu_schema = CpuSchema {
                 model: "Test CPU".to_string(),
                 clusters: Vec::new(),
-            },
-            theme_index: 0,
-            process_monitoring_enabled: false,
-            windows_event_log_diagnostics_enabled: true,
-            start_minimized: false,
-            rule_identities: None,
-            loaded_version: 5,
-            pending_pre_v6_backup: false,
-        }))
+            };
+            state.theme_index = 0;
+            state.process_monitoring_enabled = false;
+            state.windows_event_log_diagnostics_enabled = true;
+            state.start_minimized = false;
+            state.rule_identities = None;
+            state.loaded_version = 5;
+            state.pending_pre_v6_backup = false;
+            state.tuning = Default::default();
+        })))
     }
 
     #[test]
