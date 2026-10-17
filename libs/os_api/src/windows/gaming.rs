@@ -7,10 +7,16 @@ use std::{ffi::c_void, mem::size_of, ptr};
 use windows::{
     Win32::{
         Foundation::{
-            ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS, ERROR_NO_TOKEN,
-            FILETIME, FreeLibrary, GetLastError, HANDLE, HLOCAL, HMODULE, LocalFree,
+            ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS,
+            ERROR_NO_SUCH_LOGON_SESSION, ERROR_NO_TOKEN, FILETIME, FreeLibrary, GetLastError,
+            HANDLE, HLOCAL, HMODULE, LUID, LocalFree,
         },
-        Security::TOKEN_QUERY,
+        Security::{
+            Authentication::Identity::{
+                LsaFreeReturnBuffer, LsaGetLogonSessionData, LsaNtStatusToWinError,
+            },
+            TOKEN_QUERY,
+        },
         System::{
             LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
             Power::{
@@ -163,6 +169,64 @@ pub fn interactive_user() -> Result<UserIdentity, GamingError> {
 }
 fn verify_user(expected: &UserIdentity) -> Result<(), GamingError> {
     verified_session_user(expected, interactive_user()).map(|_| ())
+}
+
+fn logon_session_query_result(error: u32) -> Result<bool, GamingError> {
+    match error {
+        0 => Ok(false),
+        value if value == ERROR_NO_SUCH_LOGON_SESSION.0 => Ok(true),
+        value => Err(code("LsaGetLogonSessionData", value)),
+    }
+}
+
+/// An absent exact LSA session is positive expiry; denial or changed context is not.
+pub fn session_has_ended(expected: &UserIdentity) -> Result<bool, GamingError> {
+    let current = interactive_user()?;
+    let result = session_expiry_with(expected, &current, |logon| {
+        let luid = LUID {
+            LowPart: logon as u32,
+            HighPart: (logon >> 32) as i32,
+        };
+        let mut data = ptr::null_mut();
+        let status = unsafe { LsaGetLogonSessionData(&luid, &mut data) };
+        if !data.is_null() {
+            // LSA owns this allocation regardless of the session metadata contents.
+            unsafe {
+                let _ = LsaFreeReturnBuffer(data.cast());
+            }
+        }
+        logon_session_query_result(unsafe { LsaNtStatusToWinError(status) })
+    });
+    verify_user(&current)?;
+    result
+}
+
+#[cfg(test)]
+mod session_expiry_tests {
+    use super::*;
+    #[test]
+    fn native_session_expiry_does_not_treat_read_errors_as_absence() {
+        assert_eq!(logon_session_query_result(0), Ok(false));
+        assert_eq!(
+            logon_session_query_result(ERROR_NO_SUCH_LOGON_SESSION.0),
+            Ok(true)
+        );
+        for error in [ERROR_ACCESS_DENIED.0, 87, 8] {
+            assert!(logon_session_query_result(error).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires an interactive Windows desktop; reads logon lifetime only"]
+    fn native_session_expiry_reads_current_and_absent_logon_without_mutation() {
+        let current = interactive_user().unwrap();
+        assert!(!session_has_ended(&current).unwrap());
+        let absent = UserIdentity {
+            logon: u64::MAX,
+            ..current
+        };
+        assert!(session_has_ended(&absent).unwrap());
+    }
 }
 pub(super) fn admit_account(expected: &UserIdentity) -> Result<UserIdentity, GamingError> {
     // Old recovery targets name a previous logon. Admission still obtains the

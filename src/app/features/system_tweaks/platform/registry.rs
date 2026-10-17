@@ -25,6 +25,11 @@ pub trait Module: Send + Sync {
     fn canonical_target(&self, target: &TargetIdentity) -> Result<TargetIdentity, ModuleError> {
         Ok(target.clone())
     }
+    /// True only after native evidence proves this temporary resource's session ended.
+    /// Unavailable context or lifetime reads must remain errors, not expiry.
+    fn target_has_expired(&self, _target: &TargetIdentity) -> Result<bool, ModuleError> {
+        Ok(false)
+    }
     fn accepts_target(&self, target: &TargetIdentity) -> bool {
         let Ok(target) = self.canonical_target(target) else {
             return false;

@@ -24,12 +24,42 @@ function New-McpDebugState {
     return $isolated
 }
 
+function Write-McpDebugState {
+    param([string]$Source, [string]$Destination)
+    if ([IO.Path]::GetFullPath($Source) -eq [IO.Path]::GetFullPath($Destination)) {
+        throw 'The debug package must be in its own folder, separate from the original state.json.'
+    }
+    $saved = Get-Content -Raw -LiteralPath $Source | ConvertFrom-Json
+    [IO.File]::WriteAllText($Destination, ((New-McpDebugState $saved) | ConvertTo-Json -Depth 100), (New-Object Text.UTF8Encoding($false)))
+}
+
 if ($SelfTest) {
     $saved = '{"version":11,"groups":[{"programs":[{"autorun":true},{}]}],"tuning":{"enabled":true},"unknown":42}' | ConvertFrom-Json
     $copy = New-McpDebugState $saved
     if ($copy.Contains('tuning') -or $copy.Contains('unknown') -or $copy.process_monitoring_enabled -or $copy.groups[0].programs[0].autorun -or $copy.groups[0].programs[1].autorun) { throw 'Unsafe debug state' }
     if (-not $saved.groups[0].programs[0].autorun -or -not $copy.cpu_load_monitoring_enabled -or $copy.cpu_load_history_seconds -ne 300) { throw 'Input mutation or invalid defaults' }
-    Write-Output 'PASS: isolated settings, immutable input, no autorun/enforcement/tuning'
+    $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('cpu-affinity-mcp-paths-' + [Guid]::NewGuid().ToString('N'))
+    $testSource = Join-Path $testRoot 'state.json'
+    $testDestination = Join-Path $testRoot 'debug.json'
+    New-Item -ItemType Directory -Path $testRoot | Out-Null
+    $original = '{"version":11,"groups":[{"programs":[{"autorun":true}]}],"tuning":{"keep":true},"extension":42}'
+    try {
+        [IO.File]::WriteAllText($testSource, $original)
+        foreach ($overlap in @($testSource, (Join-Path $testRoot '.\STATE.JSON'))) {
+            $rejected = $false
+            try { Write-McpDebugState -Source $testSource -Destination $overlap } catch { $rejected = $true }
+            if (-not $rejected -or [IO.File]::ReadAllText($testSource) -cne $original) { throw 'Overlapping debug state must be rejected without changing original bytes' }
+        }
+        Write-McpDebugState -Source $testSource -Destination $testDestination
+        $written = Get-Content -Raw -LiteralPath $testDestination | ConvertFrom-Json
+        if ($written.process_monitoring_enabled -or $written.groups[0].programs[0].autorun -or $null -ne $written.PSObject.Properties['tuning']) { throw 'Unsafe written debug state' }
+        if ([IO.File]::ReadAllText($testSource) -cne $original) { throw 'Separate debug state changed original bytes' }
+    }
+    finally {
+        foreach ($testFile in @($testSource, $testDestination)) { if (Test-Path -LiteralPath $testFile) { Remove-Item -LiteralPath $testFile } }
+        Remove-Item -LiteralPath $testRoot
+    }
+    Write-Output 'PASS: isolated settings, immutable input, no autorun/enforcement/tuning; overlapping paths rejected before write'
     exit 0
 }
 
@@ -52,10 +82,9 @@ try {
     $desktop = [Environment]::GetFolderPath('Desktop')
     $sidecar = Join-Path $desktop 'state.json'
     $source = if (Test-Path -LiteralPath $sidecar) { $sidecar } else { Join-Path $env:LOCALAPPDATA 'CpuAffinityTool\state.json' }
-    $saved = Get-Content -Raw -LiteralPath $source | ConvertFrom-Json
     $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
     $utf8 = New-Object Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText((Join-Path $debugRoot 'state.json'),((New-McpDebugState $saved) | ConvertTo-Json -Depth 100),$utf8)
+    Write-McpDebugState -Source $source -Destination (Join-Path $debugRoot 'state.json')
     [IO.File]::WriteAllText((Join-Path $debugRoot '.cpu-affinity-debug-isolated'),'debug-only',$utf8)
     $logs = Join-Path $debugRoot 'logs'
     New-Item -ItemType Directory -Force -Path $logs | Out-Null

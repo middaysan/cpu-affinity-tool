@@ -33,6 +33,7 @@ pub(super) struct Snapshot {
     pub live_processes: std::sync::Arc<super::process_list::ProcessList>,
     pub error: Option<String>,
     pub detail_error: Option<String>,
+    pub collector_error: Option<String>,
     pub history_bytes: usize,
     pub instances: usize,
     pub bookkeeping_bytes: usize,
@@ -55,6 +56,7 @@ impl Default for Snapshot {
             live_processes: Default::default(),
             error: None,
             detail_error: None,
+            collector_error: None,
             history_bytes: 0,
             instances: 0,
             bookkeeping_bytes: 0,
@@ -96,12 +98,13 @@ pub(super) fn process_totals(
     targets
         .iter()
         .map(|(target, instances)| {
-            let total = instances.iter().try_fold(0.0, |sum, &(pid, token)| {
+            let mut total = Some(0.0);
+            for &(pid, token) in instances {
                 let value = *values
                     .entry((pid, token))
                     .or_insert_with(|| read(pid, token));
-                value.map(|value| sum + value)
-            });
+                total = total.zip(value).map(|(sum, value)| sum + value);
+            }
             (target.clone(), total.map(|v| v.clamp(0.0, 100.0)))
         })
         .collect()
@@ -211,6 +214,35 @@ mod tests {
         assert_eq!(reads, 2);
         assert_eq!(result[&a], Some(5.0));
         assert_eq!(result[&b], None);
+    }
+
+    #[test]
+    fn unavailable_first_pid_does_not_skip_readable_or_unprimed_siblings() {
+        let a = target("a");
+        let b = target("b");
+        let targets = HashMap::from([
+            (a.clone(), vec![(1, 10), (2, 20), (3, 30)]),
+            (b.clone(), vec![(2, 20)]),
+        ]);
+        let mut primed = std::collections::HashSet::new();
+        for tick in 0..3 {
+            let mut reads = Vec::new();
+            let values = process_totals(&targets, |pid, token| {
+                reads.push((pid, token));
+                if pid == 1 || primed.insert(pid) {
+                    None
+                } else {
+                    Some(5.0)
+                }
+            });
+            reads.sort_unstable();
+            assert_eq!(reads, vec![(1, 10), (2, 20), (3, 30)]);
+            assert_eq!(
+                values[&a], None,
+                "a missing sibling keeps the full total unknown"
+            );
+            assert_eq!(values[&b], (tick > 0).then_some(5.0));
+        }
     }
 
     #[test]

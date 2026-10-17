@@ -148,6 +148,49 @@ fn durable_valid_empty_projection_has_no_owner_and_releases_previous_fields() {
     assert_eq!(module.value(), vec![7]);
     assert!(controller.is_empty());
 }
+
+#[test]
+fn mixed_changes_do_not_own_untouched_fields_or_block_undo_after_external_change() {
+    let (module, _, memory, mut controller) = setup(false);
+    let second = ResourceId::new("second").unwrap();
+    module
+        .fields
+        .lock()
+        .unwrap()
+        .insert(second.clone(), vec![0]);
+    let mut config = module.config(12);
+    config.payload["second"] = 0.into();
+    controller
+        .acquire(owner(1), module.clone(), TargetIdentity::Machine, config)
+        .unwrap();
+    assert_eq!(
+        controller.fields().len(),
+        1,
+        "no baseline for an unowned no-op field"
+    );
+    assert_eq!(
+        memory
+            .lock()
+            .unwrap()
+            .document
+            .as_ref()
+            .unwrap()
+            .fields
+            .len(),
+        1
+    );
+    module
+        .fields
+        .lock()
+        .unwrap()
+        .insert(second.clone(), vec![33]);
+    controller
+        .recover_owner(&owner(1), RecoveryIntent::Restore)
+        .unwrap();
+    assert_eq!(module.value(), vec![7]);
+    assert_eq!(module.fields.lock().unwrap()[&second], vec![33]);
+    assert!(controller.can_admit() && controller.is_empty());
+}
 #[test]
 fn durable_session_projected_user_field_retains_exact_activation_and_trigger() {
     let (module, registry, memory, mut controller) = setup(true);
@@ -1012,6 +1055,239 @@ fn durable_operation_feedback_autonomous_saved_source_retry_clears_its_error() {
 struct AccountSetting {
     setting: Arc<Setting>,
     sid: String,
+}
+
+struct SessionSetting {
+    setting: Arc<Setting>,
+    current_logon: std::sync::atomic::AtomicU64,
+    expiry: std::sync::atomic::AtomicU8,
+    device: bool,
+}
+impl Module for SessionSetting {
+    fn descriptor(&self) -> ModuleDescriptor {
+        let mut descriptor = self.setting.descriptor();
+        descriptor.target_scopes = vec![if self.device {
+            TargetScope::PnpDevice
+        } else {
+            TargetScope::User
+        }];
+        descriptor
+    }
+    fn editor(&self) -> &dyn super::presentation::ModuleEditor {
+        self.setting.editor()
+    }
+    fn targets(&self) -> Vec<TargetIdentity> {
+        let logon = self.current_logon.load(std::sync::atomic::Ordering::SeqCst);
+        vec![if self.device {
+            TargetIdentity::Device {
+                identity: format!("display-session:{logon}"),
+            }
+        } else {
+            TargetIdentity::User {
+                sid: "S-1-5-21-1".into(),
+                logon,
+            }
+        }]
+    }
+    fn target_has_expired(&self, target: &TargetIdentity) -> Result<bool, ModuleError> {
+        if self.targets().contains(target) {
+            return Ok(false);
+        }
+        match self.expiry.load(std::sync::atomic::Ordering::SeqCst) {
+            2 => Ok(true),
+            1 => Err(ModuleError::new(ErrorKind::Denied, "session lifetime")),
+            _ => Ok(false),
+        }
+    }
+    fn observe(&self, target: &TargetIdentity) -> super::platform::registry::ModuleObservation {
+        self.setting.observe(target)
+    }
+    fn fields(
+        &self,
+        target: &TargetIdentity,
+        config: &super::platform::codec::ModuleEnvelope,
+    ) -> Result<Vec<super::platform::registry::FieldChange>, ModuleError> {
+        self.setting.fields(target, config)
+    }
+    fn read(&self, key: &ResourceKey) -> Result<Vec<u8>, ModuleError> {
+        if !self.targets().contains(&key.target) {
+            return Err(ModuleError::new(
+                ErrorKind::Denied,
+                "old session must not be read",
+            ));
+        }
+        self.setting.read(key)
+    }
+    fn write(&self, key: &ResourceKey, expected: &[u8], desired: &[u8]) -> Result<(), ModuleError> {
+        self.read(key)?;
+        self.setting.write(key, expected, desired)
+    }
+}
+
+#[test]
+fn ended_manual_session_resources_retire_without_writing_into_new_logon() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for (device, expiry_at_start) in [(false, 0), (true, 0), (false, 2), (true, 2)] {
+        let directory = OwnedDirectory::new();
+        let path = directory.0.join("state.json");
+        let mut state = crate::app::models::AppStateStorage::test_fixture(|_| {});
+        state.try_save_to_path(&path).unwrap();
+        let setting = Setting::new("simple_tweak", true);
+        let module = Arc::new(SessionSetting {
+            setting: setting.clone(),
+            current_logon: 1.into(),
+            expiry: 0.into(),
+            device,
+        });
+        let unrelated = Setting::new("scalar", false);
+        let mut registry = Registry::default();
+        registry.register(module.clone()).unwrap();
+        registry.register(unrelated.clone()).unwrap();
+        let feature = module.descriptor().id;
+        let mut old = super::Tuning::from_registry(registry.clone())
+            .headless(state, Box::new(SavedFile(path.clone())));
+        old.start_selected_recovery();
+        old.apply_tweak(feature.clone(), module.targets()[0].clone())
+            .unwrap();
+        let shared = old
+            .create_profile(
+                "shared session".into(),
+                vec![super::config::ModulePreference {
+                    feature: feature.clone(),
+                    enabled: true,
+                    mode: ActivationMode::Manual,
+                    config: setting.config(12),
+                }],
+            )
+            .unwrap();
+        old.activate_manual(shared, feature.clone(), module.targets()[0].clone())
+            .unwrap();
+        assert!(old
+            .controller
+            .fields()
+            .iter()
+            .all(|field| field.owners.len() == 2));
+        let written = *setting.writes.lock().unwrap();
+        drop(old);
+        module.current_logon.store(2, SeqCst);
+        module.expiry.store(expiry_at_start, SeqCst);
+        setting
+            .fields
+            .lock()
+            .unwrap()
+            .insert(ResourceId::new("value").unwrap(), vec![77]);
+        let state = crate::app::models::AppStateStorage::read_saved_for_tuning(&path).unwrap();
+        let mut reopened = super::Tuning::from_registry(registry)
+            .headless(state, Box::new(SavedFile(path.clone())));
+        let started =
+            reopened.start_recovery(Box::new(DiskRecoveryStore::open(&directory.0).unwrap()));
+        if expiry_at_start == 2 {
+            started.unwrap();
+        } else {
+            assert!(started.is_err());
+            assert!(
+                !reopened.controller.can_admit(),
+                "a different logon alone is not expiry proof"
+            );
+            module.expiry.store(1, SeqCst);
+            assert!(reopened.undo_all_tweaks().is_err());
+            assert!(
+                !reopened.controller.is_empty(),
+                "failed native queries retain original evidence"
+            );
+            module.expiry.store(2, SeqCst);
+            reopened.undo_all_tweaks().unwrap();
+        }
+        assert!(reopened.controller.is_empty() && reopened.controller.can_admit());
+        assert_eq!(
+            setting.value(),
+            vec![77],
+            "old-session Undo must not touch the new session"
+        );
+        assert_eq!(*setting.writes.lock().unwrap(), written);
+        let profile = reopened
+            .create_profile(
+                "unrelated".into(),
+                vec![super::config::ModulePreference {
+                    feature: unrelated.descriptor().id,
+                    enabled: true,
+                    mode: ActivationMode::Manual,
+                    config: unrelated.config(12),
+                }],
+            )
+            .unwrap();
+        reopened
+            .activate_manual(profile, unrelated.descriptor().id, TargetIdentity::Machine)
+            .unwrap();
+        assert_eq!(unrelated.value(), vec![12]);
+    }
+}
+
+#[test]
+fn expired_session_retirement_is_shared_and_retains_evidence_on_publish_failure() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for fail in [false, true] {
+        let setting = Setting::new("scalar", true);
+        let module = Arc::new(SessionSetting {
+            setting: setting.clone(),
+            current_logon: 1.into(),
+            expiry: 0.into(),
+            device: false,
+        });
+        let mut registry = Registry::default();
+        registry.register(module.clone()).unwrap();
+        let memory = Arc::new(Mutex::new(Memory::default()));
+        let mut controller = Controller::restore(
+            Box::new(Store(memory.clone())),
+            "C:/owned/state.json".into(),
+            &registry,
+        )
+        .unwrap();
+        for id in [1, 2] {
+            controller
+                .acquire(
+                    owner(id),
+                    module.clone(),
+                    module.targets()[0].clone(),
+                    setting.config(12),
+                )
+                .unwrap();
+        }
+        assert!(controller
+            .fields()
+            .iter()
+            .all(|field| field.owners.len() == 2));
+        let original =
+            serde_json::to_vec(memory.lock().unwrap().document.as_ref().unwrap()).unwrap();
+        let writes = *setting.writes.lock().unwrap();
+        module.current_logon.store(2, SeqCst);
+        module.expiry.store(2, SeqCst);
+        if fail {
+            let mut store = memory.lock().unwrap();
+            store.fail = Some(store.publications + 1);
+            drop(store);
+            assert!(controller.retire_expired_target(&owner(1)).is_err());
+            assert_eq!(
+                serde_json::to_vec(memory.lock().unwrap().document.as_ref().unwrap()).unwrap(),
+                original
+            );
+            assert!(!controller.can_admit());
+            assert_eq!(controller.owners().len(), 2);
+            assert!(controller
+                .fields()
+                .iter()
+                .all(|field| field.owners.len() == 2));
+        } else {
+            assert!(controller.retire_expired_target(&owner(1)).unwrap());
+            assert!(controller.can_admit() && controller.is_empty());
+            assert!(!controller.retire_expired_target(&owner(2)).unwrap());
+        }
+        assert_eq!(
+            *setting.writes.lock().unwrap(),
+            writes,
+            "retirement must perform no setting writes"
+        );
+    }
 }
 impl Module for AccountSetting {
     fn descriptor(&self) -> ModuleDescriptor {

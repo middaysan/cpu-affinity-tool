@@ -155,6 +155,10 @@ mod baseline_tests {
     }
 }
 impl Module for DisplayRefresh {
+    fn target_has_expired(&self, target: &TargetIdentity) -> Result<bool, ModuleError> {
+        os_api::gaming::session_has_ended(&display(target)?.user())
+            .map_err(|e| native("session lifetime", e))
+    }
     fn descriptor(&self) -> ModuleDescriptor {
         let spec = spec();
         let mut descriptor = descriptor(

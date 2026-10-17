@@ -101,6 +101,9 @@ impl ModuleEditor for MouseAcceleration {
     }
 }
 impl Module for MouseAcceleration {
+    fn target_has_expired(&self, target: &TargetIdentity) -> Result<bool, ModuleError> {
+        gaming::session_has_ended(&user(target)?).map_err(|e| native("session lifetime", e))
+    }
     fn descriptor(&self) -> ModuleDescriptor {
         descriptor(
             ID,

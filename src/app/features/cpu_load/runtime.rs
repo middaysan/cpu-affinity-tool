@@ -772,6 +772,7 @@ fn run(
         snapshot.error = None;
         crate::render_profile_scope!(CpuSampling);
         snapshot.detail_error = None;
+        snapshot.collector_error = None;
         snapshot.parked = {
             crate::render_profile_scope!(Parking);
             os_api::cpu_load::parking_snapshot().unwrap_or_default()
@@ -949,6 +950,7 @@ fn run(
         }
         if let Some(error) = trace_error {
             let gap_reason = super::history::GapReason::from_error(&error);
+            snapshot.collector_error = Some(error.clone());
             snapshot.detail_error = Some(error);
             if let Ok(mut store) = history.write() {
                 event_history.fail_with_reason(&mut store, gap_reason);
@@ -982,8 +984,11 @@ fn run(
                 "Tracked processes changed; waiting for the next interval".into()
             });
         }
-        if trace.is_none() && snapshot.detail_error.is_none() {
-            snapshot.detail_error = Some("Waiting to restart detailed CPU monitoring".into());
+        if trace.is_none() {
+            let error = snapshot
+                .collector_error
+                .get_or_insert_with(|| "Waiting to restart detailed CPU monitoring".into());
+            snapshot.detail_error.get_or_insert_with(|| error.clone());
         }
         snapshot.instances = all.len();
         live_processes.time = Some(SystemTime::now());

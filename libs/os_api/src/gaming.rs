@@ -21,6 +21,25 @@ pub struct UserIdentity {
     pub sid: String,
     pub logon: u64,
 }
+
+#[cfg(any(windows, test))]
+pub(crate) fn session_expiry_with(
+    expected: &UserIdentity,
+    current: &UserIdentity,
+    query: impl FnOnce(u64) -> Result<bool, GamingError>,
+) -> Result<bool, GamingError> {
+    if expected.logon == 0
+        || current.logon == 0
+        || !valid_account_sid(&expected.sid)
+        || expected.sid != current.sid
+    {
+        return Err(GamingError::Changed);
+    }
+    if expected == current {
+        return Ok(false);
+    }
+    query(expected.logon)
+}
 /// Bounded canonical decimal SID syntax. This supplies no native account authority.
 pub fn valid_account_sid(sid: &str) -> bool {
     fn component(value: &str, maximum: u64) -> bool {
@@ -232,9 +251,9 @@ pub use crate::windows::gaming::read_user_setting_validation;
 #[cfg(windows)]
 pub use crate::windows::gaming::{
     cpu_topology, interactive_user, power_schemes, read_accessibility, read_cpu_sets, read_mouse,
-    read_power_mode, read_power_plan, read_priority, read_process_policy, write_accessibility,
-    write_cpu_sets, write_mouse, write_power_mode, write_power_plan, write_priority,
-    write_process_policy,
+    read_power_mode, read_power_plan, read_priority, read_process_policy, session_has_ended,
+    write_accessibility, write_cpu_sets, write_mouse, write_power_mode, write_power_plan,
+    write_priority, write_process_policy,
 };
 
 #[cfg(not(windows))]
@@ -250,6 +269,7 @@ mod unavailable {
     }
     functions! {
         fn interactive_user() -> UserIdentity;
+        fn session_has_ended(user:&UserIdentity) -> bool;
         fn power_schemes(user:&UserIdentity) -> Vec<PowerScheme>;
         fn read_power_plan(user:&UserIdentity) -> GuidValue;
         fn write_power_plan(user:&UserIdentity, expected:GuidValue, desired:GuidValue) -> ();
@@ -278,6 +298,51 @@ pub use unavailable::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_expiry_requires_same_account_and_positive_native_evidence() {
+        let old = UserIdentity {
+            sid: "S-1-5-21-1".into(),
+            logon: 7,
+        };
+        let current = UserIdentity {
+            logon: 8,
+            ..old.clone()
+        };
+        assert!(
+            session_expiry_with(&old, &current, |id| {
+                assert_eq!(id, 7);
+                Ok(true)
+            })
+            .unwrap()
+        );
+        assert!(!session_expiry_with(&old, &current, |_| Ok(false)).unwrap());
+        let denied = GamingError::Denied {
+            operation: "query logon",
+            code: 5,
+        };
+        assert_eq!(
+            session_expiry_with(&old, &current, |_| Err(denied.clone())),
+            Err(denied)
+        );
+        assert!(
+            !session_expiry_with(&old, &old, |_| panic!("never expire the current session"))
+                .unwrap()
+        );
+        let foreign = UserIdentity {
+            sid: "S-1-5-21-2".into(),
+            ..current.clone()
+        };
+        assert!(
+            session_expiry_with(&old, &foreign, |_| panic!("do not inspect another account"))
+                .is_err()
+        );
+        let invalid = UserIdentity {
+            logon: 0,
+            ..old.clone()
+        };
+        assert!(session_expiry_with(&invalid, &current, |_| panic!("invalid identity")).is_err());
+    }
     #[test]
     fn durable_account_admission_rebinds_only_the_same_live_account() {
         let old = UserIdentity {

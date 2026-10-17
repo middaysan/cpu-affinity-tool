@@ -1,5 +1,33 @@
 # Native tuning validation
 
+## Session lifetime regression checks (2026-10-17)
+
+Mouse, accessibility and display recovery now distinguish a Manual activation
+from the lifetime of its temporary Windows session. The existing worker may
+retire an expired module target and shared owners only after
+[`LsaGetLogonSessionData`](https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-lsagetlogonsessiondata)
+reports that exact old logon absent, with the same current account/desktop context
+verified before and after. No old-session setting is read or written into a new
+logon. Present sessions, different accounts and read failures are not expiry.
+Persistent account-scoped settings retain their existing restoration behavior.
+
+Regression fixtures cover User and display-like Device targets across saved-state
+reload, startup retirement, uncertain/denied lifetime reads, subsequent Undo,
+shared owners, failed recovery publication and successful unrelated Apply.
+Publication failure retains both disk and in-memory originals. Mixed-field
+fixtures also verify that a newly unowned no-op field does not block Undo after
+an external change, while already-owned equal requests still share their original.
+
+The explicit read-only Windows probe passed for the actual current desktop logon
+(not expired) and an absent logon ID (expired). It changes no setting or session:
+
+```powershell
+cargo test --locked --manifest-path libs/os_api/Cargo.toml native_session_expiry_reads_current_and_absent_logon_without_mutation -- --ignored --test-threads=1
+```
+
+These fixtures and native reads do not constitute a new actual sign-out/reboot
+or settings Apply/Undo GUI run. The remaining compact GUI smoke remains separate.
+
 The earlier canonical continuity/configuration-receipt and handle-transfer lab engine was removed during the four-stage simplification. Its commands and examples no longer exist. Historical source and reports are available in Git at `e275b2661a64676933e04eda391190c05c3c3af4`; those experiments are not acceptance evidence for the new gaming modules.
 
 Existing ProgramData recovery evidence is inspected read-only. A journal, staging/previous artifact or an inspection error blocks native setting admission; the application does not delete, repair or recapture it. The old metadata directories/lease are not a gaming-setting change and are not automatically removed.

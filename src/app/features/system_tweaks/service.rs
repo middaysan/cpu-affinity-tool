@@ -634,6 +634,25 @@ impl HeadlessTuning {
             if owner.is_session() {
                 continue;
             }
+            // Retirement can also remove shared owners later in this snapshot.
+            let Some(target) = self.controller.target(&owner) else {
+                continue;
+            };
+            let module = self.registry.get(owner.feature()).cloned();
+            let accepted = module
+                .as_ref()
+                .is_some_and(|module| module.accepts_target(&target));
+            if !accepted {
+                match self.controller.retire_expired_target(&owner) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.native_failure(error);
+                        failed = true;
+                        continue;
+                    }
+                }
+            }
             let preference = config
                 .profiles
                 .iter()
@@ -641,17 +660,12 @@ impl HeadlessTuning {
                 .and_then(|p| p.modules.iter().find(|m| &m.feature == owner.feature()))
                 .filter(|m| m.enabled && m.mode == ActivationMode::Manual);
             if let Some(preference) = preference {
-                let target = self.controller.target(&owner);
                 let selected = config
                     .manual_targets
                     .iter()
                     .find(|t| t.profile == owner.profile() && &t.feature == owner.feature());
-                if let (Some(target), Some(module), Some(selected)) = (
-                    target,
-                    self.registry.get(owner.feature()).cloned(),
-                    selected,
-                ) {
-                    if !module.accepts_target(&target) {
+                if let (Some(module), Some(selected)) = (module, selected) {
+                    if !accepted {
                         let _ = self
                             .controller
                             .recover_owner(&owner, RecoveryIntent::Unknown);

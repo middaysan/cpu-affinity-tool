@@ -227,6 +227,64 @@ impl Controller {
             .map(|(key, field)| (key.field.clone(), field.baseline.clone()))
             .collect()
     }
+
+    pub(crate) fn retire_expired_target(&mut self, owner: &OwnerKey) -> Result<bool, ModuleError> {
+        if let Some(error) = &self.fault {
+            return Err(error.clone());
+        }
+        let Some((key, field)) = self
+            .fields
+            .iter()
+            .find(|(_, field)| field.owners.contains(owner))
+        else {
+            return Ok(false);
+        };
+        let target = key.target.clone();
+        if self
+            .fields
+            .iter()
+            .any(|(key, field)| field.owners.contains(owner) && key.target != target)
+            || !field.module.target_has_expired(&target)?
+        {
+            return Ok(false);
+        }
+        let keys: Vec<_> = self
+            .fields
+            .iter()
+            .filter(|(key, field)| {
+                key.target == target && field.module.descriptor().id == *owner.feature()
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        let removed: Vec<_> = keys
+            .into_iter()
+            .map(|key| {
+                let field = self.fields.remove(&key).unwrap();
+                (key, field)
+            })
+            .collect();
+        let records = self.records.clone();
+        let pending = self.pending.clone();
+        let errors = self.errors.clone();
+        let remaining = self.owners();
+        let retired: BTreeSet<_> = removed
+            .iter()
+            .flat_map(|(_, field)| field.owners.iter().cloned())
+            .collect();
+        for owner in retired.difference(&remaining) {
+            self.records.remove(owner);
+            self.pending.remove(owner);
+            self.errors.remove(owner);
+        }
+        if let Err(error) = self.persist() {
+            self.fields.extend(removed);
+            self.records = records;
+            self.pending = pending;
+            self.errors = errors;
+            return Err(error);
+        }
+        Ok(true)
+    }
     pub fn status(&self, owner: &OwnerKey) -> Option<ModuleStatus> {
         if let Some(e) = self.errors.get(owner) {
             return Some(match e.kind {
@@ -447,8 +505,13 @@ impl Controller {
                 if baseline.len() > MAX_FIELD_BYTES {
                     return Err(invalid());
                 }
-                prepared.push((change, baseline));
+                if baseline != change.desired {
+                    prepared.push((change, baseline));
+                }
             }
+        }
+        if prepared.is_empty() {
+            return self.release(owner);
         }
         let new_fields = prepared
             .iter()

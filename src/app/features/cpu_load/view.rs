@@ -583,7 +583,10 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
             if tracked_only {
                 snapshot.detail_error.as_ref().or(snapshot.error.as_ref())
             } else {
-                snapshot.error.as_ref()
+                snapshot
+                    .collector_error
+                    .as_ref()
+                    .or(snapshot.error.as_ref())
             },
             None,
             Some(current_group_cpus(app, id).unwrap_or_else(|| cpus.clone())),

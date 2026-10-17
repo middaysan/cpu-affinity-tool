@@ -354,12 +354,25 @@ fn group_scope_checkbox_switches_load_and_contributors_together_in_both_themes()
 }
 
 #[test]
-fn tracked_group_surfaces_scheduler_failures_without_relabeling_host_load() {
+fn all_group_scopes_surface_collector_failures_without_relabeling_host_load() {
     let (mut app, target) = fixture();
     let ctx = egui::Context::default();
     let mut snapshot = app.cpu_load.snapshot().as_ref().clone();
     snapshot.tracked_cpus = vec![None; 20];
     snapshot.detail_error = Some("Scheduler attribution is unavailable".into());
+    snapshot.collector_error = snapshot.detail_error.clone();
+    {
+        let mut store = app.cpu_load.history.write().unwrap();
+        store
+            .configure(20, 30, std::slice::from_ref(&target))
+            .unwrap();
+        let time = SampleTime {
+            seconds: 1.0,
+            wall: SystemTime::UNIX_EPOCH,
+        };
+        store.push_pending(time, &snapshot.parked);
+        store.mark_lost_reason(time, super::super::history::GapReason::TraceUnavailable);
+    }
     *app.cpu_load.published.write().unwrap() = Arc::new(snapshot);
     app.cpu_load.open(GraphTarget::Group {
         id: target.group,
@@ -370,8 +383,13 @@ fn tracked_group_surfaces_scheduler_failures_without_relabeling_host_load() {
     for _ in 0..3 {
         output = frame(&mut app, &ctx, vec![]);
     }
-    assert!(label(&output, "CPU12  99%").is_some());
-    assert!(label(&output, "Scheduler attribution is unavailable").is_none());
+    assert_eq!(
+        app.cpu_load.snapshot().cpus[12],
+        Some(99.0),
+        "healthy PDH is a separate metric"
+    );
+    assert!(label(&output, "CPU12  —").is_some());
+    assert!(label(&output, "Scheduler attribution is unavailable").is_some());
     let output = click(
         &mut app,
         &ctx,
@@ -379,6 +397,29 @@ fn tracked_group_surfaces_scheduler_failures_without_relabeling_host_load() {
     );
     assert!(label(&output, "CPU12  —").is_some());
     assert!(label(&output, "Scheduler attribution is unavailable").is_some());
+}
+
+#[test]
+fn host_group_does_not_show_tracked_membership_only_errors() {
+    let (mut app, target) = fixture();
+    let ctx = egui::Context::default();
+    let mut snapshot = app.cpu_load.snapshot().as_ref().clone();
+    snapshot.detail_error = Some("Tracked processes changed; waiting for the next interval".into());
+    *app.cpu_load.published.write().unwrap() = Arc::new(snapshot);
+    app.cpu_load.open(GraphTarget::Group {
+        id: target.group,
+        name: "Background".into(),
+        cpus: (12..20).collect(),
+    });
+    let mut output = frame(&mut app, &ctx, vec![]);
+    for _ in 0..3 {
+        output = frame(&mut app, &ctx, vec![]);
+    }
+    assert!(label(
+        &output,
+        "Tracked processes changed; waiting for the next interval"
+    )
+    .is_none());
 }
 
 #[test]

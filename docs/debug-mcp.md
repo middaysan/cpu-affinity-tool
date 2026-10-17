@@ -20,6 +20,11 @@ CPU monitoring and requests elevation for read-only scheduler events. Original
 settings are not edited. It creates a random per-launch key and local session
 ticket; do not share that ticket or put it in source control.
 
+The launcher rejects a debug `state.json` destination matching the original
+source path before writing, including normalized relative paths and case changes.
+Its `-SelfTest` checks that rejection preserves the original bytes and that a
+separate destination receives only the sanitized fixture.
+
 Register a stdio MCP server in the local Codex configuration using Python and:
 
 ```text
