@@ -646,6 +646,12 @@ impl eframe::App for App {
         #[cfg(all(target_os = "windows", feature = "windows"))]
         super::render_preparation::warm_fonts(ui.ctx());
     }
+
+    #[cfg(target_os = "windows")]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // The backend can wait in driver cleanup after this callback returns.
+        self.hide_native_window();
+    }
 }
 
 #[cfg(test)]
@@ -963,8 +969,22 @@ mod tests {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             assert!(app.handle_tray_commands(ui.ctx(), [TrayCmd::Quit]));
             assert!(app.closing_requested);
+            #[cfg(target_os = "windows")]
+            assert!(
+                app.is_hidden,
+                "accepted shutdown must stop showing the root"
+            );
         });
         output.textures_delta.clear();
+        #[cfg(target_os = "windows")]
+        assert!(
+            output.viewport_output.values().any(|viewport| {
+                viewport
+                    .commands
+                    .contains(&egui::ViewportCommand::Visible(false))
+            }),
+            "the root must hide while background work drains"
+        );
         assert!(
             output.viewport_output.values().all(|viewport| {
                 !viewport
@@ -973,6 +993,99 @@ mod tests {
                     .any(|command| matches!(command, egui::ViewportCommand::Close))
             }),
             "Quit must first close admission and begin worker draining"
+        );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    #[ignore = "isolated native minimize/restore/teardown regression; no UAC or user settings"]
+    fn restored_root_is_hidden_before_graphics_teardown() {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+        use winit::platform::windows::EventLoopBuilderExtWindows;
+
+        struct Probe {
+            shell: App,
+            start: Instant,
+            phase: u8,
+            result: Arc<Mutex<Option<(u8, bool)>>>,
+        }
+        impl eframe::App for Probe {
+            fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+                let elapsed = self.start.elapsed();
+                match self.phase {
+                    0 if elapsed >= Duration::from_millis(200) => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        self.phase = 1;
+                    }
+                    1 if ctx.input(|i| i.viewport().minimized) == Some(true) => {
+                        self.shell.hide_to_tray(ctx);
+                        self.phase = 2;
+                    }
+                    2 if elapsed >= Duration::from_millis(500) => {
+                        self.shell.show_from_tray(ctx);
+                        self.phase = 3;
+                    }
+                    3 if elapsed >= Duration::from_millis(800)
+                        && ctx.input(|i| i.viewport().minimized) == Some(false) =>
+                    {
+                        self.phase = 4;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    _ => {}
+                }
+                if elapsed >= Duration::from_secs(5) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                ctx.request_repaint_after(Duration::from_millis(20));
+            }
+
+            fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+                ui.label("Isolated minimize/restore/close regression");
+            }
+
+            fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+                self.shell.on_exit(gl);
+                let visible = unsafe { IsWindowVisible(self.shell.hwnd.unwrap()) }.as_bool();
+                *self.result.lock().unwrap() = Some((self.phase, visible));
+            }
+        }
+
+        let result = Arc::new(Mutex::new(None));
+        let saved = result.clone();
+        eframe::run_native(
+            "Close lifecycle regression",
+            eframe::NativeOptions {
+                run_and_return: true,
+                viewport: egui::ViewportBuilder::default().with_inner_size([280.0, 140.0]),
+                event_loop_builder: Some(Box::new(|builder| {
+                    builder.with_any_thread(true);
+                })),
+                ..Default::default()
+            },
+            Box::new(move |cc| {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                let RawWindowHandle::Win32(raw) = cc.window_handle().unwrap().as_raw() else {
+                    panic!("Win32 required");
+                };
+                let mut shell = App::new_for_test(sample_state());
+                shell.hwnd = Some(windows::Win32::Foundation::HWND(raw.hwnd.get() as *mut _));
+                shell.winit_window = cc.winit_window().cloned();
+                Ok(Box::new(Probe {
+                    shell,
+                    start: Instant::now(),
+                    phase: 0,
+                    result: saved,
+                }))
+            }),
+        )
+        .unwrap();
+        let (phase, visible) = result.lock().unwrap().unwrap();
+        assert_eq!(phase, 4, "native minimize/restore did not complete");
+        assert!(
+            !visible,
+            "the root must be hidden before backend teardown can block"
         );
     }
 
@@ -1449,9 +1562,24 @@ impl App {
     fn begin_close(&mut self, ctx: &egui::Context) {
         if !self.closing_requested {
             self.closing_requested = true;
+            #[cfg(target_os = "windows")]
+            {
+                self.is_hidden = true;
+                self.hide_native_window();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
             self.state.begin_tuning_shutdown();
         }
         ctx.request_repaint();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn hide_native_window(&self) {
+        if let Some(window) = &self.winit_window {
+            // Apply on the owning GUI thread before teardown stops pumping messages;
+            // a queued viewport command alone is too late in App::on_exit.
+            window.set_visible(false);
+        }
     }
 
     fn handle_tray_events(&mut self, ctx: &egui::Context) -> bool {

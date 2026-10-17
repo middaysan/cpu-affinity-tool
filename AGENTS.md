@@ -158,9 +158,15 @@ Current runtime split:
   - Windows local shortcut-forwarding server and primary guard
   - Windows tray icon guard
   - Windows `HWND`
-- Windows root `Arc<winit::window::Window>` for the renderer's retained taskbar policy
+  - Windows root `Arc<winit::window::Window>` for the renderer's retained taskbar policy
   - terminal tray-quit latch
   - hidden-window flag
+  - Windows shutdown visibility: accepted close/quit requests synchronously hide the
+    retained Winit root before draining background work. The queued visibility command
+    keeps viewport state consistent while hidden logic polls shutdown. `App::on_exit`
+    also hides before renderer teardown, including native-loop exit paths. Driver
+    cleanup must not leave a visible empty window without a pumping message loop;
+    CPU collector confirmation and tuning restoration retain their existing order.
 - `runtime::AppState` is the composition root over:
   - `persistent_state`
   - `rules`

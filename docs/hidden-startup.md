@@ -23,6 +23,20 @@ handler would remove a restored window's taskbar button after Explorer
 restarts. The existing locked Winit version is an explicit Windows dependency
 for this supported API; no second event loop or additional worker is created.
 
+An accepted Close or tray Quit hides that same native root synchronously before
+background shutdown starts. The corresponding queued visibility command keeps
+eframe's viewport state consistent. Hidden logic continues waiting for the CPU
+worker and tuning shutdown as before; no forced process termination is added.
+`App::on_exit` repeats the native hide before graphics teardown, covering native
+exit paths too. A viewport command queued only in `on_exit` would not be applied
+before the backend stops pumping messages.
+
+The close investigation observed intermittent waits of about two seconds after
+the application state, tray and forwarding resources had already been dropped,
+inside graphics-backend destruction. Previously the cleared root remained
+visible throughout that wait. This correction removes the visible-window
+lifecycle defect; it does not claim to eliminate driver cleanup latency.
+
 ## Dependency correction
 
 Upstream eframe 0.36.2 creates the root hidden for first-paint protection, then
@@ -49,6 +63,18 @@ zero startup SHOW/foreground events and zero visible polls; explicit show,
 hide and second show passed. Ordinary unit coverage checks initial viewport
 flags, no offscreen/focus command during hiding, tray-failure visibility,
 blocked cold-shortcut visibility and stale minimized input after restoration.
+
+The close regression also has an isolated native test:
+
+```powershell
+cargo test --features windows --bin cpu-affinity-tool app::shell::app::tests::restored_root_is_hidden_before_graphics_teardown -- --ignored --exact --nocapture
+```
+
+It minimizes, hides and restores a real Winit root, then checks native visibility
+immediately after the production `on_exit` callback and before backend cleanup.
+It failed before the correction because the root was still visible. A state
+regression separately requires accepted Quit to hide while draining, without
+requesting final Close before background shutdown has completed.
 
 The non-elevated application integration matrix uses isolated sidecar state,
 paused enforcement, disabled CPU/Event Log monitoring, no tuning intent and a
@@ -82,7 +108,20 @@ was not restarted. This is separate from checking native style bits, which
 alone cannot prove taskbar membership. Both independent reviewers accepted
 the correction with no remaining findings in their final delta reviews.
 
-The final administrator-manifest binary is built and statically verified
-separately. Elevated release launch, human UAC behavior and actual login/Task
-Scheduler startup still require their release smoke checks; non-elevated
-debug integration does not certify them.
+The administrator-manifest binary is built and statically verified separately.
+Four subsequent real UAC launches passed on this host: ordinary EXE and saved-rule
+shortcut, each with Start minimized off/on. A medium-integrity ShellExecute
+launcher requested elevation, the user approved it, and an elevated observer
+verified the exact executable and token. Hidden cases emitted no root SHOW or
+foreground event before Restore; visible cases showed normally. Warm forwarding,
+taskbar reconstruction, two minimize/restore cycles and normal exit also passed.
+
+The close correction passed six elevated isolated release runs with paused
+enforcement and a copy of the saved app list, with autorun/tuning disabled.
+Direct close and close after minimize/restore were tested with CPU monitoring
+off/on. Native visibility disappeared within the first 0–15 ms observation;
+processes exited with code 0 after 0.19–0.41 seconds. EXE/PDB identity and the
+administrator manifest were verified after the final build. These observations
+do not guarantee driver cleanup timing
+on every machine. Actual Windows login/Task Scheduler startup remains a
+separate manual check; ordinary UAC launches do not certify it.
