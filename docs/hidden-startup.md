@@ -123,5 +123,36 @@ off/on. Native visibility disappeared within the first 0–15 ms observation;
 processes exited with code 0 after 0.19–0.41 seconds. EXE/PDB identity and the
 administrator manifest were verified after the final build. These observations
 do not guarantee driver cleanup timing
-on every machine. Actual Windows login/Task Scheduler startup remains a
-separate manual check; ordinary UAC launches do not certify it.
+on every machine. Ordinary UAC launches alone do not certify login behavior.
+
+## Actual reboot and login observation
+
+On 2026-10-17 the user rebooted and logged in with two temporary interactive,
+highest-privilege Task Scheduler fixtures prepared in advance. Each task
+started its observer before directly launching the same final release EXE,
+using an isolated state with Start minimized off or on. Both observers verified
+an elevated application token and a new authentication lifetime.
+
+With Start minimized on, the original login run completed: zero visible root
+polls, zero SHOW/foreground events before Restore, two minimize/restore cycles,
+normal exit code 0 and task removal. With it off, the root emitted one SHOW and
+one foreground event and was observed visible. That observer then stopped on
+an incorrect test assumption that the helper's outer rectangle must already
+be zero; its restore/exit assertions were not reached. The original failed
+report is retained rather than relabeled as a complete run.
+
+The default Winit event target can have a 14-by-14 nonclient rectangle with a
+zero-sized client area before the first hide. Native inspection reproduced
+this in both the development build and an elevated final-release follow-up.
+After hiding, its outer and client rectangles were both zero. The corrected
+observer checks the client area, required helper styles and nonminimized state;
+it requires a zero outer rectangle only after normalization. Six predicate
+checks cover this distinction, real client content and minimized/wrong-style
+helpers. The separate elevated release follow-up passed two minimize/restore
+cycles and normal exit code 0 after login.
+
+Both temporary task removals and termination of their exact application PIDs
+were independently verified. These observations cover startup visibility for
+both preferences on this host, with the visible-mode restore/exit evidence
+coming from the separate follow-up. They do not claim two uninterrupted,
+fully passing original login-observer runs or broader hardware/login coverage.
