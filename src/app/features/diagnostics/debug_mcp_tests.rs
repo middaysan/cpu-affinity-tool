@@ -222,6 +222,101 @@ fn debug_command_parser_exposes_no_launch_shell_or_tweak_operations() {
 }
 
 #[test]
+fn system_tweaks_mcp_reads_snapshot_and_registers_actual_ui_controls() {
+    use crate::app::{
+        models::AppStateStorage, shell::presenters::system_tweaks::draw_system_tweaks,
+    };
+    use std::sync::RwLock;
+    let mut app = AppState::new_for_test(
+        Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
+        4,
+    );
+    let ctx = egui::Context::default();
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(ENABLED), true));
+    for _ in 0..3 {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 700.0),
+                )),
+                ..Default::default()
+            },
+            |ui| draw_system_tweaks(&mut app, ui),
+        );
+        output.textures_delta.clear();
+    }
+    let value = state(&mut app, &ctx).unwrap();
+    assert_eq!(value["tweaks"]["section"], "system");
+    assert!(value["tweaks"]["cards"].is_array());
+    for id in [
+        "tweaks.section.system",
+        "tweaks.section.hardware",
+        "tweaks.section.checks",
+        "tweaks.body",
+        "tweaks.undo_all",
+    ] {
+        assert!(
+            value["controls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["id"] == id),
+            "Missing {id}"
+        );
+    }
+    let registry = ctx
+        .data(|d| d.get_temp::<Registry>(egui::Id::new(REGISTRY)))
+        .unwrap();
+    let control = registry
+        .entries
+        .iter()
+        .find(|c| c.id == "tweaks.section.hardware")
+        .unwrap();
+    let events = pointer_events(control, "click", 0.5, 0.5, 0.0).unwrap();
+    let mut output = ctx.run_ui(
+        egui::RawInput {
+            events,
+            ..Default::default()
+        },
+        |ui| draw_system_tweaks(&mut app, ui),
+    );
+    output.textures_delta.clear();
+    assert_eq!(
+        state(&mut app, &ctx).unwrap()["tweaks"]["section"],
+        "hardware"
+    );
+    app.ui.tuning.tweak_help = Some(("Test help", "Cached help".into()));
+    for _ in 0..2 {
+        let mut output = ctx.run_ui(Default::default(), |ui| draw_system_tweaks(&mut app, ui));
+        output.textures_delta.clear();
+    }
+    assert_eq!(
+        state(&mut app, &ctx).unwrap()["tweaks"]["help"],
+        "Test help"
+    );
+    let registry = ctx
+        .data(|d| d.get_temp::<Registry>(egui::Id::new(REGISTRY)))
+        .unwrap();
+    let control = registry
+        .entries
+        .iter()
+        .rev()
+        .find(|c| c.id == "tweaks.help.close")
+        .unwrap();
+    let events = pointer_events(control, "click", 0.5, 0.5, 0.0).unwrap();
+    let mut output = ctx.run_ui(
+        egui::RawInput {
+            events,
+            ..Default::default()
+        },
+        |ui| draw_system_tweaks(&mut app, ui),
+    );
+    output.textures_delta.clear();
+    assert!(app.ui.tuning.tweak_help.is_none());
+}
+
+#[test]
 fn egui_input_updates_real_settings_then_reply_reads_the_settled_frame() {
     use crate::app::models::AppStateStorage;
     use std::sync::RwLock;

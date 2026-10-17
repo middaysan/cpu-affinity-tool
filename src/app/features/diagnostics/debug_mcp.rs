@@ -441,8 +441,32 @@ fn state(app: &mut AppState, ctx: &egui::Context) -> Result<Value, String> {
         .unwrap_or_default();
     let controls:Vec<_>=registry.entries.iter().map(|c|json!({"id":c.id,"rect":[c.rect.min.x,c.rect.min.y,c.rect.max.x,c.rect.max.y],"enabled":c.enabled,"extra":c.extra})).collect();
     Ok(
-        json!({"frame":ctx.cumulative_frame_nr(),"viewport":{"width":ctx.content_rect().width(),"height":ctx.content_rect().height(),"pixels_per_point":ctx.pixels_per_point()},"settings":{"open":app.ui.app_settings_open,"cpu_monitoring":app.cpu_load_enabled(),"history_seconds":app.cpu_load_history_seconds(),"error":app.cpu_load.preference_error},"groups":groups,"graph":crate::app::features::cpu_load::debug_api::graph(app,ctx),"rendered_graph":ctx.data(|d|d.get_temp::<Value>(egui::Id::new(GRAPH))),"controls":controls}),
+        json!({"frame":ctx.cumulative_frame_nr(),"viewport":{"width":ctx.content_rect().width(),"height":ctx.content_rect().height(),"pixels_per_point":ctx.pixels_per_point()},"settings":{"open":app.ui.app_settings_open,"cpu_monitoring":app.cpu_load_enabled(),"history_seconds":app.cpu_load_history_seconds(),"error":app.cpu_load.preference_error},"groups":groups,"graph":crate::app::features::cpu_load::debug_api::graph(app,ctx),"rendered_graph":ctx.data(|d|d.get_temp::<Value>(egui::Id::new(GRAPH))),"controls":controls,"tweaks":tweaks_state(app)}),
     )
+}
+
+// Read only the worker's published snapshot, never native settings or raw recovery data.
+fn tweaks_state(app: &AppState) -> Value {
+    use crate::app::features::system_tweaks::presentation::TuningPageSection;
+    let snapshot = app.tuning_snapshot();
+    let cards: Vec<_> = snapshot.tweak_cards.iter().map(|card| json!({
+        "feature":card.feature.as_str(), "title":card.spec.title,
+        "owned":card.owned, "ready":card.ready, "has_target":card.target.is_some(),
+        "status":card.status.map(crate::app::features::system_tweaks::presentation::status_label),
+        "capability":format!("{:?}",card.capability),
+        "observed":card.observed.as_ref().map(|o|o.summary.as_str()),
+        "baseline":card.baseline,
+    })).collect();
+    let previous: Vec<_> = snapshot.profiles.iter().flat_map(|p|p.modules.iter().filter(|m|m.owned).map(move |m|json!({"profile":p.id.get(),"feature":m.feature.as_str(),"status":m.status.map(crate::app::features::system_tweaks::presentation::status_label)}))).collect();
+    json!({"revision":snapshot.revision,"configuration":format!("{:?}",snapshot.configuration),
+        "operation":format!("{:?}",snapshot.operation), "operation_error":snapshot.operation_error.is_some(),
+        "error":snapshot.operation_error.as_ref().map(|e|json!({"kind":format!("{:?}",e.kind),"operation":e.operation,"detail":e.detail(),"native":e.native.as_ref().map(|n|json!({"domain":n.domain.as_str(),"code":n.code}))})),
+        "ui_error":app.ui.tuning.error,"has_changes":snapshot.has_tweak_changes,
+        "section":match app.ui.tuning.selected_section {TuningPageSection::System=>"system",TuningPageSection::Hardware=>"hardware",TuningPageSection::PcChecks=>"checks"},
+        "display_confirmation_ms":snapshot.display_confirmation.map(|t|t.saturating_duration_since(Instant::now()).as_millis()),
+        "help":app.ui.tuning.tweak_help.as_ref().map(|(title,_)|title),
+        "undo_confirmation":app.ui.tuning.confirm_undo_all,"cards":cards,"previous_owned":previous,
+        "pc_checks":snapshot.pc_checks.iter().map(|c|json!({"id":c.id,"title":c.title,"summary":c.summary})).collect::<Vec<_>>()})
 }
 
 #[cfg(test)]

@@ -1,10 +1,22 @@
 """Standard-library tests for the local stdio MCP adapter; no GUI or user files."""
 import unittest
 import urllib.error
+import io
+from unittest import mock
 import cpu_affinity_mcp as server
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_stdio_reply_is_utf8_even_with_a_windows_legacy_output_encoding(self):
+        request = {"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"cpu_state", "arguments":{}}}
+        source = io.TextIOWrapper(io.BytesIO((server.json.dumps(request) + "\n").encode("utf-8")), encoding="utf-8")
+        destination = io.BytesIO()
+        stdout = io.TextIOWrapper(destination, encoding="cp1252")
+        with mock.patch.object(server.sys, "stdin", source), mock.patch.object(server.sys, "stdout", stdout), mock.patch.object(server.sys, "argv", ["adapter", "--session", "unused"]), mock.patch.object(server, "rpc_from_ticket", return_value=lambda _: {"ok":True,"data":{"title":"… Ядро"}}):
+            server.main()
+        reply = server.json.loads(destination.getvalue().decode("utf-8"))
+        self.assertEqual(server.json.loads(reply["result"]["content"][0]["text"])["data"]["title"], "… Ядро")
+
     def test_three_diagnostic_tools_have_bounded_arguments_and_exact_actions(self):
         tools={s[0]:s for s in server.SPECS}
         for name,action,args in [('cpu_performance','performance',{'seconds':10}),('cpu_quality','quality',{'limit':20}),('cpu_wait','wait',{'condition':'new_sample','timeout_ms':1000})]:

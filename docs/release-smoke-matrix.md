@@ -10,6 +10,14 @@ Confirm that the shipped Windows binary starts correctly, applies its core launc
 
 System Tweaks has a Windows-only production catalog and a compact manual Apply/Undo interface. Current adapter round-trip evidence and remaining native limits are recorded in `docs/tuning-native-probe.md`. `scripts/test-windows-tuning-recovery.ps1` also verifies forced-process interruption at intent, physical test-target write and verified-progress boundaries, and restoration by a second worker under the native lease. These isolated fixtures do not establish every user login, hardware/driver or boot scenario, and stored settings do not prove FPS or input-latency gains.
 
+The 2026-10-18 actual debug-MCP GUI run passed all seven compact managed-card
+Apply/restart/Undo paths and display Keep/restart/Undo, expiry and close-before-
+confirmation paths with independent native readback and final restoration.
+See `tuning-native-probe.md` for the host scope. The separate session-bound
+logout/login row below remains pending actual user sign-out; its prepared task
+and same-logon refusal do not count as that result. Explorer drag/drop remains
+the separately recorded known failing row.
+
 | Scenario | Expected result | Release-blocking if it fails |
 | --- | --- | --- |
 | Cold start with existing `state.json` | App starts, loads saved state, and shows the expected groups, apps, and theme without corruption prompts; an interrupted save must leave a complete prior or new file rather than a truncated state file | Yes |

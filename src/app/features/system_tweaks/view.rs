@@ -171,14 +171,16 @@ pub(crate) fn draw_system_tweaks(app: &mut AppState, root_ui: &mut egui::Ui) {
                 ui.add(egui::Label::new(egui::RichText::new(message).size(10.5).color(color)).wrap());
             }
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!pending && editable && snapshot.has_tweak_changes, egui::Button::new(egui::RichText::new("Undo my changes").size(10.5))).clicked() {
+                let response = ui.add_enabled(!pending && editable && snapshot.has_tweak_changes, egui::Button::new(egui::RichText::new("Undo my changes").size(10.5)));
+                crate::debug_mcp_control!("tweaks.undo_all", response);
+                if response.clicked() {
                     app.ui.tuning.confirm_undo_all = true;
                 }
                 ui.label(egui::RichText::new("CPU controls: Affinity groups").size(10.0).color(palette(ui).text_muted));
             });
             ui.separator();
             let selected = app.ui.tuning.selected_section;
-            egui::ScrollArea::vertical()
+            let scroll = egui::ScrollArea::vertical()
                 .id_salt(("system-tweaks-content", selected))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -201,6 +203,10 @@ pub(crate) fn draw_system_tweaks(app: &mut AppState, root_ui: &mut egui::Ui) {
                         TuningPageSection::PcChecks => draw_pc_checks(app, ui, pending),
                     }
                 });
+            #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+            crate::app::features::diagnostics::debug_mcp::rect_control(ui.ctx(), "tweaks.body", scroll.inner_rect, true, serde_json::Value::Null);
+            #[cfg(not(all(target_os = "windows", debug_assertions, feature = "debug-mcp")))]
+            let _ = scroll;
         });
     draw_dialogs(app, root_ui.ctx());
 }
@@ -256,6 +262,17 @@ fn draw_section_selector(app: &mut AppState, ui: &mut egui::Ui) {
                             paint_focus_ring(ui, &response);
                             response
                         };
+                        crate::debug_mcp_control!(
+                            format!(
+                                "tweaks.section.{}",
+                                match section {
+                                    TuningPageSection::System => "system",
+                                    TuningPageSection::Hardware => "hardware",
+                                    TuningPageSection::PcChecks => "checks",
+                                }
+                            ),
+                            response
+                        );
                         if response.on_hover_text(help).clicked() {
                             app.ui.tuning.selected_section = section;
                         }
@@ -290,13 +307,12 @@ fn draw_hardware(app: &mut AppState, ui: &mut egui::Ui, pending: bool) {
                             egui::Label::new(egui::RichText::new(guide.title).size(11.0)).wrap(),
                         )
                         .on_hover_text(&guide.summary);
-                        if ui
-                            .add_sized(
-                                [112.0, 25.0],
-                                egui::Button::new(egui::RichText::new("Read guide").size(10.5)),
-                            )
-                            .clicked()
-                        {
+                        let response = ui.add_sized(
+                            [112.0, 25.0],
+                            egui::Button::new(egui::RichText::new("Read guide").size(10.5)),
+                        );
+                        crate::debug_mcp_control!(format!("tweaks.guide.{}", guide.id), response);
+                        if response.clicked() {
                             app.ui.tuning.tweak_help = Some((guide.title, guide.help.to_owned()));
                         }
                     });
@@ -313,13 +329,12 @@ fn draw_pc_checks(app: &mut AppState, ui: &mut egui::Ui, pending: bool) {
                 .size(10.5)
                 .color(palette(ui).text_secondary),
         );
-        if ui
-            .add_enabled(
-                !pending,
-                egui::Button::new(egui::RichText::new("Check PC").size(10.5)),
-            )
-            .clicked()
-        {
+        let response = ui.add_enabled(
+            !pending,
+            egui::Button::new(egui::RichText::new("Check PC").size(10.5)),
+        );
+        crate::debug_mcp_control!("tweaks.check_pc", response);
+        if response.clicked() {
             submit(app, TuningRequest::RefreshPcChecks);
         }
     });
@@ -634,10 +649,13 @@ fn draw_tweak(app: &mut AppState, ui: &mut egui::Ui, card: &TweakCard, pending: 
                                 .fill(palette(ui).primary.fill)
                                 .stroke(egui::Stroke::new(1.0, palette(ui).primary.border));
                         }
-                        if ui
-                            .add_enabled(enabled, button.min_size(egui::vec2(112.0, 25.0)))
-                            .clicked()
-                        {
+                        let response =
+                            ui.add_enabled(enabled, button.min_size(egui::vec2(112.0, 25.0)));
+                        crate::debug_mcp_control!(
+                            format!("tweaks.action.{}", card.feature.as_str()),
+                            response
+                        );
+                        if response.clicked() {
                             if controls.undo {
                                 submit(
                                     app,
@@ -790,14 +808,17 @@ fn draw_saved_exe_picker(app: &mut AppState, ui: &mut egui::Ui, card: &TweakCard
         .find(|(_, path)| Some(path) == selected.as_ref())
         .map_or("Choose a saved game EXE", |(name, _)| name.as_str());
     ui.add_enabled_ui(!pending, |ui| {
-        egui::ComboBox::from_id_salt("tweak-saved-exe")
+        let combo = egui::ComboBox::from_id_salt("tweak-saved-exe")
             .selected_text(name)
             .width(ui.available_width())
             .show_ui(ui, |ui| {
-                for (name, path) in &choices {
-                    ui.selectable_value(&mut selected, Some(path.clone()), name);
+                for (index, (name, path)) in choices.iter().enumerate() {
+                    let response = ui.selectable_value(&mut selected, Some(path.clone()), name);
+                    crate::debug_mcp_control!(format!("tweaks.gpu_exe.{index}"), response);
+                    let _ = index;
                 }
             });
+        crate::debug_mcp_control!("tweaks.gpu_exe", combo.response);
     });
     if selected != original {
         if let Some(path) = selected {
@@ -873,13 +894,20 @@ fn draw_previous_settings(app: &mut AppState, ui: &mut egui::Ui, pending: bool) 
                                 }
                             },
                         );
-                        if ui
+                        let response = ui
                             .add_enabled_ui(!pending, |ui| {
                                 ui.add_sized([action_width, 26.0], egui::Button::new("Undo"))
                             })
-                            .inner
-                            .clicked()
-                        {
+                            .inner;
+                        crate::debug_mcp_control!(
+                            format!(
+                                "tweaks.previous.{}.{}",
+                                profile.id.get(),
+                                card.feature.as_str()
+                            ),
+                            response
+                        );
+                        if response.clicked() {
                             submit(
                                 app,
                                 TuningRequest::UndoPreviousModule {
@@ -906,6 +934,7 @@ fn help_button(app: &mut AppState, ui: &mut egui::Ui, title: &'static str, help:
             .min_size(egui::vec2(17.0, 17.0)),
         )
         .on_hover_text(help.split("\n\n").next().unwrap_or(help));
+    crate::debug_mcp_control!(format!("tweaks.help.{title}"), response);
     if response.clicked() {
         app.ui.tuning.tweak_help = Some((title, help.to_owned()));
     }
@@ -926,8 +955,12 @@ fn draw_dialogs(app: &mut AppState, context: &egui::Context) {
             ui.heading("Keep this display mode?");
             ui.label(format!("Check that the picture is clear. The previous mode returns automatically in {remaining} seconds unless you keep it."));
             ui.horizontal_wrapped(|ui| {
-                keep = ui.button("Keep this mode").clicked();
-                cancel = ui.button("Return previous mode").clicked();
+                let response = ui.button("Keep this mode");
+                crate::debug_mcp_control!("tweaks.display.keep", response);
+                keep = response.clicked();
+                let response = ui.button("Return previous mode");
+                crate::debug_mcp_control!("tweaks.display.revert", response);
+                cancel = response.clicked();
             });
         });
         if keep {
@@ -956,7 +989,14 @@ fn draw_dialogs(app: &mut AppState, context: &egui::Context) {
             ui.set_width(width);
             ui.heading("Undo your System Tweaks?");
             ui.label("Return the settings changed here to their saved previous values. Later changes made outside this app are preserved. Any skipped restore is shown.");
-            ui.horizontal_wrapped(|ui| { cancel = ui.button("Cancel").clicked(); confirm = ui.add_enabled(!busy(&snapshot.operation), egui::Button::new("Undo my changes")).clicked(); });
+            ui.horizontal_wrapped(|ui| {
+                let response = ui.button("Cancel");
+                crate::debug_mcp_control!("tweaks.undo_all.cancel", response);
+                cancel = response.clicked();
+                let response = ui.add_enabled(!busy(&snapshot.operation), egui::Button::new("Undo my changes"));
+                crate::debug_mcp_control!("tweaks.undo_all.confirm", response);
+                confirm = response.clicked();
+            });
         });
         if cancel || modal.should_close() {
             app.ui.tuning.confirm_undo_all = false;
@@ -1025,7 +1065,9 @@ fn draw_dialogs(app: &mut AppState, context: &egui::Context) {
                         ui.add_space(6.0);
                     }
                 });
-            close = close_button(ui).clicked();
+            let response = close_button(ui);
+            crate::debug_mcp_control!("tweaks.help.close", response);
+            close = response.clicked();
         });
         if close || modal.should_close() {
             app.ui.tuning.tweak_help = None;

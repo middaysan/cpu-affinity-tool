@@ -1,4 +1,4 @@
-# Debug-only CPU monitoring MCP
+# Debug-only monitoring and System Tweaks MCP
 
 Build on Windows with:
 
@@ -12,6 +12,8 @@ windows,debug-mcp --bin cpu-affinity-tool` must fail. The normal release has no
 MCP module, listener, capture hooks or session handling.
 The build script also rejects the release profile when debug assertions have
 been manually enabled; changing that flag cannot admit MCP into release.
+The adapter writes JSON-RPC replies as UTF-8 bytes, independently of the Windows
+console code page. Windows CI checks that contract and the headless MCP UI path.
 
 Place the dev EXE, matching PDB, `Start-mcp-debug.ps1`, `Start-mcp-debug.cmd` and
 `cpu_affinity_mcp.py` in a dedicated folder. Start the launcher. It copies saved
@@ -45,9 +47,27 @@ times, nulls and partial flags are preserved. `cpu_monitor` changes one isolated
 monitoring preference per call. App-only process tables and group-only filters
 retain their ordinary UI semantics.
 
-`cpu_state` also exposes the existing `nav.groups` and `nav.tweaks` navigation
-buttons for read-only page/refresh validation through `cpu_input`. No native
-tweak action is registered.
+`cpu_state` also returns `tweaks`: the worker's published card/recovery status,
+revision, operation, current/previous summaries, remaining display-confirmation
+time, selected section, help and cached PC checks. This performs no native read
+and exposes no raw target identity or recovery payload. It is serialized only
+on request. All fifteen existing tools remain; no native-setting RPC is added.
+
+Use `cpu_input` with `nav.tweaks`, then `tweaks.section.system`,
+`tweaks.section.hardware` or `tweaks.section.checks`. Scroll `tweaks.body` to
+reveal clipped controls and re-read state. `tweaks.action.<feature>` clicks the
+actual card's current Apply/Undo action; unavailable and pending buttons retain
+their normal disabled state. `tweaks.gpu_exe` and `tweaks.gpu_exe.<index>` use only
+the ordinary saved-EXE picker. Help, Check PC, Undo-all confirmation and
+`tweaks.display.keep` / `tweaks.display.revert` are ordinary widgets too.
+
+System Tweaks UI input can change real Windows settings. Isolating app state
+does not virtualize Windows. Run only authorized tests with verified originals
+and conditional rollback. The production worker, saved-source verification,
+native identity checks, recovery lease, durable first baseline, display timeout
+and conditional Undo are unchanged; MCP supplies no native authority or bypass.
+Restart the same isolated EXE normally to verify persisted changes and Undo;
+creating a new sanitized sidecar is not that test.
 
 `cpu_input` sends normalized pointer/click/wheel events to controls from the
 current UI frame, without Windows input injection. Replies wait for the next
@@ -59,7 +79,7 @@ shutdown, including stopping the owned scheduler trace.
 One blocking transport worker, four queued requests, bounded input/reply sizes
 and eight-second GUI deadlines constrain the bridge. Graph/table serialization
 occurs only on request. No second collector, history matrix, polling timer,
-arbitrary file API, shell command, app launch or affinity/tweak action is exposed.
+arbitrary file API, shell command, app launch or direct affinity/tweak RPC is exposed.
 The session key protects this intentional elevated debug surface; this is not a
 remote-management feature or an interface for untrusted clients.
 

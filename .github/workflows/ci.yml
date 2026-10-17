@@ -53,6 +53,12 @@ jobs:
         shell: pwsh
         run: ./scripts/Start-mcp-debug.ps1 -SelfTest
 
+      - name: Check debug MCP protocol
+        run: python scripts/test_cpu_affinity_mcp.py
+
+      - name: Run headless debug MCP tests
+        run: cargo test --features windows,debug-mcp,diagnostics-test-controls --bin cpu-affinity-tool debug_mcp
+
       - name: Run Windows tuning recovery probes
         shell: pwsh
         run: ./scripts/test-windows-tuning-recovery.ps1

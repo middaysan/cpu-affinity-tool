@@ -29,7 +29,7 @@ SPECS = [
     ("cpu_performance", "performance", "Read a bounded 1..60 second window from the existing profiler cache: CPU/RAM, frame percentiles, slow frames and inclusive stage costs. No GUI repaint or native poll. Explicitly reports unavailable/stopped data and drops.", schema({"seconds":{"type":"integer","minimum":1,"maximum":60}}), True),
     ("cpu_quality", "quality", "Inspect retained original interval delivery and selected CPU/source load quality, plus incomplete CURRENT tracked PID mapping and known errors. History and current roster are separate; unknown reasons stay unknown. Interval pages run newest first.", schema({"offset":INTEGER,"limit":{"type":"integer","minimum":1,"maximum":100}}), True),
     ("cpu_wait", "wait", "Wait up to 6000 ms for a new completed original sample, committed monitoring settings, acknowledged collection release, or the next settled UI frame. new_sample captures the current baseline unless after_seconds is supplied. A normal timeout returns satisfied=false. Settings targets are used only by settings_applied. Pending waits request UI checks every 100 ms and affect timing.", schema({"condition":{"type":"string","enum":["new_sample","settings_applied","collection_released","ui_settled"]},"timeout_ms":{"type":"integer","minimum":1,"maximum":6000},"after_seconds":{"type":"number","minimum":0},"enabled":BOOL,"history_seconds":{"type":"integer","enum":[30,300,1800]}},["condition"]), True),
-    ("cpu_state", "state", "Read the rendered graph, controls, groups and monitoring state. No native poll.", schema(), True),
+    ("cpu_state", "state", "Read rendered controls, CPU state and cached System Tweaks cards, operation, confirmation deadline and help. No native poll. Use nav.tweaks and tweaks.* control IDs with cpu_input for normal UI actions.", schema(), True),
     ("cpu_open_graph", "open_graph", "Open a saved group's graph, or its rule graph using stable IDs from cpu_state.", schema({"group_id": TEXT, "rule_id": TEXT}, ["group_id"]), False),
     ("cpu_close_graph", "close_graph", "Close the CPU modal.", schema(), False),
     ("cpu_select", "select_cpu", "Select a logical CPU in the open graph.", schema({"cpu": INTEGER}, ["cpu"]), False),
@@ -38,7 +38,7 @@ SPECS = [
     ("cpu_live", "live", "Release inspection and pointer hover, restoring live graph data.", schema(), False),
     ("cpu_monitor", "monitor", "Change ONE monitoring preference in isolated test settings; no affinity enforcement.", schema({"enabled": BOOL, "history_seconds": {"type": "integer", "enum": [30, 300, 1800]}}), False),
     ("cpu_table", "table", "Read a page of the actual rendered contributors or current-app processes table. Open that view first.", schema({"kind": {"type": "string", "enum": ["contributors", "processes"]}, "offset": INTEGER, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, ["kind"]), True),
-    ("cpu_input", "input", "Send egui input to a current rendered control ID. x/y are normalized 0..1; scroll delta is points, positive downward. Re-read cpu_state after layout changes.", schema({"target": TEXT, "kind": {"type": "string", "enum": ["move", "click", "scroll"]}, "x": {"type": "number", "minimum": 0, "maximum": 1}, "y": {"type": "number", "minimum": 0, "maximum": 1}, "delta": {"type": "number", "minimum": -2000, "maximum": 2000}}, ["target", "kind"]), False),
+    ("cpu_input", "input", "Send egui input to a current rendered control ID. System Tweaks Apply/Undo changes Windows through ordinary guarded UI requests; only run authorized tests with verified rollback. x/y are normalized 0..1; scroll delta is points, positive downward. Re-read cpu_state after layout changes.", schema({"target": TEXT, "kind": {"type": "string", "enum": ["move", "click", "scroll"]}, "x": {"type": "number", "minimum": 0, "maximum": 1}, "y": {"type": "number", "minimum": 0, "maximum": 1}, "delta": {"type": "number", "minimum": -2000, "maximum": 2000}}, ["target", "kind"]), False),
     ("cpu_screenshot", "screenshot", "Capture the actual rendered app frame as PNG. Explicit capture can perturb timing; do not benchmark this frame.", schema(), True),
     ("cpu_close_test_app", "close_app", "Orderly close of this isolated debug app only.", schema(), False),
 ]
@@ -102,7 +102,7 @@ def dispatch(message, rpc):
         supported = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
         result = {"protocolVersion": version if version in supported else "2025-06-18", "capabilities": {"tools": {}},
                   "serverInfo": {"name": "cpu-affinity-debug", "version": "0.1.0"},
-                  "instructions": "Controls only an explicitly started isolated debug build. Read cpu_state for stable group/rule/control IDs. CPU graph values and tables follow the rendered selected CPU/time; unknown is not zero. Use cpu_input for actual egui widget tests. No OS actions or app launches. Screenshots perturb timing. Session keys are local and must not be printed. The normal release app has no debug endpoint."}
+                  "instructions": "Controls only an explicitly started isolated debug build. Read cpu_state for stable group/rule/control IDs and cached System Tweaks status. CPU graph values and tables follow the rendered selected CPU/time; unknown is not zero. Use cpu_input for actual egui widget tests. System Tweaks controls can change Windows settings through the normal worker; use only user-authorized tests with verified rollback. No direct native-write, shell or app-launch RPC. Screenshots perturb timing. Session keys are local and must not be printed. The normal release app has no debug endpoint."}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
@@ -153,8 +153,8 @@ def main():
         except (ValueError, TypeError):
             reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Invalid JSON-RPC input"}}
         if reply is not None:
-            sys.stdout.write(json.dumps(reply, ensure_ascii=False, allow_nan=False) + "\n")
-            sys.stdout.flush()
+            sys.stdout.buffer.write((json.dumps(reply, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
+            sys.stdout.buffer.flush()
 
 
 if __name__ == "__main__":

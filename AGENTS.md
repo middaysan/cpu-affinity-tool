@@ -577,7 +577,18 @@ release and next settled UI-frame predicates. Only an explicit pending
 `cpu_wait` schedules 100 ms checks, bounded to 1–6000 ms, without full graph
 serialization; timeout returns observed failure. No collector, native sampling
 loop, dense PID history or shipping code is added. The stdio server advertises
-fifteen tools.
+fifteen tools. The same debug-only `cpu_state` exposes immutable System Tweaks
+card/operation/confirmation snapshots without a native read or raw target/journal
+payload. Existing `cpu_input` reaches registered System Tweaks section, scrolling,
+saved-EXE, Apply/Undo, Help, PC-check and display-confirmation widgets. Those
+ordinary guarded UI requests can change Windows settings during explicitly
+authorized tests; the bridge adds no direct native-write RPC, new worker or
+production authority. Ordinary release compilation removes both state encoding
+and control IDs. Test state isolation does not virtualize Windows settings.
+Windows CI runs the adapter's standard-library protocol tests, including UTF-8
+stdio under a legacy Windows output encoding, and the headless debug-MCP tests
+with the explicit nonshipping features. The adapter writes UTF-8 bytes directly;
+the console code page cannot change JSON-RPC reply encoding.
 
 ## AGENTS.md maintenance rules
 Update `AGENTS.md` in the same change when you alter:

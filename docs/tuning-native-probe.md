@@ -1,5 +1,42 @@
 # Native tuning validation
 
+## Compact GUI acceptance through debug MCP (2026-10-18)
+
+The isolated optimized debug build passed actual egui input and independent
+native readback on this Windows 11 host, both without elevation and in a final
+elevated repeat. Seven cards made real changes: AC power preference, Game Mode,
+background clips, windowed games, mouse acceleration, accessibility hotkeys and
+the GPU preference for one owned test EXE. The app closed normally, reopened the
+same saved state and recovery journal, retained every change/owner, then restored
+each prepared baseline through its ordinary Undo button. Battery/DC and the
+mouse thresholds were preserved.
+
+The primary screen changed between supported 120/144 Hz modes at the same
+resolution. Keep followed by app restart and Undo, the 15-second expiry, and
+closing before confirmation followed by another app restart all passed. Each
+case checked the actual native mode; the final independent conditional rollback
+verified every captured original, including absent preferences. Five app launches
+exited with code zero. Original user state bytes remained unchanged. Section
+navigation, System help, explicit Check PC and the saved-EXE picker were also
+exercised through their real widgets. This completes the managed-card and display
+GUI paths left open by the earlier walkthrough; it is not an OEM/HDR/VRR or game
+performance certification.
+
+The first run exposed a debug-adapter console-code-page bug; an automated legacy
+encoding regression now requires UTF-8 bytes on stdout. Separate fixture errors
+(omitted stable rule IDs and an incorrect expectation that mouse thresholds
+would be zeroed) were corrected without weakening production admission or mouse
+preservation. Failed reports remain local alongside the successful evidence.
+
+A separate next-logon fixture is prepared for mouse, accessibility and display.
+It records real old-session baselines but finishes preparation at the exact
+original Windows values. The observer requires a new same-account logon and
+positive old-session absence, compares fresh values before/after retirement,
+checks durable empty ownership/disabled intents and reopens the app once more.
+It has not yet run at a new Windows login. Preparation and same-logon refusal
+are not acceptance evidence for logout/login; the temporary task expires and
+removes itself after its one observed run. No logout or reboot is automated.
+
 ## Session lifetime regression checks (2026-10-17)
 
 Mouse, accessibility and display recovery now distinguish a Manual activation
