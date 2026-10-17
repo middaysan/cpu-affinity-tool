@@ -63,6 +63,10 @@ mod sys {
 
     /// Initializes the tray. The application shell owns all window operations.
     pub fn init_tray(ctx: eframe::egui::Context) -> Result<TrayRuntime, String> {
+        #[cfg(all(debug_assertions, feature = "diagnostics-test-controls"))]
+        if std::env::var_os("CPU_AFFINITY_TOOL_TEST_TRAY_FAILURE").is_some() {
+            return Err("Synthetic tray initialization failure".into());
+        }
         // Command channel
         let (tx, rx) = mpsc::channel::<TrayCmd>();
 

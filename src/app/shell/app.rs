@@ -39,16 +39,29 @@ pub struct App {
     forwarding_runtime: Option<AppForwardingRuntime>,
     #[cfg(target_os = "windows")]
     hwnd: Option<windows::Win32::Foundation::HWND>,
+    #[cfg(target_os = "windows")]
+    winit_window: Option<Arc<winit::window::Window>>,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     crash_report_viewport_focused: Option<bool>,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     windows_event_log_first_frame_rendered: bool,
     closing_requested: bool,
     is_hidden: bool,
-    start_hidden_pending: bool,
+    startup_visibility_pending: bool,
+    restore_pending: bool,
 }
 
 const MONITOR_EVENT_GUI_DRAIN_LIMIT: usize = 64;
+
+#[cfg(any(test, target_os = "windows"))]
+fn set_taskbar_visibility_with(
+    visible: bool,
+    set_skip_taskbar: impl FnOnce(bool),
+    set_native_style: impl FnOnce(bool),
+) {
+    set_skip_taskbar(!visible);
+    set_native_style(visible);
+}
 
 fn should_start_minimized(enabled: bool, supported: bool, tray_available: bool) -> bool {
     enabled && supported && tray_available
@@ -95,8 +108,12 @@ fn should_hide_to_tray(
     platform_supports_hide_to_tray: bool,
     has_tray_runtime: bool,
     minimized: Option<bool>,
+    restore_pending: bool,
 ) -> bool {
-    platform_supports_hide_to_tray && has_tray_runtime && minimized == Some(true)
+    platform_supports_hide_to_tray
+        && has_tray_runtime
+        && !restore_pending
+        && minimized == Some(true)
 }
 
 #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
@@ -191,6 +208,18 @@ impl App {
     }
 
     pub fn new_without_startup_intent(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::new_with_state(cc, AppState::new())
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn new_with_storage(
+        cc: &eframe::CreationContext<'_>,
+        storage: crate::app::adapters::storage::StorageAdapter,
+    ) -> Self {
+        Self::new_with_state(cc, AppState::from_storage(storage))
+    }
+
+    fn new_with_state(cc: &eframe::CreationContext<'_>, mut state: AppState) -> Self {
         #[cfg(debug_assertions)]
         {
             println!("========================================================");
@@ -215,7 +244,6 @@ impl App {
         cc.egui_ctx
             .set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
 
-        let mut state = AppState::new();
         let monitor_ctx = cc.egui_ctx.clone();
         let wake: execution::MonitorWake = Arc::new(move || monitor_ctx.request_repaint());
         state.runtime.set_wake(wake.clone());
@@ -268,6 +296,11 @@ impl App {
                     .add_sticky_once(format!("Debug MCP: {error}"));
                 None
             });
+        let start_hidden = should_start_minimized(
+            state.start_minimized(),
+            crate::app::adapters::os::supports_hide_to_tray(),
+            tray_res.is_ok(),
+        );
         match tray_res {
             Ok(tray_runtime) => Self {
                 state,
@@ -280,13 +313,16 @@ impl App {
                 forwarding_runtime: None,
                 #[cfg(target_os = "windows")]
                 hwnd,
+                #[cfg(target_os = "windows")]
+                winit_window: cc.winit_window().cloned(),
                 #[cfg(all(target_os = "windows", feature = "windows"))]
                 crash_report_viewport_focused: None,
                 #[cfg(all(target_os = "windows", feature = "windows"))]
                 windows_event_log_first_frame_rendered: false,
                 closing_requested: false,
-                is_hidden: false,
-                start_hidden_pending: false,
+                is_hidden: start_hidden,
+                startup_visibility_pending: true,
+                restore_pending: false,
             },
             Err(e) => {
                 state
@@ -303,13 +339,16 @@ impl App {
                     forwarding_runtime: None,
                     #[cfg(target_os = "windows")]
                     hwnd,
+                    #[cfg(target_os = "windows")]
+                    winit_window: cc.winit_window().cloned(),
                     #[cfg(all(target_os = "windows", feature = "windows"))]
                     crash_report_viewport_focused: None,
                     #[cfg(all(target_os = "windows", feature = "windows"))]
                     windows_event_log_first_frame_rendered: false,
                     closing_requested: false,
                     is_hidden: false,
-                    start_hidden_pending: false,
+                    startup_visibility_pending: true,
+                    restore_pending: false,
                 }
             }
         }
@@ -396,6 +435,7 @@ impl App {
         forwarding_failed: bool,
     ) {
         if forwarding_failed && matches!(startup_intent, StartupIntent::RunRule { .. }) {
+            self.is_hidden = false;
             self.state.log_manager.add_important_sticky_once(
                 "ERROR: Shortcut launch was blocked because shortcut forwarding did not start"
                     .to_string(),
@@ -403,11 +443,6 @@ impl App {
             return;
         }
 
-        self.start_hidden_pending = should_start_minimized(
-            self.state.start_minimized(),
-            crate::app::adapters::os::supports_hide_to_tray(),
-            self.tray_runtime.is_some(),
-        );
         Self::handle_startup_intent(&mut self.state, startup_intent);
     }
 
@@ -441,13 +476,16 @@ impl App {
             forwarding_runtime: None,
             #[cfg(target_os = "windows")]
             hwnd: None,
+            #[cfg(target_os = "windows")]
+            winit_window: None,
             #[cfg(all(target_os = "windows", feature = "windows"))]
             crash_report_viewport_focused: None,
             #[cfg(all(target_os = "windows", feature = "windows"))]
             windows_event_log_first_frame_rendered: false,
             closing_requested: false,
             is_hidden: false,
-            start_hidden_pending: false,
+            startup_visibility_pending: false,
+            restore_pending: false,
         }
     }
 }
@@ -720,11 +758,148 @@ mod tests {
 
     #[test]
     fn hide_to_tray_requires_a_live_tray_runtime() {
-        assert!(super::should_hide_to_tray(true, true, Some(true)));
-        assert!(!super::should_hide_to_tray(true, false, Some(true)));
-        assert!(!super::should_hide_to_tray(false, true, Some(true)));
-        assert!(!super::should_hide_to_tray(true, true, Some(false)));
-        assert!(!super::should_hide_to_tray(true, true, None));
+        assert!(super::should_hide_to_tray(true, true, Some(true), false));
+        assert!(!super::should_hide_to_tray(true, false, Some(true), false));
+        assert!(!super::should_hide_to_tray(false, true, Some(true), false));
+        assert!(!super::should_hide_to_tray(true, true, Some(false), false));
+        assert!(!super::should_hide_to_tray(true, true, None, false));
+    }
+
+    #[test]
+    fn tray_restore_does_not_rehide_on_stale_minimized_input() {
+        assert!(!super::should_hide_to_tray(true, true, Some(true), true));
+        assert!(!super::should_hide_to_tray(true, true, None, true));
+        let mut app = App::new_for_test(sample_state());
+        let ctx = egui::Context::default();
+        app.show_from_tray(&ctx);
+        assert!(app.restore_pending);
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .minimized = Some(true);
+        let mut output = ctx.run_ui(input.clone(), |ui| assert!(app.should_render(ui.ctx())));
+        output.textures_delta.clear();
+        assert!(
+            app.restore_pending,
+            "old minimized input cannot acknowledge Restore"
+        );
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .minimized = Some(false);
+        let mut output = ctx.run_ui(input, |ui| assert!(app.should_render(ui.ctx())));
+        output.textures_delta.clear();
+        assert!(
+            !app.restore_pending,
+            "native restoration must re-arm minimize-to-tray"
+        );
+    }
+
+    #[test]
+    fn taskbar_visibility_updates_winit_policy_and_native_style_together() {
+        use std::cell::RefCell;
+        let calls = RefCell::new(Vec::new());
+        // Initial hide, tray Restore, visible fallback and another hide/restore.
+        for visible in [false, true, true, false, true] {
+            calls.borrow_mut().clear();
+            super::set_taskbar_visibility_with(
+                visible,
+                |skip| calls.borrow_mut().push(("winit_skip", skip)),
+                |show| calls.borrow_mut().push(("native_show", show)),
+            );
+            assert_eq!(
+                *calls.borrow(),
+                [("winit_skip", !visible), ("native_show", visible)],
+                "native style alone leaves Winit's Explorer-restart policy stale"
+            );
+        }
+    }
+
+    #[test]
+    fn tray_hide_uses_visibility_without_moving_or_focusing_the_window() {
+        let mut app = App::new_for_test(sample_state());
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| app.hide_to_tray(ui.ctx()));
+        output.textures_delta.clear();
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(commands.contains(&egui::ViewportCommand::Visible(false)));
+        assert!(!commands.iter().any(|c| matches!(
+            c,
+            egui::ViewportCommand::OuterPosition(_)
+                | egui::ViewportCommand::Focus
+                | egui::ViewportCommand::Visible(true)
+        )));
+        assert!(app.is_hidden);
+    }
+
+    #[test]
+    fn tray_restore_shows_and_unminimizes_without_repositioning() {
+        let mut app = App::new_for_test(sample_state());
+        app.is_hidden = true;
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            app.handle_tray_commands(ui.ctx(), [TrayCmd::Show]);
+        });
+        output.textures_delta.clear();
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(commands.contains(&egui::ViewportCommand::Visible(true)));
+        assert!(commands.contains(&egui::ViewportCommand::Minimized(false)));
+        assert!(!commands
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::OuterPosition(_))));
+        assert!(!app.is_hidden);
+    }
+
+    #[test]
+    fn startup_visibility_is_reachable_without_a_tray_and_has_no_position_commands() {
+        for tray_available in [false, true] {
+            for enabled in [false, true] {
+                let mut app = App::new_for_test(sample_state());
+                app.is_hidden = super::should_start_minimized(enabled, true, tray_available);
+                app.startup_visibility_pending = true;
+                let ctx = egui::Context::default();
+                let mut output = ctx.run_ui(Default::default(), |ui| {
+                    assert_eq!(app.should_render(ui.ctx()), !(enabled && tray_available));
+                });
+                output.textures_delta.clear();
+                let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+                assert!(commands.contains(&egui::ViewportCommand::Visible(
+                    !(enabled && tray_available)
+                )));
+                assert!(!commands.iter().any(|c| matches!(
+                    c,
+                    egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::Focus
+                )));
+                assert!(!app.startup_visibility_pending);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_cold_shortcut_forwarding_keeps_startup_error_reachable() {
+        let mut app = App::new_for_test(sample_state());
+        app.is_hidden = true;
+        app.startup_visibility_pending = true;
+        app.handle_startup_intent_after_forwarding(
+            StartupIntent::RunRule {
+                group_id: crate::app::shared::ids::GroupId("missing".into()),
+                rule_id: crate::app::shared::ids::RuleId("missing".into()),
+            },
+            true,
+        );
+        assert!(!app.is_hidden);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            Default::default(),
+            |ui| assert!(app.should_render(ui.ctx())),
+        );
+        output.textures_delta.clear();
+        assert!(output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .contains(&egui::ViewportCommand::Visible(true)));
     }
 
     #[test]
@@ -1424,20 +1599,30 @@ impl App {
     }
 
     fn should_render(&mut self, ctx: &egui::Context) -> bool {
-        if self.start_hidden_pending {
-            self.start_hidden_pending = false;
-            self.hide_to_tray(ctx);
-            return false;
+        if self.startup_visibility_pending {
+            self.startup_visibility_pending = false;
+            if self.is_hidden {
+                self.hide_to_tray(ctx);
+            } else {
+                #[cfg(target_os = "windows")]
+                self.set_taskbar_visible(true);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
         }
         if self.is_hidden {
             ctx.request_repaint_after(Duration::from_millis(250));
             return false;
         }
 
+        let minimized = ctx.input(|i| i.viewport().minimized);
+        if minimized == Some(false) {
+            self.restore_pending = false;
+        }
         if should_hide_to_tray(
             crate::app::adapters::os::supports_hide_to_tray(),
             self.tray_runtime.is_some(),
-            ctx.input(|i| i.viewport().minimized),
+            minimized,
+            self.restore_pending,
         ) {
             self.hide_to_tray(ctx);
             return false;
@@ -1448,6 +1633,7 @@ impl App {
 
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         self.is_hidden = true;
+        self.restore_pending = false;
         #[cfg(all(target_os = "windows", feature = "windows"))]
         self.state.poll_cpu_load(false);
 
@@ -1457,33 +1643,44 @@ impl App {
         }
 
         #[cfg(target_os = "windows")]
-        if let Some(hwnd) = self.hwnd {
-            crate::app::adapters::os::set_taskbar_visible(hwnd, false);
-            crate::app::adapters::os::restore_and_focus_window(hwnd);
-        }
-
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-            -10000.0, -10000.0,
-        )));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        self.set_taskbar_visible(false);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 
     fn show_from_tray(&mut self, ctx: &egui::Context) {
-        self.start_hidden_pending = false;
+        self.startup_visibility_pending = false;
         self.is_hidden = false;
+        // Winit can deliver the previous minimized=true once more before applying
+        // Minimized(false). Do not interpret that stale observation as a new minimize.
+        self.restore_pending = true;
         #[cfg(all(target_os = "windows", feature = "windows"))]
         self.state.request_crash_report_refresh();
 
         #[cfg(target_os = "windows")]
-        if let Some(hwnd) = self.hwnd {
-            crate::app::adapters::os::set_taskbar_visible(hwnd, true);
-            crate::app::adapters::os::restore_and_focus_window(hwnd);
-        }
-
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-            100.0, 100.0,
-        )));
+        self.set_taskbar_visible(true);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         ctx.request_repaint();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn set_taskbar_visible(&self, visible: bool) {
+        use winit::platform::windows::WindowExtWindows;
+        set_taskbar_visibility_with(
+            visible,
+            |skip| {
+                if let Some(window) = &self.winit_window {
+                    // Winit reapplies this retained policy when Explorer recreates its taskbar.
+                    window.set_skip_taskbar(skip);
+                }
+            },
+            |show| {
+                if let Some(hwnd) = self.hwnd {
+                    crate::app::adapters::os::set_taskbar_visible(hwnd, show);
+                }
+            },
+        );
     }
 
     fn apply_theme(&self, ctx: &egui::Context) {

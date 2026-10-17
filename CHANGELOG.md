@@ -6,6 +6,10 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Honor **Start minimized** before creating the Windows main window, including cold saved-rule shortcuts, without showing/focusing it or moving it offscreen. Restore through the tray preserves the window position, ignores stale minimized events and keeps errors reachable when the tray or cold shortcut forwarding cannot start. A minimal local eframe patch preserves an explicitly hidden root after its first paint.
+
 ### Added
 
 - Opt-in Windows render profiling and a debug-only MCP bridge for graph, table and monitoring-setting checks. Bounded local diagnostics expose CPU/memory, frame work and original-interval quality; ordinary release builds contain no MCP endpoint or handlers and reject the debug feature.

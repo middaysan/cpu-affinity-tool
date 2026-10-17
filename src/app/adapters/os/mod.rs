@@ -414,8 +414,3 @@ pub fn normalize_winit_event_target_window() -> Result<(), String> {
 pub fn set_taskbar_visible(hwnd: windows::Win32::Foundation::HWND, visible: bool) {
     os_api::OS::set_taskbar_visible(hwnd, visible);
 }
-
-#[cfg(target_os = "windows")]
-pub fn restore_and_focus_window(hwnd: windows::Win32::Foundation::HWND) {
-    os_api::OS::restore_and_focus(hwnd);
-}

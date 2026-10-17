@@ -247,7 +247,7 @@ fn native_cpu19_gui_cost_and_history() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let options = eframe::NativeOptions {
-        viewport: crate::windows_viewport(),
+        viewport: crate::windows_viewport(false),
         event_loop_builder: Some(Box::new(|builder| {
             builder.with_any_thread(true);
         })),

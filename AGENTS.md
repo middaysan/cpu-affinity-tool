@@ -88,6 +88,7 @@ Key directories:
 - `design/` - standalone HTML design reference for the approved compact Inter-based interface; it loads only repository-local assets and is not runtime input
 - `docs/` - release/process documentation and user-facing comparison/rationale references
 - `scripts/` - committed release/build verification helper scripts
+- `vendor/eframe/` - published eframe 0.36.2 with one documented initial-root-visibility fix; upstream provenance, licenses and removal criteria are in `LOCAL-PATCH.md`
 - `.github/workflows/` - CI and GitHub Release automation
 - `changelogs/` - manual release notes
 - `tasks/` - optional ignored local workspace for task dossiers and cross-session handoff
@@ -157,6 +158,7 @@ Current runtime split:
   - Windows local shortcut-forwarding server and primary guard
   - Windows tray icon guard
   - Windows `HWND`
+- Windows root `Arc<winit::window::Window>` for the renderer's retained taskbar policy
   - terminal tray-quit latch
   - hidden-window flag
 - `runtime::AppState` is the composition root over:
@@ -195,7 +197,7 @@ Current runtime split:
 - workers emit typed `shell::events::ShellEvent` messages and do not hold `egui::Context`
 - Windows crash-report discovery uses an initial/on-demand single-flight standard thread plus at most one coalesced follow-up refresh; egui rendering reads only the last completed snapshot and synchronizes its newest validated report into the retained Logs context; the Linux beta does not start this worker or expose the Crash reports route
 - Windows Event Log diagnostics uses a separate single-flight worker. It is never started by construction, focus gain, tray restore, or periodic refresh: after the first rendered UI frame it can run one bounded lookup when the persisted enabled-by-default preference allows it, with at most one delayed retry after a successful empty result.
-- App settings offers a persisted `start_minimized` preference: the next Windows GUI launch hides to the tray only when a usable tray runtime exists. It defaults to false when absent and remains readable in schema v10 and v11. Changing the preference does not hide the current window. The app does not register Windows login startup or accept `--start-in-tray`.
+- App settings offers a persisted `start_minimized` preference. The Windows entrypoint loads the canonical storage once before creating the root viewport, requests initially hidden/inactive/no-taskbar when enabled and passes that same storage into `AppState`. The shell starts hidden only with a usable tray; tray failure or blocked cold shortcut forwarding shows the error window. Explicit viewport visibility replaces offscreen positioning; restoring preserves geometry and ignores stale minimized input until Windows acknowledges restoration. Each taskbar transition updates both Winit's retained `skip_taskbar` policy and the existing native styles, including visible fallback, so `TaskbarCreated` cannot reapply an old hidden policy. A one-line local eframe 0.36.2 patch prevents its first-paint automatic show from overriding initially hidden roots. The preference defaults to false, remains readable in schema v10/v11 and affects only the next launch. No Windows login registration or `--start-in-tray` flag is added. See `docs/hidden-startup.md` for native evidence and remaining release smoke.
 - App settings keeps monitoring, history and startup explanations in bounded hover tooltips. One `Extra memory: ~N MiB` row estimates monitoring's additional cost using calculated history, the configured maximum trace buffers and runtime/tracking allowances; its breakdown is on hover. This estimate follows retention, saved apps and observed tracking changes and is not measured whole-app memory. Preference and collector errors remain visible in the menu. Its lifetime remains independent of the nested history selector.
 - Tray hiding also normalizes only the calling GUI thread's exact layered/nonactivating `Winit Thread Event Target` popup to a restored zero-sized state. The helper stays visible for Winit's paint-event delivery; other windows are not hidden or restored. Native regression coverage reproduces a leftover minimized helper rectangle; the Task Scheduler login scenario remains a manual smoke check.
 - Hovering the footer monitor status opens a bounded tracked-process table; there is no separate list button. Process, PID and Group use fixed columns with a retained header, alternating compact rows and virtualized vertical scrolling. The scrolling viewport uses matching window-bounded minimum/maximum heights so a previously short or empty popup cannot constrain a later long list; auto-shrink keeps short lists compact. Hovering different status regions and reopening preserve the same scroll identity/position. Long cells clip within their column and support horizontal drag/Shift-wheel plus full-text hover, without intercepting ordinary vertical wheel scrolling or widening the popup. The list stays open while hovered, with a short gap-crossing grace period. Native refresh attempts occur at most once per second while open; GUI passes borrow retained rows, and unchanged completed rows keep their allocation. Unavailable runtime reads retain the previous presentation snapshot and scroll position with an updating label; an initially unavailable read shows a waiting message. A completed empty snapshot clears the rows. Closing the popup starts no polling. Each completed refresh includes only saved rules matching the runtime instance's logical group/rule owner, so duplicate executable rules do not duplicate or mislabel rows. It inspects only token-bearing runtime instances and verifies the current image path and creation token together before publishing the executable filename, PID, and group. Failed inspection or a reused PID is omitted; the popup never enumerates all system processes.
@@ -210,8 +212,8 @@ Windows runtime flow:
 3. After startup forwarding selects `RunGui`, the entrypoint resolves the active crash-report directory, installs the main-thread panic hook, and prepares the startup phase before creating `tokio` or `eframe`; forwarding-only processes do not install the hook, and crash-report discovery or retention never runs synchronously on this startup path.
 4. Startup self-scheduling is prepared before worker creation as described below. A main-thread panic is written best-effort without changing Rust panic semantics; background-thread/task panics delegate to the previous hook without creating a crash report.
 5. Before Tokio/eframe/background-worker creation, the GUI process independently applies `BelowNormal` priority and a one-bit hard affinity mask for the highest available logical CPU in its inherited process/system mask. Native selection uses mask bits, including sparse restrictions, not physical-core count;4threads selects CPU3 and16selects CPU15 when all are allowed. Current startup affinity supports one Windows processor group and a representable native-width mask; multi-group/unrepresentable cases remain unchanged and are logged rather than wrapping or selecting a different global CPU. One original mask is retained for neutral EXE child launches, and the new self mask is read back. Both startup outcomes enter Logs; a failure in either does not prevent the other or GUI startup. Tokio is then created, and existing CPU-topology detection still reports the host CPU count. No periodic self-affinity enforcement or global policy is added.
-6. The Windows entrypoint marks the crash-report phase as UI-running and enters `eframe::run_native`.
-7. The Windows entrypoint creates `App` without dispatching startup intent, which creates `AppState`, seeds in-memory logical identities, writes startup diagnostics, starts execution monitors, captures `HWND`, initializes command-only tray integration, and starts the bounded crash-report index refresh.
+6. The Windows entrypoint loads storage once, derives the root viewport's initial visibility/activation/taskbar request, marks the crash-report phase as UI-running and enters `eframe::run_native`.
+7. The Windows entrypoint creates `App` without dispatching startup intent, passing the same storage to `AppState`. It seeds in-memory logical identities, writes startup diagnostics, starts execution monitors, captures `HWND`, initializes command-only tray integration, and starts the bounded crash-report index refresh. A hidden request becomes visible if tray initialization fails.
 8. The Windows entrypoint installs the prepared shortcut-forwarding runtime with the GUI wake callback before dispatching startup intent.
    - normal GUI startup then runs autorun once
    - `RunRule` startup then skips normal autorun and dispatches only the requested saved rule
@@ -450,7 +452,7 @@ Linux gaps:
 Only list materially relevant dependencies by actual role.
 
 Primary runtime and build dependencies:
-- `eframe` / `egui` - desktop GUI
+- `eframe` / `egui` - desktop GUI; the root Cargo patch selects the checked-in eframe 0.36.2 copy with its single initial-visibility correction (`vendor/eframe/LOCAL-PATCH.md`), leaving other dependency versions and the event loop unchanged
 - `tokio` - background runtime with `rt-multi-thread`, `time`, and `sync`; worker count remains the runtime default
 - `windows` - Win32 bindings for shell integration, process/runtime operations, local IPC, security descriptors, and manifest/resource-adjacent Windows APIs
 - `tray-icon` - Windows tray integration
@@ -460,7 +462,8 @@ Primary runtime and build dependencies:
 - `once_cell` - lazy initialization
 - `num_cpus` - logical thread-count detection
 - `image` - explicitly selected ICO tray decoding with only the `ico` feature; the decoded RGBA buffer is moved into the tray icon
-- `raw-window-handle` - direct Windows native-window handle access (winit remains a transitive GUI dependency)
+- `raw-window-handle` - direct Windows native-window handle access
+- `winit` - the same locked GUI dependency, also explicitly selected on Windows for its existing taskbar policy API and test-thread event-loop extension; no new event loop or input layer is added
 - `winres` - Windows resource embedding at build time
 - `libs/os_api` - local platform abstraction crate
 

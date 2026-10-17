@@ -37,6 +37,8 @@ regex = "1.13.1"
 raw-window-handle = "0.6.2"
 windows = { version = "0.62.2", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem"] }
 tray-icon = "0.26.1"
+# Use eframe's existing native window API to synchronize taskbar policy on restore.
+winit = { version = "0.30.13", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["ico"] }
 
 [target.'cfg(windows)'.build-dependencies]
@@ -50,6 +52,6 @@ tuning-test-controls = ["os_api/tuning-test-controls"]
 render-profiling = ["os_api/render-profiling"]
 debug-mcp = ["render-profiling"]
 
-[target.'cfg(windows)'.dev-dependencies]
-# Only the opt-in native GUI cost probe needs a test-thread event loop.
-winit = { version = "0.30.13", default-features = false }
+[patch.crates-io]
+# Preserve the requested initial visibility of the native root window (egui #8459).
+eframe = { path = "vendor/eframe" }

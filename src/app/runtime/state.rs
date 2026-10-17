@@ -207,7 +207,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
-        let storage = StorageAdapter::load();
+        Self::from_storage(StorageAdapter::load())
+    }
+
+    pub(crate) fn from_storage(storage: StorageAdapter) -> Self {
         #[cfg(all(target_os = "windows", feature = "windows"))]
         let crash_report_directory = StorageAdapter::active_data_dir().join(REPORT_DIRECTORY_NAME);
         #[cfg(all(target_os = "windows", feature = "windows"))]

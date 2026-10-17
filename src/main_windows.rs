@@ -21,6 +21,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 
+#[cfg(test)]
+mod startup_visibility_probe;
+
 fn main() {
     let startup_args = std::env::args().skip(1).collect::<Vec<_>>();
     let startup_intent = match parse_startup_args(&startup_args) {
@@ -86,9 +89,16 @@ fn main() {
     #[cfg(debug_assertions)]
     println!("DEBUG: Tokio runtime created and entered.");
 
+    let storage = app::adapters::storage::StorageAdapter::load();
+    let start_hidden = storage
+        .shared()
+        .read()
+        .map(|state| state.start_minimized)
+        .unwrap_or(false)
+        && app::adapters::os::supports_hide_to_tray();
     let options = NativeOptions {
         run_and_return: true,
-        viewport: windows_viewport(),
+        viewport: windows_viewport(start_hidden),
         ..Default::default()
     };
 
@@ -126,7 +136,7 @@ fn main() {
                 let startup_requires_forwarding =
                     matches!(&startup_intent, StartupIntent::RunRule { .. })
                         && forwarding_runtime.is_some();
-                let mut app = App::new_without_startup_intent(cc);
+                let mut app = App::new_with_storage(cc, storage);
                 for message in scheduling_messages {
                     app.state.log_manager.add_sticky_once(message);
                 }
@@ -165,8 +175,11 @@ fn main() {
     }
 }
 
-fn windows_viewport() -> eframe::egui::ViewportBuilder {
+fn windows_viewport(start_hidden: bool) -> eframe::egui::ViewportBuilder {
     eframe::egui::ViewportBuilder::default()
+        .with_visible(!start_hidden)
+        .with_active(!start_hidden)
+        .with_taskbar(!start_hidden)
         .with_inner_size([400.0, 700.0])
         .with_min_inner_size([400.0, 600.0])
         .with_max_inner_size([400.0, 1000.0])
@@ -241,13 +254,24 @@ mod viewport_tests {
 
     #[test]
     fn compact_layout_window_keeps_fixed_width_and_resizable_height() {
-        let viewport = super::windows_viewport();
+        let viewport = super::windows_viewport(false);
         let minimum = viewport.min_inner_size.unwrap();
         let maximum = viewport.max_inner_size.unwrap();
         assert_eq!(viewport.inner_size.unwrap().x, 400.0);
         assert_eq!(minimum.x, 400.0);
         assert_eq!(maximum.x, 400.0);
         assert!(maximum.y > minimum.y);
+    }
+
+    #[test]
+    fn startup_preference_controls_initial_visibility_focus_and_taskbar() {
+        for hidden in [false, true] {
+            let viewport = super::windows_viewport(hidden);
+            assert_eq!(viewport.visible, Some(!hidden));
+            assert_eq!(viewport.active, Some(!hidden));
+            assert_eq!(viewport.taskbar, Some(!hidden));
+            assert!(viewport.position.is_none());
+        }
     }
 }
 
