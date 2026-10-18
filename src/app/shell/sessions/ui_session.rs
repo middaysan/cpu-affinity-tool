@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub(crate) struct TrackedProcessSession {
+    pub open: bool,
+    pub revision: u64,
     pub rows: Vec<TrackedProcessSnapshot>,
     pub updating: bool,
     last_attempt: Option<Instant>,
@@ -26,6 +28,7 @@ impl TrackedProcessSession {
         if let Some(rows) = rows {
             if rows != self.rows {
                 self.rows = rows;
+                self.revision = self.revision.wrapping_add(1);
             }
         }
     }
@@ -60,6 +63,9 @@ pub struct UiSession {
 }
 
 impl UiSession {
+    pub(crate) fn monitoring_modal_open(&self, cpu_graph_open: bool) -> bool {
+        cpu_graph_open || self.tracked_processes.open
+    }
     pub fn new(total_threads: usize) -> Self {
         Self {
             tuning: Default::default(),
@@ -111,6 +117,14 @@ impl UiSession {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tracked_roster_uses_the_existing_monitoring_modal_paint_policy() {
+        let mut ui = super::UiSession::new(20);
+        assert!(!ui.monitoring_modal_open(false));
+        assert!(ui.monitoring_modal_open(true));
+        ui.tracked_processes.open = true;
+        assert!(ui.monitoring_modal_open(false));
+    }
     use super::UiSession;
     use crate::app::shell::{GroupRoute, WindowRoute};
 
@@ -123,6 +137,7 @@ mod tests {
         state.tracked_processes.publish(now, None);
         assert!(state.tracked_processes.updating);
         assert!(state.tracked_processes.rows.is_empty());
+        assert_eq!(state.tracked_processes.revision, 0);
         assert!(!state
             .tracked_processes
             .refresh_due(now + Duration::from_millis(999)));

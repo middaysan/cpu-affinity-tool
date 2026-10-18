@@ -47,6 +47,7 @@ impl ContributorRow {
 }
 #[derive(Default)]
 pub(super) struct ContributorView {
+    pub revision: u64,
     pub time: Option<SampleTime>,
     pub rows: Vec<ContributorRow>,
     pub available: bool,
@@ -54,6 +55,7 @@ pub(super) struct ContributorView {
 }
 impl ContributorView {
     pub fn clear(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         self.time = None;
         self.rows.clear();
         self.available = false;

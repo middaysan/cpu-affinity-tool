@@ -319,8 +319,7 @@ fn group_scope_checkbox_switches_load_and_contributors_together_in_both_themes()
         }
         assert!(label(&output, "CPU0  90%").is_some());
         assert!(label(&output, "foreign.exe").is_some());
-        let filter =
-            label(&output, "Tracked processes only").expect("visible group process-scope checkbox");
+        let filter = label(&output, "Tracked only").expect("visible group process-scope checkbox");
         let plot = ctx
             .read_response(egui::Id::new("cpu-load-chart"))
             .unwrap()
@@ -340,11 +339,7 @@ fn group_scope_checkbox_switches_load_and_contributors_together_in_both_themes()
             plot,
             "scope change must not move plot geometry"
         );
-        let output = click(
-            &mut app,
-            &ctx,
-            label(&output, "Tracked processes only").unwrap(),
-        );
+        let output = click(&mut app, &ctx, label(&output, "Tracked only").unwrap());
         assert!(label(&output, "CPU0  90%").is_some() && label(&output, "foreign.exe").is_some());
         let modal = ctx
             .memory(|m| m.area_rect(egui::Id::new("cpu-load-modal")))
@@ -390,11 +385,7 @@ fn all_group_scopes_surface_collector_failures_without_relabeling_host_load() {
     );
     assert!(label(&output, "CPU12  —").is_some());
     assert!(label(&output, "Scheduler attribution is unavailable").is_some());
-    let output = click(
-        &mut app,
-        &ctx,
-        label(&output, "Tracked processes only").unwrap(),
-    );
+    let output = click(&mut app, &ctx, label(&output, "Tracked only").unwrap());
     assert!(label(&output, "CPU12  —").is_some());
     assert!(label(&output, "Scheduler attribution is unavailable").is_some());
 }
@@ -942,7 +933,11 @@ fn pinned_graph_keeps_exact_time_while_scrolling_and_unpins_on_the_next_click() 
         assert!(label(&output, "CPU12  88%").is_some());
         let output = click(&mut app, &ctx, first);
         assert!(label(&output, &format!("Pinned · {time}")).is_some());
-        let output = click(&mut app, &ctx, label(&output, "Chrome · CPU load").unwrap());
+        let output = click(
+            &mut app,
+            &ctx,
+            label(&output, "Chrome · Application CPU").unwrap(),
+        );
         assert!(
             label(&output, "Live").is_some(),
             "a click outside the plot should unpin"

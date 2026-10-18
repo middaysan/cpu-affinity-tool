@@ -270,7 +270,10 @@ fn draw_delete_confirmation(app: &mut AppState, context: &egui::Context) {
     let focus_cancel = std::mem::take(&mut app.ui.crash_report_delete_confirmation_focus_pending);
     let mut cancel = false;
     let mut confirm = false;
-    let modal = egui::Modal::new(egui::Id::new("delete-crash-report-modal")).show(context, |ui| {
+    let modal = crate::app::shell::presenters::shared_elements::modal(egui::Id::new(
+        "delete-crash-report-modal",
+    ))
+    .show(context, |ui| {
         ui.heading("Delete crash report?");
         ui.label(format!(
             "{} from {} will be permanently deleted.",
@@ -315,31 +318,33 @@ fn draw_delete_saved_confirmation(app: &mut AppState, context: &egui::Context) {
         std::mem::take(&mut app.ui.crash_report_delete_saved_confirmation_focus_pending);
     let mut cancel = false;
     let mut confirm = false;
-    let modal =
-        egui::Modal::new(egui::Id::new("delete-saved-crash-reports-modal")).show(context, |ui| {
-            ui.heading("Delete saved crash reports?");
-            ui.label(format!(
-                "Delete these {count} saved crash reports permanently?"
-            ));
-            ui.horizontal(|ui| {
-                let cancel_button = ui.button("Cancel");
-                if focus_cancel {
-                    cancel_button.request_focus();
-                }
-                if cancel_button.clicked() {
-                    cancel = true;
-                }
-                if toned_button(
-                    ui,
-                    egui::Button::new("Delete saved reports"),
-                    ToneRole::Danger,
-                )
-                .clicked()
-                {
-                    confirm = true;
-                }
-            });
+    let modal = crate::app::shell::presenters::shared_elements::modal(egui::Id::new(
+        "delete-saved-crash-reports-modal",
+    ))
+    .show(context, |ui| {
+        ui.heading("Delete saved crash reports?");
+        ui.label(format!(
+            "Delete these {count} saved crash reports permanently?"
+        ));
+        ui.horizontal(|ui| {
+            let cancel_button = ui.button("Cancel");
+            if focus_cancel {
+                cancel_button.request_focus();
+            }
+            if cancel_button.clicked() {
+                cancel = true;
+            }
+            if toned_button(
+                ui,
+                egui::Button::new("Delete saved reports"),
+                ToneRole::Danger,
+            )
+            .clicked()
+            {
+                confirm = true;
+            }
         });
+    });
     cancel |= modal.should_close();
 
     if confirm {

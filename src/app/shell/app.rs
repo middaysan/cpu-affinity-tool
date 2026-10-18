@@ -573,7 +573,9 @@ impl eframe::App for App {
         super::render_preparation::scroll_repaint_delay(
             ctx,
             input,
-            self.state.cpu_load.graph.is_some(),
+            self.state
+                .ui
+                .monitoring_modal_open(self.state.cpu_load.graph.is_some()),
         )
     }
 
@@ -719,9 +721,12 @@ impl eframe::App for App {
             bridge.begin_ui(ui.ctx());
         }
         #[cfg(all(target_os = "windows", feature = "windows"))]
-        let draw_active = self.state.cpu_load.graph.is_none();
+        let draw_active = !self
+            .state
+            .ui
+            .monitoring_modal_open(self.state.cpu_load.graph.is_some());
         #[cfg(not(all(target_os = "windows", feature = "windows")))]
-        let draw_active = true;
+        let draw_active = !self.state.ui.monitoring_modal_open(false);
         self.render_main_ui(ui, draw_active);
         #[cfg(all(target_os = "windows", feature = "windows"))]
         crate::app::features::cpu_load::view::draw_modal(&mut self.state, ui.ctx());
@@ -2014,9 +2019,12 @@ impl App {
 
     fn handle_file_drops(&mut self, ctx: &egui::Context) {
         #[cfg(all(target_os = "windows", feature = "windows"))]
-        let graph_open = self.state.cpu_load.graph.is_some();
+        let graph_open = self
+            .state
+            .ui
+            .monitoring_modal_open(self.state.cpu_load.graph.is_some());
         #[cfg(not(all(target_os = "windows", feature = "windows")))]
-        let graph_open = false;
+        let graph_open = self.state.ui.monitoring_modal_open(false);
         if !file_import_allowed(&self.state.ui.current_window, graph_open) {
             return;
         }
@@ -2053,7 +2061,7 @@ impl App {
             if draw_active {
                 Self::draw_active_view(&mut self.state, ui);
             } else {
-                // The opaque CPU modal owns the content; keep only the shared chrome.
+                // The opaque monitoring modal owns the content; keep only the shared chrome.
                 egui::CentralPanel::default().show(ui, |_| {});
             }
         }

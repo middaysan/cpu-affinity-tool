@@ -950,7 +950,7 @@ fn draw_dialogs(app: &mut AppState, context: &egui::Context) {
         context.request_repaint_after(Duration::from_millis(250));
         let mut keep = false;
         let mut cancel = false;
-        let modal = egui::Modal::new(egui::Id::new("tweak-display-confirmation")).show(context, |ui| {
+        let modal = crate::app::shell::presenters::shared_elements::modal(egui::Id::new("tweak-display-confirmation")).show(context, |ui| {
             ui.set_width(width);
             ui.heading("Keep this display mode?");
             ui.label(format!("Check that the picture is clear. The previous mode returns automatically in {remaining} seconds unless you keep it."));
@@ -985,7 +985,7 @@ fn draw_dialogs(app: &mut AppState, context: &egui::Context) {
     if app.ui.tuning.confirm_undo_all {
         let mut cancel = false;
         let mut confirm = false;
-        let modal = egui::Modal::new(egui::Id::new("tweak-undo-all")).show(context, |ui| {
+        let modal = crate::app::shell::presenters::shared_elements::modal(egui::Id::new("tweak-undo-all")).show(context, |ui| {
             ui.set_width(width);
             ui.heading("Undo your System Tweaks?");
             ui.label("Return the settings changed here to their saved previous values. Later changes made outside this app are preserved. Any skipped restore is shown.");
@@ -1016,23 +1016,25 @@ fn draw_dialogs(app: &mut AppState, context: &egui::Context) {
                 && card.availability.is_available()
                 && matches!(card.capability, Capability::Available)
         }) && !busy(&snapshot.operation);
-        let modal = egui::Modal::new(egui::Id::new("tweak-options")).show(context, |ui| {
-            ui.set_width(width);
-            ui.heading("AC power settings");
-            if let Some(editor) = app.tuning_editors().editor(&feature) {
-                editor.show_tweak_options(ui, &mut config);
-                ui.separator();
-                ui.horizontal(|ui| {
-                    cancel = ui.button("Cancel").clicked();
-                    apply = ui
-                        .add_enabled(
-                            available && editor.accepts_config(&config),
-                            egui::Button::new("Apply"),
-                        )
-                        .clicked();
+        let modal =
+            crate::app::shell::presenters::shared_elements::modal(egui::Id::new("tweak-options"))
+                .show(context, |ui| {
+                    ui.set_width(width);
+                    ui.heading("AC power settings");
+                    if let Some(editor) = app.tuning_editors().editor(&feature) {
+                        editor.show_tweak_options(ui, &mut config);
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            cancel = ui.button("Cancel").clicked();
+                            apply = ui
+                                .add_enabled(
+                                    available && editor.accepts_config(&config),
+                                    egui::Button::new("Apply"),
+                                )
+                                .clicked();
+                        });
+                    }
                 });
-            }
-        });
         app.ui.tuning.tweak_options = Some((feature.clone(), target.clone(), config.clone()));
         if cancel || modal.should_close() {
             app.ui.tuning.tweak_options = None;
@@ -1053,22 +1055,27 @@ fn draw_dialogs(app: &mut AppState, context: &egui::Context) {
     }
     if let Some((title, help)) = app.ui.tuning.tweak_help.clone() {
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("tweak-help")).show(context, |ui| {
-            ui.set_width(width);
-            ui.label(egui::RichText::new(title).size(16.0).strong());
-            egui::ScrollArea::vertical()
-                .id_salt("tweak-help-text")
-                .max_height((context.content_rect().height() - 180.0).clamp(40.0, 420.0))
-                .show(ui, |ui| {
-                    for paragraph in help.split("\n\n") {
-                        ui.add(egui::Label::new(egui::RichText::new(paragraph).size(12.0)).wrap());
-                        ui.add_space(6.0);
-                    }
+        let modal =
+            crate::app::shell::presenters::shared_elements::modal(egui::Id::new("tweak-help"))
+                .show(context, |ui| {
+                    ui.set_width(width);
+                    ui.label(egui::RichText::new(title).size(16.0).strong());
+                    egui::ScrollArea::vertical()
+                        .id_salt("tweak-help-text")
+                        .max_height((context.content_rect().height() - 180.0).clamp(40.0, 420.0))
+                        .show(ui, |ui| {
+                            for paragraph in help.split("\n\n") {
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(paragraph).size(12.0))
+                                        .wrap(),
+                                );
+                                ui.add_space(6.0);
+                            }
+                        });
+                    let response = close_button(ui);
+                    crate::debug_mcp_control!("tweaks.help.close", response);
+                    close = response.clicked();
                 });
-            let response = close_button(ui);
-            crate::debug_mcp_control!("tweaks.help.close", response);
-            close = response.clicked();
-        });
         if close || modal.should_close() {
             app.ui.tuning.tweak_help = None;
         }

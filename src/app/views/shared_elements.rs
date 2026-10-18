@@ -215,16 +215,16 @@ const DARK_PALETTE: UiPalette = UiPalette {
 };
 
 const LIGHT_PALETTE: UiPalette = UiPalette {
-    surface: Color32::from_rgb(242, 244, 245),
-    group: Color32::from_rgb(250, 251, 252),
-    inset: Color32::from_rgb(233, 237, 239),
-    row: Color32::from_rgb(236, 239, 241),
+    surface: Color32::from_rgb(231, 233, 232),
+    group: Color32::from_rgb(240, 241, 238),
+    inset: Color32::from_rgb(223, 227, 225),
+    row: Color32::from_rgb(228, 231, 228),
     text_primary: Color32::from_rgb(29, 37, 43),
-    text_secondary: Color32::from_rgb(86, 99, 108),
-    text_muted: Color32::from_rgb(94, 105, 113),
-    border_subtle: Color32::from_rgb(203, 210, 215),
-    border_strong: Color32::from_rgb(174, 185, 192),
-    neutral_status: Color32::from_rgb(94, 105, 113),
+    text_secondary: Color32::from_rgb(78, 91, 98),
+    text_muted: Color32::from_rgb(87, 98, 104),
+    border_subtle: Color32::from_rgb(194, 201, 199),
+    border_strong: Color32::from_rgb(166, 179, 177),
+    neutral_status: Color32::from_rgb(87, 98, 104),
     accent: ToneTokens {
         fg: Color32::from_rgb(59, 89, 101),
         fill: Color32::from_rgb(224, 232, 235),
@@ -247,11 +247,11 @@ const LIGHT_PALETTE: UiPalette = UiPalette {
         border: Color32::from_rgb(138, 160, 169),
     },
     visibility: ToneTokens {
-        fg: Color32::from_rgb(86, 99, 108),
-        fill: Color32::from_rgb(233, 237, 239),
-        hover_fill: Color32::from_rgb(226, 231, 234),
-        active_fill: Color32::from_rgb(214, 221, 225),
-        border: Color32::from_rgb(174, 185, 192),
+        fg: Color32::from_rgb(78, 91, 98),
+        fill: Color32::from_rgb(223, 227, 225),
+        hover_fill: Color32::from_rgb(216, 223, 220),
+        active_fill: Color32::from_rgb(209, 218, 214),
+        border: Color32::from_rgb(166, 179, 177),
     },
     success: ToneTokens {
         fg: Color32::from_rgb(36, 109, 73),
@@ -284,8 +284,8 @@ const LIGHT_PALETTE: UiPalette = UiPalette {
     drag_idle: Color32::from_rgb(123, 135, 143),
     drag_active: Color32::from_rgb(73, 104, 117),
     drop_target: Color32::from_rgb(88, 118, 130),
-    monitoring_surface: Color32::from_rgb(250, 251, 252),
-    monitoring_border: Color32::from_rgb(203, 210, 215),
+    monitoring_surface: Color32::from_rgb(240, 241, 238),
+    monitoring_border: Color32::from_rgb(194, 201, 199),
     core_performance: Color32::from_rgb(224, 232, 235),
     core_efficiency: Color32::from_rgb(225, 236, 230),
     core_hyper_thread: Color32::from_rgb(239, 230, 214),
@@ -367,11 +367,11 @@ pub fn apply_widget_visuals(visuals: &mut egui::Visuals) {
         )
     } else {
         (
-            Color32::from_rgb(233, 237, 239),
-            Color32::from_rgb(174, 185, 192),
-            Color32::from_rgb(226, 231, 234),
+            palette.visibility.fill,
+            palette.visibility.border,
+            palette.visibility.hover_fill,
             Color32::from_rgb(123, 135, 143),
-            Color32::from_rgb(214, 221, 225),
+            palette.visibility.active_fill,
         )
     };
 
@@ -784,6 +784,33 @@ mod tests {
     }
 
     #[test]
+    fn light_surfaces_are_neutral_soft_and_keep_readable_small_text() {
+        let palette = palette_for_dark_mode(false);
+        for surface in [
+            palette.surface,
+            palette.group,
+            palette.inset,
+            palette.row,
+            palette.monitoring_surface,
+        ] {
+            let channels = [surface.r(), surface.g(), surface.b()];
+            assert!(channels.iter().max().unwrap() - channels.iter().min().unwrap() <= 4);
+            assert!(
+                relative_luminance(surface) < 0.89,
+                "large surfaces should avoid near-white glare"
+            );
+            for foreground in [
+                palette.text_primary,
+                palette.text_secondary,
+                palette.text_muted,
+                palette.neutral_status,
+            ] {
+                assert!(contrast_ratio(foreground, surface) >= 4.5);
+            }
+        }
+    }
+
+    #[test]
     fn test_semantic_palettes_use_exact_muted_dark_and_light_accents() {
         let dark = palette_for_dark_mode(true);
         let light = palette_for_dark_mode(false);
@@ -792,7 +819,7 @@ mod tests {
         assert_eq!(dark.group, Color32::from_rgb(21, 24, 27));
         assert_eq!(dark.accent.fill, Color32::from_rgb(20, 30, 35));
         assert_eq!(dark.accent.border, Color32::from_rgb(57, 88, 102));
-        assert_eq!(light.surface, Color32::from_rgb(242, 244, 245));
+        assert_eq!(light.surface, Color32::from_rgb(231, 233, 232));
         assert_eq!(light.accent.fill, Color32::from_rgb(224, 232, 235));
         assert_eq!(light.accent.border, Color32::from_rgb(138, 160, 169));
         assert_ne!(dark.success.fg, dark.warning.fg);
@@ -1006,4 +1033,8 @@ mod tests {
             ]
         );
     }
+}
+/// A static scrim costs one filled rectangle, independent of modal content.
+pub(crate) fn modal(id: egui::Id) -> egui::Modal {
+    egui::Modal::new(id).backdrop_color(egui::Color32::from_black_alpha(185))
 }

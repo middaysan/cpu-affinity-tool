@@ -152,19 +152,26 @@ impl ProcessList {
     }
 }
 
+#[derive(Clone, Default)]
+pub(super) struct CurrentOrder {
+    source: Option<Arc<ProcessList>>,
+    target: Option<RuleTarget>,
+    revision: u64,
+    order: crate::app::shell::presenters::process_table::Order,
+}
+
 pub(super) fn draw(
     ui: &mut eframe::egui::Ui,
-    list: &ProcessList,
+    list: &Arc<ProcessList>,
     target: &RuleTarget,
     available_height: f32,
 ) {
     crate::render_profile_scope!(CurrentProcesses);
-    #[cfg(all(debug_assertions, feature = "debug-mcp"))]
-    super::debug_api::record_processes(ui.ctx(), list, target);
+
     use crate::app::shell::presenters::shared_elements::{
         compact_table_spacing, palette, table_row_separator, COMPACT_TABLE_ROW_HEIGHT,
     };
-    use eframe::egui::{self, Align, Layout, RichText};
+    use eframe::egui::{self, RichText};
     let colors = *palette(ui);
     let top = ui.cursor().top();
     let rows = || list.rows.iter().filter(|row| &row.target == target);
@@ -184,31 +191,48 @@ pub(super) fn draw(
     ui.label(RichText::new(if list.ready {format!("CPU mapping: {mapped}/{count} processes")} else {"Updating tracked processes…".into()}).small().color(if !list.ready||mapped<count {colors.warning.fg}else{colors.text_secondary}))
         .on_hover_text("The footer and this table use tracked exact PID/creation-token instances. Refresh times can differ. This current table includes idle and unavailable instances; graph contributors include only measured work on the selected CPU/time. An unknown sibling can make the app's complete aggregate unavailable.");
     let widths = [(ui.available_width() - 202.0).max(46.0), 46.0, 46.0, 86.0];
+    use crate::app::shell::presenters::process_table::{self as table, Column, Sort};
     let cell = |ui: &mut egui::Ui, text: RichText, width: f32, right: bool| {
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(width, COMPACT_TABLE_ROW_HEIGHT),
-            egui::Sense::hover(),
-        );
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(if right {
-            Layout::right_to_left(Align::Center)
-        } else {
-            Layout::left_to_right(Align::Center)
-        }));
-        child.add(egui::Label::new(text).truncate().selectable(false))
+        table::cell(ui, width, right, text)
     };
+    let id = egui::Id::new("current-process-sort");
+    let mut order = ui
+        .ctx()
+        .data(|d| d.get_temp::<table::Order>(id))
+        .unwrap_or_default();
     ui.scope(|ui| {
         compact_table_spacing(ui);
         ui.spacing_mut().item_spacing.x=6.0;
         ui.horizontal(|ui|for (i,title) in ["Process","PID","CPU %","CPUs"].iter().enumerate(){
-            let response=cell(ui,RichText::new(*title).small().weak(),widths[i],i==1||i==2);
+            let response=if i<3 {table::heading(ui,widths[i],title,[Column::Name,Column::Pid,Column::Load][i], &mut order)} else {cell(ui,RichText::new(*title).small().weak(),widths[i],false)};
+            #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+            crate::app::features::diagnostics::debug_mcp::control(format!("sort.processes.{i}"), &response);
             if i==2 {response.on_hover_text("Process CPU time relative to the whole machine, sampled once per second with GetProcessTimes. This can remain available when scheduler/per-core attribution is unavailable. Its interval is not identical to Task Manager or the per-CPU trace.");}
             else if i==3 {response.on_hover_text("Logical CPUs with measured positive work in the latest scheduler interval. A process can run on several CPUs; this is not a single instantaneous location or its allowed affinity. Idle means a complete measured zero interval; Unavailable and * preserve missing/partial data.");}
         });
+        let indices = ui.ctx().data_mut(|d| {
+            let cache = d.get_temp_mut_or_default::<CurrentOrder>(id.with("cache"));
+            if cache.source.as_ref().is_none_or(|old| !Arc::ptr_eq(old,list)) || cache.target.as_ref()!=Some(target) {
+                cache.source=Some(list.clone()); cache.target=Some(target.clone()); cache.revision=cache.revision.wrapping_add(1);
+            }
+            cache.order.sort=order.sort;
+            let sort=order.sort.unwrap_or(Sort{column:Column::Pid,descending:false});
+            cache.order.prepare(cache.revision,list.rows.len(),|i| &list.rows[i].target==target,|a,b| {
+                let (a,b)=(&list.rows[a],&list.rows[b]);
+                let primary=match sort.column {Column::Name=>sort.compare(table::name_cmp(a.name(),b.name())),Column::Load=>sort.load(a.total,b.total),_=>sort.compare(a.pid.cmp(&b.pid))};
+                primary.then(a.pid.cmp(&b.pid)).then(a.token.cmp(&b.token))
+            });
+            cache.order.rows.clone()
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(id,order));
+        #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+        super::debug_api::record_processes(ui.ctx(), list, &indices);
         ui.separator();
         let height=(available_height-(ui.cursor().top()-top)).max(60.0);
         let scroll = egui::ScrollArea::vertical().id_salt("cpu-process-list").min_scrolled_height(height).max_height(height).auto_shrink([false,false]).show_rows(ui,COMPACT_TABLE_ROW_HEIGHT,count,|ui,range| {
             if count==0 {ui.label(if list.ready{"No tracked processes for this app."}else{"Waiting for the first tracked-process snapshot…"});}
-            for row in rows().skip(range.start).take(range.len()) {
+            for &index in &indices[range] {
+                let row=&list.rows[index];
                 let row_response = ui.push_id((row.pid,row.token),|ui|ui.horizontal(|ui| {
                     cell(ui,RichText::new(row.name()).small(),widths[0],false).on_hover_text(row.name());
                     cell(ui,RichText::new(row.pid_text()).small(),widths[1],true);
@@ -246,6 +270,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
         );
+        let list = Arc::new(list);
         let ctx = egui::Context::default();
         let mut output = egui::FullOutput::default();
         for _ in 0..3 {

@@ -174,10 +174,11 @@ fn cpu_tile(
         })
         .stroke(egui::Stroke::NONE)
         .corner_radius(5.0)
-        .inner_margin(5)
+        .inner_margin(4)
         .show(ui, |ui| {
             ui.vertical(|ui| {
-                ui.set_width((width - 10.0).max(20.0));
+                ui.spacing_mut().item_spacing.y=1.0;
+                ui.set_width((width - 8.0).max(20.0));
                 ui.with_layout(Layout::top_down(Align::Center), |ui| {
                     let badge_width=ui.available_width()*0.7;
                     ui.allocate_ui_with_layout(egui::vec2(badge_width,0.0),Layout::top_down(Align::Center),|ui| {
@@ -362,25 +363,15 @@ fn contributor_table_content(
     };
     compact_table_spacing(ui);
     let colors = *palette(ui);
+    use crate::app::shell::presenters::process_table::{self as table, Column, Sort};
     let cell = |ui: &mut egui::Ui, width: f32, align: Align, text: RichText| {
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(width, COMPACT_TABLE_ROW_HEIGHT),
-            egui::Sense::hover(),
-        );
-        let mut cell_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
-            if align == Align::Max {
-                Layout::right_to_left(Align::Center)
-            } else {
-                Layout::left_to_right(Align::Center)
-            },
-        ));
-        cell_ui.add(
-            egui::Label::new(text)
-                .halign(align)
-                .truncate()
-                .selectable(false),
-        )
+        table::cell(ui, width, align == Align::Max, text)
     };
+    let order_id = egui::Id::new("contributor-table-sort");
+    let mut order = ui
+        .ctx()
+        .data(|d| d.get_temp::<table::Order>(order_id))
+        .unwrap_or_default();
     ui.horizontal(|ui| {
         ui.label(RichText::new(if view.partial {"Processes · partial"} else {"Processes"}).small().strong().color(if view.partial {colors.warning.fg} else {colors.text_secondary})).on_hover_text(
             "Scheduler time on the selected logical CPU; 100% means one fully busy logical CPU. The graph and table use the same original interval. Group charts follow the all/tracked filter; app charts include that app's exact tracked instances. Partial means some work could not be attributed. Current whole-machine process percentages use a different counter. Bounded RAM history can become unavailable earlier under exceptional process churn.");
@@ -389,6 +380,8 @@ fn contributor_table_content(
         ui.label(RichText::new(format!("{mode} · {time}")).size(9.0).color(if historical {colors.accent.fg} else {colors.text_secondary}));
     });
     if !view.available {
+        #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+        super::debug_api::record_contributors(ui.ctx(), view, cpu, &[]);
         ui.label(
             RichText::new(format!("Process data unavailable for CPU{cpu}."))
                 .small()
@@ -401,28 +394,53 @@ fn contributor_table_content(
     let load_width = 48.0;
     let name_width = (width - pid_width - load_width - ui.spacing().item_spacing.x * 2.0).max(40.0);
     ui.horizontal(|ui| {
-        cell(
-            ui,
-            name_width,
-            Align::Min,
-            RichText::new("Process").small().weak(),
-        );
-        cell(
-            ui,
-            pid_width,
-            Align::Max,
-            RichText::new("PID").small().weak(),
-        );
-        cell(
-            ui,
-            load_width,
-            Align::Max,
-            RichText::new(format!("CPU{cpu}"))
-                .small()
-                .strong()
-                .color(colors.success.fg),
-        );
+        let cpu_title = format!("CPU{cpu}");
+        for (i, (title, column, width)) in [
+            ("Process", Column::Name, name_width),
+            ("PID", Column::Pid, pid_width),
+            (&cpu_title, Column::Load, load_width),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let response = table::heading(ui, width, title, column, &mut order);
+            #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+            crate::app::features::diagnostics::debug_mcp::control(
+                format!("sort.contributors.{i}"),
+                &response,
+            );
+            #[cfg(not(all(debug_assertions, feature = "debug-mcp")))]
+            let _ = (i, response);
+        }
     });
+    let indices = ui.ctx().data_mut(|d| {
+        let cached = d.get_temp_mut_or_default::<table::Order>(order_id.with("indices"));
+        cached.sort = order.sort;
+        let sort = order.sort.unwrap_or(Sort {
+            column: Column::Load,
+            descending: true,
+        });
+        cached.prepare(
+            view.revision,
+            view.rows.len(),
+            |_| true,
+            |a, b| {
+                let (a, b) = (&view.rows[a], &view.rows[b]);
+                let primary = match sort.column {
+                    Column::Name => sort.compare(table::name_cmp(&a.process.name, &b.process.name)),
+                    Column::Pid => sort.compare(a.process.pid.cmp(&b.process.pid)),
+                    _ => sort.load(Some(a.load), Some(b.load)),
+                };
+                primary
+                    .then(a.process.pid.cmp(&b.process.pid))
+                    .then(a.process.instance.cmp(&b.process.instance))
+            },
+        );
+        cached.rows.clone()
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(order_id, order));
+    #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+    super::debug_api::record_contributors(ui.ctx(), view, cpu, &indices);
     if view.rows.is_empty() {
         ui.label(
             RichText::new(format!("No measured process load on CPU{cpu}."))
@@ -441,7 +459,7 @@ fn contributor_table_content(
                 view.rows.len(),
                 |ui, range| {
                     for index in range {
-                        let row = &view.rows[index];
+                        let row = &view.rows[indices[index]];
                         let row_response = ui.horizontal(|ui| {
                             cell(
                                 ui,
@@ -493,7 +511,69 @@ fn contributor_height(ctx: &egui::Context) -> f32 {
     (modal_inner_height(ctx) * 0.33).clamp(160.0, 280.0)
 }
 
-fn modal_header(ui: &mut egui::Ui, name: &str) -> bool {
+fn filter_chip(ui: &mut egui::Ui, selected: &mut bool, label: &str) -> egui::Response {
+    let response = ui.add(
+        egui::Button::new(RichText::new(label).size(9.0))
+            .selected(*selected)
+            .corner_radius(4.0)
+            .min_size(egui::vec2(0.0, 17.0)),
+    );
+    if response.clicked() {
+        *selected = !*selected;
+    }
+    response
+}
+
+fn process_scope(app: &AppState, ctx: &egui::Context, target: &RuleTarget) -> std::sync::Arc<str> {
+    type Scope = (RuleTarget, std::sync::Arc<str>);
+    let id = egui::Id::new("app-process-scope");
+    if let Some((_, text)) = ctx
+        .data(|d| d.get_temp::<Scope>(id))
+        .filter(|(key, _)| key == target)
+    {
+        return text;
+    }
+    let value = (|| {
+        let g = app.rules.group_index_for_id(&target.group)?;
+        let r = app.rules.rule_index_for_id(g, &target.rule)?;
+        let state = app.persistent_state.try_read().ok()?;
+        let app = state.groups.get(g)?.programs.get(r)?;
+        Some(scope_text(
+            &app.additional_processes,
+            app.manage_descendants,
+        ))
+    })();
+    let Some(value) = value else {
+        return "Tracked process names unavailable".into();
+    };
+    let text: std::sync::Arc<str> = value.into();
+    ctx.data_mut(|d| d.insert_temp(id, (target.clone(), text.clone())));
+    text
+}
+fn scope_text(names: &[String], descendants: bool) -> String {
+    let names = if names.is_empty() {
+        "managed launches".into()
+    } else {
+        names.join(", ")
+    };
+    format!(
+        "Tracks: {names}{}",
+        if descendants { " + descendants" } else { "" }
+    )
+}
+fn scope_label(ui: &mut egui::Ui, text: &str) {
+    ui.add(
+        egui::Label::new(
+            RichText::new(text)
+                .size(9.0)
+                .color(palette(ui).text_secondary),
+        )
+        .truncate(),
+    )
+    .on_hover_text(text);
+}
+
+fn modal_header(ui: &mut egui::Ui, name: &str, application: bool) -> bool {
     let mut close = false;
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(
@@ -501,8 +581,18 @@ fn modal_header(ui: &mut egui::Ui, name: &str) -> bool {
             Layout::left_to_right(Align::Center),
             |ui| {
                 ui.add(
-                    egui::Label::new(RichText::new(format!("{name} · CPU load")).strong())
-                        .truncate(),
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "{name} · {}",
+                            if application {
+                                "Application CPU"
+                            } else {
+                                "Group CPUs"
+                            }
+                        ))
+                        .strong(),
+                    )
+                    .truncate(),
                 )
             },
         )
@@ -551,19 +641,41 @@ fn view_switch(ui: &mut egui::Ui, processes: &mut bool) {
 pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
     let Some(target) = app.cpu_load.graph.clone() else {
         super::chart::clear(ctx);
+        ctx.data_mut(|d| {
+            d.remove::<super::process_list::CurrentOrder>(
+                egui::Id::new("current-process-sort").with("cache"),
+            );
+            d.remove::<(RuleTarget, std::sync::Arc<str>)>(egui::Id::new("app-process-scope"));
+        });
+        ctx.data_mut(|d| {
+            d.remove::<crate::app::shell::presenters::process_table::Order>(
+                egui::Id::new("contributor-table-sort").with("indices"),
+            )
+        });
         return;
     };
     crate::render_profile_scope!(CpuModal);
+    let app_scope = if let GraphTarget::Process { target, .. } = &target {
+        Some(process_scope(app, ctx, target))
+    } else {
+        None
+    };
     let snapshot = app.cpu_load.snapshot();
     if let GraphTarget::Process { target, name } = &target {
         if app.cpu_load.show_processes {
             let mut close = false;
             let mut mode = true;
-            let response = egui::Modal::new(egui::Id::new("cpu-load-modal")).show(ctx, |ui| {
+            let response = crate::app::shell::presenters::shared_elements::modal(egui::Id::new(
+                "cpu-load-modal",
+            ))
+            .show(ctx, |ui| {
                 let top = ui.cursor().top();
                 ui.set_width((ctx.content_rect().width() - 36.0).clamp(200.0, 356.0));
                 ui.set_height(modal_inner_height(ctx));
-                close = modal_header(ui, name);
+                close = modal_header(ui, name, true);
+                if let Some(scope) = &app_scope {
+                    scope_label(ui, scope);
+                }
                 if let Some(error) = &snapshot.detail_error {
                     ui.add(
                         egui::Label::new(
@@ -690,11 +802,11 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
     let mut show_processes = false;
     #[cfg(all(debug_assertions, feature = "debug-mcp"))]
     super::debug_api::record_graph(ctx, &data, &cpus, selected);
-    let response = egui::Modal::new(egui::Id::new("cpu-load-modal")).show(ctx, |ui| {
+    let response = crate::app::shell::presenters::shared_elements::modal(egui::Id::new("cpu-load-modal")).show(ctx, |ui| {
         let modal_top = ui.cursor().top();
         ui.set_width((ctx.content_rect().width() - 36.0).clamp(200.0, 356.0));
         ui.set_height(modal_inner_height(ctx));
-        close=modal_header(ui,name);
+        close=modal_header(ui,name,process);
         let subtitle = if process {
             "Process load per logical CPU"
         } else if tracked_only && show_all {
@@ -706,10 +818,10 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
         } else {
             "All programs on this group's logical CPUs"
         };
-        ui.label(RichText::new(subtitle).small().weak());
+        if let Some(scope)=&app_scope {scope_label(ui,scope);} else {ui.label(RichText::new(subtitle).small().weak());}
         ui.horizontal(|ui| {
             ui.set_min_height(18.0);
-            let response = ui.checkbox(&mut show_all,"All CPUs");
+            let response = filter_chip(ui,&mut show_all,"All CPUs").on_hover_text("Show every logical CPU. When off, show only the current group mask. This changes which CPU tiles are visible, not the process filter.");
             crate::debug_mcp_control!("graph.all_cpus", response);
             let mode=data.hovered.map(|time|format!("{} · {}",if inspection.pinned.is_some(){"Pinned"}else{"History"},os_api::cpu_load::sample_clock_label(time.wall))).unwrap_or_else(||if data.pending {data.sample.time.map(|time|format!("Live · {}",os_api::cpu_load::sample_clock_label(time.wall))).unwrap_or_else(||"Waiting for events…".into())}else{"Live".into()});
             let color=if data.hovered.is_some(){palette(ui).accent.fg}else{palette(ui).text_secondary};
@@ -717,7 +829,7 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
                 .on_hover_text("Live uses the latest completed interval, including its original time, for both CPU values and process rows. Recent intervals wait for Windows events and fill in at their original positions; real losses stay gaps. Hover to inspect the same sample on every CPU. Left click the plot to pin the time and scroll process details; the next left click releases it. Recording continues.");
         });
         if !process {
-            let response = ui.checkbox(&mut tracked_only,"Tracked processes only").on_hover_text(
+            let response = filter_chip(ui,&mut tracked_only,"Tracked only").on_hover_text(
                 "Unchecked: all observed system processes. Checked: processes tracked by CPU Affinity Tool across all saved groups at the original sample, only on the displayed CPUs. A shared PID/creation-token instance is counted once. This filter changes both graph load and contributor rows; it does not replace historical membership with today's process list."
             );
             crate::debug_mcp_control!("graph.tracked_only", response);
@@ -757,10 +869,11 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
                     .stroke(egui::Stroke::new(1.0,if data.hovered.is_some(){colors.selected.border}else{egui::Color32::TRANSPARENT}))
                     .fill(if data.hovered.is_some(){colors.selected.fill.gamma_multiply(0.3)}else{egui::Color32::TRANSPARENT})
                     .corner_radius(5.0).inner_margin(3).show(ui,|ui| {
-                let width = ((ui.available_width() - 18.0) / 4.0).max(42.0);
+                ui.spacing_mut().item_spacing.y = 5.0;
+                let width = ((ui.available_width() - 24.0) / 4.0).max(42.0);
                 for row in cpus.chunks(4) {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = 8.0;
                         for &cpu in row {
                             if cpu_tile(ui,cpu,selected==Some(cpu),width,&grid) {
                                 selected = Some(cpu);
@@ -831,6 +944,15 @@ mod tests {
     use super::*;
     use crate::app::models::AppStateStorage;
     use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn application_scope_names_configured_processes_and_descendants_explicitly() {
+        assert_eq!(
+            scope_text(&["chrome.exe".into(), "helper.exe".into()], true),
+            "Tracks: chrome.exe, helper.exe + descendants"
+        );
+        assert_eq!(scope_text(&[], false), "Tracks: managed launches");
+    }
 
     #[test]
     fn clipped_cpu_tiles_skip_layout_and_retain_row_geometry() {
@@ -938,7 +1060,7 @@ mod tests {
                 "CPU name must be centered, including selected tiles"
             );
             assert!(badge.top() < tile.top() + 8.0);
-            assert!((badge.width()/(tile.width()-10.0)-0.7).abs()<0.02,
+            assert!((badge.width()/(tile.width()-8.0)-0.7).abs()<0.02,
                 "tile badge must leave symmetric side space and be about 30% narrower: badge={badge:?}, tile={tile:?}");
             assert!(
                 badges.iter().any(|r| r.contains_rect(detail.shrink(1.0))),
@@ -968,6 +1090,7 @@ mod tests {
     fn expanded_contributor_table_shows_at_least_eight_rows_at_nine_hundred_height() {
         let ctx = egui::Context::default();
         let view = super::super::contributors::ContributorView {
+            revision: 1,
             available: true,
             partial: false,
             time: None,
@@ -1029,6 +1152,7 @@ mod tests {
     fn contributor_columns_align_names_left_and_numbers_right() {
         let ctx = egui::Context::default();
         let view = super::super::contributors::ContributorView {
+            revision: 1,
             time: None,
             available: true,
             partial: false,
@@ -1078,6 +1202,7 @@ mod tests {
     fn contributor_table_has_process_pid_cpu_and_explicit_historical_time() {
         let ctx = egui::Context::default();
         let view = super::super::contributors::ContributorView {
+            revision: 1,
             time: Some(super::super::history::SampleTime {
                 seconds: 1.0,
                 wall: std::time::SystemTime::UNIX_EPOCH,

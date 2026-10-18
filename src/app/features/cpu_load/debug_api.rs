@@ -338,10 +338,17 @@ pub(super) fn record_graph(
             rendered_graph(data, cpus, cpu, debug_mcp::wants_series(ctx)),
         );
     }
+}
+pub(super) fn record_contributors(
+    ctx: &egui::Context,
+    view: &super::contributors::ContributorView,
+    cpu: usize,
+    order: &[usize],
+) {
     if let Some((offset, limit)) = debug_mcp::table_page(ctx, "contributors") {
         debug_mcp::table_capture(
             ctx,
-            json!({"kind":"contributors","cpu":cpu,"sample_seconds":data.contributors.time.map(|t|t.seconds),"available":data.contributors.available,"partial":data.contributors.partial,"total":data.contributors.rows.len(),"offset":offset,"rows":data.contributors.rows.iter().skip(offset).take(limit).map(|r|json!({"name":r.process.name.as_ref(),"pid":r.process.pid,"instance":r.process.instance,"load":r.load})).collect::<Vec<_>>()}),
+            json!({"kind":"contributors","cpu":cpu,"sample_seconds":view.time.map(|t|t.seconds),"available":view.available,"partial":view.partial,"total":view.rows.len(),"offset":offset,"rows":order.iter().skip(offset).take(limit).map(|&i| {let r=&view.rows[i];json!({"name":r.process.name.as_ref(),"pid":r.process.pid,"instance":r.process.instance,"load":r.load})}).collect::<Vec<_>>()}),
         );
     }
 }
@@ -361,12 +368,12 @@ fn rendered_graph(
 pub(super) fn record_processes(
     ctx: &egui::Context,
     list: &super::process_list::ProcessList,
-    target: &RuleTarget,
+    order: &[usize],
 ) {
     let Some((offset, limit)) = debug_mcp::table_page(ctx, "processes") else {
         return;
     };
-    let rows = || list.rows.iter().filter(|r| &r.target == target);
+    let rows = || order.iter().map(|&i| &list.rows[i]);
     debug_mcp::table_capture(
         ctx,
         json!({"kind":"processes","ready":list.ready,"total":rows().count(),"offset":offset,"rows":rows().skip(offset).take(limit).map(|r|json!({"name":r.name(),"pid":r.pid,"instance":r.token,"cpu_percent":r.total,"cpus":r.cores,"known_cpus":r.known_cores,"cpu_count":r.cpu_count})).collect::<Vec<_>>()}),

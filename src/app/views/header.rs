@@ -226,6 +226,34 @@ fn navigation_gradient_mesh(rect: egui::Rect, top: Color32, bottom: Color32) -> 
     mesh
 }
 
+fn paint_navigation_connection(
+    ui: &egui::Ui,
+    bounds: egui::Rect,
+    count: usize,
+    selected: usize,
+) -> egui::Rect {
+    // A single scalar in egui's existing animation manager; only paint moves.
+    // Keep the rail against the content-facing edge without adding layout height.
+    let position = ui.ctx().animate_value_with_time(
+        ui.id().with("navigation-connection"),
+        selected as f32,
+        ui.style().animation_time.clamp(0.0, 0.12),
+    );
+    let width = bounds.width() / count as f32;
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(
+            bounds.left() + position * width + 6.0,
+            bounds.bottom() - 2.0,
+        ),
+        egui::pos2(
+            bounds.left() + (position + 1.0) * width - 6.0,
+            bounds.bottom(),
+        ),
+    );
+    ui.painter().rect_filled(rect, 1.0, palette(ui).accent.fg);
+    rect
+}
+
 fn navigation_switch(app: &mut AppState, ui: &mut egui::Ui) {
     egui::Frame::NONE
         .fill(row_fill(ui))
@@ -234,7 +262,7 @@ fn navigation_switch(app: &mut AppState, ui: &mut egui::Ui) {
         .inner_margin(Margin::same(2))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            ui.horizontal(|ui| {
+            let strip = ui.horizontal(|ui| {
                 let width = ui.available_width() / if app.modules_enabled() { 3.0 } else { 2.0 };
                 let groups_selected =
                     matches!(app.ui.current_window, WindowRoute::Groups(GroupRoute::List));
@@ -270,10 +298,21 @@ fn navigation_switch(app: &mut AppState, ui: &mut egui::Ui) {
                 } else {
                     RichText::new("Logs").size(BUTTON_FONT_SIZE)
                 };
-                if navigation_button(ui, logs, logs_selected, width).clicked() {
+                let logs_response = navigation_button(ui, logs, logs_selected, width);
+                crate::debug_mcp_control!("nav.logs", logs_response);
+                if logs_response.clicked() {
                     app.set_current_window(WindowRoute::Logs);
                 }
             });
+            let count = if app.modules_enabled() { 3 } else { 2 };
+            let selected = match app.ui.current_window {
+                WindowRoute::Groups(_)
+                | WindowRoute::AppRunSettings
+                | WindowRoute::InstalledAppPicker => 0,
+                WindowRoute::Tuning => 1,
+                _ => count - 1,
+            };
+            paint_navigation_connection(ui, strip.response.rect, count, selected);
         });
 }
 
@@ -310,6 +349,43 @@ pub fn draw_top_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn navigation_connection_slides_snaps_and_settles_without_layout_motion() {
+        let context = egui::Context::default();
+        let bounds = Rect::from_min_size(Pos2::new(10.0, 10.0), egui::vec2(300.0, 28.0));
+        let frame = |time, index| {
+            let mut rect = Rect::NOTHING;
+            let mut output = context.run_ui(
+                RawInput {
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    rect = super::paint_navigation_connection(ui, bounds, 3, index);
+                },
+            );
+            output.textures_delta.clear();
+            (rect, output)
+        };
+        let (start, _) = frame(0.0, 0);
+        frame(0.1, 2);
+        let (moving, _) = frame(0.16, 2);
+        let (end, _) = frame(0.4, 2);
+        assert!(moving.left() > start.left() && moving.left() < end.left());
+        assert_eq!(start.size(), end.size());
+        assert_eq!(end.bottom(), bounds.bottom());
+        assert!(bounds.contains_rect(end));
+        frame(0.5, 2);
+        let (_, settled) = frame(0.6, 2);
+        assert_eq!(
+            settled.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            std::time::Duration::MAX
+        );
+        context.all_styles_mut(|style| style.animation_time = 0.0);
+        let (snapped, _) = frame(0.7, 0);
+        assert_eq!(snapped, start);
+    }
+
     use super::{draw_top_panel, navigation_button};
     use crate::app::models::AppStateStorage;
     use crate::app::runtime::AppState;

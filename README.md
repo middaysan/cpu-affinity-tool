@@ -50,7 +50,7 @@ This is a control tool, not a promise of better FPS.
 - Open the active data folder directly from **Logs**
 - Choose light, dark, or system theme in **App settings**
 - Enable **Start minimized** in App settings to open the next Windows session in the tray (not Windows login autostart)
-- Hover the monitor status to inspect verified process filenames, PIDs, and owning groups
+- Click the monitor information button to inspect and sort verified process filenames, PIDs, and owning groups
 
 ## When it helps
 

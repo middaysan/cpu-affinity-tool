@@ -13,6 +13,8 @@ pub mod header;
 pub mod installed_app_picker;
 #[path = "../../views/logs.rs"]
 pub mod logs;
+#[path = "../../views/process_table.rs"]
+pub(crate) mod process_table;
 #[path = "../../views/run_settings.rs"]
 pub mod run_settings;
 #[path = "../../views/shared_elements.rs"]
