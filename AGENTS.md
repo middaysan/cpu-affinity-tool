@@ -68,7 +68,7 @@ Current platform reality:
 Key directories:
 - `src/` - application runtime code and entrypoints
 - `src/app/shell/` - the top-level `eframe::App` shell, route enums, transient UI sessions, typed shell events, and presenter module ownership
-- `src/app/shell/render_preparation.rs` - bounded Windows font preparation and the CPU-modal scroll paint budget on the existing GUI thread
+- `src/app/shell/render_preparation.rs` - bounded Windows font preparation and the nonblocking 60 Hz CPU-modal scroll paint budget; the existing native event loop retains queued input until the deadline
 - `src/app/features/` - bounded feature modules for `rules`, `execution`, `preferences`, `shortcut`, `topology`, `diagnostics`, `cpu_load`, and `system_tweaks`
 - `src/app/features/cpu_load/` - Windows-only read-only CPU telemetry, bounded histories, a single sampling worker and the compact group/process graph presenter. Native PDH/process-time/ETW collectors live under `libs/os_api/src/windows/cpu_load/` behind `libs/os_api/src/cpu_load.rs`.
 - `src/app/features/system_tweaks/platform/` - small typed contracts/codecs, the module registry and owned-field controller
@@ -89,7 +89,7 @@ Key directories:
 - `design/` - standalone HTML design reference for the approved compact Inter-based interface; it loads only repository-local assets and is not runtime input
 - `docs/` - release/process documentation and user-facing comparison/rationale references
 - `scripts/` - committed release/build verification helper scripts
-- `vendor/eframe/` - published eframe 0.36.2 with one documented initial-root-visibility fix; upstream provenance, licenses and removal criteria are in `LOCAL-PATCH.md`
+- `vendor/eframe/` - published eframe 0.36.2 with documented initial-root-visibility and opt-in native root-frame deferral fixes; upstream provenance, licenses and removal criteria are in `LOCAL-PATCH.md`
 - `.github/workflows/` - CI and GitHub Release automation
 - `changelogs/` - manual release notes
 - `tasks/` - optional ignored local workspace for task dossiers and cross-session handoff
@@ -265,8 +265,8 @@ Tuning status:
 - background tasks use `tokio`
 - the tuning application runtime uses one dedicated standard thread and bounded request queue for saved candidates, owned-field operations and execution observations. It publishes immutable snapshots; shell polling adopts them while hidden and during bounded shutdown. Native reads never hold GUI-facing snapshot/admission locks.
 - Full System Tweaks card/capability refresh runs only while its page is visible and uncovered. The worker continues owned-field inspection, execution/session reconciliation, display-confirmation expiry and shutdown recovery while hidden. Reopening requests a fresh card snapshot on the same worker. Compact cards use a combined observation/readiness seam; display refresh reuses one tested mode inventory per card refresh. Apply/Undo still perform their independent native validation.
-- CPU graph modals suppress rendering of the underlying active page, keeping the header/footer and ordinary eframe scroll distance and input. During modal wheel smoothing or dragging, a 90 Hz frame budget admits paints on the existing GUI thread with a bounded wait of at most one 11.12 ms interval. Buttons, keys, text and viewport close bypass it immediately. No input is discarded, no new thread or idle timer is added, and actual cadence depends on native presentation. Uncovered pages and non-scrolling idle/hover retain reactive rendering. Each retained original CPU interval additionally stores a bounded one-byte gap category (baseline, numeric contribution capacity, stream/schema/order failure, missing frame or other known failure). Native frame causes propagate to MCP quality and opt-in render logs; resize/overwrite/Off preserve the original-time lifecycle. A category never turns an unknown interval into zero or asserts a more precise cause than was observed.
-- Windows shared-font preparation feeds egui's own caches in at most eight-character portions once per physical UI frame. The fixed font/character set restarts at a changed pixel scale; temporary eight-millisecond repaint requests end after preparation completes. It paints no hidden screen, adds no worker or second text cache, and does not pre-render arbitrary Unicode process names. CPU tiles reuse one measured size qualified by width, scale, font height and spacing; fully clipped tiles reserve that geometry without laying out their labels. Exact current PID display strings follow existing one-second snapshots, invalidation and memory accounting; contributor PID/load strings follow the existing exact-time view cache. Table virtualization, cursor selection and telemetry frequency are unchanged.
+- CPU graph modals suppress rendering of the underlying active page, keeping the header/footer and ordinary eframe scroll distance and input. During modal wheel smoothing or dragging, a 60 Hz frame budget defers painting before consuming native input, using the existing event-loop deadline without sleeping the GUI thread. Buttons, keys, text, viewport changes and close bypass it immediately. No input is discarded, no new thread or idle timer is added, and actual cadence depends on native presentation. Uncovered pages and non-scrolling idle/hover retain reactive rendering. Each retained original CPU interval additionally stores a bounded one-byte gap category (baseline, numeric contribution capacity, stream/schema/order failure, missing frame or other known failure). Native frame causes propagate to MCP quality and opt-in render logs; resize/overwrite/Off preserve the original-time lifecycle. A category never turns an unknown interval into zero or asserts a more precise cause than was observed.
+- Windows shared-font preparation feeds egui's own caches in at most eight-character portions once per physical UI frame. The fixed font/character set covers four subpixel positions and restarts at changed pixel scale or actual text options; temporary eight-millisecond repaint requests end after preparation completes. It paints no hidden screen, adds no worker or second text cache, and does not pre-render arbitrary Unicode process names. CPU tiles reuse one measured size qualified by width, scale, font height and spacing; fully clipped tiles reserve that geometry without laying out their labels. Exact current PID display strings follow existing one-second snapshots, invalidation and memory accounting; contributor PID/load strings follow the existing exact-time view cache. Table virtualization, cursor selection and telemetry frequency are unchanged.
 - The fixed native numeric interval reservation allows 128 positive contribution cells per logical CPU (at least 256), retaining all 16 pending/frame buffers. This startup/churn headroom is reserved once on enable, included in settings estimates and the same 256 MiB admission budget. Exceeding it remains an explicitly categorized gap; buffers do not grow in the event callback.
 - tray callbacks only enqueue typed commands and wake egui; `tray_rx` is owned and drained by `shell::App` on the GUI thread, which exclusively owns `HWND` operations and the terminal Quit transition
 - Windows local shortcut-forwarding requests flow through a shell-owned named-pipe server thread into `shell::App`, with per-request reply channels; request enqueue wakes the `egui` context for prompt draining
@@ -463,7 +463,7 @@ Linux gaps:
 Only list materially relevant dependencies by actual role.
 
 Primary runtime and build dependencies:
-- `eframe` / `egui` - desktop GUI; the root Cargo patch selects the checked-in eframe 0.36.2 copy with its single initial-visibility correction (`vendor/eframe/LOCAL-PATCH.md`), leaving other dependency versions and the event loop unchanged
+- `eframe` / `egui` - desktop GUI; the root Cargo patch selects the checked-in eframe 0.36.2 copy with its initial-visibility correction and opt-in pre-input root-frame deferral (`vendor/eframe/LOCAL-PATCH.md`). The latter uses the existing sleeping event-loop deadline, retains pending input and bypasses native lifecycle events; default clients and the Linux entrypoint retain upstream repaint behavior.
 - `tokio` - background runtime with `rt-multi-thread`, `time`, and `sync`; worker count remains the runtime default
 - `windows` - Win32 bindings for shell integration, process/runtime operations, local IPC, security descriptors, and manifest/resource-adjacent Windows APIs
 - `tray-icon` - Windows tray integration
@@ -515,7 +515,7 @@ Current CI facts:
 - runners:
   - `windows-latest` for the Windows release-path job
   - `ubuntu-24.04` for the Linux desktop beta job
-- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, runs feature-gated real-binary crash probes and isolated forced-process tuning recovery probes, reproduces the stable line-table release build, verifies the built EXE/PDB identity and manifest resource, and verifies the Linux beta binary on `ubuntu-24.04`
+- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, tests the local eframe frame-deferral predicates/deadlines with a temporary lock seeded from the root lock, runs feature-gated real-binary crash probes and isolated forced-process tuning recovery probes, reproduces the stable line-table release build, verifies the built EXE/PDB identity and manifest resource, and verifies the Linux beta binary on `ubuntu-24.04`
 - tests are part of the committed CI contract for `ci.yml`; both jobs require committed lockfiles to remain unchanged after compilation/tests, and the Windows release build reports EXE/PDB byte sizes. The Windows job also runs the MCP launcher's filesystem isolation self-test without launching an app or requesting elevation.
 - the Windows CI job validates the feature-gated Windows binary path explicitly with `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --features windows --bin cpu-affinity-tool`, `scripts/build-windows-release.ps1`, `scripts/test-windows-pdb-verifier.ps1`, and `scripts/assert-windows-release-manifest.ps1` against the built release EXE/PDB pair
 
@@ -567,6 +567,18 @@ Privilege model:
 - `tuning-test-controls` is an explicit nonshipping root/os_api feature for development and lab tuning probes; isolated fixtures and default preflight do not certify canonical ProgramData, elevated cross-user or reboot behavior
 
 Debug MCP diagnostics also remain behind the same debug-only fences. The feature
+uses request-specific captures on the settled reply frame. Mutations/input return
+only an applied/frame acknowledgement; `cpu_state` is a compact snapshot unless
+`include_series=true` explicitly requests the selected numeric series. Table reads
+prepare only the requested bounded page; quality does not materialize a series.
+Font preparation covers four subpixel glyph variants in bounded per-frame chunks
+and invalidates on actual font TextOptions or pixel-scale changes. It reuses egui
+caches and requests no repaint once settled. Its optional profiler stage is
+`font_preparation`; ordinary release compilation removes that instrumentation.
+The CPU-modal scroll budget defers root paints at 60 Hz before native input is
+consumed, preserving queued wheel data and bypassing discrete input; it never
+sleeps the GUI thread. No additional worker or idle repaint timer is introduced.
+The debug feature
 enables the existing opt-in render profiler; `debug_performance.rs` adds a bounded
 4096-frame/61-stage-bucket/64-resource cache fed by its existing writer.
 `cpu_performance` reads it off the GUI thread without native polling or repaint,

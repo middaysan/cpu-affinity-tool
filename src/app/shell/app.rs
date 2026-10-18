@@ -567,6 +567,18 @@ impl App {
 
 impl eframe::App for App {
     #[cfg(all(target_os = "windows", feature = "windows"))]
+    fn repaint_delay(&mut self, ctx: &egui::Context, input: &egui::RawInput) -> Duration {
+        if self.closing_requested || self.is_hidden || self.restore_pending {
+            return Duration::ZERO;
+        }
+        super::render_preparation::scroll_repaint_delay(
+            ctx,
+            input,
+            self.state.cpu_load.graph.is_some(),
+        )
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         if !self.closing_requested && self.state.ui.dropped_files.is_none() {
             if let Some(drop) = self
@@ -581,7 +593,6 @@ impl eframe::App for App {
         if let Some(bridge) = &mut self.debug_mcp {
             bridge.raw_input(&mut self.state, ctx, input);
         }
-        super::render_preparation::pace_scroll(ctx, input, self.state.cpu_load.graph.is_some());
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -744,6 +755,57 @@ mod tests {
         reduce_tray_commands, theme_preference_for_index, viewport_gained_focus, App,
         TrayCommandAction, MONITOR_EVENT_GUI_DRAIN_LIMIT,
     };
+
+    #[cfg(all(target_os = "windows", feature = "windows", feature = "debug-mcp"))]
+    #[test]
+    fn native_frame_deferral_bypasses_shutdown_hidden_and_restore() {
+        use eframe::App as _;
+        let fixture = AppStateStorage::test_fixture(|state| {
+            state.cpu_load_monitoring_enabled = true;
+            state.groups.push(CoreGroup {
+                name: "test".into(),
+                cores: vec![0],
+                programs: vec![],
+                is_hidden: false,
+                run_all_button: false,
+            });
+        });
+        let mut shell =
+            App::new_for_test(AppState::new_for_test(Arc::new(RwLock::new(fixture)), 4));
+        let group_id = shell.state.rules.group_id_for_index(0).unwrap().0;
+        crate::app::features::cpu_load::debug_api::apply(
+            &mut shell.state,
+            &crate::app::features::diagnostics::debug_mcp::Command::OpenGraph {
+                group_id,
+                rule_id: None,
+            },
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 30.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        });
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                egui::Id::new("cpu-scroll-frame-budget"),
+                std::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
+        });
+        for mode in 0..3 {
+            shell.closing_requested = mode == 0;
+            shell.is_hidden = mode == 1;
+            shell.restore_pending = mode == 2;
+            assert_eq!(shell.repaint_delay(&ctx, &input), std::time::Duration::ZERO);
+        }
+        shell.closing_requested = false;
+        shell.is_hidden = false;
+        shell.restore_pending = false;
+        assert!(shell.repaint_delay(&ctx, &input) > std::time::Duration::ZERO);
+    }
     #[cfg(all(target_os = "windows", feature = "windows"))]
     use super::{AppForwardingRuntime, ForwardingServerLifetime};
     use crate::app::features::execution;

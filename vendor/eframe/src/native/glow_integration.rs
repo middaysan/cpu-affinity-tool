@@ -617,6 +617,20 @@ impl GlowWinitRunning<'_> {
             let Some(egui_winit) = viewport.egui_winit.as_mut() else {
                 return Ok(EventResult::Wait);
             };
+            if crate::native::winit_integration::can_defer_frame(
+                &egui_ctx,
+                viewport_id,
+                &viewport.info,
+            ) && !crate::native::winit_integration::is_invisible_or_minimized(window)
+            {
+                let delay = self.app.repaint_delay(&egui_ctx, egui_winit.egui_input());
+                if !delay.is_zero() {
+                    return Ok(EventResult::RepaintAt(
+                        window_id,
+                        std::time::Instant::now() + delay,
+                    ));
+                }
+            }
             let mut raw_input = egui_winit.take_egui_input(window);
             let viewport_ui_cb = viewport.viewport_ui_cb.clone();
 

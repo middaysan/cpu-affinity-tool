@@ -277,6 +277,21 @@ pub trait App {
     ///
     /// This function does not return a value. Any changes to the input should be made directly to `_raw_input`.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, _raw_input: &mut egui::RawInput) {}
+
+    /// Optional native root-frame deferral before queued input is consumed.
+    ///
+    /// Return zero to paint now, or a short delay to use the existing sleeping
+    /// event-loop deadline. Input remains queued and is rechecked on new events.
+    /// Hidden-window logic, child viewports and viewport lifecycle events bypass
+    /// this hook. The default preserves the upstream repaint policy.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn repaint_delay(
+        &mut self,
+        _ctx: &egui::Context,
+        _input: &egui::RawInput,
+    ) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
 }
 
 /// Options controlling the behavior of a native window.

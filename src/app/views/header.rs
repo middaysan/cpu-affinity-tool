@@ -28,7 +28,8 @@ fn settings_menu(app: &mut AppState, ui: &mut egui::Ui) {
             let mut theme_index = app.get_theme_index();
             ui.horizontal(|ui| {
                 for (index, name) in [(0, "System"), (1, "Light"), (2, "Dark")] {
-                    ui.selectable_value(&mut theme_index, index, name);
+                    let response=ui.selectable_value(&mut theme_index, index, name);
+                    crate::debug_mcp_control!(format!("settings.theme.{index}"),response);
                 }
             });
             if theme_index != app.get_theme_index() {

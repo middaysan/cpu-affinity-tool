@@ -26,6 +26,31 @@ use crate::{
 /// See <https://github.com/emilk/egui/issues/7776>.
 const INVISIBLE_WINDOW_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
+fn consume_due_repaint(repaints: &mut HashMap<WindowId, Instant>, window: WindowId, now: Instant) {
+    if repaints.get(&window).is_some_and(|at| *at <= now) {
+        repaints.remove(&window);
+    }
+}
+
+#[cfg(test)]
+mod frame_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn painting_consumes_due_requests_without_losing_future_repaints() {
+        let now = Instant::now();
+        let window = WindowId::from(1);
+        let future = now + Duration::from_millis(16);
+        let mut repaints = HashMap::default();
+        repaints.insert(window, now);
+        consume_due_repaint(&mut repaints, window, now);
+        assert!(!repaints.contains_key(&window));
+        repaints.insert(window, future);
+        consume_due_repaint(&mut repaints, window, now);
+        assert_eq!(repaints.get(&window), Some(&future));
+    }
+}
+
 // ----------------------------------------------------------------------------
 fn create_event_loop(native_options: &mut epi::NativeOptions) -> Result<EventLoop<UserEvent>> {
     #[cfg(target_os = "android")]
@@ -110,8 +135,11 @@ impl<T: WinitApp> WinitAppWrapper<T> {
             && let Ok(EventResult::RepaintNow(window_id)) = event_result
         {
             log::trace!("RepaintNow of {window_id:?}");
-            self.windows_next_repaint_times
-                .insert(window_id, Instant::now());
+            consume_due_repaint(
+                &mut self.windows_next_repaint_times,
+                window_id,
+                Instant::now(),
+            );
 
             // Fix flickering on Windows, see https://github.com/emilk/egui/pull/2280
             event_result = self.winit_app.run_ui_and_paint(event_loop, window_id);
@@ -372,6 +400,13 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
         event_loop_context::with_event_loop_context(event_loop, move || {
             let event_result = match event {
                 winit::event::WindowEvent::RedrawRequested => {
+                    // This paint attempt consumes the queued request. A native
+                    // deferral must not be merged with an already-due deadline.
+                    consume_due_repaint(
+                        &mut self.windows_next_repaint_times,
+                        window_id,
+                        Instant::now(),
+                    );
                     self.winit_app.run_ui_and_paint(event_loop, window_id)
                 }
                 _ => self.winit_app.window_event(event_loop, window_id, event),

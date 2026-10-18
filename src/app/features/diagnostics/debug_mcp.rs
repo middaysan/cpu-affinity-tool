@@ -34,7 +34,10 @@ pub(crate) enum Command {
         limit: usize,
     },
     Wait(WaitOptions),
-    State {},
+    State {
+        #[serde(default)]
+        include_series: bool,
+    },
     OpenGraph {
         group_id: String,
         #[serde(default)]
@@ -103,6 +106,42 @@ struct Control {
 struct Registry {
     entries: Vec<Control>,
 }
+#[derive(Clone, Copy, Default)]
+struct Capture {
+    graph: bool,
+    series: bool,
+    contributors: Option<(usize, usize)>,
+    processes: Option<(usize, usize)>,
+}
+impl Capture {
+    fn for_command(command: &Command) -> Self {
+        match command {
+            Command::State { include_series } => Self {
+                graph: true,
+                series: *include_series,
+                ..Self::default()
+            },
+            Command::Quality { .. } => Self {
+                graph: true,
+                ..Self::default()
+            },
+            Command::Table {
+                kind,
+                offset,
+                limit,
+            } if *limit > 0 && *limit <= 100 && *offset <= 100_000 => Self {
+                contributors: (kind == "contributors").then_some((*offset, *limit)),
+                processes: (kind == "processes").then_some((*offset, *limit)),
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
+}
+fn capture(ctx: &egui::Context) -> Capture {
+    ctx.data(|d| d.get_temp::<Capture>(egui::Id::new(CAPTURE)))
+        .unwrap_or_default()
+}
 pub(crate) fn control(id: impl Into<String>, response: &egui::Response) {
     rect_control(
         &response.ctx,
@@ -139,8 +178,18 @@ pub(crate) fn rect_control(
     });
 }
 pub(crate) fn wants_capture(ctx: &egui::Context) -> bool {
-    ctx.data(|d| d.get_temp::<bool>(egui::Id::new(CAPTURE)))
-        .unwrap_or(false)
+    capture(ctx).graph
+}
+pub(crate) fn wants_series(ctx: &egui::Context) -> bool {
+    capture(ctx).series
+}
+pub(crate) fn table_page(ctx: &egui::Context, kind: &str) -> Option<(usize, usize)> {
+    let plan = capture(ctx);
+    if kind == "contributors" {
+        plan.contributors
+    } else {
+        plan.processes
+    }
 }
 pub(crate) fn graph_capture(ctx: &egui::Context, value: Value) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(GRAPH), value));
@@ -326,7 +375,7 @@ impl Bridge {
                 input.events.push(egui::Event::PointerGone);
                 crate::app::features::cpu_load::debug_api::apply(app, &request.command)
             }
-            Command::State {}
+            Command::State { .. }
             | Command::Table { .. }
             | Command::Quality { .. }
             | Command::CloseApp {} => Ok(()),
@@ -346,13 +395,18 @@ impl Bridge {
         ctx.request_repaint();
     }
     pub(crate) fn begin_ui(&self, ctx: &egui::Context) {
+        let frame = ctx.cumulative_frame_nr();
         ctx.data_mut(|d| {
             d.get_temp_mut_or_default::<Registry>(egui::Id::new(REGISTRY))
                 .entries
                 .clear();
             d.insert_temp(
                 egui::Id::new(CAPTURE),
-                self.pending.as_ref().is_some_and(|p| p.wait.is_none()),
+                self.pending
+                    .as_ref()
+                    .filter(|p| p.wait.is_none() && frame >= p.after)
+                    .map(|p| Capture::for_command(&p.request.command))
+                    .unwrap_or_default(),
             );
             d.remove::<Value>(egui::Id::new(GRAPH));
             d.remove::<Value>(egui::Id::new(TABLE));
@@ -405,23 +459,13 @@ impl Bridge {
                 } else {
                     ctx.data(|d| d.get_temp::<Value>(egui::Id::new(TABLE)))
                         .filter(|v| v["kind"] == *kind)
-                        .map(|mut v| {
-                            let rows = v["rows"].as_array().cloned().unwrap_or_default();
-                            v["total"] = json!(rows.len());
-                            v["offset"] = json!(offset);
-                            v["rows"] = json!(rows
-                                .into_iter()
-                                .skip(*offset)
-                                .take(*limit)
-                                .collect::<Vec<_>>());
-                            v
-                        })
                         .ok_or_else(|| {
                             "Open the requested contributors/processes view first".into()
                         })
                 }
             }
-            _ => state(app, ctx),
+            Command::State { .. } => state(app, ctx),
+            _ => Ok(json!({"frame":ctx.cumulative_frame_nr(),"applied":true})),
         };
         let close = matches!(pending.request.command, Command::CloseApp {});
         let body = match value {

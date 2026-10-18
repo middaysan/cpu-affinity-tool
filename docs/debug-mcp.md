@@ -47,6 +47,16 @@ times, nulls and partial flags are preserved. `cpu_monitor` changes one isolated
 monitoring preference per call. App-only process tables and group-only filters
 retain their ordinary UI semantics.
 
+Mutation/input replies contain only `frame` and `applied`, after a settled frame.
+Read `cpu_state` explicitly to inspect the result. Its default graph snapshot
+contains tile values and `series_points`, without the numeric series; use
+`cpu_state(include_series=true)` when those original points are required.
+`cpu_table` builds only the requested page (at most 100 rows), retaining `total`
+and `offset`. Quality requests capture selected CPU/time without a full series.
+Input and wait commands do not serialize histories or tables. Large series
+construction remains an explicit diagnostic read and should not run on every
+pointer event when measuring normal interaction cost.
+
 `cpu_state` also returns `tweaks`: the worker's published card/recovery status,
 revision, operation, current/previous summaries, remaining display-confirmation
 time, selected section, help and cached PC checks. This performs no native read
@@ -77,8 +87,8 @@ requests are marked in render-profiling logs. `cpu_close_test_app` performs norm
 shutdown, including stopping the owned scheduler trace.
 
 One blocking transport worker, four queued requests, bounded input/reply sizes
-and eight-second GUI deadlines constrain the bridge. Graph/table serialization
-occurs only on request. No second collector, history matrix, polling timer,
+and eight-second GUI deadlines constrain the bridge. Graph/table capture occurs
+only for the requested data on the settled reply frame. No second collector, history matrix, polling timer,
 arbitrary file API, shell command, app launch or direct affinity/tweak RPC is exposed.
 The session key protects this intentional elevated debug surface; this is not a
 remote-management feature or an interface for untrusted clients.

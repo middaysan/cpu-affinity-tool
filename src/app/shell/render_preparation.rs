@@ -2,7 +2,7 @@ use eframe::egui;
 use std::time::Duration;
 use std::time::Instant;
 
-const SCROLL_FRAME: Duration = Duration::from_nanos(1_000_000_000 / 90);
+const SCROLL_FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 const FONT_CHUNK: usize = 8;
 const FONT_TEXT: &str =
     "CPU0123456789%*—: .,-/()abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ<>…·";
@@ -33,7 +33,11 @@ fn urgent_input(input: &egui::RawInput) -> bool {
         })
 }
 
-pub(super) fn pace_scroll(ctx: &egui::Context, input: &egui::RawInput, modal: bool) {
+pub(super) fn scroll_repaint_delay(
+    ctx: &egui::Context,
+    input: &egui::RawInput,
+    modal: bool,
+) -> Duration {
     let id = egui::Id::new("cpu-scroll-frame-budget");
     let scrolling = modal
         && input.viewport_id == egui::ViewportId::ROOT
@@ -44,35 +48,44 @@ pub(super) fn pace_scroll(ctx: &egui::Context, input: &egui::RawInput, modal: bo
             || ctx.input(|i| i.is_scrolling() || i.pointer.is_decidedly_dragging()));
     if !scrolling {
         ctx.data_mut(|d| d.remove::<Instant>(id));
-        return;
+        return Duration::ZERO;
     }
     let age = ctx
         .data(|d| d.get_temp::<Instant>(id))
         .map(|at| at.elapsed());
     let delay = scroll_delay(age, true, urgent_input(input));
-    // Bound the existing GUI thread's paint cadence, without an idle timer or
-    // dropping/coalescing input. Discrete actions bypass this short wait.
-    if !delay.is_zero() {
-        std::thread::sleep(delay);
+    // The native event loop retains input until the deadline. Never sleep here
+    // or advance the budget when a repaint was only deferred.
+    if delay.is_zero() {
+        ctx.data_mut(|d| d.insert_temp(id, Instant::now()));
     }
-    ctx.data_mut(|d| d.insert_temp(id, Instant::now()));
+    delay
 }
 
 #[derive(Clone, Default)]
 struct FontWarmup {
     scale: f32,
+    options: Option<egui::epaint::TextOptions>,
     font: usize,
     cursor: usize,
+    variant: u8,
     frame: Option<u64>,
 }
 impl FontWarmup {
     fn done(&self) -> bool {
         self.font == FONT_SIZES.len()
     }
-    fn next(&mut self, scale: f32, frame: u64) -> Option<(egui::FontId, &'static str)> {
-        if self.scale != scale {
+    fn next(
+        &mut self,
+        scale: f32,
+        options: &egui::epaint::TextOptions,
+        frame: u64,
+    ) -> Option<(egui::FontId, &'static str, f32)> {
+        if self.scale != scale || self.options.as_ref() != Some(options) {
             *self = Self {
                 scale,
+                options: Some(*options),
+                frame: self.frame,
                 ..Default::default()
             };
         }
@@ -92,12 +105,17 @@ impl FontWarmup {
             egui::FontFamily::Proportional
         };
         let font = egui::FontId::new(FONT_SIZES[self.font], family);
-        self.cursor += end;
-        if self.cursor == FONT_TEXT.len() {
-            self.cursor = 0;
-            self.font += 1;
+        let offset = f32::from(self.variant) / 4.0 / scale;
+        self.variant += 1;
+        if self.variant == 4 {
+            self.variant = 0;
+            self.cursor += end;
+            if self.cursor == FONT_TEXT.len() {
+                self.cursor = 0;
+                self.font += 1;
+            }
         }
-        Some((font, text))
+        Some((font, text, offset))
     }
 }
 
@@ -106,13 +124,38 @@ pub(super) fn warm_fonts(ctx: &egui::Context) {
     let mut state = ctx
         .data(|d| d.get_temp::<FontWarmup>(id))
         .unwrap_or_default();
-    if state.done() && state.scale == ctx.pixels_per_point() {
+    let options = ctx.fonts(|fonts| *fonts.fonts.options());
+    #[cfg(feature = "render-profiling")]
+    if state
+        .options
+        .as_ref()
+        .is_some_and(|previous| previous != &options)
+    {
+        crate::app::features::diagnostics::render_profile::note("font_options_changed");
+    }
+    if state.done()
+        && state.scale == ctx.pixels_per_point()
+        && state.options.as_ref() == Some(&options)
+    {
         return;
     }
-    if let Some((font, text)) = state.next(ctx.pixels_per_point(), ctx.cumulative_frame_nr()) {
+    if let Some((font, text, offset)) =
+        state.next(ctx.pixels_per_point(), &options, ctx.cumulative_frame_nr())
+    {
+        crate::render_profile_scope!(FontPreparation);
         // Use egui's own glyph/galley caches; do not paint or keep a second copy.
         ctx.fonts_mut(|fonts| {
-            let _ = fonts.layout_no_wrap(text.into(), font, egui::Color32::WHITE);
+            // Isolate each glyph so its subpixel position is independent of
+            // shaping/advances of the preceding characters in this batch.
+            for character in text.chars() {
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    character.to_string(),
+                    font.clone(),
+                    egui::Color32::WHITE,
+                );
+                job.sections[0].leading_space = offset;
+                let _ = fonts.layout_job(job);
+            }
         });
     }
     let done = state.done();
@@ -130,6 +173,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scroll_budget_uses_sixty_frames_per_second() {
+        let delay = scroll_delay(Some(Duration::from_millis(3)), true, false);
+        assert!(delay > Duration::from_millis(13) && delay < Duration::from_millis(14));
+    }
+
+    #[test]
+    fn deferred_paint_keeps_wheel_events_and_does_not_move_deadline() {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 30.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        });
+        let key = egui::Id::new("cpu-scroll-frame-budget");
+        assert_eq!(scroll_repaint_delay(&ctx, &input, true), Duration::ZERO);
+        let at = ctx.data(|d| d.get_temp::<Instant>(key)).unwrap();
+        let delay = scroll_repaint_delay(&ctx, &input, true);
+        if !delay.is_zero() {
+            assert_eq!(ctx.data(|d| d.get_temp::<Instant>(key)), Some(at));
+        }
+        assert_eq!(input.events.len(), 1);
+        assert_eq!(scroll_repaint_delay(&ctx, &input, false), Duration::ZERO);
+        assert!(ctx.data(|d| d.get_temp::<Instant>(key)).is_none());
+    }
+
+    #[test]
     fn scroll_budget_is_bounded_and_bypasses_idle_and_discrete_input() {
         assert_eq!(scroll_delay(None, true, false), Duration::ZERO);
         assert_eq!(
@@ -141,7 +212,7 @@ mod tests {
             Duration::ZERO
         );
         let delay = scroll_delay(Some(Duration::from_millis(3)), true, false);
-        assert!(delay > Duration::from_millis(8) && delay < Duration::from_millis(9));
+        assert!(delay > Duration::from_millis(13) && delay < Duration::from_millis(14));
         assert_eq!(
             scroll_delay(Some(Duration::from_millis(20)), true, false),
             Duration::ZERO
@@ -189,12 +260,15 @@ mod tests {
     fn font_preparation_is_incremental_once_per_frame_and_restarts_at_new_scale() {
         let mut state = FontWarmup::default();
         let mut pieces = Vec::new();
-        for frame in 0..256 {
-            if let Some((font, text)) = state.next(1.75, frame) {
+        let options = egui::epaint::TextOptions::default();
+        for frame in 0..512 {
+            if let Some((font, text, offset)) = state.next(1.75, &options, frame) {
                 assert!(text.chars().count() <= FONT_CHUNK);
                 assert!(!text.is_empty());
-                pieces.push((font.size, text));
-                assert!(state.next(1.75, frame).is_none());
+                if offset == 0.0 {
+                    pieces.push((font.size, text));
+                }
+                assert!(state.next(1.75, &options, frame).is_none());
             } else {
                 break;
             }
@@ -208,8 +282,8 @@ mod tests {
                 .collect();
             assert_eq!(joined, FONT_TEXT);
         }
-        assert!(state.next(1.75, 300).is_none());
-        assert!(state.next(2.0, 301).is_some());
+        assert!(state.next(1.75, &options, 600).is_none());
+        assert!(state.next(2.0, &options, 601).is_some());
         assert!(!state.done());
     }
 
@@ -218,7 +292,7 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.set_fonts(super::super::presenters::shared_elements::ui_font_definitions());
         let mut finished = false;
-        for _ in 0..256 {
+        for _ in 0..512 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| warm_fonts(ui.ctx()));
             output.textures_delta.clear();
             if ctx.data(|d| d.get_temp::<bool>(egui::Id::new("ui-font-preparation-ready")))
@@ -237,5 +311,66 @@ mod tests {
                     > Duration::from_secs(1)
             );
         }
+    }
+
+    #[test]
+    fn font_preparation_restarts_after_text_options_change() {
+        let ctx = egui::Context::default();
+        ctx.set_visuals(egui::Visuals::dark());
+        ctx.set_fonts(super::super::presenters::shared_elements::ui_font_definitions());
+        for _ in 0..512 {
+            let mut output = ctx.run_ui(Default::default(), |ui| warm_fonts(ui.ctx()));
+            output.textures_delta.clear();
+        }
+        assert_eq!(
+            ctx.data(|d| d.get_temp::<bool>(egui::Id::new("ui-font-preparation-ready"))),
+            Some(true)
+        );
+        ctx.set_visuals(egui::Visuals::light());
+        let mut output = ctx.run_ui(Default::default(), |ui| warm_fonts(ui.ctx()));
+        output.textures_delta.clear();
+        assert_eq!(
+            ctx.data(|d| d.get_temp::<bool>(egui::Id::new("ui-font-preparation-ready"))),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn prepared_glyphs_cover_all_subpixel_positions() {
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(1.75);
+        ctx.set_fonts(super::super::presenters::shared_elements::ui_font_definitions());
+        for _ in 0..512 {
+            let mut output = ctx.run_ui(Default::default(), |ui| warm_fonts(ui.ctx()));
+            output.textures_delta.clear();
+        }
+        let mut unchanged = false;
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            ui.ctx().fonts_mut(|fonts| {
+                let before = fonts.image();
+                for (index, size) in FONT_SIZES.into_iter().enumerate() {
+                    let family = if index + 1 == FONT_SIZES.len() {
+                        super::super::presenters::shared_elements::inter_semibold_family()
+                    } else {
+                        egui::FontFamily::Proportional
+                    };
+                    for c in FONT_TEXT.chars() {
+                        for bin in 0..4 {
+                            let mut job = egui::text::LayoutJob::simple_singleline(
+                                c.to_string(),
+                                egui::FontId::new(size, family.clone()),
+                                egui::Color32::WHITE,
+                            );
+                            job.sections[0].leading_space = bin as f32 / 4.0 / 1.75;
+                            let _ = fonts.layout_job(job);
+                        }
+                    }
+                }
+                let after = fonts.image();
+                unchanged = before.size == after.size && before.pixels == after.pixels;
+            });
+        });
+        output.textures_delta.clear();
+        assert!(unchanged, "prepared glyphs still allocate bitmap variants");
     }
 }

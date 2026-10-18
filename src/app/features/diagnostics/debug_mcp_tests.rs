@@ -1,6 +1,84 @@
 use super::*;
 
 #[test]
+fn input_ack_does_not_capture_or_clone_graph_history() {
+    use crate::app::models::AppStateStorage;
+    use std::sync::RwLock;
+    let mut app = AppState::new_for_test(
+        Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
+        4,
+    );
+    let ctx = egui::Context::default();
+    let (_, rx) = mpsc::sync_channel(1);
+    let (reply, result) = mpsc::sync_channel(1);
+    let mut bridge = Bridge {
+        requests: rx,
+        _transport: None,
+        pending: Some(Pending {
+            request: Request {
+                id: 1,
+                command: Command::Live {},
+                reply,
+                deadline: Instant::now() + std::time::Duration::from_secs(5),
+            },
+            after: 0,
+            wait: None,
+        }),
+        screenshot: None,
+    };
+    let mut output = ctx.run_ui(Default::default(), |ui| {
+        bridge.begin_ui(ui.ctx());
+        assert!(
+            !wants_capture(ui.ctx()),
+            "input must not materialize history"
+        );
+        bridge.end_ui(&mut app, ui.ctx());
+    });
+    output.textures_delta.clear();
+    let Reply::Json(body) = result.try_recv().unwrap() else {
+        panic!("expected acknowledgement")
+    };
+    assert_eq!(body["data"]["applied"], true);
+    assert!(body["data"].get("rendered_graph").is_none());
+}
+
+#[test]
+fn explicit_series_capture_is_opt_in() {
+    assert!(
+        serde_json::from_value::<Command>(json!({"action":"state","include_series":true})).is_ok()
+    );
+}
+
+#[test]
+fn read_capture_is_request_scoped_and_bounded() {
+    let light = Capture::for_command(&Command::State {
+        include_series: false,
+    });
+    assert!(
+        light.graph && !light.series && light.contributors.is_none() && light.processes.is_none()
+    );
+    assert!(
+        Capture::for_command(&Command::State {
+            include_series: true
+        })
+        .series
+    );
+    let page = Capture::for_command(&Command::Table {
+        kind: "contributors".into(),
+        offset: 99,
+        limit: 2,
+    });
+    assert_eq!(page.contributors, Some((99, 2)));
+    assert!(!page.graph && !page.series && page.processes.is_none());
+    let invalid = Capture::for_command(&Command::Table {
+        kind: "processes".into(),
+        offset: 0,
+        limit: 101,
+    });
+    assert!(invalid.processes.is_none());
+}
+
+#[test]
 fn wait_timeout_returns_observed_failure_and_releases_the_request() {
     use crate::app::models::AppStateStorage;
     use std::sync::RwLock;
@@ -373,14 +451,17 @@ fn egui_input_updates_real_settings_then_reply_reads_the_settled_frame() {
     );
     frame(&mut bridge, &mut app);
     let Reply::Json(body) = result.try_recv().unwrap() else {
-        panic!("expected state")
+        panic!("expected acknowledgement")
     };
     assert_eq!(body["ok"], true);
+    assert_eq!(body["data"]["applied"], true);
+    assert!(body["data"].get("settings").is_none());
+    let snapshot = state(&mut app, &ctx).unwrap();
     assert_eq!(
-        body["data"]["settings"]["open"], true,
+        snapshot["settings"]["open"], true,
         "input must hit the actual widget"
     );
-    assert!(body["data"]["controls"]
+    assert!(snapshot["controls"]
         .as_array()
         .unwrap()
         .iter()

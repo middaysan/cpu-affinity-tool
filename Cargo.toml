@@ -53,5 +53,5 @@ render-profiling = ["os_api/render-profiling"]
 debug-mcp = ["render-profiling"]
 
 [patch.crates-io]
-# Preserve the requested initial visibility of the native root window (egui #8459).
+# Preserve initial visibility (egui #8459) and allow nonblocking root-frame deferral.
 eframe = { path = "vendor/eframe" }

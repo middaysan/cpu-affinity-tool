@@ -422,3 +422,99 @@ normal app exit returned zero and original user settings were preserved.
 Ignored evidence is `target/cpu19-scroll-optimized{,-analysis,-data-check,
 -finish,-exit}.json`, its `-render.jsonl` and screenshots. Desktop `BUILD.json`
 and `CPU19-results.json` identify the exact measured package.
+
+## Nonblocking scroll and request-specific MCP follow-up, 2026-10-18
+
+The next investigation separated application work from diagnostic capture and
+waiting. Three changes now use the existing GUI/transport infrastructure:
+
+- MCP mutations acknowledge the settled frame without constructing state,
+  history or tables. Default state reads omit the numeric series; an explicit
+  `include_series=true` read requests it. Table capture builds only the requested
+  bounded page. These changes remain debug-only.
+- Font preparation covers all four subpixel glyph positions, invalidating on
+  actual text options as well as scale. Each frame prepares at most eight
+  characters at one position in egui's own cache. The new optional profiling
+  scope distinguishes this work from the surrounding UI.
+- CPU-modal scroll painting uses a 60 Hz native deadline before consuming input,
+  replacing the previous GUI-thread sleep. The existing event loop retains the
+  pending input. Discrete input, closing, hidden/restore states and native
+  viewport changes bypass deferral. There is no new thread or idle timer.
+
+The optimized debug-MCP EXE SHA256 is
+`594F9BA1FFBF4B9D5547372918B537A62ABAA8128DD851B59A6BFC3E80928586`,
+PDB GUID `be7ee014-9934-44bc-9dd5-29ca73c91dc1`, age 1. The ordinary release
+SHA256 is `B22D21B2FEF8EC1221AF2B5CFB59272DEC418E96FDC63C36AF74D995B2EA0970`,
+PDB GUID `c7ed23a3-39d4-4222-a49e-54b4ac2335ac`, age 1. Both Desktop pairs
+were verified. Release marker checks exclude the MCP/profiling implementation.
+
+The actual stdio MCP run lasted 343 seconds on CPU19/BelowNormal, twenty logical
+CPUs, four saved apps and 1,800-second retention. The driver ran on CPU18. Scene
+windows excluded their crossing resource samples; full raw logs supply GUI
+statistics. CPU below is the entire instrumented process relative to one
+logical CPU. The previous column is the immediately preceding read-only
+investigation, not a simultaneous paired benchmark or a shipping-build estimate.
+
+| Scene | Previous CPU | New CPU | New frames/s | New GUI p95 / max, ms |
+| --- | ---: | ---: | ---: | ---: |
+| Groups, idle | 2.07% | 1.42% | 4.74 | 0.641 / 0.902 |
+| App graph, idle | 1.80% | 1.93% | 4.58 | 0.919 / 1.394 |
+| Graph hover, 10 requests/s | 9.14% | 8.07% | 43.11 | 0.613 / 3.992 |
+| App PID table, idle | 2.04% | 1.73% | 5.42 | 0.559 / 0.722 |
+| App PID scroll, 20 requests/s | 15.32% | 9.59% | 58.85 | 0.491 / 0.865 |
+| Pinned contributors, wheel 2 requests/s | 7.00% | 6.66% | 28.60 | 0.605 / 2.188 |
+| Host group graph, idle | 1.65% | 2.23% | 6.54 | 0.754 / 1.005 |
+| Tracked group graph, idle | 1.90% | 2.13% | 4.56 | 0.775 / 0.902 |
+
+PID scrolling fell by 37.4% in process CPU, from about 87.5 to 58.8 paints/s.
+Its GUI p95 fell from 0.730 to 0.491 ms. The first Chrome graph after preparation
+took 3.088 ms versus 16.490 ms previously. Twelve opening/All-CPU sequences had
+maxima of 2.042–7.389 ms; they include the option changes and intervening frames,
+not only the transition frame. After light/dark preparation the first graph
+openings took 2.157 and 1.989 ms.
+
+Default state reads at 10 Hz measured 5.90% CPU and 0.706 ms GUI p95; explicit
+series reads measured 6.29% and 1.223 ms. The off-GUI performance read measured
+1.76% and 0.767 ms. Default reads still cause GUI frames, and explicit full
+series reads still have a diagnostic cost; these are not normal idle scenes.
+The bounded performance cache now reserves 293,424 bytes.
+
+Cold work remains. Initial startup took 24.980 ms. Immediate light/dark changes
+each took about 31.8 ms and 110 million scheduled thread cycles, distributed
+across header, central content and footer after the font-options reset. Bounded
+preparation improves subsequent first use but cannot warm every required glyph
+before that same theme-change frame. A separate 32.747 ms startup-period frame
+had only 4.86 million scheduled cycles, supporting waiting/descheduling rather
+than 32 ms of CPU execution. No universal stutter-free claim is supported.
+
+Steady monitoring scene endpoints used 232.45–235.22 MiB private memory, versus
+roughly 225–230 MiB previously. Additional prepared glyph variants retain memory;
+this short run does not isolate allocations or certify absence of leaks. Off
+released history and current rows and reduced private memory to 211.77 MiB;
+the preceding tracked scene was 233.91 MiB, a 22.15 MiB difference. Off CPU was
+1.38%. No telemetry frequency, attribution, history reservation or collector was
+reduced to obtain the scroll improvement.
+
+Pinned Chrome and host samples matched graph, quality and contributor CPU/time
+identities. The complete Chrome subtotal differed by less than 0.00000001
+percentage points; host attribution remained explicitly partial. Paged rows
+matched their pinned full-page slice. The pin survived contributor scrolling.
+The first epoch grew from 33 to 317 completed rows while retaining one initial
+baseline gap and two pending rows, with no new lost intervals. Off confirmed
+release and empty history; On produced a completed interval with its own
+baseline gap. Pending and unavailable cells remain distinct from zero.
+
+The 7.52 MB log ended with zero dropped/queued records. Closing during scrolling
+returned exit code zero, and original user settings were unchanged. Regression
+checks passed: 703 debug/MCP tests, 674 ordinary tests, nine Python protocol
+tests and two native eframe frame-deadline/admission tests. Strict ordinary/debug
+Clippy, formatting, native hidden-root/restore smoke, builds, EXE/PDB identities
+and manifest checks passed. The eframe regressions are now also in Windows CI.
+Ignored evidence is `target/gui-fix-{study,analysis,host-result,launch,checks}.json`
+and the exact package log named by `target/gui-fix-ready.json`.
+
+An independent Astra review found no actionable introduced bugs in the native
+deferral/deadline, input/lifecycle, font-cache or MCP capture/paging changes.
+Its documentation finding was corrected. The review was read-only; WGPU and
+broader DPI/driver combinations received source inspection, while actual native
+evidence above exercises Windows/Glow on this host.

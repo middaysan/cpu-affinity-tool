@@ -7,6 +7,13 @@ import cpu_affinity_mcp as server
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_series_is_an_explicit_state_read_option(self):
+        calls=[]
+        request={"id":1,"method":"tools/call","params":{"name":"cpu_state","arguments":{"include_series":True}}}
+        result=server.dispatch(request, lambda body: calls.append(body) or {"ok":True})
+        self.assertFalse(result["result"]["isError"])
+        self.assertEqual(calls,[{"action":"state","include_series":True}])
+
     def test_stdio_reply_is_utf8_even_with_a_windows_legacy_output_encoding(self):
         request = {"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"cpu_state", "arguments":{}}}
         source = io.TextIOWrapper(io.BytesIO((server.json.dumps(request) + "\n").encode("utf-8")), encoding="utf-8")

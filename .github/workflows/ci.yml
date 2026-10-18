@@ -59,6 +59,17 @@ jobs:
       - name: Run headless debug MCP tests
         run: cargo test --features windows,debug-mcp,diagnostics-test-controls --bin cpu-affinity-tool debug_mcp
 
+      - name: Test local eframe frame deferral
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath Cargo.lock -Destination vendor/eframe/Cargo.lock
+          try {
+            cargo test --manifest-path vendor/eframe/Cargo.toml --lib --no-default-features --features accesskit,default_fonts,glow,wayland,x11 --target-dir target frame_
+            if ($LASTEXITCODE -ne 0) { throw 'Local eframe regression tests failed' }
+          } finally {
+            Remove-Item -LiteralPath vendor/eframe/Cargo.lock
+          }
+
       - name: Run Windows tuning recovery probes
         shell: pwsh
         run: ./scripts/test-windows-tuning-recovery.ps1

@@ -669,7 +669,7 @@ impl WgpuWinitRunning<'_> {
             };
             egui_winit::update_viewport_info(info, &integration.egui_ctx, window, false);
 
-            let is_visible = viewport.info.visible().unwrap_or(true);
+            let is_visible = info.visible().unwrap_or(true);
 
             {
                 profiling::scope!("set_window");
@@ -679,6 +679,20 @@ impl WgpuWinitRunning<'_> {
             let Some(egui_winit) = egui_winit.as_mut() else {
                 return Ok(EventResult::Wait);
             };
+            if crate::native::winit_integration::can_defer_frame(
+                &integration.egui_ctx,
+                viewport_id,
+                info,
+            ) && !crate::native::winit_integration::is_invisible_or_minimized(window)
+            {
+                let delay = app.repaint_delay(&integration.egui_ctx, egui_winit.egui_input());
+                if !delay.is_zero() {
+                    return Ok(EventResult::RepaintAt(
+                        window_id,
+                        std::time::Instant::now() + delay,
+                    ));
+                }
+            }
             let mut raw_input = egui_winit.take_egui_input(window);
 
             let show_ui = is_visible || is_viewport_or_descendant_visible(viewports, viewport_id);

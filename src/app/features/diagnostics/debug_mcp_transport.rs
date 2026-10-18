@@ -233,7 +233,12 @@ mod tests {
         let body = r#"{"action":"state"}"#;
         write!(client,"POST /rpc HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer test-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
         let request = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(matches!(request.command, Command::State {}));
+        assert!(matches!(
+            request.command,
+            Command::State {
+                include_series: false
+            }
+        ));
         assert_eq!(request.id, 7);
         request
             .reply

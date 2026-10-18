@@ -17,6 +17,63 @@ pub fn is_invisible_or_minimized(window: &Window) -> bool {
     window.is_visible() == Some(false) || window.is_minimized() == Some(true)
 }
 
+/// Only a stable root viewport may postpone painting queued input. Resize,
+/// DPI/focus changes and lifecycle events must reach the application promptly.
+pub(crate) fn can_defer_frame(
+    ctx: &egui::Context,
+    id: ViewportId,
+    info: &egui::ViewportInfo,
+) -> bool {
+    id == ViewportId::ROOT
+        && info.events.is_empty()
+        && ctx.input(|input| {
+            let previous = input.viewport();
+            previous.inner_rect == info.inner_rect
+                && previous.native_pixels_per_point == info.native_pixels_per_point
+                && previous.focused == info.focused
+        })
+}
+
+#[cfg(test)]
+mod frame_deferral_tests {
+    use super::*;
+
+    #[test]
+    fn only_stable_root_frames_can_be_deferred() {
+        let ctx = egui::Context::default();
+        let initial = ctx.input(|input| input.viewport().clone());
+        assert!(can_defer_frame(&ctx, ViewportId::ROOT, &initial));
+        assert!(!can_defer_frame(
+            &ctx,
+            ViewportId::from_hash_of("child"),
+            &initial
+        ));
+        for changed in [
+            egui::ViewportInfo {
+                events: vec![egui::ViewportEvent::Close],
+                ..initial.clone()
+            },
+            egui::ViewportInfo {
+                inner_rect: Some(egui::Rect::from_min_size(
+                    Default::default(),
+                    egui::vec2(500.0, 400.0),
+                )),
+                ..initial.clone()
+            },
+            egui::ViewportInfo {
+                native_pixels_per_point: Some(2.0),
+                ..initial.clone()
+            },
+            egui::ViewportInfo {
+                focused: Some(true),
+                ..initial.clone()
+            },
+        ] {
+            assert!(!can_defer_frame(&ctx, ViewportId::ROOT, &changed));
+        }
+    }
+}
+
 /// On Mac, a minimized window uses up all CPU:
 /// <https://github.com/emilk/egui/issues/325>
 ///

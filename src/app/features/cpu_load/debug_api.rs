@@ -8,6 +8,44 @@ use serde_json::{json, Value};
 mod tests {
     use super::*;
     #[test]
+    fn compact_graph_read_does_not_expand_retained_history() {
+        use super::super::{
+            contributors::ContributorView,
+            history::{HistoricalSample, Overview, Series, SeriesPoint},
+            runtime::GraphData,
+        };
+        let mut series = Series::default();
+        series.points = (0..1801)
+            .map(|i| SeriesPoint {
+                seconds: i as f64,
+                timestamp: std::time::UNIX_EPOCH,
+                value: None,
+                partial: false,
+                parked: None,
+            })
+            .collect();
+        let sample = HistoricalSample::default();
+        let overview = Overview::default();
+        let contributors = ContributorView::default();
+        let data = GraphData {
+            series: &series,
+            overview: &overview,
+            sample: &sample,
+            hovered: None,
+            contributors: &contributors,
+            pending: true,
+            available: true,
+        };
+        let compact = rendered_graph(&data, &[], Some(0), false);
+        assert_eq!(compact["series_points"], 1801);
+        assert!(compact.get("series").is_none());
+        assert!(compact.to_string().len() < 1024);
+        let detailed = rendered_graph(&data, &[], Some(0), true);
+        assert_eq!(detailed["series"].as_array().unwrap().len(), 1801);
+        assert!(detailed["series"][0]["load"].is_null());
+        assert!(detailed["series"][0]["parked"].is_null());
+    }
+    #[test]
     fn current_pid_quality_preserves_missing_values_and_deduplicates_owners() {
         let one = RuleTarget {
             group: GroupId("g".into()),
@@ -294,29 +332,43 @@ pub(super) fn record_graph(
     cpus: &[usize],
     cpu: Option<usize>,
 ) {
-    if !debug_mcp::wants_capture(ctx) {
-        return;
+    if debug_mcp::wants_capture(ctx) {
+        debug_mcp::graph_capture(
+            ctx,
+            rendered_graph(data, cpus, cpu, debug_mcp::wants_series(ctx)),
+        );
     }
+    if let Some((offset, limit)) = debug_mcp::table_page(ctx, "contributors") {
+        debug_mcp::table_capture(
+            ctx,
+            json!({"kind":"contributors","cpu":cpu,"sample_seconds":data.contributors.time.map(|t|t.seconds),"available":data.contributors.available,"partial":data.contributors.partial,"total":data.contributors.rows.len(),"offset":offset,"rows":data.contributors.rows.iter().skip(offset).take(limit).map(|r|json!({"name":r.process.name.as_ref(),"pid":r.process.pid,"instance":r.process.instance,"load":r.load})).collect::<Vec<_>>()}),
+        );
+    }
+}
+fn rendered_graph(
+    data: &super::runtime::GraphData<'_>,
+    cpus: &[usize],
+    cpu: Option<usize>,
+    include_series: bool,
+) -> Value {
     let tiles:Vec<_>=cpus.iter().map(|&c|json!({"cpu":c,"load":data.sample.values.get(c),"partial":data.sample.partial.get(c),"parked":data.sample.parked.get(c),"activity":data.overview.activity.get(c)})).collect();
-    debug_mcp::graph_capture(
-        ctx,
-        json!({"cpu":cpu,"sample_seconds":data.sample.time.map(|t|t.seconds),"inspected_seconds":data.hovered.map(|t|t.seconds),"pending":data.pending,"available":data.available,"tiles":tiles,"series":data.series.points.iter().map(|p|json!({"seconds":p.seconds,"load":p.value,"partial":p.partial,"parked":p.parked})).collect::<Vec<_>>()}),
-    );
-    debug_mcp::table_capture(
-        ctx,
-        json!({"kind":"contributors","cpu":cpu,"sample_seconds":data.contributors.time.map(|t|t.seconds),"available":data.contributors.available,"partial":data.contributors.partial,"rows":data.contributors.rows.iter().map(|r|json!({"name":r.process.name.as_ref(),"pid":r.process.pid,"instance":r.process.instance,"load":r.load})).collect::<Vec<_>>()}),
-    );
+    let mut value = json!({"cpu":cpu,"sample_seconds":data.sample.time.map(|t|t.seconds),"inspected_seconds":data.hovered.map(|t|t.seconds),"pending":data.pending,"available":data.available,"tiles":tiles,"series_points":data.series.points.len()});
+    if include_series {
+        value["series"]=json!(data.series.points.iter().map(|p|json!({"seconds":p.seconds,"load":p.value,"partial":p.partial,"parked":p.parked})).collect::<Vec<_>>());
+    }
+    value
 }
 pub(super) fn record_processes(
     ctx: &egui::Context,
     list: &super::process_list::ProcessList,
     target: &RuleTarget,
 ) {
-    if !debug_mcp::wants_capture(ctx) {
+    let Some((offset, limit)) = debug_mcp::table_page(ctx, "processes") else {
         return;
-    }
+    };
+    let rows = || list.rows.iter().filter(|r| &r.target == target);
     debug_mcp::table_capture(
         ctx,
-        json!({"kind":"processes","ready":list.ready,"rows":list.rows.iter().filter(|r|&r.target==target).map(|r|json!({"name":r.name(),"pid":r.pid,"instance":r.token,"cpu_percent":r.total,"cpus":r.cores,"known_cpus":r.known_cores,"cpu_count":r.cpu_count})).collect::<Vec<_>>()}),
+        json!({"kind":"processes","ready":list.ready,"total":rows().count(),"offset":offset,"rows":rows().skip(offset).take(limit).map(|r|json!({"name":r.name(),"pid":r.pid,"instance":r.token,"cpu_percent":r.total,"cpus":r.cores,"known_cpus":r.known_cores,"cpu_count":r.cpu_count})).collect::<Vec<_>>()}),
     );
 }
