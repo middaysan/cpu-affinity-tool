@@ -518,3 +518,27 @@ deferral/deadline, input/lifecycle, font-cache or MCP capture/paging changes.
 Its documentation finding was corrected. The review was read-only; WGPU and
 broader DPI/driver combinations received source inspection, while actual native
 evidence above exercises Windows/Glow on this host.
+
+
+## DX12 integration into MR22 — 2026-10-18
+
+The tested DX12 source snapshot is now integrated into the original `docs/modular-gaming-features-plan` branch. Windows explicitly uses WGPU/DX12 with `MemoryUsage`; Linux retains Glow. This includes shared theme rasterization, bounded 32-glyph preparation, the equivalent-default epaint hinting fix, eight-byte contributor entries, guarded GUI relative priority +1 within BelowNormal/CPU19, and the compact green CPU selection/ruled monitoring tables. Experimental window titles and registry installation stamps are not included. See [the renderer contract](windows-rendering.md) and local vendor patch records for scope and removal criteria.
+
+The paired acceptance used the last delivered compact DX12 EXE as the baseline and the integrated canonical line-table release as the candidate. Windows11 / i5-14600KF / twenty logical CPUs / RX9070XT / 175% DPI. Own affinity0x80000 and BelowNormal were verified; the observer ran on CPU18, and an owned finite producer ran on CPU12. Thirty-five idle child processes supplied a genuinely scrollable current table, with43 total tracked Python instances in the observed snapshot. Enforcement, autorun and System Tweaks were disabled in isolated sidecars. No builds ran inside timed windows.
+
+A190.3-second functional/resource run passed four positive exact-original-time graph/table comparisons, pin persistence during list access, settings/retention changes, full history release on Off and fresh samples on On. Both initial collection epochs had zero lost rows after baseline expiry: baseline28 completed/2 pending; integrated29 completed/2 pending. Pending remains unavailable. Actual table offsets changed by more than100logical pixels. Native release minimize/tray restoration, normal close and five-second hidden startup with zero initial root-show events passed. Roots hid in16.5–16.7ms and process exits were about376ms.
+
+An initial single release pair differed by about17MiB private memory. A separate153.0-second reverse-order ABBA repeat showed that both EXEs vary across launches, so the initial pair is not treated as a fixed regression. The following are means of two clean-release scrolling windows per EXE, with neither MCP nor profiling in those processes:
+
+| Actual long-table scroll | Delivered compact DX12 | Integrated MR22 |
+| --- | ---: | ---: |
+| CPU, percent of ONE CPU19 | 8.82% | 8.71% |
+| Private Bytes, mean | 161.44MiB | 162.50MiB |
+| Private Bytes, observed range | 150.73–172.15MiB | 152.32–172.68MiB |
+| Working set, mean | 120.50MiB | 122.03MiB |
+
+Instrumented MCP scrolling was9.82% vs9.27% of one CPU19. GUI p95 was0.660ms for both; maxima were0.963 vs1.253ms. These GUI spans exclude full native/driver latency. The existing approximately62ms cold native PDH-related startup limit was not reclassified as fixed. Short run ranges, different diagnostics and the earlier7.03% result from another viewport/workload must not be mixed into an identical-workload claim. The evidence supports retention of the DX12 memory/speed benefits, within observed startup/allocation/host variation, rather than a universal performance improvement.
+
+Both runs passed, all72 owned children exited normally, all test windows closed and working settings hashes were unchanged. The exact measured integrated release SHA256 is `645521591d91481891178d2a0f9d9161f764061a95beb9b0b32b59637ab30cd9`. Matching PDB/administrator manifest and absence of MCP/profiler markers passed. Local acceptance:683 ordinary app tests,712 debug/MCP tests,170OS tests plus one doctest,47epaint tests,2eframe regressions,9Python protocol tests, launcher isolation, both production/debug Clippy configurations, formatting and RustSec audit passed. The audit retains the five already documented informational warnings; no vulnerability exception was added. Local raw evidence is ignored under `target/dx12-integration/` and its `repeat/` directory.
+
+Independent final Astra reviews are intentionally deferred until the user finishes the remaining UI feedback. Committing this integration is not a merge, release approval or certification of other GPU/driver/RDP combinations. Exact-head Windows/Linux CI remains the publication gate for this commit.

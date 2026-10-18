@@ -3,6 +3,25 @@ use std::sync::Arc;
 
 pub const BUTTON_FONT_SIZE: f32 = 10.5;
 pub const FORM_INPUT_HEIGHT: f32 = 28.0;
+
+pub const COMPACT_TABLE_ROW_HEIGHT: f32 = 14.0;
+
+pub fn compact_table_spacing(ui: &mut egui::Ui) {
+    ui.spacing_mut().item_spacing.y = 1.0;
+    ui.spacing_mut().interact_size.y = COMPACT_TABLE_ROW_HEIGHT;
+}
+
+pub fn table_row_separator(ui: &egui::Ui, rect: egui::Rect) {
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom(),
+        Stroke::new(
+            1.0 / ui.pixels_per_point(),
+            palette(ui).border_subtle.gamma_multiply(0.7),
+        ),
+    );
+}
+
 pub const INTER_REGULAR_FONT_NAME: &str = "Inter Regular";
 pub const INTER_MEDIUM_FONT_NAME: &str = "Inter Medium";
 pub const INTER_SEMIBOLD_FONT_NAME: &str = "Inter Semibold";
@@ -332,6 +351,8 @@ pub fn form_text_edit(text: &mut String) -> egui::TextEdit<'_> {
 }
 
 pub fn apply_widget_visuals(visuals: &mut egui::Visuals) {
+    // Theme colors must not invalidate the shared glyph atlas and text cache.
+    visuals.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Off;
     let dark_mode = visuals.dark_mode;
     let palette = palette_for_dark_mode(dark_mode);
     let radius = egui::CornerRadius::same(5);
@@ -388,6 +409,11 @@ pub fn apply_widget_visuals(visuals: &mut egui::Visuals) {
 
     visuals.selection.bg_fill = palette.selected.fill;
     visuals.selection.stroke = Stroke::new(1.0, palette.selected.fg);
+}
+
+pub fn install_ui_fonts(ctx: &egui::Context) {
+    ctx.set_fonts(ui_font_definitions());
+    ctx.all_styles_mut(|style| apply_widget_visuals(&mut style.visuals));
 }
 
 fn apply_tone_to_visuals(visuals: &mut egui::Visuals, tokens: ToneTokens) {
@@ -633,6 +659,76 @@ fn strong_border(ui: &egui::Ui) -> Color32 {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn initial_font_setup_preserves_the_first_frames_rasterized_text() {
+        use eframe::egui;
+        use std::sync::Arc;
+
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(1.75);
+        super::install_ui_fonts(&ctx);
+        let mut previous = None;
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                let mut visuals = egui::Visuals::dark();
+                super::apply_widget_visuals(&mut visuals);
+                ui.ctx().set_visuals(visuals);
+                let galley = ui.ctx().fonts_mut(|fonts| {
+                    fonts.layout_no_wrap(
+                        "CPU19 12% · Processes · 22:10:34".to_owned(),
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::WHITE,
+                    )
+                });
+                if let Some(previous) = &previous {
+                    assert!(
+                        Arc::ptr_eq(previous, &galley),
+                        "first-frame theme application discarded cached text"
+                    );
+                }
+                previous = Some(galley);
+            });
+            output.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn theme_changes_reuse_rasterized_text() {
+        use eframe::egui;
+        use std::sync::Arc;
+
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(1.75);
+        ctx.set_fonts(super::ui_font_definitions());
+        let mut previous = None;
+        for dark in [true, false, true, false] {
+            let mut visuals = if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            };
+            super::apply_widget_visuals(&mut visuals);
+            ctx.set_visuals(visuals);
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                let galley = ui.ctx().fonts_mut(|fonts| {
+                    fonts.layout_no_wrap(
+                        "CPU19 12% · Processes · 22:10:34".to_owned(),
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::WHITE,
+                    )
+                });
+                if let Some(previous) = &previous {
+                    assert!(
+                        Arc::ptr_eq(previous, &galley),
+                        "changing only the theme discarded cached text"
+                    );
+                }
+                previous = Some(galley);
+            });
+            output.textures_delta.clear();
+        }
+    }
+
+    #[test]
     fn close_template_has_one_size_and_uses_each_themes_red_palette() {
         use eframe::egui;
         for dark in [true, false] {
@@ -857,6 +953,57 @@ mod tests {
         assert_eq!(
             selected_tone_feedback_stroke(tokens, true, true),
             Some(Stroke::new(2.0, tokens.fg))
+        );
+    }
+    #[test]
+    fn bundled_font_pixels_remain_identical_after_hinting_cache_reuse() {
+        let mut actual = Vec::new();
+        for scale in [1.0, 1.25, 1.75] {
+            let ctx = eframe::egui::Context::default();
+            ctx.set_pixels_per_point(scale);
+            super::install_ui_fonts(&ctx);
+            let mut hash = 0xcbf29ce484222325u64;
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                ui.ctx().fonts_mut(|fonts| {
+                    for family in [
+                        FontFamily::Proportional,
+                        super::inter_medium_family(),
+                        super::inter_semibold_family(),
+                    ] {
+                        for size in [9.0, 10.5, 12.0, 16.0, 19.0] {
+                            for bin in 0..4 {
+                                let mut job = eframe::egui::text::LayoutJob::simple_singleline(
+                                    "CPU19 42% Chrome — Привет Ядро ✓⚙…".to_owned(),
+                                    eframe::egui::FontId::new(size, family.clone()),
+                                    Color32::WHITE,
+                                );
+                                job.sections[0].leading_space = bin as f32 / 4.0 / scale;
+                                let _ = fonts.layout_job(job);
+                            }
+                        }
+                    }
+                    let image = fonts.image();
+                    for byte in image
+                        .size
+                        .into_iter()
+                        .flat_map(|n| (n as u64).to_le_bytes())
+                        .chain(image.pixels.iter().flat_map(|pixel| pixel.to_array()))
+                    {
+                        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+                    }
+                });
+            });
+            output.textures_delta.clear();
+            actual.push(hash);
+        }
+        println!("FONT_PIXEL_BASELINE={actual:?}");
+        assert_eq!(
+            actual,
+            [
+                3198809121559153442,
+                9985481743074764138,
+                4433918113974858919
+            ]
         );
     }
 }

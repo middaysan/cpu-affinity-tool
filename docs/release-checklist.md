@@ -15,6 +15,7 @@ Use `docs/release-process.md` for the current automated tag-release flow and rel
 - Confirm `README.md` and `AGENTS.md` describe Windows as the primary stable released platform and Linux as a separate beta prerelease track without stable parity.
 - Confirm `README.md` documents the administrator/UAC expectation from `app.manifest`, including that saved-rule shortcut launches may show UAC.
 - Confirm `README.md` matches the current interface terminology: **Add installed...**, **Add file...**, **Affinity groups**, **Logs**, **Monitoring active**, the pause/resume icon, and **App settings**.
+- Confirm Windows uses WGPU/DX12 with `MemoryUsage`, Linux retains Glow, and both local eframe/epaint patches retain provenance and license files. Include Windows hidden startup, tray restore, close, both themes and per-core graph/table smoke for renderer changes.
 - Confirm the bundled Inter font and its SIL Open Font License file are present under `assets/fonts` and included in the release commit.
 - Confirm shortcut docs explain current elevated token Desktop placement, including credential-over-the-shoulder UAC placing shortcuts on the elevated account's Desktop.
 - Confirm version markers are aligned manually before tagging: release tag `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`. The workflow validates these again after the tag is pushed.

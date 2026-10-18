@@ -161,7 +161,9 @@ pub(super) fn draw(
     crate::render_profile_scope!(CurrentProcesses);
     #[cfg(all(debug_assertions, feature = "debug-mcp"))]
     super::debug_api::record_processes(ui.ctx(), list, target);
-    use crate::app::shell::presenters::shared_elements::palette;
+    use crate::app::shell::presenters::shared_elements::{
+        compact_table_spacing, palette, table_row_separator, COMPACT_TABLE_ROW_HEIGHT,
+    };
     use eframe::egui::{self, Align, Layout, RichText};
     let colors = *palette(ui);
     let top = ui.cursor().top();
@@ -183,7 +185,10 @@ pub(super) fn draw(
         .on_hover_text("The footer and this table use tracked exact PID/creation-token instances. Refresh times can differ. This current table includes idle and unavailable instances; graph contributors include only measured work on the selected CPU/time. An unknown sibling can make the app's complete aggregate unavailable.");
     let widths = [(ui.available_width() - 202.0).max(46.0), 46.0, 46.0, 86.0];
     let cell = |ui: &mut egui::Ui, text: RichText, width: f32, right: bool| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 18.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(width, COMPACT_TABLE_ROW_HEIGHT),
+            egui::Sense::hover(),
+        );
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(if right {
             Layout::right_to_left(Align::Center)
         } else {
@@ -192,6 +197,7 @@ pub(super) fn draw(
         child.add(egui::Label::new(text).truncate().selectable(false))
     };
     ui.scope(|ui| {
+        compact_table_spacing(ui);
         ui.spacing_mut().item_spacing.x=6.0;
         ui.horizontal(|ui|for (i,title) in ["Process","PID","CPU %","CPUs"].iter().enumerate(){
             let response=cell(ui,RichText::new(*title).small().weak(),widths[i],i==1||i==2);
@@ -200,10 +206,10 @@ pub(super) fn draw(
         });
         ui.separator();
         let height=(available_height-(ui.cursor().top()-top)).max(60.0);
-        let scroll = egui::ScrollArea::vertical().id_salt("cpu-process-list").min_scrolled_height(height).max_height(height).auto_shrink([false,false]).show_rows(ui,18.0,count,|ui,range| {
+        let scroll = egui::ScrollArea::vertical().id_salt("cpu-process-list").min_scrolled_height(height).max_height(height).auto_shrink([false,false]).show_rows(ui,COMPACT_TABLE_ROW_HEIGHT,count,|ui,range| {
             if count==0 {ui.label(if list.ready{"No tracked processes for this app."}else{"Waiting for the first tracked-process snapshot…"});}
             for row in rows().skip(range.start).take(range.len()) {
-                ui.push_id((row.pid,row.token),|ui|ui.horizontal(|ui| {
+                let row_response = ui.push_id((row.pid,row.token),|ui|ui.horizontal(|ui| {
                     cell(ui,RichText::new(row.name()).small(),widths[0],false).on_hover_text(row.name());
                     cell(ui,RichText::new(row.pid_text()).small(),widths[1],true);
                     cell(ui,RichText::new(row.load_text()).small(),widths[2],true);
@@ -213,6 +219,7 @@ pub(super) fn draw(
                         for &(cpu,load) in &row.cores {ui.label(format!("CPU{cpu}: {}",super::view::percent(Some(load))));}
                     });
                 }));
+                table_row_separator(ui, row_response.inner.response.rect);
             }
         });
         #[cfg(all(debug_assertions, feature = "debug-mcp"))]
@@ -226,6 +233,61 @@ pub(super) fn draw(
 mod tests {
     use super::*;
     use crate::app::shared::ids::{GroupId, RuleId};
+
+    #[test]
+    fn compact_current_table_paints_dense_rows_and_separators() {
+        use eframe::egui;
+        let target = RuleTarget {
+            group: GroupId("g".into()),
+            rule: RuleId("r".into()),
+        };
+        let list = ProcessList::from_tracking(
+            &HashMap::from([(target.clone(), (1000..1040).map(|pid| (pid, 1)).collect())]),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let ctx = egui::Context::default();
+        let mut output = egui::FullOutput::default();
+        for _ in 0..3 {
+            output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| draw(ui, &list, &target, 330.0),
+            );
+            output.textures_delta.clear();
+        }
+        let positions = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t)
+                    if t.galley
+                        .text()
+                        .parse::<u32>()
+                        .is_ok_and(|pid| (1000..1040).contains(&pid)) =>
+                {
+                    Some(t.pos.y)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(positions.len() > 10);
+        assert!(
+            positions[1] - positions[0] <= 15.1,
+            "current rows must be compact: {:?}",
+            &positions[..2]
+        );
+        let lines=output.shapes.iter().filter(|s|matches!(&s.shape,egui::Shape::LineSegment{points,stroke} if (points[0].y-points[1].y).abs()<0.1 && (points[1].x-points[0].x).abs()>250.0 && stroke.width<=1.0)).count();
+        assert!(
+            lines >= positions.len() - 1,
+            "each visible current row needs a subtle separator"
+        );
+    }
 
     #[test]
     fn cached_row_text_tracks_partial_complete_and_invalidated_snapshots() {

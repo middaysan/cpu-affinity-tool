@@ -70,6 +70,17 @@ jobs:
             Remove-Item -LiteralPath vendor/eframe/Cargo.lock
           }
 
+      - name: Test local epaint hinting compatibility
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath Cargo.lock -Destination vendor/epaint/Cargo.lock
+          try {
+            cargo test --manifest-path vendor/epaint/Cargo.toml --lib --target-dir target
+            if ($LASTEXITCODE -ne 0) { throw 'Local epaint regression tests failed' }
+          } finally {
+            Remove-Item -LiteralPath vendor/epaint/Cargo.lock
+          }
+
       - name: Run Windows tuning recovery probes
         shell: pwsh
         run: ./scripts/test-windows-tuning-recovery.ps1

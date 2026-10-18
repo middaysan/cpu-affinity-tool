@@ -38,6 +38,35 @@ fn current_masks() -> Result<(usize, usize), String> {
 }
 
 impl OS {
+    /// Prefer the GUI within our BelowNormal process; preserve worker priorities.
+    pub fn prefer_current_gui_thread() -> Result<(), String> {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_PRIORITY,
+            THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_NORMAL,
+        };
+        use windows::Win32::System::WindowsProgramming::THREAD_PRIORITY_ERROR_RETURN;
+        if Self::get_process_priority(std::process::id())? != crate::PriorityClass::BelowNormal {
+            return Err("GUI scheduling requires the own BelowNormal process policy".into());
+        }
+        let thread = unsafe { GetCurrentThread() };
+        let previous = unsafe { GetThreadPriority(thread) };
+        if previous == THREAD_PRIORITY_ERROR_RETURN as i32 {
+            return Err("Read own GUI thread priority failed".into());
+        }
+        if previous != THREAD_PRIORITY_NORMAL.0 && previous != THREAD_PRIORITY_ABOVE_NORMAL.0 {
+            return Err("Own GUI thread already has an explicit priority; left unchanged".into());
+        }
+        unsafe { SetThreadPriority(thread, THREAD_PRIORITY_ABOVE_NORMAL) }
+            .map_err(|error| format!("Set own GUI thread priority failed: {error}"))?;
+        if unsafe { GetThreadPriority(thread) } == THREAD_PRIORITY_ABOVE_NORMAL.0 {
+            Ok(())
+        } else {
+            let restore = unsafe { SetThreadPriority(thread, THREAD_PRIORITY(previous)) };
+            Err(format!(
+                "Own GUI thread priority readback differs; restoration: {restore:?}"
+            ))
+        }
+    }
     /// Startup-only hard affinity for this process, including its future workers.
     /// Classic process masks cannot safely choose a global CPU across groups.
     pub fn pin_current_process_to_last_cpu() -> Result<usize, String> {
@@ -127,6 +156,15 @@ mod tests {
             }
         });
         OS::set_current_process_priority(crate::PriorityClass::BelowNormal).unwrap();
+        OS::prefer_current_gui_thread().unwrap();
+        assert_eq!(
+            unsafe {
+                windows::Win32::System::Threading::GetThreadPriority(
+                    windows::Win32::System::Threading::GetCurrentThread(),
+                )
+            },
+            1
+        );
         assert_eq!(OS::pin_current_process_to_last_cpu().unwrap(), cpu);
         let desired = 1usize << cpu;
         assert_eq!(current_masks().unwrap().0, desired);
@@ -137,7 +175,15 @@ mod tests {
         barrier.wait();
         existing.join().unwrap();
         std::thread::spawn(move || {
-            assert_eq!(unsafe { GetCurrentProcessorNumber() } as usize, cpu)
+            assert_eq!(unsafe { GetCurrentProcessorNumber() } as usize, cpu);
+            assert_eq!(
+                unsafe {
+                    windows::Win32::System::Threading::GetThreadPriority(
+                        windows::Win32::System::Threading::GetCurrentThread(),
+                    )
+                },
+                0
+            );
         })
         .join()
         .unwrap();

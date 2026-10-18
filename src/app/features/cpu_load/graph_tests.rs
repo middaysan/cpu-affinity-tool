@@ -690,7 +690,12 @@ fn app_activity_rails_follow_the_retained_window_independent_of_hover_or_pin() {
                 .iter()
                 .filter_map(|shape| match &shape.shape {
                     egui::Shape::Rect(r)
-                        if r.fill == green && (r.rect.width() - 3.0).abs() < 0.1 =>
+                        if r.fill == green && (r.rect.width() - 3.0).abs() < 0.1
+                            && output.shapes.iter().any(|parent| matches!(&parent.shape, egui::Shape::Rect(tile)
+                                if tile.rect.width() > 40.0 && tile.rect.height() < 100.0
+                                && tile.rect.contains_rect(r.rect)
+                                && (tile.rect.right() - r.rect.right() - 3.0).abs() < 0.2
+                                && (r.rect.top() - tile.rect.top() - tile.rect.height() * 0.2).abs() < 0.2)) =>
                     {
                         Some(r.rect)
                     }
@@ -1090,7 +1095,7 @@ fn cpu_selection_links_the_tile_graph_and_table_even_when_parked_or_outside() {
         context
             .run_ui(egui::RawInput::default(), |ui| {
                 let colors = crate::app::shell::presenters::shared_elements::palette(ui);
-                accent = colors.accent.fg;
+                accent = colors.success.fg;
                 check_fg = colors.primary.fg;
             })
             .textures_delta
@@ -1116,7 +1121,7 @@ fn cpu_selection_links_the_tile_graph_and_table_even_when_parked_or_outside() {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(output.shapes.iter().filter(|s| matches!(&s.shape,egui::Shape::LineSegment {points,stroke} if stroke.color==check_fg && tile_rect.contains(points[0]) && tile_rect.contains(points[1]))).count(),2,"selection needs a painted check, not color alone");
+        assert_eq!(output.shapes.iter().filter(|s| matches!(&s.shape,egui::Shape::LineSegment {points,stroke} if stroke.color==check_fg && tile_rect.contains(points[0]) && tile_rect.contains(points[1]))).count(),0,"selection uses the green badge and outline without a painted check");
         assert!(
             label(&output, "No measured process load on CPU12.").is_some(),
             "zero must name the selected CPU"

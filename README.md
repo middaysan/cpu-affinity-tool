@@ -5,6 +5,7 @@ Windows utility for managing CPU affinity of games and background applications.
 - Primary stable released platform: Windows
 - Linux desktop beta: source build on `x86_64` `glibc`, manual smoke on `X11` or `Wayland`, plus prerelease artifacts under `linux-beta-v*` tags
 - Stable download artifact: Windows only
+- Windows rendering: WGPU / DirectX 12 with memory-oriented allocation; Linux beta retains OpenGL
 - Linux beta prereleases: [GitHub Releases](https://github.com/middaysan/cpu-affinity-tool/releases)
 - Download: [Latest Release](https://github.com/middaysan/cpu-affinity-tool/releases/latest)
 - License: [MIT](./LICENSE)

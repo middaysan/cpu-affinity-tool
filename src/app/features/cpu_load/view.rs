@@ -84,12 +84,24 @@ fn cpu_badge(
     ui: &mut egui::Ui,
     cpu: usize,
     size: f32,
+    selected: bool,
     color: Option<egui::Color32>,
 ) -> egui::Response {
     let colors = *palette(ui);
     egui::Frame::NONE
-        .fill(colors.primary.fill)
-        .stroke(egui::Stroke::new(1.0, colors.accent.border))
+        .fill(if selected {
+            colors.success.fg
+        } else {
+            colors.primary.fill
+        })
+        .stroke(egui::Stroke::new(
+            1.0,
+            if selected {
+                colors.success.fg
+            } else {
+                colors.accent.border
+            },
+        ))
         .corner_radius(4.0)
         .inner_margin(egui::Margin::symmetric(if size < 10.0 { 4 } else { 6 }, 2))
         .show(ui, |ui| {
@@ -98,7 +110,11 @@ fn cpu_badge(
                     RichText::new(format!("CPU{cpu}"))
                         .size(size)
                         .strong()
-                        .color(color.unwrap_or(colors.primary.fg)),
+                        .color(if selected {
+                            colors.success.fill
+                        } else {
+                            color.unwrap_or(colors.primary.fg)
+                        }),
                 )
                 .truncate(),
             );
@@ -141,16 +157,16 @@ fn cpu_tile(
     let colors = *palette(ui);
     let has_activity =
         data.show_app_activity && data.overview.activity.get(cpu).copied().unwrap_or(false);
-    let border = if outside {
+    let border = if selected {
+        colors.success.fg
+    } else if outside {
         colors.danger.fg
-    } else if selected {
-        colors.accent.fg
     } else {
         colors.border_strong
     };
     let frame=egui::Frame::NONE
         .fill(if selected {
-            colors.selected.fill
+            colors.success.fill
         } else if parked == Some(true) {
             colors.warning.fill
         } else {
@@ -166,7 +182,7 @@ fn cpu_tile(
                     let badge_width=ui.available_width()*0.7;
                     ui.allocate_ui_with_layout(egui::vec2(badge_width,0.0),Layout::top_down(Align::Center),|ui| {
                         ui.set_width(badge_width);
-                        cpu_badge(ui,cpu,9.0,outside.then_some(colors.danger.fg));
+                        cpu_badge(ui,cpu,9.0,selected,outside.then_some(colors.danger.fg));
                     });
                 });
                 ui.scope(|ui| {
@@ -203,7 +219,7 @@ fn cpu_tile(
             ui.painter().rect_stroke(
                 rect.shrink(2.0),
                 3.0,
-                egui::Stroke::new(2.0, colors.accent.fg),
+                egui::Stroke::new(2.0, colors.danger.fg),
                 egui::StrokeKind::Inside,
             );
         }
@@ -213,23 +229,8 @@ fn cpu_tile(
                 rect.left_bottom() + egui::vec2(4.0, -6.0),
             ),
             2.0,
-            colors.accent.fg,
+            colors.success.fg,
         );
-        let check = egui::Rect::from_min_size(
-            rect.right_top() + egui::vec2(-19.0, 4.0),
-            egui::vec2(12.0, 12.0),
-        );
-        ui.painter().rect_filled(check, 3.0, colors.primary.fill);
-        let start = check.min;
-        for [a, b] in [
-            [egui::vec2(2.5, 6.0), egui::vec2(5.0, 8.5)],
-            [egui::vec2(5.0, 8.5), egui::vec2(9.5, 3.5)],
-        ] {
-            ui.painter().line_segment(
-                [start + a, start + b],
-                egui::Stroke::new(1.5, colors.primary.fg),
-            );
-        }
     }
     if has_activity {
         ui.painter().rect_filled(
@@ -283,6 +284,7 @@ pub(crate) fn group_indicator(
     let response = load_meter(ui, value, color, true).on_hover_text(
         "Open CPU graph. Average load of this group's logical CPUs from all programs. Overlapping groups share CPU capacity.",
     );
+    crate::debug_mcp_control!(format!("meter.group.{}", id.0), response);
     if let Some(error) = &snapshot.error {
         response.clone().on_hover_text(error);
     }
@@ -316,6 +318,7 @@ pub(crate) fn process_indicator(
     let explanation = "CPU load across this app's tracked processes, relative to the whole CPU. Click for load per logical CPU. — means stopped, waiting or unavailable.";
     let response =
         load_meter(ui, value, color, running).on_hover_text(format!("{status}\n{explanation}"));
+    crate::debug_mcp_control!(format!("meter.rule.{}", target.rule.0), response);
     if response.clicked() {
         app.cpu_load.open(GraphTarget::Process {
             target,
@@ -354,9 +357,16 @@ fn contributor_table_content(
     cpu: usize,
     historical: bool,
 ) {
+    use crate::app::shell::presenters::shared_elements::{
+        compact_table_spacing, table_row_separator, COMPACT_TABLE_ROW_HEIGHT,
+    };
+    compact_table_spacing(ui);
     let colors = *palette(ui);
     let cell = |ui: &mut egui::Ui, width: f32, align: Align, text: RichText| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 18.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(width, COMPACT_TABLE_ROW_HEIGHT),
+            egui::Sense::hover(),
+        );
         let mut cell_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
             if align == Align::Max {
                 Layout::right_to_left(Align::Center)
@@ -410,7 +420,7 @@ fn contributor_table_content(
             RichText::new(format!("CPU{cpu}"))
                 .small()
                 .strong()
-                .color(colors.accent.fg),
+                .color(colors.success.fg),
         );
     });
     if view.rows.is_empty() {
@@ -425,32 +435,38 @@ fn contributor_table_content(
             .min_scrolled_height(contributor_height(ui.ctx()) - 56.0)
             .max_height(contributor_height(ui.ctx()) - 56.0)
             .auto_shrink([false, false])
-            .show_rows(ui, 18.0, view.rows.len(), |ui, range| {
-                for index in range {
-                    let row = &view.rows[index];
-                    ui.horizontal(|ui| {
-                        cell(
-                            ui,
-                            name_width,
-                            Align::Min,
-                            RichText::new(row.process.name.as_ref()).small(),
-                        )
-                        .on_hover_text(row.process.name.as_ref());
-                        cell(
-                            ui,
-                            pid_width,
-                            Align::Max,
-                            RichText::new(row.pid_text()).small(),
-                        );
-                        cell(
-                            ui,
-                            load_width,
-                            Align::Max,
-                            RichText::new(row.load_text()).small(),
-                        );
-                    });
-                }
-            });
+            .show_rows(
+                ui,
+                COMPACT_TABLE_ROW_HEIGHT,
+                view.rows.len(),
+                |ui, range| {
+                    for index in range {
+                        let row = &view.rows[index];
+                        let row_response = ui.horizontal(|ui| {
+                            cell(
+                                ui,
+                                name_width,
+                                Align::Min,
+                                RichText::new(row.process.name.as_ref()).small(),
+                            )
+                            .on_hover_text(row.process.name.as_ref());
+                            cell(
+                                ui,
+                                pid_width,
+                                Align::Max,
+                                RichText::new(row.pid_text()).small(),
+                            );
+                            cell(
+                                ui,
+                                load_width,
+                                Align::Max,
+                                RichText::new(row.load_text()).small(),
+                            );
+                        });
+                        table_row_separator(ui, row_response.response.rect);
+                    }
+                },
+            );
         #[cfg(all(debug_assertions, feature = "debug-mcp"))]
         crate::app::features::diagnostics::debug_mcp::rect_control(
             ui.ctx(),
@@ -760,17 +776,17 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
                     let value = measured_percent(value,is_partial);
                     let parked = parked.get(cpu).copied().flatten();
                     egui::Frame::NONE.fill(colors.group)
-                        .stroke(egui::Stroke::new(1.0,colors.accent.border))
+                        .stroke(egui::Stroke::new(1.0,colors.success.fg))
                         .corner_radius(6.0).inner_margin(8).show(ui,|ui| {
                             ui.spacing_mut().item_spacing.y=4.0;
                             let header=ui.horizontal(|ui| {
-                                cpu_badge(ui,cpu,11.0,None).on_hover_text("Selected logical CPU. Its load history and process contributions share this panel. Click another CPU tile above to change it.");
+                                cpu_badge(ui,cpu,11.0,true,None).on_hover_text("Selected logical CPU. Its load history and process contributions share this panel. Click another CPU tile above to change it.");
                                 ui.label(RichText::new(value).size(11.0).strong());
                                 if is_partial {ui.label(RichText::new("Partial").size(9.0).color(colors.warning.fg)).on_hover_text("Measured subtotal from known process samples. Some tracked instances are unavailable, so the full total is unknown. Dashed graph segments preserve the measured work.");}
                                 ui.label(RichText::new(parking_text(parked)).size(9.0).color(if parked==Some(true){colors.warning.fg}else{colors.text_muted}));
                             });
                             let header_rect=header.response.rect;
-                            ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(header_rect.left()-6.0,header_rect.top()),egui::pos2(header_rect.left()-3.0,header_rect.bottom())),2.0,colors.accent.fg);
+                            ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(header_rect.left()-6.0,header_rect.top()),egui::pos2(header_rect.left()-3.0,header_rect.bottom())),2.0,colors.success.fg);
                             actual_hover=chart(ui,data.series,cpu,data.hovered,inspection.pinned.is_some());
                             contributor_table(ui,data.contributors,cpu,data.hovered.is_some());
                         });
@@ -877,8 +893,8 @@ mod tests {
             let mut border = egui::Color32::TRANSPARENT;
             let overview = Overview::default();
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                primary = palette(ui).primary.fill;
-                border = palette(ui).accent.border;
+                primary = palette(ui).success.fg;
+                border = palette(ui).success.fg;
                 let data = GridData {
                     values: &[Some(12.0)],
                     partial: &[],
@@ -896,7 +912,7 @@ mod tests {
                         .unwrap()
                         .rect;
                 });
-                detail = cpu_badge(ui, 0, 11.0, None).rect;
+                detail = cpu_badge(ui, 0, 11.0, true, None).rect;
             });
             output.textures_delta.clear();
             let badges = output
@@ -928,6 +944,8 @@ mod tests {
                 badges.iter().any(|r| r.contains_rect(detail.shrink(1.0))),
                 "detail must reuse badge style"
             );
+            assert!(output.shapes.iter().any(|s| matches!(&s.shape,egui::Shape::Rect(r) if r.rect==tile && r.stroke.width==2.0 && r.stroke.color==border)), "selected tile outline must match the green name badge");
+            assert!(!output.shapes.iter().any(|s| matches!(&s.shape,egui::Shape::LineSegment { points,stroke } if stroke.width==1.5 && tile.contains(points[0]) && tile.contains(points[1]))), "selection must not paint the former check mark");
             let load = output
                 .shapes
                 .iter()
@@ -987,6 +1005,20 @@ mod tests {
                 |s| matches!(&s.shape,egui::Shape::Text(t) if t.galley.text().starts_with("row")),
             )
             .count();
+        let positions = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text().starts_with("row") => Some(t.pos.y),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            positions[1] - positions[0] <= 15.1,
+            "contributors need compact row pitch: {:?}",
+            &positions[..2]
+        );
+        assert!(output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::LineSegment{points,stroke} if (points[0].y-points[1].y).abs()<0.1 && (points[1].x-points[0].x).abs()>200.0 && stroke.width<=1.0)), "contributors need subtle row separators");
         assert!(
             rows >= 8,
             "expanded table needs more visible contributors: {rows}"

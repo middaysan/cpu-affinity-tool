@@ -615,3 +615,23 @@ impl core::fmt::Display for Error {
 
 /// Short for `Result<T, eframe::Error>`.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
+
+/// Opt-in synchronous scopes for this isolated debug renderer investigation.
+#[cfg(debug_assertions)]
+pub mod cpu_frame_probe {
+    use std::sync::OnceLock;
+    /// Frame, prepare/input, app update, tessellation, renderer work.
+    pub type Callback = fn(usize, bool);
+    static CALLBACK: OnceLock<Callback> = OnceLock::new();
+    /// Install once; absent from release builds and performs no I/O.
+    pub fn install(callback: Callback) { let _ = CALLBACK.set(callback); }
+    /// A balanced diagnostic scope, including early returns.
+    pub struct Guard { phase: usize, callback: Callback }
+    impl Drop for Guard { fn drop(&mut self) { (self.callback)(self.phase, false); } }
+    /// Begin a scope only when explicitly enabled by the test application.
+    pub fn begin(phase: usize) -> Option<Guard> {
+        let callback = *CALLBACK.get()?;
+        callback(phase, true);
+        Some(Guard { phase, callback })
+    }
+}

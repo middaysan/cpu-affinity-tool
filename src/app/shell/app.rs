@@ -293,8 +293,7 @@ impl App {
             println!("========================================================");
         }
 
-        cc.egui_ctx
-            .set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+        crate::app::shell::presenters::shared_elements::install_ui_fonts(&cc.egui_ctx);
 
         let monitor_ctx = cc.egui_ctx.clone();
         let wake: execution::MonitorWake = Arc::new(move || monitor_ctx.request_repaint());

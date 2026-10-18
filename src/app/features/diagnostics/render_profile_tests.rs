@@ -167,6 +167,10 @@ fn render_log_records_frames_background_work_resources_and_clean_shutdown() {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     assert_eq!(rows.first().unwrap()["kind"], "session_start");
+    let anchor = rows.iter().find(|r| r["kind"] == "clock_anchor").unwrap();
+    assert!(anchor["qpc_after"][0].as_i64().unwrap() >= anchor["qpc_before"][0].as_i64().unwrap());
+    assert!(anchor["qpc_after"][1].as_i64().unwrap() > 0);
+    assert_eq!(anchor["qpc_after"][1], anchor["qpc_before"][1]);
     assert_eq!(rows.last().unwrap()["kind"], "session_end");
     assert_eq!(rows.last().unwrap()["dropped_records"], 0);
     assert!(rows

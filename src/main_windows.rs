@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+#[cfg(all(debug_assertions, feature = "render-profiling"))]
+mod native_frame_probe;
 mod tray;
 
 use app::features::diagnostics::crash_reports::{
@@ -69,10 +71,11 @@ fn main() {
         println!("========================================================");
     }
     // Restrict our process before creating Tokio/GUI/background workers.
-    let scheduling_messages = app::startup::prepare_background_scheduling_with(
+    let mut scheduling_messages = app::startup::prepare_background_scheduling_with(
         app::adapters::os::set_current_process_priority,
         app::adapters::os::pin_current_process_to_last_cpu,
-    );
+    )
+    .to_vec();
     #[cfg(feature = "render-profiling")]
     let _render_profile_session = match app::features::diagnostics::render_profile::start_from_env()
     {
@@ -82,9 +85,16 @@ fn main() {
             std::process::exit(EXIT_GUI_STARTUP_ERROR);
         }
     };
+    #[cfg(all(debug_assertions, feature = "render-profiling"))]
+    if std::env::var_os("CPU_AFFINITY_NATIVE_PROBE").is_some() {
+        native_frame_probe::install();
+    }
     // Creating tokio runtime manually
     let rt = Runtime::new().expect("failed to create tokio runtime");
     let _guard = rt.enter();
+    if let Err(error) = OS::prefer_current_gui_thread() {
+        scheduling_messages.push(format!("Own GUI scheduling: {error}"));
+    }
 
     #[cfg(debug_assertions)]
     println!("DEBUG: Tokio runtime created and entered.");
@@ -96,17 +106,13 @@ fn main() {
         .map(|state| state.start_minimized)
         .unwrap_or(false)
         && app::adapters::os::supports_hide_to_tray();
-    let options = NativeOptions {
-        run_and_return: true,
-        viewport: windows_viewport(start_hidden),
-        ..Default::default()
-    };
+    let options = windows_native_options(start_hidden);
 
     #[cfg(debug_assertions)]
     {
         println!("DEBUG: NativeOptions initialized:");
         println!("  - Renderer: {:?}", options.renderer);
-        println!("  - V-Sync: {}", options.glow_options.vsync);
+        println!("  - WGPU: DX12 / MemoryUsage / debug graphics layers disabled");
         println!("  - Run and return: {}", options.run_and_return);
         println!("========================================================");
     }
@@ -132,6 +138,14 @@ fn main() {
                     app::features::diagnostics::render_profile::renderer(
                         description.chars().take(512).collect(),
                     );
+                }
+                #[cfg(feature = "render-profiling")]
+                if let Some(state) = &cc.wgpu_render_state {
+                    let info = state.adapter.get_info();
+                    app::features::diagnostics::render_profile::renderer(format!(
+                        "WGPU {:?} / {} / {} / MemoryUsage",
+                        info.backend, info.name, info.driver
+                    ));
                 }
                 let startup_requires_forwarding =
                     matches!(&startup_intent, StartupIntent::RunRule { .. })
@@ -407,5 +421,51 @@ impl StartupForwardingPlatform for WindowsStartupForwardingPlatform {
                 ForwardingClientError::Io(err)
             }
         })
+    }
+}
+
+// Keep renderer configuration and initial root visibility in one startup contract.
+fn windows_native_options(start_hidden: bool) -> NativeOptions {
+    let mut options = NativeOptions {
+        run_and_return: true,
+        renderer: eframe::Renderer::Wgpu,
+        viewport: windows_viewport(start_hidden),
+        ..Default::default()
+    };
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        setup.instance_descriptor.backends = wgpu::Backends::DX12;
+        setup.instance_descriptor.flags = wgpu::InstanceFlags::empty();
+        let original = Arc::clone(&setup.device_descriptor);
+        setup.device_descriptor = Arc::new(move |adapter| {
+            let mut descriptor = original(adapter);
+            descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
+            descriptor
+        });
+    }
+    options
+}
+
+#[cfg(test)]
+mod windows_renderer_tests {
+    #[test]
+    fn full_app_uses_dx12_and_preserves_startup_visibility() {
+        for hidden in [false, true] {
+            let options = super::windows_native_options(hidden);
+            assert_eq!(options.renderer, eframe::Renderer::Wgpu);
+            assert!(options.run_and_return);
+            assert!(
+                options.viewport.title.is_none(),
+                "native title comes from run_native"
+            );
+            assert_eq!(options.viewport.active, Some(!hidden));
+            assert_eq!(options.viewport.taskbar, Some(!hidden));
+            assert_eq!(options.viewport.visible, Some(!hidden));
+            let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = options.wgpu_options.wgpu_setup
+            else {
+                panic!("expected owned WGPU device")
+            };
+            assert_eq!(setup.instance_descriptor.backends, wgpu::Backends::DX12);
+            assert!(setup.instance_descriptor.flags.is_empty());
+        }
     }
 }

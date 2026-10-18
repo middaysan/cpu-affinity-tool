@@ -42,6 +42,11 @@ pub(crate) enum Stage {
     TraceDrain,
     TraceTick,
     Discovery,
+    NativeFrame,
+    NativePrepare,
+    NativeUpdate,
+    Tessellate,
+    Paint,
     Reconcile,
 }
 const NAMES: [&str; STAGES] = [
@@ -69,6 +74,11 @@ const NAMES: [&str; STAGES] = [
     "trace_drain",
     "trace_tick",
     "discovery",
+    "native_frame",
+    "native_prepare",
+    "native_update",
+    "tessellate",
+    "paint",
     "reconcile",
 ];
 #[derive(Clone, Copy, Default, Serialize)]
@@ -549,7 +559,11 @@ fn write_session<W: Write>(
     duration: Duration,
 ) -> std::io::Result<()> {
     let mut sink = Sink::new(writer, LIMIT);
+    let qpc_before = os_api::render_profile::qpc_clock();
+    let clock_us = shared.now();
+    let qpc_after = os_api::render_profile::qpc_clock();
     sink.line(&json!({"kind":"session_start","schema":1,"version":env!("CARGO_PKG_VERSION"),"unix_ms":SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis(),"logical_cpus":os_api::cpu_load::logical_cpu_count(),"affinity_mask":os_api::OS::get_process_affinity(std::process::id()).ok(),"priority":format!("{:?}",os_api::OS::get_process_priority(std::process::id()).ok()),"limit_bytes":LIMIT,"limit_seconds":duration.as_secs(),"queue_capacity":QUEUE,"timing":"inclusive wall_us; unscaled scheduled thread cycles; backend timing belongs to previous frame; no GPU/input-to-display timing"}))?;
+    sink.line(&json!({"kind":"clock_anchor","clock_us":clock_us,"qpc_before":qpc_before,"qpc_after":qpc_after}))?;
     let mut resource = os_api::cpu_load::resource_sample().ok();
     let mut sampled = Instant::now();
     let mut writer_clock = os_api::render_profile::thread_clock();

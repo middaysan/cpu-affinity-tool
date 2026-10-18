@@ -1,7 +1,7 @@
 use crate::app::runtime::{AppState, TrackedProcessSnapshot};
 use crate::app::shell::presenters::shared_elements::{
-    inter_medium_family, palette, success_color, toned_sized_button, ToneRole, UiPalette,
-    BUTTON_FONT_SIZE,
+    compact_table_spacing, inter_medium_family, palette, success_color, table_row_separator,
+    toned_sized_button, ToneRole, UiPalette, BUTTON_FONT_SIZE, COMPACT_TABLE_ROW_HEIGHT,
 };
 use eframe::egui::{self, Layout, Margin, Panel, RichText, Stroke, Vec2};
 
@@ -13,7 +13,7 @@ fn monitor_toggle_icon(monitoring_enabled: bool) -> (&'static str, &'static str)
     }
 }
 
-const TRACKED_ROW_HEIGHT: f32 = 16.0;
+const TRACKED_ROW_HEIGHT: f32 = COMPACT_TABLE_ROW_HEIGHT;
 const TRACKED_COLUMN_GAP: f32 = 6.0;
 const TRACKED_TABLE_GUTTER: f32 = 8.0;
 
@@ -89,7 +89,8 @@ fn draw_tracked_process_list(
             );
         });
     }
-    ui.spacing_mut().item_spacing = egui::vec2(TRACKED_COLUMN_GAP, 2.0);
+    compact_table_spacing(ui);
+    ui.spacing_mut().item_spacing.x = TRACKED_COLUMN_GAP;
     // Keep the final column clear of the floating vertical scrollbar as well.
     let width =
         (ui.available_width() - ui.spacing().scroll.allocated_width() - TRACKED_TABLE_GUTTER)
@@ -122,16 +123,19 @@ fn draw_tracked_process_list(
                     palette(ui).row,
                 );
             }
-            ui.push_id(
+            let row_response = ui.push_id(
                 (process.pid, &process.group_name, &process.process_name),
                 |ui| {
                     ui.horizontal(|ui| {
                         tracked_text_cell(ui, &process.process_name, widths[0], "process");
                         tracked_text_cell(ui, &process.pid.to_string(), widths[1], "pid");
                         tracked_text_cell(ui, &process.group_name, widths[2], "group");
-                    });
+                    })
+                    .response
+                    .rect
                 },
             );
+            table_row_separator(ui, row_response.inner);
         }
     })
 }
@@ -265,6 +269,60 @@ pub fn draw_bottom_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
 mod tests {
     use super::{footer_frame, monitor_toggle_icon};
     use crate::app::shell::presenters::shared_elements::palette_for_dark_mode;
+
+    #[test]
+    fn compact_tracked_table_paints_dense_rows_and_separators() {
+        use eframe::egui;
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+        let processes: Vec<_> = (1000..1040)
+            .map(|pid| crate::app::runtime::TrackedProcessSnapshot {
+                process_name: format!("p{pid}.exe"),
+                pid,
+                group_name: "Group".into(),
+            })
+            .collect();
+        let mut output = egui::FullOutput::default();
+        for _ in 0..3 {
+            output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 500.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    super::draw_tracked_process_list(ui, &processes);
+                },
+            );
+            output.textures_delta.clear();
+        }
+        let positions = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t)
+                    if t.galley.text().starts_with('p') && t.galley.text().ends_with(".exe") =>
+                {
+                    Some(t.pos.y)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(positions.len() > 10);
+        assert!(
+            positions[1] - positions[0] <= 15.1,
+            "footer rows must be compact: {:?}",
+            &positions[..2]
+        );
+        let lines = output.shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::LineSegment { points, stroke }
+            if (points[0].y - points[1].y).abs() < 0.1 && (points[1].x - points[0].x).abs() > 250.0 && stroke.width <= 1.0)).count();
+        assert!(
+            lines >= positions.len() - 1,
+            "each visible footer row needs a subtle separator"
+        );
+    }
 
     #[test]
     fn test_footer_frame_fills_the_entire_panel_surface() {

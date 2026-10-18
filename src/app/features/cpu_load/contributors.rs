@@ -62,7 +62,7 @@ impl ContributorView {
 }
 #[derive(Clone, Copy, Default)]
 struct Entry {
-    identity: u32,
+    identity: u16,
     cpu: u16,
     load: f32,
 }
@@ -83,6 +83,7 @@ struct Identity {
 }
 type Key = (u32, u64, Option<Arc<RuleId>>);
 const MAX_IDENTITIES: usize = 8192;
+const _: () = assert!(MAX_IDENTITIES <= u16::MAX as usize + 1);
 // Sparse pool, not a dense PID × CPU × time matrix. Full frames are evicted
 // under exceptional churn rather than silently truncating a named process list.
 pub(super) fn contributor_bytes(cpus: usize, seconds: u32) -> Option<usize> {
@@ -241,7 +242,7 @@ impl ContributorHistory {
                 };
                 self.identities[index].as_mut().unwrap().refs += 1;
                 self.entries[self.entry_head] = Entry {
-                    identity: index as u32,
+                    identity: index as u16,
                     cpu: value.cpu as u16,
                     load: value.load.clamp(0.0, 100.0),
                 };
@@ -390,6 +391,93 @@ mod tests {
             name: name.into(),
         })
     }
+    #[test]
+    fn compact_entry_preserves_capacity_and_accounts_exact_reservation() {
+        assert_eq!(size_of::<Entry>(), 8);
+        assert!(MAX_IDENTITIES <= usize::from(u16::MAX) + 1);
+        let compact = contributor_bytes(20, 1800).unwrap();
+        let previous = (20 * 32 * 1801 * 12)
+            + 1801 * size_of::<Option<Frame>>()
+            + MAX_IDENTITIES * (size_of::<Option<Identity>>() + 128 + size_of::<usize>());
+        assert_eq!(previous - compact, 4_610_560);
+        let history = ContributorHistory::new(20, 1800).unwrap();
+        assert_eq!(history.entries.len(), 20 * 32 * 1801);
+        assert_eq!(
+            history.reserved_bytes(),
+            history.entries.capacity() * 8
+                + history.frames.capacity() * size_of::<Option<Frame>>()
+                + history.identities.capacity() * size_of::<Option<Identity>>()
+                + history.lookup.capacity() * 64
+                + history.free.capacity() * size_of::<usize>()
+        );
+    }
+
+    #[test]
+    fn highest_identity_survives_resize_then_reuses_only_evicted_slots() {
+        let mut history = ContributorHistory::new(32, 30).unwrap();
+        let first = SampleTime {
+            seconds: 1.0,
+            wall: SystemTime::UNIX_EPOCH,
+        };
+        let rule = Arc::new(RuleId("retained".into()));
+        let rows = (0..MAX_IDENTITIES + 1)
+            .map(|n| Contribution {
+                process: process(n as u32, n as u64 + 100, "retained.exe"),
+                rule: Some(rule.clone()),
+                cpu: 31,
+                load: 0.125,
+            })
+            .collect::<Vec<_>>();
+        history.push(first, &rows, true);
+        assert_eq!(history.identities.len(), MAX_IDENTITIES);
+        assert_eq!(
+            history.entries[MAX_IDENTITIES - 1].identity as usize,
+            MAX_IDENTITIES - 1
+        );
+        let mut view = ContributorView::default();
+        history.copy(first, 31, Some(rule.as_ref()), &mut view);
+        assert!(view.partial);
+        assert_eq!(view.rows.len(), MAX_IDENTITIES);
+        let mut resized = history.resized(32, 300).unwrap();
+        resized.copy(first, 31, Some(rule.as_ref()), &mut view);
+        assert_eq!(view.rows.len(), MAX_IDENTITIES);
+        let last = view
+            .rows
+            .iter()
+            .find(|r| r.process.pid == (MAX_IDENTITIES - 1) as u32)
+            .unwrap();
+        assert_eq!(last.process.instance, MAX_IDENTITIES as u64 + 99);
+        assert_eq!(last.load, 0.125);
+        resized.push(
+            SampleTime {
+                seconds: 302.0,
+                ..first
+            },
+            &[Contribution {
+                process: process(0, 900_000, "reused.exe"),
+                rule: Some(rule.clone()),
+                cpu: 31,
+                load: 7.25,
+            }],
+            true,
+        );
+        resized.copy(first, 31, Some(rule.as_ref()), &mut view);
+        assert!(!view.available);
+        resized.copy(
+            SampleTime {
+                seconds: 302.0,
+                ..first
+            },
+            31,
+            Some(rule.as_ref()),
+            &mut view,
+        );
+        assert!(view.available && !view.partial);
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].process.instance, 900_000);
+        assert_eq!(view.rows[0].load, 7.25);
+    }
+
     #[test]
     fn tracked_scope_retains_sample_membership_and_distinguishes_reused_pids() {
         let mut history = ContributorHistory::new(1, 30).unwrap();

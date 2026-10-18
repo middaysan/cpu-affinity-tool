@@ -3,7 +3,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 const SCROLL_FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
-const FONT_CHUNK: usize = 8;
+const FONT_CHUNK: usize = 32;
 const FONT_TEXT: &str =
     "CPU0123456789%*—: .,-/()abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ<>…·";
 const FONT_SIZES: [f32; 9] = [8.0, 9.0, 9.5, 10.0, 10.5, 11.0, 12.0, 19.0, 16.0];
@@ -164,13 +164,33 @@ pub(super) fn warm_fonts(ctx: &egui::Context) {
         d.insert_temp(egui::Id::new("ui-font-preparation-ready"), done);
     });
     if !done {
-        ctx.request_repaint_after(Duration::from_millis(8));
+        ctx.request_repaint_after(Duration::from_nanos(1_000_000_000 / 60));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_preparation_bounds_total_paints_without_skipping_variants() {
+        let mut state = FontWarmup::default();
+        let options = egui::epaint::TextOptions::default();
+        let mut variants = 0;
+        let mut frames = 0;
+        while let Some((_, text, _)) = state.next(1.75, &options, frames) {
+            assert!(text.chars().count() <= 32);
+            variants += text.chars().count();
+            assert!(state.next(1.75, &options, frames).is_none());
+            frames += 1;
+            assert!(
+                frames <= 120,
+                "font preparation redraws too many complete frames: {frames}"
+            );
+        }
+        assert!(state.done());
+        assert_eq!(variants, FONT_TEXT.chars().count() * FONT_SIZES.len() * 4);
+    }
 
     #[test]
     fn scroll_budget_uses_sixty_frames_per_second() {

@@ -37,3 +37,5 @@ The Windows CI runs the two `frame_` library regressions against this copy,
 seeding its temporary lock from the root lock and deleting it afterwards. These
 check stable-root admission and consumption of due deadlines without removing
 future repaints. Native scroll/close/tray smoke still supplements these tests.
+
+The opt-in development profiler also has an optional `cfg(debug_assertions)` callback around full native frame, prepare/input, update, tessellation and paint stages. It is unset unless the application explicitly opts into the existing development profiler. The callback adds no worker or I/O and is compiled out of release builds.

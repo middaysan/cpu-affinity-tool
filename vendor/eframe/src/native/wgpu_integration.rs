@@ -622,10 +622,14 @@ impl WgpuWinitRunning<'_> {
             pending_deltas,
         } = self;
 
+        #[cfg(debug_assertions)]
+        let _native_probe = crate::cpu_frame_probe::begin(0);
         let mut frame_timer = crate::stopwatch::Stopwatch::new();
         frame_timer.start();
 
         let (viewport_ui_cb, raw_input, is_visible, show_ui) = {
+            #[cfg(debug_assertions)]
+            let _prepare_probe = crate::cpu_frame_probe::begin(1);
             profiling::scope!("Prepare");
             let mut shared_lock = shared.borrow_mut();
 
@@ -767,7 +771,11 @@ impl WgpuWinitRunning<'_> {
 
         // Runs the update, which could call immediate viewports,
         // so make sure we hold no locks here!
-        let full_output = integration.update(app.as_mut(), viewport_ui_cb.as_deref(), raw_input);
+        let full_output = {
+            #[cfg(debug_assertions)]
+            let _update_probe = crate::cpu_frame_probe::begin(2);
+            integration.update(app.as_mut(), viewport_ui_cb.as_deref(), raw_input)
+        };
 
         // ------------------------------------------------------------
 
@@ -811,7 +819,11 @@ impl WgpuWinitRunning<'_> {
         egui_winit.handle_platform_output_with_event_loop(window, event_loop, platform_output);
 
         let vsync_secs = if is_visible {
-            let clipped_primitives = egui_ctx.tessellate(shapes, pixels_per_point);
+            let clipped_primitives = {
+                #[cfg(debug_assertions)]
+                let _tessellate_probe = crate::cpu_frame_probe::begin(3);
+                egui_ctx.tessellate(shapes, pixels_per_point)
+            };
 
             let mut screenshot_commands = vec![];
             viewport.actions_requested.retain(|cmd| {
@@ -822,6 +834,8 @@ impl WgpuWinitRunning<'_> {
                     true
                 }
             });
+            #[cfg(debug_assertions)]
+            let paint_probe = crate::cpu_frame_probe::begin(4);
             let vsync_secs = painter.paint_and_update_textures(
                 viewport_id,
                 pixels_per_point,
@@ -832,6 +846,8 @@ impl WgpuWinitRunning<'_> {
                 window,
             );
 
+            #[cfg(debug_assertions)]
+            drop(paint_probe);
             for action in viewport.actions_requested.drain(..) {
                 match action {
                     ActionRequested::Screenshot { .. } => {
