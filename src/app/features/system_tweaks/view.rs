@@ -4,7 +4,7 @@ use crate::app::features::system_tweaks::{
 };
 use crate::app::{
     features::system_tweaks::{
-        platform::contract::{Capability, Effect, ModuleStatus, TargetIdentity, TargetScope},
+        platform::contract::{Capability, Effect, ModuleStatus, TargetScope},
         presentation::{status_label, ModuleAction, TuningPageSection, TweakSection},
         PcCheck, SaveError, TuningConfigurationState, TuningOperationState, TuningRequest,
         TweakCard,
@@ -822,8 +822,12 @@ fn draw_saved_exe_picker(app: &mut AppState, ui: &mut egui::Ui, card: &TweakCard
     });
     if selected != original {
         if let Some(path) = selected {
-            let target = TargetIdentity::Device {
-                identity: format!("gpu_exe:{}", path.to_string_lossy()),
+            let Some(target) = app
+                .tuning_editors()
+                .get(&card.feature)
+                .and_then(|module| module.editor().tweak_saved_executable_target(&path))
+            else {
+                return;
             };
             if submit(
                 app,
@@ -1116,6 +1120,7 @@ fn draw_operation_error(
 mod tests {
     use super::*;
     use crate::app::features::system_tweaks::platform::contract::ActivationMode;
+    use crate::app::features::system_tweaks::platform::contract::TargetIdentity;
     use crate::app::models::AppStateStorage;
     use std::{
         sync::{Arc, RwLock},

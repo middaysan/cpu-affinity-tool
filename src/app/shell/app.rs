@@ -13,7 +13,8 @@ use crate::app::runtime::{AppState, RunRuleOutcome};
 #[cfg(all(target_os = "windows", feature = "windows"))]
 use crate::app::shell::presenters::crash_reports;
 use crate::app::shell::presenters::{
-    central, footer, group_editor, header, installed_app_picker, logs, run_settings, system_tweaks,
+    central, group_editor, header, installed_app_picker, logs, run_settings, service_controls,
+    system_tweaks,
 };
 #[cfg(all(target_os = "windows", feature = "windows"))]
 use crate::app::shell::sessions::ShortcutCreationRole;
@@ -575,12 +576,14 @@ impl eframe::App for App {
             input,
             self.state
                 .ui
-                .monitoring_modal_open(self.state.cpu_load.graph.is_some()),
+                .monitoring_modal_open(self.state.cpu_load.graph.is_some())
+                || self.state.mcp.modal_open(),
         )
     }
 
     #[cfg(all(target_os = "windows", feature = "windows"))]
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        self.state.cpu_load.export_input(ctx, input);
         if !self.closing_requested && self.state.ui.dropped_files.is_none() {
             if let Some(drop) = self
                 .file_drop_guard
@@ -611,6 +614,8 @@ impl eframe::App for App {
             }
         }
         self.handle_tray_events(ctx);
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        self.state.poll_mcp(ctx);
         if self.closing_requested {
             #[cfg(all(target_os = "windows", feature = "windows"))]
             self.handle_local_ipc_requests(ctx);
@@ -724,12 +729,17 @@ impl eframe::App for App {
         let draw_active = !self
             .state
             .ui
-            .monitoring_modal_open(self.state.cpu_load.graph.is_some());
+            .monitoring_modal_open(self.state.cpu_load.graph.is_some())
+            && !self.state.mcp.modal_open();
         #[cfg(not(all(target_os = "windows", feature = "windows")))]
         let draw_active = !self.state.ui.monitoring_modal_open(false);
         self.render_main_ui(ui, draw_active);
         #[cfg(all(target_os = "windows", feature = "windows"))]
         crate::app::features::cpu_load::view::draw_modal(&mut self.state, ui.ctx());
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        {
+            self.state.mcp.draw(ui.ctx());
+        }
         if self.state.runtime.take_status_read_pending() {
             // A cached status read must not consume the only runtime notification.
             ui.ctx().request_repaint_after(Duration::from_millis(50));
@@ -1814,11 +1824,10 @@ impl App {
                 };
                 drained += 1;
                 if let Some((message, sticky)) = event.legacy_log_message() {
-                    if sticky {
-                        self.state.log_manager.add_sticky_once(message.to_string());
-                    } else {
-                        self.state.log_manager.add_entry(message.to_string());
-                    }
+                    self.state
+                        .log_manager
+                        .add_monitor_entry(message.to_string(), sticky);
+                    self.state.ui.tracked_processes.last_activity = Some(std::time::Instant::now());
                 }
                 if let Some(message) = event.tuning_log_message() {
                     self.state.log_manager.add_important_entry(message);
@@ -1831,7 +1840,7 @@ impl App {
         }
 
         if drain_status.dropped_monitor_messages > 0 || drain_status.dropped_warnings > 0 {
-            self.state.log_manager.add_important_entry(format!(
+            self.state.log_manager.add_monitor_important_entry(format!(
                 "WARNING: Monitoring notification queue was saturated; skipped {} routine message(s) and {} warning(s). The current runtime state was refreshed.",
                 drain_status.dropped_monitor_messages, drain_status.dropped_warnings
             ));
@@ -2022,7 +2031,8 @@ impl App {
         let graph_open = self
             .state
             .ui
-            .monitoring_modal_open(self.state.cpu_load.graph.is_some());
+            .monitoring_modal_open(self.state.cpu_load.graph.is_some())
+            || self.state.mcp.modal_open();
         #[cfg(not(all(target_os = "windows", feature = "windows")))]
         let graph_open = self.state.ui.monitoring_modal_open(false);
         if !file_import_allowed(&self.state.ui.current_window, graph_open) {
@@ -2053,8 +2063,9 @@ impl App {
             header::draw_top_panel(&mut self.state, ui);
         }
         {
+            // Keep the diagnostic bucket stable; service dialogs reserve no panel.
             crate::render_profile_scope!(Footer);
-            footer::draw_bottom_panel(&mut self.state, ui);
+            service_controls::draw_modals(&mut self.state, ui.ctx());
         }
         {
             crate::render_profile_scope!(Central);

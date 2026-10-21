@@ -205,6 +205,53 @@ fn partial_work_retains_quality_and_reserved_storage_through_history_resize() {
 use crate::app::shared::ids::{GroupId, RuleId};
 use std::time::Duration;
 
+#[test]
+fn group_mean_retains_positive_partial_evidence_without_treating_gaps_as_zero() {
+    let mut store = HistoryStore::default();
+    store.configure(2, 30, &[]).unwrap();
+    let time = SampleTime {
+        seconds: 1.0,
+        wall: SystemTime::UNIX_EPOCH,
+    };
+    store.push_pending(time, &[]);
+    assert!(store.complete(
+        time,
+        &super::super::model::Snapshot {
+            cpus: vec![Some(90.0); 2],
+            tracked_cpus: vec![Some(20.0), None],
+            tracked_partial_cpus: vec![None, Some(10.0)],
+            ..Default::default()
+        }
+    ));
+    assert_eq!(
+        store.group_mean_at(LoadSource::Tracked, time, &[0, 1, 1]),
+        (Some(15.0), true)
+    );
+    assert_eq!(
+        store.group_mean_at(LoadSource::Tracked, time, &[0]),
+        (Some(20.0), false)
+    );
+    assert_eq!(
+        store.group_mean_at(LoadSource::Tracked, time, &[2]),
+        (None, false)
+    );
+    assert_eq!(
+        store.group_mean_at(LoadSource::System, time, &[0, 1]),
+        (Some(90.0), false)
+    );
+    assert_eq!(
+        store.group_mean_at(
+            LoadSource::Tracked,
+            SampleTime {
+                seconds: 2.0,
+                ..time
+            },
+            &[0]
+        ),
+        (None, false)
+    );
+}
+
 fn target() -> RuleTarget {
     RuleTarget {
         group: GroupId("g".into()),

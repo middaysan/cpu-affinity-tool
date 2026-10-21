@@ -120,6 +120,12 @@ pub(super) fn draw(
     crate::render_profile_scope!(DetailDraw);
     let (_, rect) = ui.allocate_space(egui::vec2(ui.available_width(), 124.0));
     let response = ui.interact(rect, egui::Id::new(CHART_ID), egui::Sense::click());
+    let export_menu = super::export_ui::menu(
+        ui,
+        &response,
+        egui::Rect::from_min_max(rect.min - egui::vec2(0.0, 24.0), rect.max),
+        cpu,
+    );
     let plot = plot_rect(rect);
     #[cfg(all(debug_assertions, feature = "debug-mcp"))]
     crate::app::features::diagnostics::debug_mcp::rect_control(
@@ -310,7 +316,7 @@ pub(super) fn draw(
                 ui.painter()
                     .circle_filled(egui::pos2(x, y_at(value)), 2.5, colors.accent.fg);
             }
-            if !pinned {
+            if !pinned && !export_menu {
                 egui::Tooltip::for_widget(&response)
                     .at_pointer()
                     // Give edge placement a useful size before its first layout;
@@ -324,7 +330,7 @@ pub(super) fn draw(
                     });
             }
         }
-    } else {
+    } else if !export_menu {
         response.on_hover_text(format!(
             "Up to {} seconds, sampled once per second. Hover for the recorded value; left click the plot to pin that time and scroll the process list. The next left click anywhere releases it. Load covers an interval; amber ticks mark parking only at the sample time. Gaps mean no data.", history.duration_seconds,
         ));
@@ -343,6 +349,48 @@ pub(super) fn draw(
 mod tests {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn chart_right_click_offers_png_and_complete_csv_history() {
+        let ctx = egui::Context::default();
+        let history = History::default();
+        let pos = egui::pos2(60.0, 60.0);
+        let mut output = egui::FullOutput::default();
+        for step in 0..7 {
+            let mut events = vec![egui::Event::PointerMoved(pos)];
+            if step == 2 || step == 3 {
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed: step == 2,
+                    modifiers: Default::default(),
+                });
+            }
+            output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 300.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    draw(ui, &history, 0, None, false);
+                },
+            );
+            output.textures_delta.clear();
+        }
+        for title in ["Save this graph (PNG)…", "Save all CPU history (CSV)…"] {
+            assert!(
+                output
+                    .shapes
+                    .iter()
+                    .any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == title)),
+                "Missing chart export action: {title}"
+            );
+        }
+    }
 
     #[test]
     fn partial_curve_is_dashed_and_explained_while_hover_reuses_geometry() {

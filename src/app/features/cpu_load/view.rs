@@ -1,6 +1,9 @@
 use super::history::{Overview, SampleTime};
-use super::model::{group_mean, GraphTarget, RuleTarget};
-use super::{chart::draw as chart, meter::load_meter};
+use super::model::{GraphTarget, RuleTarget};
+use super::{
+    chart::draw as chart,
+    meter::{load_meter, MeterKind, MeterLoad},
+};
 use crate::app::runtime::AppState;
 use crate::app::shared::ids::GroupId;
 use crate::app::shell::presenters::shared_elements::{close_button, paint_focus_ring, palette};
@@ -80,15 +83,26 @@ fn outside_activity(
     }
 }
 
+const APP_ACTIVITY_COLOR: egui::Color32 = egui::Color32::from_rgb(242, 196, 75);
+const APP_ACTIVITY_HELP: &str = "This app has measured CPU work on this logical CPU in the retained history window. The marker includes all retained samples, independently of Live, History or Pinned inspection. It disappears when the last positive sample expires. Missing intervals are not proof of inactivity.";
+
+fn activity_marker(badge: egui::Rect) -> egui::Rect {
+    egui::Rect::from_center_size(
+        egui::pos2(badge.right() - 6.5, badge.center().y),
+        egui::Vec2::splat(5.0),
+    )
+}
+
 fn cpu_badge(
     ui: &mut egui::Ui,
     cpu: usize,
     size: f32,
     selected: bool,
     color: Option<egui::Color32>,
+    activity: bool,
 ) -> egui::Response {
     let colors = *palette(ui);
-    egui::Frame::NONE
+    let badge = egui::Frame::NONE
         .fill(if selected {
             colors.success.fg
         } else {
@@ -105,21 +119,102 @@ fn cpu_badge(
         .corner_radius(4.0)
         .inner_margin(egui::Margin::symmetric(if size < 10.0 { 4 } else { 6 }, 2))
         .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(
-                    RichText::new(format!("CPU{cpu}"))
-                        .size(size)
-                        .strong()
-                        .color(if selected {
-                            colors.success.fill
-                        } else {
-                            color.unwrap_or(colors.primary.fg)
-                        }),
-                )
-                .truncate(),
-            );
+            let label = egui::Label::new(
+                RichText::new(format!("CPU{cpu}"))
+                    .size(size)
+                    .strong()
+                    .color(if selected {
+                        colors.success.fill
+                    } else {
+                        color.unwrap_or(colors.primary.fg)
+                    }),
+            )
+            .truncate();
+            if size < 10.0 {
+                // Reserve the marker inside the badge without changing its geometry.
+                let height = ui.fonts_mut(|f| f.row_height(&egui::FontId::proportional(size)));
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), height),
+                    egui::Sense::hover(),
+                );
+                let mut text_ui =
+                    ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(
+                            rect.right() - if activity { 8.0 } else { 0.0 },
+                            rect.bottom(),
+                        ),
+                    )));
+                response.union(text_ui.add(label.halign(Align::Center)))
+            } else {
+                ui.add(label)
+            }
         })
-        .response
+        .response;
+    if activity {
+        let marker = activity_marker(badge.rect);
+        ui.painter().circle(
+            marker.center(),
+            2.5,
+            APP_ACTIVITY_COLOR,
+            egui::Stroke::new(0.5, colors.group),
+        );
+    }
+    badge
+}
+
+fn tile_footer(
+    ui: &mut egui::Ui,
+    value: Option<f32>,
+    partial: bool,
+    parked: Option<bool>,
+    outside: bool,
+) {
+    let colors = *palette(ui);
+    let state_color = if parked == Some(true) {
+        colors.warning.fg
+    } else {
+        colors.text_muted
+    };
+    let state = ui.painter().layout_no_wrap(
+        parking_text(parked).into(),
+        egui::FontId::proportional(8.0),
+        state_color,
+    );
+    let load = ui.painter().layout_no_wrap(
+        measured_percent(value, partial),
+        egui::FontId::proportional(9.0),
+        if outside {
+            colors.danger.fg
+        } else {
+            colors.text_primary
+        },
+    );
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), state.size().y.max(load.size().y)),
+        egui::Sense::hover(),
+    );
+    let width = (state.size().x + 4.0 + load.size().x).min(rect.width());
+    let left = rect.center().x - width * 0.5;
+    let load_left = left + width - load.size().x;
+    let state_clip = egui::Rect::from_min_max(
+        egui::pos2(left, rect.top()),
+        egui::pos2((load_left - 4.0).max(left), rect.bottom()),
+    )
+    .intersect(ui.clip_rect());
+    ui.painter().with_clip_rect(state_clip).galley(
+        egui::pos2(left, rect.center().y - state.size().y * 0.5),
+        state,
+        state_color,
+    );
+    ui.painter()
+        .with_clip_rect(rect.intersect(ui.clip_rect()))
+        .galley(
+            egui::pos2(load_left, rect.center().y - load.size().y * 0.5),
+            load,
+            colors.text_primary,
+        );
+    response.on_hover_text("Windows parking state at the last poll, sampled once per second. Load covers the interval between samples, so a CPU can have nonzero load and be parked at the poll. Unparked CPUs may still be idle. State — means the parking state is unavailable.");
 }
 
 fn cpu_tile(
@@ -164,7 +259,8 @@ fn cpu_tile(
     } else {
         colors.border_strong
     };
-    let frame=egui::Frame::NONE
+    let mut activity_hit = None;
+    let frame = egui::Frame::NONE
         .fill(if selected {
             colors.success.fill
         } else if parked == Some(true) {
@@ -174,32 +270,39 @@ fn cpu_tile(
         })
         .stroke(egui::Stroke::NONE)
         .corner_radius(5.0)
-        .inner_margin(4)
+        .inner_margin(egui::Margin::symmetric(4, 2))
         .show(ui, |ui| {
             ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y=1.0;
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.spacing_mut().interact_size.y = 0.0;
                 ui.set_width((width - 8.0).max(20.0));
                 ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                    let badge_width=ui.available_width()*0.7;
-                    ui.allocate_ui_with_layout(egui::vec2(badge_width,0.0),Layout::top_down(Align::Center),|ui| {
-                        ui.set_width(badge_width);
-                        cpu_badge(ui,cpu,9.0,selected,outside.then_some(colors.danger.fg));
-                    });
+                    let badge_width = ui.available_width() * 0.7;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(badge_width, 0.0),
+                        Layout::top_down(Align::Center),
+                        |ui| {
+                            ui.set_width(badge_width);
+                            let badge = cpu_badge(
+                                ui,
+                                cpu,
+                                9.0,
+                                selected,
+                                outside.then_some(colors.danger.fg),
+                                has_activity,
+                            );
+                            if has_activity {
+                                activity_hit = Some(
+                                    activity_marker(badge.rect)
+                                        .expand(2.0)
+                                        .intersect(badge.rect),
+                                );
+                            }
+                        },
+                    );
                 });
-                ui.scope(|ui| {
-                    ui.set_max_width((ui.available_width()-3.0).max(20.0));
-                    super::mini_chart::draw(ui,data.overview,cpu,data.hovered);
-                });
-                let state_color = if parked == Some(true) { colors.warning.fg } else { colors.text_muted };
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x=3.0;
-                    let load=ui.painter().layout_no_wrap(measured_percent(value,partial),
-                        egui::FontId::proportional(9.0),if outside {colors.danger.fg}else{colors.text_primary});
-                    let state_width=(ui.available_width()-load.size().x-3.0).max(0.0);
-                    ui.add_sized([state_width,12.0],egui::Label::new(RichText::new(parking_text(parked)).size(8.0).color(state_color)).truncate())
-                        .on_hover_text("Windows parking state at the last poll, sampled once per second. Load covers the interval between samples, so a CPU can have nonzero load and be parked at the poll. Unparked CPUs may still be idle. State — means the parking state is unavailable.");
-                    ui.add(egui::Label::new(load).truncate());
-                });
+                super::mini_chart::draw(ui, data.overview, cpu, data.hovered);
+                tile_footer(ui, value, partial, parked, outside);
             });
         });
     let rect = frame.response.rect;
@@ -233,17 +336,8 @@ fn cpu_tile(
             colors.success.fg,
         );
     }
-    if has_activity {
-        ui.painter().rect_filled(
-            egui::Rect::from_min_max(
-                egui::pos2(rect.right() - 6.0, rect.top() + rect.height() * 0.2),
-                egui::pos2(rect.right() - 3.0, rect.bottom() - rect.height() * 0.2),
-            ),
-            2.0,
-            colors.success.fg,
-        );
-    }
     let response = ui.interact(rect, ui.id().with(("cpu-tile", cpu)), egui::Sense::click());
+    super::export_ui::menu(ui, &response, rect, cpu);
     crate::debug_mcp_control!(format!("cpu.{cpu}"), response);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
@@ -263,10 +357,23 @@ fn cpu_tile(
         )
     });
     paint_focus_ring(ui, &response);
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(if outside {"Activity outside the CURRENT group mask. Click for this CPU's detailed graph. Historical activity is not proof of an earlier mask violation. A green bar marks measured app work anywhere in the retained history window, independently of the inspected time."} else if data.show_app_activity {"Click for this CPU's detailed graph. A green bar marks measured app work anywhere in the retained history window, independently of the inspected time. Missing intervals are not proof of inactivity. Mini graphs show a compressed min/max overview; gaps mean missing data."} else {"Click for this CPU's detailed graph. Mini graphs show a compressed min/max overview; gaps mean missing data."})
-        .clicked()
+    let over_activity = activity_hit.is_some_and(|rect| ui.rect_contains_pointer(rect));
+    #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+    if let Some(rect) = activity_hit {
+        crate::app::features::diagnostics::debug_mcp::rect_control(
+            ui.ctx(),
+            format!("cpu.activity.{cpu}"),
+            rect,
+            true,
+            serde_json::Value::Null,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(
+        if over_activity {APP_ACTIVITY_HELP}
+        else if outside {"Activity outside the CURRENT group mask. Click for this CPU's detailed graph. Historical activity is not proof of an earlier mask violation."}
+        else if data.show_app_activity {"Click for this CPU's detailed graph. A yellow dot inside the CPU badge marks measured app work in retained history. Mini graphs show a compressed min/max overview; gaps mean missing data."}
+        else {"Click for this CPU's detailed graph. Mini graphs show a compressed min/max overview; gaps mean missing data."}
+    ).clicked()
 }
 
 pub(crate) fn group_indicator(
@@ -280,13 +387,23 @@ pub(crate) fn group_indicator(
         return;
     }
     let snapshot = app.cpu_load.snapshot();
-    let value = group_mean(&snapshot.cpus, cpus);
+    let (value, partial) = app.cpu_load.tracked_group_load(cpus);
     let color = palette(ui).accent.fg;
-    let response = load_meter(ui, value, color, true).on_hover_text(
-        "Open CPU graph. Average load of this group's logical CPUs from all programs. Overlapping groups share CPU capacity.",
-    );
+    let response = load_meter(ui, MeterLoad { value, partial }, color, true, MeterKind::Group).on_hover_ui(|ui| {
+        ui.label(format!(
+            "Open CPU graphs.\nTracked apps: {} of this group's CPU capacity (latest finalized graph interval).\nTracked scope covers unique processes across your saved groups on these CPUs. * means partial measured load; — means unavailable. Use All system processes in the graphs for other programs.",
+            measured_percent(value, partial),
+        ));
+    });
     crate::debug_mcp_control!(format!("meter.group.{}", id.0), response);
     if let Some(error) = &snapshot.error {
+        response.clone().on_hover_text(error);
+    }
+    if let Some(error) = snapshot
+        .collector_error
+        .as_ref()
+        .or(snapshot.detail_error.as_ref())
+    {
         response.clone().on_hover_text(error);
     }
     if response.clicked() {
@@ -316,9 +433,13 @@ pub(crate) fn process_indicator(
     } else {
         None
     };
-    let explanation = "CPU load across this app's tracked processes, relative to the whole CPU. Click for load per logical CPU. — means stopped, waiting or unavailable.";
-    let response =
-        load_meter(ui, value, color, running).on_hover_text(format!("{status}\n{explanation}"));
+    let explanation = if running {
+        format!("Open CPU graphs.\n{status}\nCPU load across this app's tracked processes, relative to the whole CPU. — means waiting or unavailable.")
+    } else {
+        format!("{status}\nStart this app to view its CPU graphs.")
+    };
+    let response = load_meter(ui, value.into(), color, running, MeterKind::Application)
+        .on_hover_text(explanation);
     crate::debug_mcp_control!(format!("meter.rule.{}", target.rule.0), response);
     if response.clicked() {
         app.cpu_load.open(GraphTarget::Process {
@@ -512,12 +633,31 @@ fn contributor_height(ctx: &egui::Context) -> f32 {
 }
 
 fn filter_chip(ui: &mut egui::Ui, selected: &mut bool, label: &str) -> egui::Response {
+    let colors = *palette(ui);
     let response = ui.add(
-        egui::Button::new(RichText::new(label).size(9.0))
-            .selected(*selected)
-            .corner_radius(4.0)
-            .min_size(egui::vec2(0.0, 17.0)),
+        egui::Button::new(RichText::new(label).size(9.0).color(if *selected {
+            colors.success.fill
+        } else {
+            colors.text_secondary
+        }))
+        .selected(*selected)
+        .fill(if *selected {
+            colors.success.fg
+        } else {
+            colors.inset
+        })
+        .stroke(egui::Stroke::new(
+            if *selected { 1.5 } else { 1.0 },
+            if *selected {
+                colors.success.fg
+            } else {
+                colors.border_strong
+            },
+        ))
+        .corner_radius(4.0)
+        .min_size(egui::vec2(0.0, 17.0)),
     );
+    paint_focus_ring(ui, &response);
     if response.clicked() {
         *selected = !*selected;
     }
@@ -573,7 +713,7 @@ fn scope_label(ui: &mut egui::Ui, text: &str) {
     .on_hover_text(text);
 }
 
-fn modal_header(ui: &mut egui::Ui, name: &str, application: bool) -> bool {
+fn modal_header(ui: &mut egui::Ui, name: &str, application: bool, system: bool) -> bool {
     let mut close = false;
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(
@@ -584,7 +724,9 @@ fn modal_header(ui: &mut egui::Ui, name: &str, application: bool) -> bool {
                     egui::Label::new(
                         RichText::new(format!(
                             "{name} · {}",
-                            if application {
+                            if system {
+                                "System CPU"
+                            } else if application {
                                 "Application CPU"
                             } else {
                                 "Group CPUs"
@@ -661,46 +803,27 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
         None
     };
     let snapshot = app.cpu_load.snapshot();
-    if let GraphTarget::Process { target, name } = &target {
-        if app.cpu_load.show_processes {
-            let mut close = false;
-            let mut mode = true;
-            let response = crate::app::shell::presenters::shared_elements::modal(egui::Id::new(
-                "cpu-load-modal",
-            ))
-            .show(ctx, |ui| {
-                let top = ui.cursor().top();
-                ui.set_width((ctx.content_rect().width() - 36.0).clamp(200.0, 356.0));
-                ui.set_height(modal_inner_height(ctx));
-                close = modal_header(ui, name, true);
-                if let Some(scope) = &app_scope {
-                    scope_label(ui, scope);
-                }
-                if let Some(error) = &snapshot.detail_error {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(error).small().color(palette(ui).warning.fg),
-                        )
-                        .wrap(),
-                    );
-                }
-                let height =
-                    (modal_inner_height(ctx) - (ui.cursor().top() - top) - 35.0).max(100.0);
-                super::process_list::draw(ui, &snapshot.live_processes, target, height);
-                ui.add_space(4.0);
-                view_switch(ui, &mut mode);
-            });
-            app.cpu_load.show_processes = mode;
-            app.cpu_load.inspection = Default::default();
-            super::chart::clear(ctx);
-            if close || response.should_close() {
-                app.cpu_load.close();
-            }
-            return;
-        }
-    }
     let mut tracked_only = app.cpu_load.tracked_only();
-    let (name, live_values, error, rule, mask) = match &target {
+    let system = matches!(target, GraphTarget::System);
+    let (name, live_values, error, rule, mask): (&str, _, _, _, _) = match &target {
+        GraphTarget::System => (
+            "All CPUs",
+            if tracked_only {
+                snapshot.tracked_cpus.as_slice()
+            } else {
+                snapshot.cpus.as_slice()
+            },
+            if tracked_only {
+                snapshot.detail_error.as_ref().or(snapshot.error.as_ref())
+            } else {
+                snapshot
+                    .collector_error
+                    .as_ref()
+                    .or(snapshot.error.as_ref())
+            },
+            None,
+            None,
+        ),
         GraphTarget::Group { id, name, cpus } => (
             name,
             if tracked_only {
@@ -751,7 +874,7 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
         .len()
         .max(live_values.len())
         .max(app.ui.group_form.core_selection.len());
-    let mut show_all = app.cpu_load.show_all_cpus;
+    let mut show_all = system || app.cpu_load.show_all_cpus;
     let mut cpus: Vec<_> = if show_all {
         (0..count).collect()
     } else {
@@ -768,11 +891,81 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
     let mut close = false;
     let series_cpu = selected;
     let mut inspection = app.cpu_load.inspection;
-    let data = app
-        .cpu_load
-        .graph_data(rule, selected.unwrap_or(usize::MAX), |series| {
-            inspection.select(ctx, series)
+    let displaying_processes = app.cpu_load.show_processes;
+    let export_notice = app.cpu_load.export_ui.notice.clone();
+    let mut show_processes = displaying_processes;
+    let process_rows = displaying_processes.then(|| {
+        if process {
+            snapshot.live_processes.clone()
+        } else {
+            app.cpu_load.group_processes(&cpus)
+        }
+    });
+    let data = if displaying_processes {
+        None
+    } else {
+        Some(
+            app.cpu_load
+                .graph_data(rule, selected.unwrap_or(usize::MAX), |series| {
+                    inspection.select(ctx, series)
+                }),
+        )
+    };
+    let mut actual_hover = None;
+    #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+    if let Some(data) = &data {
+        super::debug_api::record_graph(ctx, data, &cpus, selected);
+    }
+    let response = crate::app::shell::presenters::shared_elements::modal(egui::Id::new("cpu-load-modal")).show(ctx, |ui| {
+        let modal_top = ui.cursor().top();
+        ui.set_width((ctx.content_rect().width() - 36.0).clamp(200.0, 356.0));
+        ui.set_height(modal_inner_height(ctx));
+        close = modal_header(ui, name, process, system);
+        let subtitle = if tracked_only {
+            if show_all {"Tracked apps on all logical CPUs"} else {"Tracked apps on this group's logical CPUs"}
+        } else if show_all {"All system processes on all logical CPUs"}
+        else {"All system processes on this group's logical CPUs"};
+        if let Some(scope) = &app_scope {scope_label(ui, scope);}
+        else {ui.label(RichText::new(subtitle).small().weak());}
+        ui.horizontal(|ui| {
+            ui.set_min_height(18.0);
+            ui.spacing_mut().item_spacing.x = 5.0;
+            if !system && (!process || !displaying_processes) {
+                let response = filter_chip(ui, &mut show_all, "All CPUs").on_hover_text(
+                    "Off: use this group's selected CPUs. On: use every logical CPU. Changes the graph CPUs and the scope of the group's process table."
+                );
+                crate::debug_mcp_control!("graph.all_cpus", response);
+            }
+            if !process {
+                let mut all_processes = !tracked_only;
+                let response = filter_chip(ui, &mut all_processes, "All system processes").on_hover_text(
+                    "Off: only apps tracked by CPU Affinity Tool across your saved groups. On: include other Windows processes too. Both views use only the displayed CPUs. This changes what is shown; it does not apply CPU settings to other apps."
+                );
+                crate::debug_mcp_control!("graph.tracked_only", response);
+                tracked_only = !all_processes;
+            }
+            let mode = if let Some(data) = &data {
+                data.hovered.map(|time| format!("{} · {}", if inspection.pinned.is_some() {"Pinned"} else {"History"}, os_api::cpu_load::sample_clock_label(time.wall)))
+                    .unwrap_or_else(|| if data.pending {
+                        data.sample.time.map(|time| format!("Live · {}", os_api::cpu_load::sample_clock_label(time.wall))).unwrap_or_else(|| "Waiting for events…".into())
+                    } else {"Live".into()})
+            } else {
+                process_rows.as_ref().and_then(|rows| rows.time).map(|time| format!("Live · {}", os_api::cpu_load::sample_clock_label(time))).unwrap_or_else(|| "Waiting for data…".into())
+            };
+            let historical = data.as_ref().is_some_and(|data| data.hovered.is_some());
+            let color = if historical {palette(ui).accent.fg} else {palette(ui).text_secondary};
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add(egui::Label::new(RichText::new(mode).size(9.0).color(color).strong()).truncate())
+                    .on_hover_text("Graphs: hover to inspect one original interval; click the plot to pin it. Processes: the latest available interval. Group graphs and process rows share the same original sample and filters. Recording continues in both views.");
+            });
         });
+        if let Some(error) = error {
+            ui.add(egui::Label::new(RichText::new(error).small().color(ui.visuals().warn_fg_color)).wrap());
+        }
+        if let Some(notice) = &export_notice {
+            ui.add(egui::Label::new(RichText::new(notice).small().weak()).wrap());
+        }
+        if let Some(data) = &data {
     let recorded = data.hovered.is_some() || !data.series.points.is_empty() || !data.available;
     let values = if recorded {
         data.sample.values.as_slice()
@@ -798,67 +991,18 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
         hovered: data.hovered,
         show_app_activity: process,
     };
-    let mut actual_hover = None;
-    let mut show_processes = false;
-    #[cfg(all(debug_assertions, feature = "debug-mcp"))]
-    super::debug_api::record_graph(ctx, &data, &cpus, selected);
-    let response = crate::app::shell::presenters::shared_elements::modal(egui::Id::new("cpu-load-modal")).show(ctx, |ui| {
-        let modal_top = ui.cursor().top();
-        ui.set_width((ctx.content_rect().width() - 36.0).clamp(200.0, 356.0));
-        ui.set_height(modal_inner_height(ctx));
-        close=modal_header(ui,name,process);
-        let subtitle = if process {
-            "Process load per logical CPU"
-        } else if tracked_only && show_all {
-            "Tracked processes on all logical CPUs"
-        } else if tracked_only {
-            "Tracked processes on this group's logical CPUs"
-        } else if show_all {
-            "All programs on all logical CPUs"
-        } else {
-            "All programs on this group's logical CPUs"
-        };
-        if let Some(scope)=&app_scope {scope_label(ui,scope);} else {ui.label(RichText::new(subtitle).small().weak());}
-        ui.horizontal(|ui| {
-            ui.set_min_height(18.0);
-            let response = filter_chip(ui,&mut show_all,"All CPUs").on_hover_text("Show every logical CPU. When off, show only the current group mask. This changes which CPU tiles are visible, not the process filter.");
-            crate::debug_mcp_control!("graph.all_cpus", response);
-            let mode=data.hovered.map(|time|format!("{} · {}",if inspection.pinned.is_some(){"Pinned"}else{"History"},os_api::cpu_load::sample_clock_label(time.wall))).unwrap_or_else(||if data.pending {data.sample.time.map(|time|format!("Live · {}",os_api::cpu_load::sample_clock_label(time.wall))).unwrap_or_else(||"Waiting for events…".into())}else{"Live".into()});
-            let color=if data.hovered.is_some(){palette(ui).accent.fg}else{palette(ui).text_secondary};
-            ui.label(RichText::new(mode).size(9.0).color(color).strong())
-                .on_hover_text("Live uses the latest completed interval, including its original time, for both CPU values and process rows. Recent intervals wait for Windows events and fill in at their original positions; real losses stay gaps. Hover to inspect the same sample on every CPU. Left click the plot to pin the time and scroll process details; the next left click releases it. Recording continues.");
-        });
-        if !process {
-            let response = filter_chip(ui,&mut tracked_only,"Tracked only").on_hover_text(
-                "Unchecked: all observed system processes. Checked: processes tracked by CPU Affinity Tool across all saved groups at the original sample, only on the displayed CPUs. A shared PID/creation-token instance is counted once. This filter changes both graph load and contributor rows; it does not replace historical membership with today's process list."
-            );
-            crate::debug_mcp_control!("graph.tracked_only", response);
-        }
-        if process {
-            let outside=outside_activity(values,partial,mask.as_deref());
-            let message=match outside {Some(0)=>"Outside current mask: none".into(),Some(n)=>format!("Outside current mask: {n} CPU{}",if n==1{""}else{"s"}),None=>"Outside current mask: unavailable".into()};
-            ui.horizontal(|ui| {
-                ui.set_min_height(18.0);
-                let color=if outside.is_some_and(|n|n>0) {palette(ui).danger.fg}else{palette(ui).text_muted};
-                ui.label(RichText::new(message).size(9.0).color(color))
-                    .on_hover_text("Compared with the CURRENT saved group mask. Earlier masks are not recorded. Red tiles mark observed activity outside that mask, not proof of a past enforcement failure.");
-                if !show_all && outside.is_some_and(|n|n>0) && ui.small_button("Show").clicked() {show_all=true;}
-            });
-        }
-        if let Some(error) = error {
-            ui.add(
-                egui::Label::new(
-                    RichText::new(error)
-                        .small()
-                        .color(ui.visuals().warn_fg_color),
-                )
-                .wrap(),
-            );
-        } else if live_values.is_empty() {
-            ui.label(RichText::new("Collecting the first sample…").small().weak());
-        }
-        let body_height = (modal_inner_height(ctx) - (ui.cursor().top() - modal_top)
-            - if process {70.0} else {24.0}).max(100.0);
+            if process {
+                let outside = outside_activity(values, partial, mask.as_deref());
+                let message = match outside {Some(0) => "Outside current mask: none".into(), Some(n) => format!("Outside current mask: {n} CPU{}", if n == 1 {""} else {"s"}), None => "Outside current mask: unavailable".into()};
+                ui.horizontal(|ui| {
+                    ui.set_min_height(18.0);
+                    let color = if outside.is_some_and(|n| n > 0) {palette(ui).danger.fg} else {palette(ui).text_muted};
+                    ui.label(RichText::new(message).size(9.0).color(color)).on_hover_text("Compared with the CURRENT saved group mask. Earlier masks are not recorded. Red tiles mark observed activity outside that mask, not proof of a past enforcement failure.");
+                    if !show_all && outside.is_some_and(|n| n > 0) && ui.small_button("Show").clicked() {show_all = true;}
+                });
+            }
+            if error.is_none() && live_values.is_empty() {ui.label(RichText::new("Collecting the first sample…").small().weak());}
+            let body_height = (modal_inner_height(ctx) - (ui.cursor().top() - modal_top) - 70.0).max(100.0);
         let body_scroll = egui::ScrollArea::vertical()
             .min_scrolled_height(body_height)
             .max_height(body_height)
@@ -893,7 +1037,7 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
                         .corner_radius(6.0).inner_margin(8).show(ui,|ui| {
                             ui.spacing_mut().item_spacing.y=4.0;
                             let header=ui.horizontal(|ui| {
-                                cpu_badge(ui,cpu,11.0,true,None).on_hover_text("Selected logical CPU. Its load history and process contributions share this panel. Click another CPU tile above to change it.");
+                                cpu_badge(ui,cpu,11.0,true,None,false).on_hover_text("Selected logical CPU. Its load history and process contributions share this panel. Click another CPU tile above to change it.");
                                 ui.label(RichText::new(value).size(11.0).strong());
                                 if is_partial {ui.label(RichText::new("Partial").size(9.0).color(colors.warning.fg)).on_hover_text("Measured subtotal from known process samples. Some tracked instances are unavailable, so the full total is unknown. Dashed graph segments preserve the measured work.");}
                                 ui.label(RichText::new(parking_text(parked)).size(9.0).color(if parked==Some(true){colors.warning.fg}else{colors.text_muted}));
@@ -909,33 +1053,42 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
         crate::app::features::diagnostics::debug_mcp::rect_control(ctx, "graph.body", body_scroll.inner_rect, true, serde_json::json!({"offset":body_scroll.state.offset.y,"content_height":body_scroll.content_size.y}));
         #[cfg(not(all(debug_assertions, feature = "debug-mcp")))]
         let _ = body_scroll;
+        } else if let Some(rows) = &process_rows {
+            let body_height = (modal_inner_height(ctx) - (ui.cursor().top() - modal_top) - 70.0).max(100.0);
+            super::process_list::draw(ui, rows, rule, body_height);
+        }
         ui.add_space(5.0);
-        let note = if process {
-            "History records while CPU monitoring is enabled, including with this graph closed."
-        } else {
-            "Logical CPUs, including SMT threads. History is kept in memory."
-        };
-        ui.add(egui::Label::new(RichText::new(note).small().weak()).wrap());
-        if process {view_switch(ui,&mut show_processes);}
+        ui.add(egui::Label::new(RichText::new("History records while CPU monitoring is enabled, including with this graph closed.").small().weak()).wrap());
+        view_switch(ui, &mut show_processes);
     });
-    // A new layout/scroll position can move the plot. Re-run only that changed
-    // layout; ordinary hover already used its stable geometry before the grid.
-    if actual_hover != data.hovered
+    let graph_changed = data
+        .as_ref()
+        .is_some_and(|data| actual_hover != data.hovered);
+    if graph_changed
         || selected != app.cpu_load.selected_cpu
         || show_all != app.cpu_load.show_all_cpus
         || tracked_only != app.cpu_load.tracked_only()
+        || show_processes != displaying_processes
     {
-        ctx.request_discard("Synchronize CPU grid and graph inspection");
+        ctx.request_discard("Synchronize CPU view and inspection scope");
     }
     app.cpu_load.selected_cpu = selected;
-    app.cpu_load.inspection = inspection;
+    app.cpu_load.inspection = if show_processes {
+        Default::default()
+    } else {
+        inspection
+    };
     app.cpu_load.show_all_cpus = show_all;
     app.cpu_load.show_processes = show_processes;
     app.cpu_load.set_tracked_only(tracked_only);
+    if show_processes {
+        super::chart::clear(ctx);
+    }
     if close || response.should_close() {
         app.cpu_load.close();
         super::chart::clear(ctx);
     }
+    app.cpu_load.export_actions(ctx);
 }
 
 #[cfg(test)]
@@ -944,6 +1097,133 @@ mod tests {
     use super::*;
     use crate::app::models::AppStateStorage;
     use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn cpu_tile_places_activity_in_badge_and_keeps_plot_and_footer_tight() {
+        for dark in [true, false] {
+            for scale in [1.0, 1.75] {
+                let ctx = egui::Context::default();
+                ctx.set_fonts(
+                    crate::app::shell::presenters::shared_elements::ui_font_definitions(),
+                );
+                ctx.set_visuals(if dark {
+                    egui::Visuals::dark()
+                } else {
+                    egui::Visuals::light()
+                });
+                ctx.set_pixels_per_point(scale);
+                let overview = Overview {
+                    activity: vec![true],
+                    ..Default::default()
+                };
+                let data = GridData {
+                    values: &[Some(0.2)],
+                    partial: &[],
+                    parked: &[Some(false)],
+                    mask: None,
+                    overview: &overview,
+                    hovered: None,
+                    show_app_activity: true,
+                };
+                let mut tile = egui::Rect::NOTHING;
+                let mut output = egui::FullOutput::default();
+                for _ in 0..3 {
+                    output = ctx.run_ui(Default::default(), |ui| {
+                        ui.spacing_mut().interact_size.y = 28.0;
+                        cpu_tile(ui, 0, true, 83.0, &data);
+                        tile = ctx
+                            .read_response(ui.id().with(("cpu-tile", 0usize)))
+                            .unwrap()
+                            .rect;
+                    });
+                    output.textures_delta.clear();
+                }
+                let text = |name: &str| {
+                    output
+                        .shapes
+                        .iter()
+                        .find_map(|s| match &s.shape {
+                            egui::Shape::Text(t) if t.galley.text() == name => {
+                                Some(t.galley.rect.translate(t.pos.to_vec2()))
+                            }
+                            _ => None,
+                        })
+                        .unwrap()
+                };
+                let state = text("Unparked");
+                let load = text("<1%");
+                assert!(
+                    tile.bottom() - state.bottom().max(load.bottom()) <= 4.0,
+                    "no inherited button padding below footer: {tile:?}, {state:?}, {load:?}"
+                );
+                assert!((state.center().y - load.center().y).abs() < 0.6);
+                assert!(
+                    (egui::Rect::from_min_max(state.min, load.max).center().x - tile.center().x)
+                        .abs()
+                        < 0.6,
+                    "footer pair must be centered"
+                );
+                assert!(tile.shrink(2.0).contains_rect(load));
+                let baseline = output
+                    .shapes
+                    .iter()
+                    .find_map(|s| match &s.shape {
+                        egui::Shape::LineSegment { points, .. }
+                            if (points[0].y - points[1].y).abs() < 0.1
+                                && (points[1].x - points[0].x).abs() > 40.0
+                                && tile.contains(points[0]) =>
+                        {
+                            Some(points[0].y)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(
+                    state.top().min(load.top()) - baseline <= 3.0,
+                    "mini graph must meet its footer closely"
+                );
+                let dot = output
+                    .shapes
+                    .iter()
+                    .find_map(|s| match &s.shape {
+                        egui::Shape::Circle(c)
+                            if c.radius == 2.5
+                                && c.fill == egui::Color32::from_rgb(242, 196, 75) =>
+                        {
+                            Some(egui::Rect::from_center_size(
+                                c.center,
+                                egui::Vec2::splat(5.0),
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .expect("retained activity needs a yellow dot");
+                let cpu = text("CPU0");
+                assert!(output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(r) if r.rect.contains_rect(cpu) && r.rect.contains_rect(dot) && r.rect.height()<25.0)),"activity belongs inside CPU badge");
+                assert!(!dot.intersects(cpu));
+                assert!(!output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(r) if r.rect.width()<=3.1 && r.rect.center().x>tile.center().x && tile.contains_rect(r.rect))),"right activity rail is removed");
+                let quiet = GridData {
+                    show_app_activity: false,
+                    ..data
+                };
+                let mut quiet_rect = egui::Rect::NOTHING;
+                let mut quiet_output = ctx.run_ui(Default::default(), |ui| {
+                    ui.spacing_mut().interact_size.y = 28.0;
+                    cpu_tile(ui, 0, true, 83.0, &quiet);
+                    quiet_rect = ctx
+                        .read_response(ui.id().with(("cpu-tile", 0usize)))
+                        .unwrap()
+                        .rect;
+                });
+                quiet_output.textures_delta.clear();
+                assert_eq!(
+                    tile.size(),
+                    quiet_rect.size(),
+                    "activity must not change tile geometry"
+                );
+            }
+        }
+    }
 
     #[test]
     fn application_scope_names_configured_processes_and_descendants_explicitly() {
@@ -1034,7 +1314,7 @@ mod tests {
                         .unwrap()
                         .rect;
                 });
-                detail = cpu_badge(ui, 0, 11.0, true, None).rect;
+                detail = cpu_badge(ui, 0, 11.0, true, None, false).rect;
             });
             output.textures_delta.clear();
             let badges = output
@@ -1269,7 +1549,44 @@ mod tests {
     }
 
     #[test]
-    fn compact_indicators_do_not_add_a_cpu_or_graph_row() {
+    fn group_indicator_only_shows_tracked_interval_load() {
+        let ctx = egui::Context::default();
+        let mut app = AppState::new_for_test(
+            Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
+            2,
+        );
+        let mut snapshot = app.cpu_load.snapshot().as_ref().clone();
+        snapshot.cpus = vec![Some(70.0), Some(90.0)];
+        snapshot.tracked_cpus = vec![Some(99.0); 2];
+        *app.cpu_load.published.write().unwrap() = Arc::new(snapshot);
+        {
+            let mut history = app.cpu_load.history.write().unwrap();
+            history.configure(2, 30, &[]).unwrap();
+            history.push(
+                1.0,
+                std::time::SystemTime::UNIX_EPOCH,
+                &[Some(90.0); 2],
+                &[],
+                &std::collections::HashMap::new(),
+            );
+            history.record_tracked(&[Some(20.0), Some(40.0)]);
+        }
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            group_indicator(&mut app, ui, &GroupId("g".into()), "Group", &[0, 1]);
+        });
+        output.textures_delta.clear();
+        assert!(output.shapes.iter().any(
+            |shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "30%")
+        ));
+        assert!(output.shapes.iter().any(
+            |shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "30%")
+        ));
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Tracked")));
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "All processes")));
+    }
+
+    #[test]
+    fn indicators_keep_compact_unlabeled_cpu_strips() {
         let ctx = egui::Context::default();
         let mut app = AppState::new_for_test(
             Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
@@ -1299,11 +1616,60 @@ mod tests {
                 _ => None,
             })
             .collect();
+        assert!(!labels.contains(&"All processes"));
+        assert!(!labels.contains(&"Tracked"));
+        assert!(labels.contains(&"CPU graphs"));
+        let heights: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.rect.width() <= 70.0 => Some(rect.rect.height()),
+                _ => None,
+            })
+            .collect();
+        assert!(heights.iter().any(|height| (*height - 13.5).abs() < 0.01));
+        assert!(heights.iter().any(|height| (*height - 18.0).abs() < 0.01));
+    }
+
+    #[test]
+    fn system_modal_has_a_global_scope_without_a_saved_group() {
+        let ctx = egui::Context::default();
+        let mut app = AppState::new_for_test(
+            Arc::new(RwLock::new(AppStateStorage::test_fixture(|state| {
+                state.groups.clear()
+            }))),
+            20,
+        );
+        app.cpu_load.open(GraphTarget::System);
+        let mut output = None;
+        for _ in 0..3 {
+            let mut frame = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 900.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| draw_modal(&mut app, ui.ctx()),
+            );
+            frame.textures_delta.clear();
+            output = Some(frame);
+        }
+        let output = output.unwrap();
+        let labels: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.text()),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.contains(&"All CPUs · System CPU"));
+        assert!(labels.contains(&"All system processes on all logical CPUs"));
         assert!(
-            !labels.iter().any(|text| text.contains("Graph")
-                || text.contains("CPU ")
-                || text.contains("60 s")),
-            "extra load rows remain: {labels:?}"
+            !labels.contains(&"All CPUs"),
+            "system CPU scope is fixed, not a group-mask toggle"
         );
     }
 

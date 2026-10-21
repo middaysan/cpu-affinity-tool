@@ -109,6 +109,9 @@ pub(crate) trait ModuleEditor: Send + Sync {
     fn selects_saved_exe(&self) -> bool {
         false
     }
+    fn tweak_saved_executable_target(&self, _path: &std::path::Path) -> Option<TargetIdentity> {
+        None
+    }
     fn qualify_tweak_target(&self, target: &TargetIdentity) -> Result<TargetIdentity, ModuleError> {
         Ok(target.clone())
     }

@@ -54,9 +54,11 @@ impl Default for Control {
 /// the GUI copies one full CPU series, a bounded overview and one hovered row
 /// under short nonblocking reads. It never copies every full CPU history.
 pub(crate) struct CpuLoadRuntime {
+    pub(super) exports: Arc<super::export::ExportManager>,
+    pub(super) export_ui: super::export_ui::ExportUi,
     control: Arc<(Mutex<Control>, Condvar)>,
-    published: Arc<RwLock<Arc<Snapshot>>>,
-    history: Arc<RwLock<HistoryStore>>,
+    pub(super) published: Arc<RwLock<Arc<Snapshot>>>,
+    pub(super) history: Arc<RwLock<HistoryStore>>,
     series_cache: Series,
     series_key: Option<(Option<RuleTarget>, usize)>,
     overview_cache: Overview,
@@ -64,9 +66,12 @@ pub(crate) struct CpuLoadRuntime {
     sample_cache: HistoricalSample,
     contributor_cache: ContributorView,
     contributor_key: Option<(Option<RuleTarget>, usize, SampleTime, u64)>,
+    group_process_cache: Arc<super::process_list::ProcessList>,
+    group_process_key: Option<(Vec<usize>, bool, Option<SampleTime>, u64)>,
     worker: Option<JoinHandle<()>>,
     running: Arc<TokioRwLock<RunningApps>>,
     source: Arc<RwLock<AppStateStorage>>,
+    managed_runs: Arc<crate::app::features::execution::managed_runs::ManagedRuns>,
     pub graph: Option<GraphTarget>,
     pub selected_cpu: Option<usize>,
     pub show_all_cpus: bool,
@@ -86,6 +91,8 @@ impl CpuLoadRuntime {
         source: Arc<RwLock<AppStateStorage>>,
     ) -> Self {
         Self {
+            exports: Default::default(),
+            export_ui: Default::default(),
             control: Default::default(),
             published: Arc::new(RwLock::new(Arc::new(Snapshot::default()))),
             history: Default::default(),
@@ -96,9 +103,12 @@ impl CpuLoadRuntime {
             sample_cache: Default::default(),
             contributor_cache: Default::default(),
             contributor_key: None,
+            group_process_cache: Default::default(),
+            group_process_key: None,
             worker: None,
             running,
             source,
+            managed_runs: Default::default(),
             graph: None,
             selected_cpu: None,
             show_all_cpus: false,
@@ -112,11 +122,18 @@ impl CpuLoadRuntime {
             stopped: Arc::new(AtomicBool::new(true)),
         }
     }
+    pub fn with_managed_runs(
+        mut self,
+        runs: Arc<crate::app::features::execution::managed_runs::ManagedRuns>,
+    ) -> Self {
+        self.managed_runs = runs;
+        self
+    }
     pub fn open(&mut self, target: GraphTarget) {
-        self.set_tracked_only(false);
+        self.set_tracked_only(matches!(target, GraphTarget::Group { .. }));
+        self.show_all_cpus = matches!(target, GraphTarget::System);
         self.graph = Some(target);
         self.selected_cpu = None;
-        self.show_all_cpus = false;
         self.show_processes = false;
         self.inspection = Default::default();
         self.overview_key = None;
@@ -124,6 +141,8 @@ impl CpuLoadRuntime {
         self.sample_cache.clear();
         self.contributor_cache.clear();
         self.contributor_key = None;
+        self.group_process_cache = Default::default();
+        self.group_process_key = None;
     }
     pub fn close(&mut self) {
         self.set_tracked_only(false);
@@ -136,6 +155,8 @@ impl CpuLoadRuntime {
         self.sample_cache = HistoricalSample::default();
         self.contributor_cache = ContributorView::default();
         self.contributor_key = None;
+        self.group_process_cache = Default::default();
+        self.group_process_key = None;
         self.show_all_cpus = false;
         self.show_processes = false;
         self.inspection = Default::default();
@@ -157,6 +178,7 @@ impl CpuLoadRuntime {
             let history = self.history.clone();
             let running = self.running.clone();
             let source = self.source.clone();
+            let managed_runs = self.managed_runs.clone();
             let stopped = self.stopped.clone();
             self.stopped.store(false, Ordering::Release);
             match std::thread::Builder::new()
@@ -169,7 +191,7 @@ impl CpuLoadRuntime {
                         }
                     }
                     let _finished = Finished(stopped);
-                    run(control, published, history, running, source);
+                    run(control, published, history, running, source, managed_runs);
                 }) {
                 Ok(worker) => self.worker = Some(worker),
                 Err(error) => {
@@ -208,6 +230,15 @@ impl CpuLoadRuntime {
     pub fn tracked_only(&self) -> bool {
         self.group_tracked_only
     }
+    pub(super) fn tracked_group_load(&self, cpus: &[usize]) -> (Option<f32>, bool) {
+        let Ok(history) = self.history.try_read() else {
+            return (None, false);
+        };
+        let Some(time) = history.latest_finalized() else {
+            return (None, false);
+        };
+        history.group_mean_at(LoadSource::Tracked, time, cpus)
+    }
     pub fn set_tracked_only(&mut self, value: bool) {
         if self.group_tracked_only != value {
             self.group_tracked_only = value;
@@ -222,6 +253,59 @@ impl CpuLoadRuntime {
             None if self.group_tracked_only => LoadSource::Tracked,
             None => LoadSource::System,
         }
+    }
+    pub(super) fn group_processes(
+        &mut self,
+        cpus: &[usize],
+    ) -> Arc<super::process_list::ProcessList> {
+        let Ok(history) = self.history.try_read() else {
+            return Arc::new(super::process_list::ProcessList {
+                group: true,
+                ..Default::default()
+            });
+        };
+        let time = history.latest_finalized();
+        let same = self
+            .group_process_key
+            .as_ref()
+            .is_some_and(|(mask, tracked, at, revision)| {
+                mask == cpus
+                    && *tracked == self.group_tracked_only
+                    && *at == time
+                    && *revision == history.revision
+            });
+        if !same {
+            let list = if let Some(time) = time {
+                let source = self.load_source(None);
+                let known = cpus
+                    .iter()
+                    .filter(|&&cpu| history.value_at(source, time, cpu).is_some())
+                    .count();
+                history.contributors.process_list(
+                    time,
+                    cpus,
+                    if self.group_tracked_only {
+                        ContributorScope::Tracked
+                    } else {
+                        ContributorScope::System
+                    },
+                    known,
+                )
+            } else {
+                super::process_list::ProcessList {
+                    group: true,
+                    ..Default::default()
+                }
+            };
+            self.group_process_cache = Arc::new(list);
+            self.group_process_key = Some((
+                cpus.to_vec(),
+                self.group_tracked_only,
+                time,
+                history.revision,
+            ));
+        }
+        self.group_process_cache.clone()
     }
     #[cfg(any(test, all(debug_assertions, feature = "debug-mcp")))]
     pub(super) fn series(&mut self, target: Option<&RuleTarget>, cpu: usize) -> &Series {
@@ -319,6 +403,7 @@ impl CpuLoadRuntime {
                                 LoadSource::System => ContributorScope::System,
                                 LoadSource::Tracked => ContributorScope::Tracked,
                                 LoadSource::Rule(target) => ContributorScope::Rule(&target.rule),
+                                LoadSource::Run(id) => ContributorScope::Run(id),
                             },
                             &mut self.contributor_cache,
                         );
@@ -348,24 +433,26 @@ impl CpuLoadRuntime {
         }
     }
     pub fn memory_estimate(&self, cpus: usize, rules: usize, seconds: u32) -> String {
-        let history = history_bytes(cpus, rules, seconds)
+        let runs = self.managed_runs.telemetry_count();
+        let history = history_bytes(cpus, rules.saturating_add(runs), seconds)
             .and_then(|h| h.checked_add(contributor_bytes(cpus, seconds)?))
             .unwrap_or(usize::MAX);
         let snapshot = self.snapshot();
         let bookkeeping = ESTIMATED_COLLECTOR_RUNTIME_BYTES
             + snapshot.live_processes.reserved_bytes()
+            + self.group_process_cache.reserved_bytes()
             + snapshot
                 .bookkeeping_bytes
                 .max(os_api::cpu_load::history_buffer_bytes(cpus).unwrap_or(usize::MAX))
             + snapshot.instances * (128 + cpus * 32)
             + snapshot.contributor_metadata_bytes
-            + rules * cpus * 24
+            + (rules + runs) * cpus * 24
             + cpus * 16;
         // Use the configured trace-buffer maximum for one conservative estimate.
         let trace_buffers = cpus.saturating_mul(2).max(4) * 2 * 64 * 1024;
         let mib = 1024.0 * 1024.0;
         format!(
-            "Extra memory: ~{:.1} MiB\nHistory: {:.2} MiB · {cpus} logical CPUs · {rules} apps\n{} tracked processes · {} observed threads{}\n{} retained process identities · bounded sparse contributor pool\nDelayed intervals: {:.2} MiB reserved · 16 max",
+            "Extra memory: ~{:.1} MiB\nHistory: {:.2} MiB · {cpus} logical CPUs · {rules} apps · {runs} managed roots\n{} tracked processes · {} observed threads{}\n{} retained process identities · bounded sparse contributor pool\nDelayed intervals: {:.2} MiB reserved · 16 max",
             (history as f64 + trace_buffers as f64 + bookkeeping as f64) / mib,
             history as f64 / mib,
             snapshot.instances,
@@ -383,6 +470,7 @@ impl CpuLoadRuntime {
         )
     }
     pub fn shutdown(&mut self) {
+        self.exports.cancelled.store(true, Ordering::Release);
         if let Ok(mut c) = self.control.0.lock() {
             c.quit = true;
             self.control.1.notify_one();
@@ -617,6 +705,7 @@ fn run(
     history: Arc<RwLock<HistoryStore>>,
     running: Arc<TokioRwLock<RunningApps>>,
     source: Arc<RwLock<AppStateStorage>>,
+    managed_runs: Arc<crate::app::features::execution::managed_runs::ManagedRuns>,
 ) {
     let mut next = Instant::now();
     let mut previous = Control::default();
@@ -628,6 +717,7 @@ fn run(
     let mut pid_totals: HashMap<(u32, u64), Option<f32>> = HashMap::new();
     let mut tracking: Option<TrackingSnapshot> = None;
     let mut targets = Vec::new();
+    let mut run_targets = HashMap::new();
     let mut all = Vec::new();
     let mut snapshot = Snapshot::default();
     let mut configured_cpus = 0;
@@ -665,6 +755,7 @@ fn run(
             tracking = None;
             all.clear();
             targets.clear();
+            run_targets.clear();
             event_history = EventHistory::default();
             identities.clear();
             contributor_rules.clear();
@@ -683,6 +774,11 @@ fn run(
             }
         }
         let count = os_api::cpu_load::logical_cpu_count();
+        let observed_runs = managed_runs
+            .telemetry_targets()
+            .unwrap_or_else(|| run_targets.clone());
+        let runs_changed = observed_runs != run_targets;
+        run_targets = observed_runs;
         let configuration_changed = match saved_targets(&source, &mut targets) {
             Ok(changed) => {
                 changed
@@ -745,6 +841,10 @@ fn run(
             snapshot.processes.clear();
             snapshot.process_cpus.clear();
             snapshot.process_partial_cpus.clear();
+            snapshot.run_cpus.clear();
+            snapshot.run_partial_cpus.clear();
+            snapshot.run_totals.clear();
+            snapshot.scheduler_time = None;
             snapshot.tracked_cpus.clear();
             snapshot.tracked_partial_cpus.clear();
             snapshot.live_processes = Default::default();
@@ -754,6 +854,15 @@ fn run(
             previous = current;
             next = Instant::now() + SAMPLE_INTERVAL;
             continue;
+        }
+        if configuration_changed || runs_changed {
+            snapshot.run_error = history
+                .write()
+                .map_err(|_| "CPU history lock failed".to_string())
+                .and_then(|mut store| {
+                    store.configure_runs(&run_targets.keys().cloned().collect::<Vec<_>>())
+                })
+                .err();
         }
         // A retention-only wake reserves/resizes without adding an early sample.
         if current.enabled
@@ -810,7 +919,7 @@ fn run(
                 }
             }
         }
-        if configuration_changed || !unchanged {
+        if configuration_changed || !unchanged || runs_changed {
             all.clear();
             if let Some(tracked) = &tracking {
                 all.extend(
@@ -821,6 +930,7 @@ fn run(
                         .flat_map(|(_, instances)| instances.iter().copied()),
                 );
             }
+            all.extend(run_targets.values().copied());
             all.sort_unstable();
             all.dedup();
             let live: HashSet<_> = all.iter().copied().collect();
@@ -840,12 +950,9 @@ fn run(
         let tracked = tracking
             .as_ref()
             .filter(|t| membership_matches(&running, t.generation));
-        if let Some(tracked) = tracked {
+        {
             crate::render_profile_scope!(ProcessTimes);
-            if all.is_empty() {
-                snapshot.tracked_cpus.fill(Some(0.0));
-            }
-            snapshot.processes = process_totals(&tracked.targets, |pid, token| {
+            for &(pid, token) in &all {
                 if let std::collections::hash_map::Entry::Vacant(entry) =
                     processes.entry((pid, token))
                 {
@@ -864,8 +971,16 @@ fn run(
                         entry.insert(identity);
                     }
                 }
-                value
-            });
+            }
+            if let Some(tracked) = tracked {
+                snapshot.processes = process_totals(&tracked.targets, |pid, token| {
+                    pid_totals.get(&(pid, token)).copied().flatten()
+                });
+            }
+            snapshot.run_totals = run_targets
+                .iter()
+                .map(|(id, instance)| (id.clone(), pid_totals.get(instance).copied().flatten()))
+                .collect();
         }
         let mut live_processes = tracking
             .as_ref()
@@ -921,7 +1036,15 @@ fn run(
                     tracked.filter(|tracked| membership_matches(&running, tracked.generation));
                 let tick = {
                     crate::render_profile_scope!(TraceTick);
-                    active.history_tick(if valid.is_some() { &all } else { &[] })
+                    active.history_tick(if valid.is_some() {
+                        &all
+                    } else {
+                        all.clear();
+                        all.extend(run_targets.values().copied());
+                        all.sort_unstable();
+                        all.dedup();
+                        &all
+                    })
                 };
                 match tick {
                     Ok(tick) => {
@@ -931,6 +1054,7 @@ fn run(
                                 targets: valid.map(|t| &t.targets),
                                 names: &identities,
                                 rules: &contributor_rules,
+                                runs: &run_targets,
                                 changed: configuration_changed,
                             };
                             if let Err(error) =
@@ -994,6 +1118,7 @@ fn run(
         live_processes.time = Some(SystemTime::now());
         snapshot.live_processes = Arc::new(live_processes);
         if let Ok(store) = history.read() {
+            snapshot.scheduler_time = store.latest_finalized();
             snapshot.history_bytes = store.reserved_bytes();
             snapshot.contributor_metadata_bytes = store.contributors.metadata_bytes();
             snapshot.contributor_identities = store.contributors.metadata_count();

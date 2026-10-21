@@ -1,8 +1,13 @@
 //! Read-only Windows CPU graphs. Independent of process settings enforcement.
+mod api;
 mod chart;
+pub(crate) use api::CpuReadHandle;
 mod contributors;
+pub(crate) mod controls;
 #[cfg(all(debug_assertions, feature = "debug-mcp"))]
 pub(crate) mod debug_api;
+mod export;
+mod export_ui;
 mod history;
 mod meter;
 mod mini_chart;

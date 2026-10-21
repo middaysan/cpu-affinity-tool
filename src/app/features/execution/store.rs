@@ -28,6 +28,8 @@ pub(crate) struct InstalledPackageTrackingState {
 }
 
 pub struct RuntimeRegistry {
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) managed_runs: Arc<super::managed_runs::ManagedRuns>,
     pub(crate) store: ExecutionStore,
     pub(crate) monitor_rx: Option<MonitorEventReceiver>,
     wake: Option<MonitorWake>,
@@ -315,6 +317,8 @@ impl ExecutionStore {
 impl RuntimeRegistry {
     pub fn new() -> Self {
         Self {
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            managed_runs: Default::default(),
             store: ExecutionStore::new(),
             monitor_rx: None,
             wake: None,

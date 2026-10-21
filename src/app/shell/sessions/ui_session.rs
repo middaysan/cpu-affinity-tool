@@ -13,6 +13,8 @@ pub(crate) struct TrackedProcessSession {
     pub revision: u64,
     pub rows: Vec<TrackedProcessSnapshot>,
     pub updating: bool,
+    pub show_logs: bool,
+    pub last_activity: Option<Instant>,
     last_attempt: Option<Instant>,
 }
 
@@ -38,6 +40,8 @@ impl TrackedProcessSession {
 pub struct UiSession {
     pub(crate) tuning: crate::app::features::system_tweaks::presentation::TuningUiSession,
     pub(crate) app_settings_open: bool,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) cpu_monitor_open: bool,
     pub(crate) tracked_processes: TrackedProcessSession,
     pub current_window: WindowRoute,
     pub group_form: GroupFormSession,
@@ -64,12 +68,18 @@ pub struct UiSession {
 
 impl UiSession {
     pub(crate) fn monitoring_modal_open(&self, cpu_graph_open: bool) -> bool {
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        if self.cpu_monitor_open {
+            return true;
+        }
         cpu_graph_open || self.tracked_processes.open
     }
     pub fn new(total_threads: usize) -> Self {
         Self {
             tuning: Default::default(),
             app_settings_open: false,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            cpu_monitor_open: false,
             tracked_processes: Default::default(),
             current_window: WindowRoute::Groups(GroupRoute::List),
             group_form: GroupFormSession {
@@ -81,6 +91,7 @@ impl UiSession {
                 last_clicked_core: None,
             },
             app_edit_state: RuleEditorSession {
+                process_names: Default::default(),
                 current_edit: None,
                 target: None,
                 shortcut_result: None,

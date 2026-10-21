@@ -147,7 +147,7 @@ fn current_quality(list: &super::process_list::ProcessList, target: Option<&Rule
     for row in list
         .rows
         .iter()
-        .filter(|r| target.is_none_or(|t| t == &r.target))
+        .filter(|r| target.is_none_or(|t| r.target.as_ref() == Some(t)))
     {
         if !seen.insert((row.pid, row.token)) {
             continue;
@@ -187,6 +187,7 @@ pub(crate) fn graph(app: &AppState, _ctx: &egui::Context) -> Value {
     let snapshot = runtime.snapshot();
     let target = match &runtime.graph {
         None => Value::Null,
+        Some(GraphTarget::System) => json!({"kind":"system"}),
         Some(GraphTarget::Group { id, .. }) => json!({"kind":"group","group_id":id.0}),
         Some(GraphTarget::Process { target, .. }) => {
             json!({"kind":"app","group_id":target.group.0,"rule_id":target.rule.0})
@@ -229,6 +230,7 @@ pub(crate) fn apply(app: &mut AppState, command: &Command) -> Result<(), String>
             };
             drop(state);
             app.ui.app_settings_open = false;
+            app.ui.cpu_monitor_open = false;
             app.cpu_load.open(target);
         }
         Command::CloseGraph {} => app.cpu_load.close(),
@@ -239,16 +241,19 @@ pub(crate) fn apply(app: &mut AppState, command: &Command) -> Result<(), String>
             }
             if !app.cpu_load.show_all_cpus {
                 let id = match app.cpu_load.graph.as_ref().unwrap() {
-                    GraphTarget::Group { id, .. } => id,
-                    GraphTarget::Process { target, .. } => &target.group,
+                    GraphTarget::System => None,
+                    GraphTarget::Group { id, .. } => Some(id),
+                    GraphTarget::Process { target, .. } => Some(&target.group),
                 };
-                let g = app.rules.group_index_for_id(id).ok_or("Group removed")?;
-                let saved = app
-                    .persistent_state
-                    .try_read()
-                    .map_err(|_| "Settings busy")?;
-                if !saved.groups.get(g).is_some_and(|g| g.cores.contains(cpu)) {
-                    return Err("CPU is filtered out; enable All CPUs first".into());
+                if let Some(id) = id {
+                    let g = app.rules.group_index_for_id(id).ok_or("Group removed")?;
+                    let saved = app
+                        .persistent_state
+                        .try_read()
+                        .map_err(|_| "Settings busy")?;
+                    if !saved.groups.get(g).is_some_and(|g| g.cores.contains(cpu)) {
+                        return Err("CPU is filtered out; enable All CPUs first".into());
+                    }
                 }
             }
             app.cpu_load.selected_cpu = Some(*cpu);
@@ -272,12 +277,10 @@ pub(crate) fn apply(app: &mut AppState, command: &Command) -> Result<(), String>
             {
                 return Err("View must be graphs or processes".into());
             }
-            if view.as_deref() == Some("processes")
-                && !matches!(app.cpu_load.graph, Some(GraphTarget::Process { .. }))
-            {
-                return Err("Processes view is app-only".into());
-            }
             if let Some(v) = all_cpus {
+                if !*v && matches!(app.cpu_load.graph, Some(GraphTarget::System)) {
+                    return Err("System graphs always include every logical CPU".into());
+                }
                 app.cpu_load.show_all_cpus = *v;
             }
             if let Some(v) = tracked_only {
@@ -376,6 +379,6 @@ pub(super) fn record_processes(
     let rows = || order.iter().map(|&i| &list.rows[i]);
     debug_mcp::table_capture(
         ctx,
-        json!({"kind":"processes","ready":list.ready,"total":rows().count(),"offset":offset,"rows":rows().skip(offset).take(limit).map(|r|json!({"name":r.name(),"pid":r.pid,"instance":r.token,"cpu_percent":r.total,"cpus":r.cores,"known_cpus":r.known_cores,"cpu_count":r.cpu_count})).collect::<Vec<_>>()}),
+        json!({"kind":"processes","ready":list.ready,"partial":list.partial,"scope":if list.group{"displayed_cpus"}else{"application"},"cpu_percent_basis":if list.group{"displayed_cpu_capacity"}else{"whole_machine"},"total":rows().count(),"offset":offset,"rows":rows().skip(offset).take(limit).map(|r|json!({"name":r.name(),"pid":r.pid,"instance":r.token,"cpu_percent":r.total,"partial":r.partial,"cpus":r.cores,"known_cpus":r.known_cores,"cpu_count":r.cpu_count})).collect::<Vec<_>>()}),
     );
 }

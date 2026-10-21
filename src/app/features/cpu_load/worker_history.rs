@@ -12,6 +12,7 @@ struct Ownership {
     generation: Option<u64>,
     named_count: usize,
     targets: HashMap<RuleTarget, Vec<(u32, u64)>>,
+    runs: HashMap<String, (u32, u64)>,
     names: HashMap<(u32, u64), Arc<CpuProcess>>,
     rules: HashMap<RuleTarget, Arc<RuleId>>,
 }
@@ -24,6 +25,101 @@ mod tests {
     use crate::app::shared::ids::GroupId;
     use os_api::cpu_load::{CpuHistoryTarget, CpuHistoryValue};
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn delayed_run_work_uses_original_run_and_does_not_enter_saved_tracked_union() {
+        let mut store = HistoryStore::default();
+        store.configure(1, 30, &[]).unwrap();
+        store
+            .configure_runs(&["run-a".into(), "run-b".into()])
+            .unwrap();
+        let mut events = EventHistory::default();
+        let names = HashMap::from([(
+            (42, 10),
+            Arc::new(CpuProcess {
+                pid: 42,
+                instance: 10,
+                name: "child.exe".into(),
+            }),
+        )]);
+        let rules = HashMap::new();
+        let targets = HashMap::new();
+        let old = HashMap::from([("run-a".to_string(), (42, 10))]);
+        let new = HashMap::from([("run-b".to_string(), (42, 20))]);
+        for id in 0..=2 {
+            events
+                .enqueue(
+                    CpuHistoryTick {
+                        id,
+                        seconds: id as f64 + 1.0,
+                        timestamp: SystemTime::UNIX_EPOCH + Duration::from_secs(id),
+                    },
+                    OwnerInput {
+                        generation: Some(1),
+                        targets: Some(&targets),
+                        names: &names,
+                        rules: &rules,
+                        runs: if id == 0 { &old } else { &new },
+                        changed: true,
+                    },
+                    &[],
+                    &mut store,
+                )
+                .unwrap();
+        }
+        let mut frame = CpuHistoryFrame::new(1).unwrap();
+        frame.id = 0;
+        events.apply(&frame, &mut store);
+        frame.id = 1;
+        frame.available = true;
+        frame.cpus[0] = Some(25.0);
+        frame.targets.push(CpuHistoryTarget { pid: 42, token: 10 });
+        frame.coverage.push(1);
+        frame.tracked.push(CpuHistoryValue {
+            target: 0,
+            cpu: 0,
+            load: 25.0,
+        });
+        events.apply(&frame, &mut store);
+        let mut sample = HistoricalSample::default();
+        store.copy_sample(
+            super::super::history::LoadSource::Run("run-a"),
+            2.0,
+            &mut sample,
+        );
+        assert_eq!(sample.values, [Some(25.0)]);
+        store.copy_sample(
+            super::super::history::LoadSource::Run("run-b"),
+            2.0,
+            &mut sample,
+        );
+        assert_eq!(sample.values, [None]);
+        store.copy_sample(super::super::history::LoadSource::Tracked, 2.0, &mut sample);
+        assert_eq!(sample.values, [Some(0.0)]);
+        let mut view = ContributorView::default();
+        store.contributors.copy(
+            SampleTime {
+                seconds: 2.0,
+                wall: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            },
+            0,
+            super::super::contributors::ContributorScope::Run("run-a"),
+            &mut view,
+        );
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].load, 25.0);
+        store.configure(1, 300, &[]).unwrap();
+        store.copy_sample(
+            super::super::history::LoadSource::Run("run-a"),
+            2.0,
+            &mut sample,
+        );
+        assert_eq!(
+            sample.values,
+            [Some(25.0)],
+            "retention resize preserves admitted run data"
+        );
+    }
 
     #[test]
     fn delayed_frames_keep_original_rule_and_creation_token_after_membership_changes() {
@@ -59,6 +155,7 @@ mod tests {
                         targets: Some(if id == 0 { &old_targets } else { &new_targets }),
                         names: &names,
                         rules: &rules,
+                        runs: &HashMap::new(),
                         changed: false,
                     },
                     &[],
@@ -113,6 +210,7 @@ pub(super) struct OwnerInput<'a> {
     pub targets: Option<&'a HashMap<RuleTarget, Vec<(u32, u64)>>>,
     pub names: &'a HashMap<(u32, u64), Arc<CpuProcess>>,
     pub rules: &'a HashMap<RuleTarget, Arc<RuleId>>,
+    pub runs: &'a HashMap<String, (u32, u64)>,
     pub changed: bool,
 }
 struct PendingInterval {
@@ -156,12 +254,13 @@ impl EventHistory {
             return Err("CPU history exceeded 16 pending intervals".into());
         }
         if input.changed
+            || input.runs != &self.captured.runs
             || input.generation != self.captured.generation
             || input.names.len() != self.captured.named_count
         {
             let targets = input.targets.cloned().unwrap_or_default();
             let mut names = input.names.clone();
-            for &(pid, token) in targets.values().flatten() {
+            for &(pid, token) in targets.values().flatten().chain(input.runs.values()) {
                 names.entry((pid, token)).or_insert_with(|| {
                     Arc::new(CpuProcess {
                         pid,
@@ -174,6 +273,7 @@ impl EventHistory {
                 generation: input.generation,
                 named_count: input.names.len(),
                 targets,
+                runs: input.runs.clone(),
                 names,
                 rules: input.rules.clone(),
             });
@@ -206,6 +306,14 @@ impl EventHistory {
     fn clear_values(&mut self) {
         self.sample_count = 0;
         self.snapshot.tracked_cpus.fill(None);
+        for values in self
+            .snapshot
+            .run_cpus
+            .values_mut()
+            .chain(self.snapshot.run_partial_cpus.values_mut())
+        {
+            values.fill(None);
+        }
         self.snapshot.tracked_partial_cpus.fill(None);
         for values in self
             .snapshot
@@ -226,6 +334,7 @@ impl EventHistory {
             return;
         };
         let time = pending.time;
+        store.api_native_interval(time, frame.id, frame.begin, frame.end);
         let owners = pending.owners.clone();
         self.pending.pop_front();
         if !frame.available {
@@ -271,6 +380,14 @@ impl EventHistory {
         self.snapshot.cpus.clone_from(&frame.cpus);
         self.snapshot.tracked_cpus.resize(cpus, None);
         self.snapshot.tracked_cpus.fill(None);
+        for values in self
+            .snapshot
+            .run_cpus
+            .values_mut()
+            .chain(self.snapshot.run_partial_cpus.values_mut())
+        {
+            values.fill(None);
+        }
         self.snapshot.tracked_partial_cpus.resize(cpus, None);
         self.snapshot.tracked_partial_cpus.fill(None);
         self.snapshot
@@ -325,6 +442,7 @@ impl EventHistory {
                                 self.inputs.push(Contribution {
                                     process: identity.clone(),
                                     rule: Some(rule.clone()),
+                                    run: None,
                                     cpu,
                                     load,
                                 });
@@ -334,10 +452,44 @@ impl EventHistory {
                 }
             }
         }
+        self.snapshot
+            .run_cpus
+            .retain(|id, _| owners.runs.contains_key(id));
+        self.snapshot
+            .run_partial_cpus
+            .retain(|id, _| owners.runs.contains_key(id));
+        for (id, &instance) in &owners.runs {
+            let values = self.snapshot.run_cpus.entry(id.clone()).or_default();
+            values.resize(cpus, None);
+            let partial = self
+                .snapshot
+                .run_partial_cpus
+                .entry(id.clone())
+                .or_default();
+            partial.resize(cpus, None);
+            super::runtime::aggregate_cpus(values, partial, &[instance], samples);
+            if let (Some(identity), Ok(index)) = (
+                owners.names.get(&instance),
+                samples.binary_search_by_key(&instance, |s| (s.pid, s.token)),
+            ) {
+                for (cpu, load) in samples[index].cpus.iter().enumerate() {
+                    if let Some(load) = load.filter(|v| *v > 0.0) {
+                        self.inputs.push(Contribution {
+                            process: identity.clone(),
+                            rule: None,
+                            run: Some(Arc::from(id.as_str())),
+                            cpu,
+                            load,
+                        });
+                    }
+                }
+            }
+        }
         for value in &frame.contributors {
             self.inputs.push(Contribution {
                 process: value.process.clone(),
                 rule: None,
+                run: None,
                 cpu: value.cpu as usize,
                 load: value.load,
             });
@@ -348,6 +500,7 @@ impl EventHistory {
                     self.inputs.push(Contribution {
                         process: row.process.clone(),
                         rule: None,
+                        run: None,
                         cpu,
                         load: f32::NAN,
                     });
@@ -362,6 +515,10 @@ impl EventHistory {
         }
     }
     pub fn publish(&self, snapshot: &mut Snapshot) {
+        snapshot.run_cpus.clone_from(&self.snapshot.run_cpus);
+        snapshot
+            .run_partial_cpus
+            .clone_from(&self.snapshot.run_partial_cpus);
         snapshot
             .process_cpus
             .clone_from(&self.snapshot.process_cpus);
@@ -394,6 +551,8 @@ impl EventHistory {
             }
             seen[count] = pointer;
             count += 1;
+            owners_bytes += owners.runs.capacity() * std::mem::size_of::<(String, (u32, u64))>()
+                + owners.runs.keys().map(String::capacity).sum::<usize>();
             owners_bytes += owners.targets.capacity()
                 * std::mem::size_of::<(RuleTarget, Vec<(u32, u64)>)>()
                 + owners.names.capacity() * std::mem::size_of::<((u32, u64), Arc<CpuProcess>)>()

@@ -1,3 +1,4 @@
+pub mod agent;
 mod common;
 mod cpu;
 pub(crate) mod cpu_load;

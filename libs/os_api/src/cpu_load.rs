@@ -5,8 +5,8 @@
 pub use crate::windows::cpu_load::{
     CpuContribution, CpuHistoryContribution, CpuHistoryFrame, CpuHistoryGap, CpuHistoryTarget,
     CpuHistoryTick, CpuHistoryValue, CpuProcess, CpuSampler, DetailedTrace, ProcessCpuSample,
-    ProcessSampler, ResourceSample, history_buffer_bytes, history_clock, logical_cpu_count,
-    parking_snapshot, resource_sample,
+    ProcessSampler, ResourceSample, history_buffer_bytes, history_clock, history_frequency,
+    logical_cpu_count, parking_snapshot, resource_sample,
 };
 
 /// Format a sample's wall time in the Windows user's local time zone.

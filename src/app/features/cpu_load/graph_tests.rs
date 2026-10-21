@@ -191,6 +191,7 @@ fn measured_partial_work_is_visible_in_app_and_tracked_group_tiles_and_history()
                 store.contributors.push(
                     time,
                     &[Contribution {
+                        run: None,
                         process: Arc::new(os_api::cpu_load::CpuProcess {
                             pid: 42,
                             instance: 10,
@@ -286,6 +287,7 @@ fn group_scope_checkbox_switches_load_and_contributors_together_in_both_themes()
             );
             store.record_tracked(&snapshot.tracked_cpus);
             let p = |pid, name: &str, rule, load| Contribution {
+                run: None,
                 process: Arc::new(os_api::cpu_load::CpuProcess {
                     pid,
                     instance: 10,
@@ -317,21 +319,34 @@ fn group_scope_checkbox_switches_load_and_contributors_together_in_both_themes()
         for _ in 0..3 {
             output = frame(&mut app, &ctx, vec![]);
         }
-        assert!(label(&output, "CPU0  90%").is_some());
-        assert!(label(&output, "foreign.exe").is_some());
-        let filter = label(&output, "Tracked only").expect("visible group process-scope checkbox");
+        assert!(app.cpu_load.tracked_only());
+        assert!(label(&output, "CPU0  30%").is_some());
+        assert!(label(&output, "foreign.exe").is_none());
+        let filter = label(&output, "All system processes")
+            .expect("visible opt-in for other Windows processes");
         let plot = ctx
             .read_response(egui::Id::new("cpu-load-chart"))
             .unwrap()
             .rect;
-        let output = click(&mut app, &ctx, filter);
-        assert!(app.cpu_load.tracked_only());
-        assert!(label(&output, "CPU0  30%").is_some());
-        assert!(label(&output, "tracked.exe").is_some());
+        let mode = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text().starts_with("Live") => {
+                    Some(text.galley.rect.translate(text.pos.to_vec2()))
+                }
+                _ => None,
+            })
+            .expect("visible live mode");
+        assert!((mode.center().y - filter.y).abs() < 2.0);
         assert!(
-            label(&output, "foreign.exe").is_none(),
-            "untracked PID must not remain under filtered load"
+            mode.right() >= plot.right() - 1.0,
+            "inspection mode must align to the row's right edge"
         );
+        let output = click(&mut app, &ctx, filter);
+        assert!(!app.cpu_load.tracked_only());
+        assert!(label(&output, "CPU0  90%").is_some());
+        assert!(label(&output, "foreign.exe").is_some());
         assert_eq!(
             ctx.read_response(egui::Id::new("cpu-load-chart"))
                 .unwrap()
@@ -339,8 +354,38 @@ fn group_scope_checkbox_switches_load_and_contributors_together_in_both_themes()
             plot,
             "scope change must not move plot geometry"
         );
-        let output = click(&mut app, &ctx, label(&output, "Tracked only").unwrap());
-        assert!(label(&output, "CPU0  90%").is_some() && label(&output, "foreign.exe").is_some());
+        let output = click(
+            &mut app,
+            &ctx,
+            label(&output, "All system processes").unwrap(),
+        );
+        assert!(app.cpu_load.tracked_only());
+        assert!(label(&output, "CPU0  30%").is_some() && label(&output, "foreign.exe").is_none());
+        // The contributor card also has a Processes heading; the footer switch is last.
+        let switch = output
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Processes" => {
+                    Some(text.galley.rect.translate(text.pos.to_vec2()).center())
+                }
+                _ => None,
+            })
+            .expect("group process view switch");
+        let output = click(&mut app, &ctx, switch);
+        assert!(app.cpu_load.show_processes);
+        assert!(label(&output, "tracked.exe").is_some());
+        assert!(label(&output, "foreign.exe").is_none());
+        assert!(tiles(&output).is_empty());
+        let output = click(
+            &mut app,
+            &ctx,
+            label(&output, "All system processes").unwrap(),
+        );
+        assert!(label(&output, "foreign.exe").is_some());
+        let output = click(&mut app, &ctx, label(&output, "Graphs").unwrap());
+        assert!(!app.cpu_load.show_processes && !tiles(&output).is_empty());
         let modal = ctx
             .memory(|m| m.area_rect(egui::Id::new("cpu-load-modal")))
             .unwrap();
@@ -385,7 +430,11 @@ fn all_group_scopes_surface_collector_failures_without_relabeling_host_load() {
     );
     assert!(label(&output, "CPU12  —").is_some());
     assert!(label(&output, "Scheduler attribution is unavailable").is_some());
-    let output = click(&mut app, &ctx, label(&output, "Tracked only").unwrap());
+    let output = click(
+        &mut app,
+        &ctx,
+        label(&output, "All system processes").unwrap(),
+    );
     assert!(label(&output, "CPU12  —").is_some());
     assert!(label(&output, "Scheduler attribution is unavailable").is_some());
 }
@@ -406,6 +455,16 @@ fn host_group_does_not_show_tracked_membership_only_errors() {
     for _ in 0..3 {
         output = frame(&mut app, &ctx, vec![]);
     }
+    assert!(label(
+        &output,
+        "Tracked processes changed; waiting for the next interval"
+    )
+    .is_some());
+    let output = click(
+        &mut app,
+        &ctx,
+        label(&output, "All system processes").unwrap(),
+    );
     assert!(label(
         &output,
         "Tracked processes changed; waiting for the next interval"
@@ -637,7 +696,7 @@ fn app_modal_switches_to_all_current_pids_without_mask_or_activity_filtering() {
 }
 
 #[test]
-fn app_activity_rails_follow_the_retained_window_independent_of_hover_or_pin() {
+fn app_activity_dots_follow_the_retained_window_independent_of_hover_or_pin() {
     for dark in [true, false] {
         let (mut app, target) = fixture();
         let ctx = egui::Context::default();
@@ -648,14 +707,7 @@ fn app_activity_rails_follow_the_retained_window_independent_of_hover_or_pin() {
             egui::Visuals::light()
         });
         ctx.all_styles_mut(|style| style.animation_time = 0.0);
-        let mut green = egui::Color32::TRANSPARENT;
-        ctx.run_ui(egui::RawInput::default(), |ui| {
-            green = crate::app::shell::presenters::shared_elements::palette(ui)
-                .success
-                .fg;
-        })
-        .textures_delta
-        .clear();
+        let yellow = egui::Color32::from_rgb(242, 196, 75);
         {
             let mut history = app.cpu_load.history.write().unwrap();
             history
@@ -675,21 +727,14 @@ fn app_activity_rails_follow_the_retained_window_independent_of_hover_or_pin() {
                 );
             }
         }
-        let rails = |output: &egui::FullOutput| {
+        let dots = |output: &egui::FullOutput| {
             output
                 .shapes
                 .iter()
-                .filter_map(|shape| match &shape.shape {
-                    egui::Shape::Rect(r)
-                        if r.fill == green && (r.rect.width() - 3.0).abs() < 0.1
-                            && output.shapes.iter().any(|parent| matches!(&parent.shape, egui::Shape::Rect(tile)
-                                if tile.rect.width() > 40.0 && tile.rect.height() < 100.0
-                                && tile.rect.contains_rect(r.rect)
-                                && (tile.rect.right() - r.rect.right() - 3.0).abs() < 0.2
-                                && (r.rect.top() - tile.rect.top() - tile.rect.height() * 0.2).abs() < 0.2)) =>
-                    {
-                        Some(r.rect)
-                    }
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Circle(c) if c.fill == yellow && c.radius == 2.5 => Some(
+                        egui::Rect::from_center_size(c.center, egui::Vec2::splat(5.0)),
+                    ),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -698,7 +743,7 @@ fn app_activity_rails_follow_the_retained_window_independent_of_hover_or_pin() {
         for _ in 0..3 {
             output = frame(&mut app, &ctx, vec![]);
         }
-        let markers = rails(&output);
+        let markers = dots(&output);
         assert_eq!(
             markers.len(),
             1,
@@ -719,24 +764,18 @@ fn app_activity_rails_follow_the_retained_window_independent_of_hover_or_pin() {
                 _ => None,
             })
             .unwrap();
-        assert!((tile.right() - markers[0].right() - 3.0).abs() < 0.2);
-        assert!((markers[0].top() - tile.top() - tile.height() * 0.2).abs() < 0.2);
-        assert!((tile.bottom() - markers[0].bottom() - tile.height() * 0.2).abs() < 0.2);
-        assert!(
-            output
-                .shapes
-                .iter()
-                .filter_map(|s| match &s.shape {
-                    egui::Shape::Rect(r)
-                        if r.rect.width() == 12.0
-                            && r.rect.height() == 12.0
-                            && tile.contains_rect(r.rect) =>
-                        Some(r.rect),
-                    _ => None,
-                })
-                .all(|check| !check.intersects(markers[0])),
-            "selection check cannot cover the activity rail"
+        assert!(output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(r) if r.rect.height()<25.0 && tile.contains_rect(r.rect) && r.rect.contains(tile_label) && r.rect.contains_rect(markers[0]))),"dot must be inside the CPU12 name badge");
+        ctx.all_styles_mut(|style| {
+            style.interaction.tooltip_delay = 0.0;
+            style.interaction.show_tooltips_only_when_still = false;
+        });
+        let _ = frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(markers[0].center())],
         );
+        let tooltip = frame(&mut app, &ctx, vec![]);
+        assert!(tooltip.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text().contains("This app has measured CPU work"))),"yellow dot must explain its retained-history meaning on hover");
         let plot = ctx
             .read_response(egui::Id::new("cpu-load-chart"))
             .unwrap()
@@ -748,7 +787,7 @@ fn app_activity_rails_follow_the_retained_window_independent_of_hover_or_pin() {
         );
         assert!(app.cpu_load.inspection.pinned.is_some());
         assert_eq!(
-            rails(&output),
+            dots(&output),
             markers,
             "pinning a zero-load sample does not erase older measured work"
         );
@@ -770,7 +809,7 @@ fn app_activity_rails_follow_the_retained_window_independent_of_hover_or_pin() {
             vec![egui::Event::PointerMoved(egui::pos2(2.0, 2.0))],
         );
         assert!(
-            rails(&output).is_empty(),
+            dots(&output).is_empty(),
             "last positive sample expired even though a time remains pinned"
         );
         let mut values = vec![Some(0.0); 20];
@@ -784,12 +823,12 @@ fn app_activity_rails_follow_the_retained_window_independent_of_hover_or_pin() {
         );
         let output = frame(&mut app, &ctx, vec![]);
         assert_eq!(
-            rails(&output).len(),
+            dots(&output).len(),
             1,
             "new work adds a marker despite the frozen inspection"
         );
         let cpu13 = label(&output, "CPU13  0%").unwrap();
-        assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Rect(r) if r.rect.height()<100.0 && r.rect.contains(cpu13) && r.rect.contains_rect(rails(&output)[0]))),"marker belongs to CPU13");
+        assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Rect(r) if r.rect.height()<100.0 && r.rect.contains(cpu13) && r.rect.contains_rect(dots(&output)[0]))),"marker belongs to CPU13");
         app.cpu_load.open(GraphTarget::Group {
             id: target.group,
             name: "Background".into(),
@@ -797,7 +836,7 @@ fn app_activity_rails_follow_the_retained_window_independent_of_hover_or_pin() {
         });
         let output = frame(&mut app, &ctx, vec![]);
         assert!(
-            rails(&output).is_empty(),
+            dots(&output).is_empty(),
             "group host activity is not an app-presence marker"
         );
     }
@@ -837,6 +876,7 @@ fn pinned_graph_keeps_exact_time_while_scrolling_and_unpins_on_the_next_click() 
                     },
                     &(0..40)
                         .map(|i| Contribution {
+                            run: None,
                             process: Arc::new(os_api::cpu_load::CpuProcess {
                                 pid: 1000 + i,
                                 instance: 1,
@@ -1073,6 +1113,7 @@ fn cpu_selection_links_the_tile_graph_and_table_even_when_parked_or_outside() {
                     wall: SystemTime::UNIX_EPOCH,
                 },
                 &[Contribution {
+                    run: None,
                     process: Arc::new(os_api::cpu_load::CpuProcess {
                         pid: 1234,
                         instance: 1,

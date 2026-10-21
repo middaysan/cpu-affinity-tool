@@ -220,11 +220,15 @@ fn pointer_events(
     let mut events = vec![egui::Event::PointerMoved(pos)];
     match kind {
         "move" => {}
-        "click" => {
+        "click" | "right_click" => {
             for pressed in [true, false] {
                 events.push(egui::Event::PointerButton {
                     pos,
-                    button: egui::PointerButton::Primary,
+                    button: if kind == "right_click" {
+                        egui::PointerButton::Secondary
+                    } else {
+                        egui::PointerButton::Primary
+                    },
                     pressed,
                     modifiers: egui::Modifiers::NONE,
                 });
@@ -236,7 +240,7 @@ fn pointer_events(
             phase: egui::TouchPhase::Move,
             modifiers: egui::Modifiers::NONE,
         }),
-        _ => return Err("Use move, click or scroll".into()),
+        _ => return Err("Use move, click, right_click or scroll".into()),
     }
     Ok(events)
 }

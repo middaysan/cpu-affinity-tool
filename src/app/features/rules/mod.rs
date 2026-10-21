@@ -1,3 +1,6 @@
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub(crate) mod commands;
+pub(crate) mod process_names;
 mod service;
 
 use crate::app::models::AppStateStorage;

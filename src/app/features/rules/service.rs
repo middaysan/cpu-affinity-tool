@@ -10,6 +10,30 @@ pub struct EditableGroup {
     pub run_all_enabled: bool,
 }
 
+pub(super) fn validate_group_values(
+    name: &str,
+    cpus: &[usize],
+    total: usize,
+) -> Result<(String, Vec<usize>), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Group name cannot be empty".into());
+    }
+    if name.len() > 256 || name.contains('\0') {
+        return Err("Group name must contain at most 256 bytes and no NUL".into());
+    }
+    if cpus.is_empty() {
+        return Err("At least one core must be selected".into());
+    }
+    if cpus.len() > 4096 || cpus.iter().any(|cpu| *cpu >= total) {
+        return Err("Select existing logical CPUs".into());
+    }
+    let mut cpus = cpus.to_vec();
+    cpus.sort_unstable();
+    cpus.dedup();
+    Ok((name.into(), cpus))
+}
+
 pub fn set_group_is_hidden(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     index: usize,
@@ -49,15 +73,11 @@ pub fn create_group(
     core_selection: &[bool],
     run_all_enabled: bool,
 ) -> Result<(), String> {
-    let group_name_trimmed = group_name.trim();
-    if group_name_trimmed.is_empty() {
-        return Err("Group name cannot be empty".to_string());
-    }
-
-    let selected_cores = selected_cores(core_selection);
-    if selected_cores.is_empty() {
-        return Err("At least one core must be selected".to_string());
-    }
+    let (group_name_trimmed, selected_cores) = validate_group_values(
+        group_name,
+        &selected_cores(core_selection),
+        core_selection.len(),
+    )?;
 
     let mut state = persistent_state.write().unwrap();
     state.groups.push(CoreGroup {
@@ -77,15 +97,8 @@ pub fn update_group_properties(
     core_selection: &[bool],
     run_all_button: bool,
 ) -> Result<bool, String> {
-    let group_name_trimmed = name.trim();
-    if group_name_trimmed.is_empty() {
-        return Err("Group name cannot be empty".to_string());
-    }
-
-    let selected_cores = selected_cores(core_selection);
-    if selected_cores.is_empty() {
-        return Err("At least one core must be selected".to_string());
-    }
+    let (group_name_trimmed, selected_cores) =
+        validate_group_values(&name, &selected_cores(core_selection), core_selection.len())?;
 
     let mut state = persistent_state.write().unwrap();
     if index < state.groups.len() {

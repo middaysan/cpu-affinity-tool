@@ -180,6 +180,8 @@ pub struct AppState {
     pub(crate) runtime: RuntimeRegistry,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     pub(crate) cpu_load: crate::app::features::cpu_load::CpuLoadRuntime,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) mcp: crate::app::features::mcp::McpRuntime,
     pub(crate) log_manager: LogManager,
     #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
     #[cfg_attr(
@@ -233,7 +235,8 @@ impl AppState {
             runtime.running_apps_handle(),
             true,
             persistent_state.clone(),
-        );
+        )
+        .with_managed_runs(runtime.managed_runs.clone());
         let saved = persistent_state
             .read()
             .expect("newly created state lock")
@@ -260,6 +263,8 @@ impl AppState {
             runtime,
             #[cfg(all(target_os = "windows", feature = "windows"))]
             cpu_load,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            mcp: Default::default(),
             tuning,
             tuning_editors,
             tuning_adopted_revision: 0,
@@ -299,7 +304,8 @@ impl AppState {
             runtime.running_apps_handle(),
             false,
             persistent_state.clone(),
-        );
+        )
+        .with_managed_runs(runtime.managed_runs.clone());
         let saved = persistent_state
             .read()
             .expect("newly created state lock")
@@ -322,6 +328,8 @@ impl AppState {
             runtime,
             #[cfg(all(target_os = "windows", feature = "windows"))]
             cpu_load,
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            mcp: crate::app::features::mcp::McpRuntime::inactive(),
             tuning,
             tuning_editors,
             tuning_adopted_revision: 0,
@@ -346,6 +354,18 @@ impl AppState {
     }
     pub(crate) fn tuning_snapshot(&self) -> Arc<TuningSnapshot> {
         self.tuning.snapshot()
+    }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn tuning_client(
+        &self,
+    ) -> Option<crate::app::features::system_tweaks::TuningClient> {
+        self.tuning.client()
+    }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn poll_mcp(&mut self, ctx: &eframe::egui::Context) {
+        let mut mcp = std::mem::take(&mut self.mcp);
+        mcp.poll(self, ctx);
+        self.mcp = mcp;
     }
     pub(crate) fn modules_enabled(&self) -> bool {
         self.tuning.modules_enabled()
@@ -382,12 +402,26 @@ impl AppState {
             let Ok(mut projection) = self.persistent_state.try_write() else {
                 return false;
             };
+            let monitoring_changed =
+                projection.process_monitoring_enabled != snapshot.state.process_monitoring_enabled;
             *projection = (*snapshot.state).clone();
             self.rules = snapshot.rules.clone();
             self.tuning_adopted_revision = snapshot.revision;
             #[cfg(test)]
             {
                 self.save_count += 1;
+            }
+            drop(projection);
+            if monitoring_changed {
+                self.log_manager.add_monitor_entry(
+                    if snapshot.state.process_monitoring_enabled {
+                        "Process monitor enabled"
+                    } else {
+                        "Process monitor paused"
+                    }
+                    .into(),
+                    false,
+                );
             }
         }
         if let Some(outcome) = snapshot.shutdown_outcome {
@@ -441,6 +475,8 @@ impl AppState {
         self.tuning.poll_interval()
     }
     pub(crate) fn begin_tuning_shutdown(&mut self) {
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        self.mcp.shutdown();
         #[cfg(all(target_os = "windows", feature = "windows"))]
         self.cpu_load.shutdown();
         self.tuning.begin_shutdown();
@@ -1496,7 +1532,7 @@ impl AppState {
                 if saved == wanted {
                     self.cpu_load.preference_override = None;
                 } else {
-                    self.cpu_load.preference_error = Some("CPU monitoring changed for this session, but could not be saved. Try again in App settings.".into());
+                    self.cpu_load.preference_error = Some("CPU monitoring changed for this session, but could not be saved. Try again in CPU monitoring.".into());
                 }
             }
             if let Some(wanted) = self.cpu_load.history_seconds_override {
@@ -1508,7 +1544,7 @@ impl AppState {
                 if saved == wanted {
                     self.cpu_load.history_seconds_override = None;
                 } else {
-                    self.cpu_load.preference_error = Some("CPU history changed for this session, but could not be saved. Try again in App settings.".into());
+                    self.cpu_load.preference_error = Some("CPU history changed for this session, but could not be saved. Try again in CPU monitoring.".into());
                 }
             }
         }
@@ -1826,6 +1862,7 @@ impl AppState {
     }
 
     pub fn open_app_run_settings(&mut self, group_id: GroupId, rule_id: RuleId) {
+        self.ui.app_edit_state.process_names.request_refresh();
         self.ui.app_edit_state.current_edit = None;
         self.ui.app_edit_state.target =
             Some(crate::app::shell::sessions::RuleEditorTarget { group_id, rule_id });

@@ -186,6 +186,7 @@ fn graph_commands_resolve_saved_identity_close_settings_and_reject_invalid_views
     );
     let id = app.rules.group_id_for_index(0).unwrap().0;
     app.ui.app_settings_open = true;
+    app.ui.cpu_monitor_open = true;
     debug_api::apply(
         &mut app,
         &Command::OpenGraph {
@@ -195,6 +196,7 @@ fn graph_commands_resolve_saved_identity_close_settings_and_reject_invalid_views
     )
     .unwrap();
     assert!(!app.ui.app_settings_open);
+    assert!(!app.ui.cpu_monitor_open);
     let before = debug_api::graph(&app, &egui::Context::default());
     assert_eq!(before["target"]["kind"], "group");
     assert!(debug_api::apply(
@@ -202,7 +204,7 @@ fn graph_commands_resolve_saved_identity_close_settings_and_reject_invalid_views
         &Command::GraphOptions {
             all_cpus: Some(true),
             tracked_only: None,
-            view: Some("processes".into())
+            view: Some("invalid".into())
         }
     )
     .is_err());
@@ -210,6 +212,16 @@ fn graph_commands_resolve_saved_identity_close_settings_and_reject_invalid_views
         !app.cpu_load.show_all_cpus,
         "invalid request cannot partially mutate graph state"
     );
+    debug_api::apply(
+        &mut app,
+        &Command::GraphOptions {
+            all_cpus: Some(true),
+            tracked_only: None,
+            view: Some("processes".into()),
+        },
+    )
+    .unwrap();
+    assert!(app.cpu_load.show_all_cpus && app.cpu_load.show_processes);
     assert!(debug_api::apply(
         &mut app,
         &Command::OpenGraph {
@@ -403,6 +415,7 @@ fn egui_input_updates_real_settings_then_reply_reads_the_settled_frame() {
         4,
     );
     let ctx = egui::Context::default();
+    crate::app::shell::presenters::shared_elements::install_ui_fonts(&ctx);
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(ENABLED), true));
     let (tx, rx) = mpsc::sync_channel(4);
     let mut bridge = Bridge {
@@ -423,6 +436,7 @@ fn egui_input_updates_real_settings_then_reply_reads_the_settled_frame() {
         let mut output = ctx.run_ui(input, |ui| {
             bridge.begin_ui(ui.ctx());
             crate::app::shell::presenters::header::draw_top_panel(app, ui);
+            crate::app::shell::presenters::service_controls::draw_modals(app, ui.ctx());
             bridge.end_ui(app, ui.ctx());
         });
         output.textures_delta.clear();
@@ -462,6 +476,38 @@ fn egui_input_updates_real_settings_then_reply_reads_the_settled_frame() {
         "input must hit the actual widget"
     );
     assert!(snapshot["controls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["id"] == "settings.theme.1"));
+    assert!(!snapshot["controls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["id"] == "settings.history"));
+    let (reply, result) = mpsc::sync_channel(1);
+    tx.send(Request {
+        id: 2,
+        command: Command::Input {
+            target: "cpu.monitor.open".into(),
+            kind: "click".into(),
+            x: 0.5,
+            y: 0.5,
+            delta: 0.0,
+        },
+        reply,
+        deadline: Instant::now() + std::time::Duration::from_secs(5),
+    })
+    .unwrap();
+    frame(&mut bridge, &mut app);
+    assert!(result.try_recv().is_err());
+    frame(&mut bridge, &mut app);
+    let Reply::Json(body) = result.try_recv().unwrap() else {
+        panic!("expected acknowledgement")
+    };
+    assert_eq!(body["ok"], true);
+    assert!(app.ui.cpu_monitor_open);
+    assert!(state(&mut app, &ctx).unwrap()["controls"]
         .as_array()
         .unwrap()
         .iter()

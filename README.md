@@ -51,6 +51,7 @@ This is a control tool, not a promise of better FPS.
 - Choose light, dark, or system theme in **App settings**
 - Enable **Start minimized** in App settings to open the next Windows session in the tray (not Windows login autostart)
 - Click the monitor information button to inspect and sort verified process filenames, PIDs, and owning groups
+- Optionally connect a local AI agent over HTTP MCP, with one permanent full-access connection key for configuration, launches, exact process control, output and System Tweaks ([setup and API behavior](docs/mcp.md), [Windows validation](docs/mcp-validation.md))
 
 ## When it helps
 

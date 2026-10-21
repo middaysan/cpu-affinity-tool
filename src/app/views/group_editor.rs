@@ -285,49 +285,64 @@ fn draw_core_buttons_impl(
     mut record_rect: impl FnMut(egui::Rect),
 ) {
     let colors = palette(ui);
+    let all_selected = cores.iter().all(|c| groups.core_selection[c.index]);
+    let mut all_response = ui
+        .scope(|ui| {
+            ui.spacing_mut().interact_size.y = CORE_TILE_HEIGHT / 2.0;
+            ui.spacing_mut().button_padding.y = 1.0;
+            let all_tokens = core_tile_tokens(CoreType::Other, all_selected, colors);
+            let mut all_label = RichText::new(if all_selected {
+                "Clear all"
+            } else {
+                "Select all"
+            })
+            .size(9.0);
+            if let Some(tokens) = all_tokens {
+                all_label = all_label.color(tokens.fg);
+            }
+            let all_button = egui::Button::new(all_label)
+                .selected(all_selected)
+                .truncate();
+            if let Some(tokens) = all_tokens {
+                let response = ui.add_sized(
+                    egui::vec2(68.0, CORE_TILE_HEIGHT / 2.0),
+                    all_button
+                        .fill(tokens.fill)
+                        .stroke(egui::Stroke::new(1.0, tokens.border)),
+                );
+                paint_focus_ring(ui, &response);
+                paint_selected_tone_feedback(ui, &response, tokens);
+                response
+            } else {
+                let response = ui.add_sized(egui::vec2(68.0, CORE_TILE_HEIGHT / 2.0), all_button);
+                paint_focus_ring(ui, &response);
+                response
+            }
+        })
+        .inner
+        .on_hover_text(if all_selected {
+            "Clear selection for every thread in this section."
+        } else {
+            "Select every thread in this section."
+        });
+    record_rect(all_response.rect);
+    if all_response.clicked() {
+        let mut changed = false;
+        for c in cores.iter() {
+            let target = !all_selected;
+            if groups.core_selection[c.index] != target {
+                groups.core_selection[c.index] = target;
+                changed = true;
+            }
+        }
+        if changed {
+            all_response.mark_changed();
+        }
+        groups.last_clicked_core = None;
+    }
+
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-        let all_selected = cores.iter().all(|c| groups.core_selection[c.index]);
-        let all_tokens = core_tile_tokens(CoreType::Other, all_selected, colors);
-        let mut all_label =
-            RichText::new(if all_selected { "✓ All" } else { "All" }).size(BUTTON_FONT_SIZE);
-        if let Some(tokens) = all_tokens {
-            all_label = all_label.color(tokens.fg);
-        }
-        let all_button = egui::Button::new(all_label)
-            .selected(all_selected)
-            .truncate();
-        let mut all_response = if let Some(tokens) = all_tokens {
-            let response = ui.add_sized(
-                egui::vec2(46.0, CORE_TILE_HEIGHT),
-                all_button
-                    .fill(tokens.fill)
-                    .stroke(egui::Stroke::new(1.0, tokens.border)),
-            );
-            paint_focus_ring(ui, &response);
-            paint_selected_tone_feedback(ui, &response, tokens);
-            response
-        } else {
-            let response = ui.add_sized(egui::vec2(46.0, CORE_TILE_HEIGHT), all_button);
-            paint_focus_ring(ui, &response);
-            response
-        };
-        record_rect(all_response.rect);
-        if all_response.clicked() {
-            let mut changed = false;
-            for c in cores.iter() {
-                let target = !all_selected;
-                if groups.core_selection[c.index] != target {
-                    groups.core_selection[c.index] = target;
-                    changed = true;
-                }
-            }
-            if changed {
-                all_response.mark_changed();
-            }
-            groups.last_clicked_core = None;
-        }
-
         for core in cores.iter() {
             let is_selected = groups.core_selection[core.index];
             let size = egui::vec2(CORE_TILE_WIDTH, CORE_TILE_HEIGHT);
@@ -696,6 +711,7 @@ mod tests {
 
         assert_eq!(unselected.len(), 21);
         assert_eq!(selected.len(), unselected.len());
+        assert!(unselected[0].bottom() < unselected[1].top());
         for (control_index, (unselected_rect, selected_rect)) in
             unselected.iter().zip(&selected).enumerate()
         {
@@ -705,7 +721,7 @@ mod tests {
             }
             assert_eq!(selected_rect, unselected_rect);
             let expected_size = if control_index == 0 {
-                egui::vec2(46.0, 34.0)
+                egui::vec2(68.0, 17.0)
             } else {
                 egui::vec2(CORE_TILE_WIDTH, 34.0)
             };

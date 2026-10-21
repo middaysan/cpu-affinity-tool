@@ -17,6 +17,7 @@ pub struct RuleEditorTarget {
 
 /// State for editing an application that will be run with a specific CPU affinity.
 pub struct RuleEditorSession {
+    pub(crate) process_names: crate::app::features::rules::process_names::ProcessNames,
     /// The application currently being edited, if any.
     pub current_edit: Option<AppToRun>,
     /// Transient logical identity of the rule being edited.

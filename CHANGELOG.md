@@ -6,50 +6,45 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
-### Fixed
-
-- Restore file imports from ordinary Explorer into the elevated Windows window through root-scoped Shell drops. Keep the original release point at the current DPI so files enter the chosen group even if the pointer moves before rendering; importing never launches the target.
-- Honor **Start minimized** before creating the Windows main window, including cold saved-rule shortcuts, without showing/focusing it or moving it offscreen. Restore through the tray preserves the window position, ignores stale minimized events and keeps errors reachable when the tray or cold shortcut forwarding cannot start. A minimal local eframe patch preserves an explicitly hidden root after its first paint.
-
 ### Added
 
-- Opt-in Windows render profiling and a debug-only MCP bridge for graph, table and monitoring-setting checks. Bounded local diagnostics expose CPU/memory, frame work and original-interval quality; ordinary release builds contain no MCP endpoint or handlers and reject the debug feature.
-- Process/PID/load contributors below the selected logical CPU graph, for the latest completed sample and the exact historical sample under the pointer. Group graphs include observed host processes; application graphs retain individual tracked instances. Bounded sparse RAM history preserves names of exited processes and distinguishes PID reuse; settings include its memory estimate.
-- Windows CPU load indicators for affinity groups and tracked apps, with a centered per-logical-CPU graph. **App settings > CPU load monitoring** saves an on/off preference independently of affinity/priority protection. Per-app/per-logical-CPU history records continuously, including with graphs closed and in the tray. Preallocated bounded memory rings follow saved-app additions/removals; settings show the estimated extra memory and explain monitoring overhead.
-- A manual Memory integrity guide at the end of **System Tweaks > System > For games**, with a direct Windows Security Core isolation shortcut. The app does not change this security setting or manage its Undo.
-
-### Fixed
-
-- Complete delayed CPU scheduler data at its original recorded interval, updating the graph, all CPU tiles and process contributors together. Live uses the last resolved interval; real loss remains a gap. Preallocated buffers hold at most 16 pending intervals, preserve original rule/PID lifetime ownership and enter the monitoring memory estimate.
-- Keep the final measured scheduler interval of a confirmed exited process and report later intervals as zero instead of letting a stale retired PID make app/tracked-group totals permanently partial. Match the ETW end to a verified native-lifetime QPC observation so buffered ends and reused PIDs cannot retire or charge the wrong instance; startup, delivery gaps and real errors remain unavailable.
-- Preserve measured CPU work when another tracked process lacks a sample. App and tracked-group graphs show an explicit dashed subtotal with marked percentages instead of hiding all known activity; fully unknown intervals stay gaps. Render isolated valid samples as dots, retain partial quality through history resizing, and synchronize live/history tile values and process attribution.
-- Keep CPU group history continuous at idle by reading busy time as the complement of Windows' Idle Time counter; retain real unavailable samples as gaps. Show explicit Windows parking state on CPU tiles and sampled parking marks in history. Replace the modal's unsupported close glyph with **Close**.
-- Preserve CPU runtime-refresh failures during recovery and Undo. Restore absent AC overrides through a scoped Windows restore privilege, without changing registry ACLs or deleting setting containers.
-- Remove the leftover minimized Winit helper rectangle when hiding to the tray, including **Start minimized**. Keep the event helper available for paint delivery and leave unrelated windows untouched (issue #20).
+- Windows System Tweaks with typed Apply/Undo operations, bounded recovery journals, process scheduling ownership and display-change confirmation with automatic rollback. Retained older settings remain available for recovery and Undo.
+- An optional localhost Streamable HTTP MCP server inside the same Windows EXE. Its compact controls provide enable/disable, port, Copy connection and a self-contained Copy AI prompt. One permanent protected key grants full access to supported group/rule/settings operations, ordinary or explicitly elevated program launches, exact-instance process control, bounded output, logs, crash reports and CPU telemetry. MCP is disabled by default; share its full-access connection only with a trusted agent.
+- A bounded, human-readable journal of the last 100 MCP commands and a separate Process monitor log. Service controls remain accessible while disabled, without toggling a service just by opening its window.
+- Continuous CPU history in RAM while monitoring is enabled, including with graphs closed or the window in the tray. Choose 30 seconds, 5 minutes (default), or 30 minutes. Original-time scheduler intervals, PID lifetime identity and explicit unavailable/partial/lost data keep graphs and contributors consistent when events arrive late.
+- Shared group/application CPU windows with Graphs / Processes views, exact-time contributors, current tracked process rows, sorting and pinned history. Group graphs default to tracked applications; an explicit All system processes option includes other observed CPU work.
+- Right-click CPU graphs to save the visible chart as PNG or all retained CPU/process history as UTF-8 CSV. Agents can download the same bounded CSV through `export_cpu_history`, with immutable artifacts and UTF-8 byte cursors.
+- Running-process name suggestions in Application rule tracking fields. Cached background discovery and case-insensitive matching help choose executable names without scanning Windows on each keystroke.
+- A manual Memory integrity guide in System Tweaks with a direct Core isolation settings action. The app does not change this security setting or manage its Undo.
+- Opt-in nonshipping render profiling and a separate debug-only MCP bridge for isolated GUI checks. Ordinary releases exclude debug automation, authority overrides and profiling hooks; production MCP is an independent optional feature.
 
 ### Changed
 
-- Start the Windows GUI with BelowNormal priority and hard affinity to its last available logical CPU before creating background workers. Saved EXE launches receive their own rule mask, or the original pre-restriction mask when affinity belongs to another owner. Startup Logs report success/failure; multi-group or unrepresentable native masks remain unchanged instead of selecting an incorrect CPU.
-- Center logical CPU names in a shared rounded, outlined badge on tiles and the detailed graph. Tile badges use 70% of the inner width for symmetric side spacing. Keep tile load right-aligned beside parking status, with selection checks and app-activity rails visible.
-- Expand CPU modals to 80% of the window height and enlarge the stable, scrollable contributor table. Group charts offer **Tracked processes only**, switching tiles, history and contributor rows together between all observed host processes and the exact historical tracked union across saved groups. Shared instances count once; application graphs retain their own scope. Include the additional preallocated aggregate ring in the monitoring memory estimate.
-- Add a Graphs / Processes switch to app CPU modals with all tracked PIDs, whole-machine CPU time and measured CPU locations, including idle/unavailable instances. Keep current rows separate from graph history and preserve known contributors as partial when a missing sibling makes the app aggregate unavailable.
-- Mark application CPU tiles with a green rail when positive work exists in the retained history, independently of hover or pinned time. Remove expired activity markers and add them on new work, including known activity beside missing samples.
-- Let a left click pin the CPU graph's exact sample while scrolling historical process contributors; the next left click releases it. Keep recording, cursor, tile values and process attribution synchronized. Align process-table columns and card spacing, shorten the header accent and retain parking color separately from load.
-- Make CPU graph selection explicit with a contrasting tile outline, painted check and shared accent rail. Group the selected CPU's large graph and process contributors in one card with a CPU badge; empty and unavailable process messages identify the selected CPU.
+- Windows renders through WGPU/DX12 with memory-oriented allocation hints. Linux retains Glow and its separate desktop beta scope. Shared theme rasterization, bounded font preparation, cached graph meshes/table sorting and a 60 Hz scroll paint budget reduce repeated GUI work while keeping reactive rendering. Artifact-specific measurements and remaining backend limits are documented separately.
+- Compact MCP, Process monitor and CPU load status buttons now sit at the top right. App settings starts with one Light / Dark / System selector and shows the version last. CPU monitoring remains independent from affinity/priority enforcement.
+- Align process tables, subtle row separators, modal layouts, stronger dimming and compact CPU tiles. Selected CPUs use a green label/outline; a yellow in-label dot marks retained application activity. Group load shows tracked work on the group's CPUs; the header CPU control shows overall system load.
+- Keep the group toolbar fixed while cards scroll. Give application names more room, use compact Run controls and preserve full-name drag targets. Application rule settings use full-width paths and clearer launch/tracking sections.
+- Update compatible Rust dependencies and raise the minimum toolchain to Rust 1.95. Local eframe, epaint and Winit patches retain upstream provenance, licenses, regression tests and removal criteria.
 
-- Organize the footer's tracked-process popup as a compact Process / PID / Group table. Clip long cells with horizontal drag/Shift-wheel scrolling; keep a fixed header, vertical list scrolling and full-value hover without widening the popup.
-- Move group/application drag targets to their full name columns, including padding after short names. Remove left drag grips, retain keyboard group reordering, and hide all meter spacing when CPU load monitoring is off.
-- Unify explicit **Close** buttons with one theme-aware dark-red style; keep a single top-right Close in CPU graphs. Remove group number badges, show the stable Group ID only in Edit, and add subtle borders/padding to load meters.
-- Replace separate CPU load/Graph rows with compact percentage blocks and horizontal gradient fill beside group names and processes. Preserve process status colors, keep dialogs compact, and use the shared blue style for the monitor button.
-- Reduce repeated CPU-modal rendering work with clipped-tile layout, snapshot-prepared table text and a scroll-only 90 Hz paint budget. Prepare shared font sizes incrementally on existing GUI frames; telemetry remains at 1 Hz. Host measurements and remaining cold-frame/memory limits are documented in `docs/cpu19-performance-probe.md`.
-- Add **App settings > CPU history**: 30 seconds, 5 minutes (default), or 30 minutes in memory. Charts show local HH:MM:SS and exact sampled load/parking on hover; retention changes preserve an open process trace and the 1 Hz cadence.
-- Add a subtle theme-aware gradient and short selection/hover transitions to the main navigation; keep panel content static and stop decorative repaints after transitions settle.
-- Make the main navigation wider and taller than the compact, centered System Tweaks section switch.
-- Keep three System Tweaks sections: **System**, **GPU / network**, and **Check PC**. Hide old module profiles; only applied older settings appear at the bottom of System with individual Undo, preserving recovery data across restarts and failed restoration.
-- Keep the AC performance tweak to one Windows power-mode preference. Retire CPU frequency, high-clock and parking controls; preserve recovery and Undo for previously applied CPU settings after restarting the app.
-- Rename the main tabs to **Affinity groups**, **System Tweaks**, and **Logs**, in that order. Place **New group** at the top right of the group list and remove its repeated heading.
-- Simplify the header to **⚙ App settings** on the left and the version on the right. Keep the application name in the window title bar, CPU details on version hover, and the footer for monitoring controls and status.
-- Update direct and compatible transitive dependencies, including `eframe` / `egui` 0.36.2, `tray-icon` 0.26.1, Tokio 1.53.2 and Serde/JSON. Raise the minimum Rust toolchain to 1.95 for the GUI stack.
+### Fixed
+
+- Preserve logical window sizing when moving between monitors with different scaling, including native rectangle handling and subsequent Explorer drops.
+- Restore ordinary Explorer imports into the elevated Windows window through root-scoped Shell drops. Keep the original physical release point so the chosen group receives the file; importing never launches it.
+- Honor hidden startup before the first Windows paint, preserve tray restoration geometry and hide the root before graphics teardown. Keep startup errors reachable when the tray or shortcut-forwarding path cannot start.
+- Retire ended desktop sessions despite old LSA logon records, without discarding current-session ownership or changing current settings.
+- Preserve delayed/final CPU work at its original interval and avoid attributing a reused PID's work to an earlier lifetime. Missing data remains unavailable rather than becoming a zero.
+- Keep the MCP native-worker budget across listener restarts and cancelled HTTP callers, so uninterruptible native calls cannot bypass the application-wide bound.
+- Reclaim scheduling metadata only after confirmed exact-process exit, keeping alive or uncertain process ownership and previously attempted fields intact.
+- Apply MCP's existing Realtime priority restriction before either saved EXE or installed-app activation. Preserve neutral launch scheduling for module-owned fields and retain manual configurations.
+- Enforce launch-name limits before MCP admission and bound retained display labels/error text so all managed runs remain inspectable within the response budget. Operational process/run identities and saved names are unchanged.
+- Keep graph export menus above reopened modal windows, including after theme changes.
+
+### Compatibility
+
+- Windows remains the stable portable x64 EXE plus matching PDB distribution and still requires administrator approval. Linux beta artifacts remain separate, without System Tweaks or production MCP parity.
+- Current saves use schema v11. Existing configuration locations and pre-v6 backup behavior remain; explicit saves upgrade older schemas. Downgrading after a current-schema save is unsupported. MCP authority is stored separately from editable application state.
+- CPU history is bounded and memory-only until explicitly exported. CSV contains the retained period and observed positive process work, not an unlimited archive or proof that an absent process was idle. Disabling MCP leaves resumed programs/output and independent CPU monitoring running.
+- No release tag or next-version number is selected by these Unreleased notes.
 
 ## [1.6.3] - 2026-09-20
 

@@ -9,6 +9,7 @@ pub(crate) struct RuleTarget {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GraphTarget {
+    System,
     Group {
         id: GroupId,
         name: String,
@@ -28,6 +29,11 @@ pub(super) struct Snapshot {
     pub tracked_partial_cpus: Vec<Option<f32>>,
     pub parked: Vec<Option<bool>>,
     pub processes: HashMap<RuleTarget, Option<f32>>,
+    pub run_totals: HashMap<String, Option<f32>>,
+    pub run_cpus: HashMap<String, Vec<Option<f32>>>,
+    pub run_partial_cpus: HashMap<String, Vec<Option<f32>>>,
+    pub run_error: Option<String>,
+    pub scheduler_time: Option<super::history::SampleTime>,
     pub process_cpus: HashMap<RuleTarget, Vec<Option<f32>>>,
     pub process_partial_cpus: HashMap<RuleTarget, Vec<Option<f32>>>,
     pub live_processes: std::sync::Arc<super::process_list::ProcessList>,
@@ -51,6 +57,11 @@ impl Default for Snapshot {
             tracked_partial_cpus: Vec::new(),
             parked: Vec::new(),
             processes: HashMap::new(),
+            run_totals: HashMap::new(),
+            run_cpus: HashMap::new(),
+            run_partial_cpus: HashMap::new(),
+            run_error: None,
+            scheduler_time: None,
             process_cpus: HashMap::new(),
             process_partial_cpus: HashMap::new(),
             live_processes: Default::default(),
@@ -66,18 +77,14 @@ impl Default for Snapshot {
         }
     }
 }
-/// CPU groups describe capacity, independently of application ownership.
-pub(super) fn group_mean(cpus: &[Option<f32>], selected: &[usize]) -> Option<f32> {
-    let mut count = 0;
-    let mut total = 0.0;
-    for (index, &cpu) in selected.iter().enumerate() {
-        if selected[..index].contains(&cpu) {
-            continue;
-        }
-        total += cpus.get(cpu).copied().flatten().filter(|v| v.is_finite())?;
-        count += 1;
-    }
-    (count > 0).then(|| (total / count as f32).clamp(0.0, 100.0))
+/// The system summary covers every logical CPU exactly once, without a mask allocation.
+pub(super) fn system_mean(cpus: &[Option<f32>]) -> Option<f32> {
+    let total = cpus.iter().try_fold(0.0, |sum, value| {
+        value
+            .filter(|value| value.is_finite())
+            .map(|value| sum + value)
+    })?;
+    (!cpus.is_empty()).then(|| (total / cpus.len() as f32).clamp(0.0, 100.0))
 }
 pub(super) fn normalized_instances(
     instances: impl IntoIterator<Item = (u32, u64)>,
@@ -190,12 +197,9 @@ mod tests {
     }
     #[test]
     fn group_mean_and_exact_instance_totals_preserve_unknown_and_shared_semantics() {
-        assert_eq!(
-            group_mean(&[Some(20.0), Some(80.0)], &[0, 1, 1]),
-            Some(50.0)
-        );
-        assert_eq!(group_mean(&[Some(20.0), None], &[0, 1]), None);
-        assert_eq!(group_mean(&[], &[]), None);
+        assert_eq!(system_mean(&[Some(20.0), Some(80.0)]), Some(50.0));
+        assert_eq!(system_mean(&[Some(20.0), None]), None);
+        assert_eq!(system_mean(&[]), None);
         assert_eq!(
             normalized_instances([(1, 10), (1, 10), (0, 10), (1, 0)]),
             vec![(1, 10)]

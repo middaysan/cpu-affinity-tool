@@ -118,6 +118,7 @@ pub struct UiPalette {
     pub accent: ToneTokens,
     pub selected: ToneTokens,
     pub primary: ToneTokens,
+    pub run: ToneTokens,
     pub visibility: ToneTokens,
     pub success: ToneTokens,
     pub warning: ToneTokens,
@@ -166,6 +167,13 @@ const DARK_PALETTE: UiPalette = UiPalette {
         hover_fill: Color32::from_rgb(49, 77, 89),
         active_fill: Color32::from_rgb(34, 57, 67),
         border: Color32::from_rgb(57, 88, 102),
+    },
+    run: ToneTokens {
+        fg: Color32::from_rgb(231, 244, 235),
+        fill: Color32::from_rgb(29, 66, 45),
+        hover_fill: Color32::from_rgb(36, 81, 54),
+        active_fill: Color32::from_rgb(23, 54, 37),
+        border: Color32::from_rgb(30, 34, 38),
     },
     visibility: ToneTokens {
         fg: Color32::from_rgb(163, 171, 178),
@@ -245,6 +253,13 @@ const LIGHT_PALETTE: UiPalette = UiPalette {
         hover_fill: Color32::from_rgb(78, 113, 128),
         active_fill: Color32::from_rgb(56, 86, 99),
         border: Color32::from_rgb(138, 160, 169),
+    },
+    run: ToneTokens {
+        fg: Color32::from_rgb(244, 250, 246),
+        fill: Color32::from_rgb(43, 90, 61),
+        hover_fill: Color32::from_rgb(51, 103, 70),
+        active_fill: Color32::from_rgb(35, 77, 51),
+        border: Color32::from_rgb(228, 231, 228),
     },
     visibility: ToneTokens {
         fg: Color32::from_rgb(78, 91, 98),
@@ -505,6 +520,77 @@ pub fn toned_sized_button_with_tokens(
     response
 }
 
+/// Native launch button with one soft cast shadow behind the body.
+pub fn app_run_button(
+    ui: &mut egui::Ui,
+    size: impl Into<egui::Vec2>,
+    button: egui::Button<'_>,
+) -> egui::Response {
+    cast_shadow_button(ui, size, button, palette(ui).run)
+}
+
+/// Compact neutral control; status is carried by its text and border.
+pub const STATUS_BUTTON_FONT_SIZE: f32 = 9.0;
+
+pub fn status_button(
+    ui: &mut egui::Ui,
+    size: impl Into<egui::Vec2>,
+    label: &str,
+    color: Color32,
+) -> egui::Response {
+    let neutral = palette(ui).visibility;
+    cast_shadow_button(
+        ui,
+        size,
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(STATUS_BUTTON_FONT_SIZE)
+                .color(color)
+                .family(inter_medium_family()),
+        ),
+        ToneTokens {
+            fg: color,
+            border: palette(ui).border_strong.lerp_to_gamma(color, 0.35),
+            ..neutral
+        },
+    )
+}
+
+/// Tooltips must wrap even when their anchor lives in a no-wrap control row.
+pub fn tooltip_layout(ui: &mut egui::Ui) {
+    ui.set_max_width((ui.ctx().content_rect().width() - 32.0).clamp(1.0, 260.0));
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+}
+
+pub fn wrapped_tooltip(response: egui::Response, text: &str) -> egui::Response {
+    response.on_hover_ui(|ui| {
+        tooltip_layout(ui);
+        ui.add(egui::Label::new(text).wrap());
+    })
+}
+
+fn cast_shadow_button(
+    ui: &mut egui::Ui,
+    size: impl Into<egui::Vec2>,
+    button: egui::Button<'_>,
+    tokens: ToneTokens,
+) -> egui::Response {
+    let shadow_slot = ui.painter().add(egui::Shape::Noop);
+    let response = toned_sized_button_with_tokens(ui, size, button.corner_radius(5.0), tokens);
+    let pressed = response.is_pointer_button_down_on();
+    ui.painter().set(
+        shadow_slot,
+        Shadow {
+            offset: [0, 1],
+            blur: if pressed { 2 } else { 5 },
+            spread: 0,
+            color: Color32::from_black_alpha(if ui.visuals().dark_mode { 40 } else { 24 }),
+        }
+        .as_shape(response.rect, 5.0),
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 pub fn ghost_button(ui: &mut egui::Ui, button: egui::Button<'_>) -> egui::Response {
     let colors = *palette(ui);
     let response = ui
@@ -750,6 +836,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn run_button_has_one_soft_rear_shadow_without_a_double_contour() {
+        use eframe::egui;
+        for dark in [true, false] {
+            let ctx = egui::Context::default();
+            ctx.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+            let mut rect = egui::Rect::NOTHING;
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                rect = super::app_run_button(
+                    ui,
+                    [42.0, 21.0],
+                    egui::Button::new(egui::RichText::new("Run").size(super::BUTTON_FONT_SIZE)),
+                )
+                .rect;
+            });
+            output.textures_delta.clear();
+            assert_eq!(rect.size(), egui::vec2(42.0, 21.0));
+            let colors = super::palette_for_dark_mode(dark);
+            let tokens = colors.run;
+            assert_eq!(tokens.border, colors.row);
+            assert!(tokens.fill.g() > tokens.fill.r() && tokens.fill.g() > tokens.fill.b());
+            assert!(relative_luminance(tokens.fill) < 0.15);
+            let body = output
+                .shapes
+                .iter()
+                .position(|shape| {
+                    matches!(&shape.shape,
+                egui::Shape::Rect(shape) if shape.rect == rect && shape.fill == tokens.fill && shape.stroke.color == colors.row)
+                })
+                .unwrap();
+            let shadow = output.shapes.iter().position(|shape| matches!(&shape.shape,
+                egui::Shape::Rect(shape) if shape.blur_width >= 5.0 && shape.rect.center().y > rect.center().y)).unwrap();
+            assert!(
+                shadow < body,
+                "outer shadow must stay behind the native button"
+            );
+            for inset in [1.0, 2.0] {
+                assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Rect(shape) if shape.rect == rect.shrink(inset) && shape.stroke.color.a() > 0)), "hard inset contours must not return");
+            }
+        }
+    }
+
     use super::{
         apply_tone_to_visuals, apply_widget_style, palette_for_dark_mode,
         selected_tone_feedback_stroke, ui_font_definitions, BUTTON_FONT_SIZE,
@@ -917,6 +1050,7 @@ mod tests {
                 palette.accent,
                 palette.selected,
                 palette.primary,
+                palette.run,
                 palette.visibility,
                 palette.success,
                 palette.warning,
@@ -1037,4 +1171,131 @@ mod tests {
 /// A static scrim costs one filled rectangle, independent of modal content.
 pub(crate) fn modal(id: egui::Id) -> egui::Modal {
     egui::Modal::new(id).backdrop_color(egui::Color32::from_black_alpha(185))
+}
+
+pub(crate) fn service_modal_layout(ui: &mut egui::Ui, body_height: f32) {
+    let available = ui.ctx().content_rect().size();
+    ui.set_width((available.x - 36.0).clamp(200.0, 356.0));
+    ui.set_height((body_height + 145.0).min((available.y - 40.0).max(160.0)));
+    ui.spacing_mut().item_spacing.y = 7.0;
+}
+
+pub(crate) fn service_modal_header(
+    ui: &mut egui::Ui,
+    title: &str,
+    purpose: &str,
+) -> egui::Response {
+    let close = ui
+        .horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(title)
+                    .size(13.0)
+                    .family(inter_semibold_family()),
+            );
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                close_button,
+            )
+            .inner
+        })
+        .inner;
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(purpose)
+                .size(9.5)
+                .color(palette(ui).text_secondary),
+        )
+        .wrap(),
+    );
+    close
+}
+
+pub(crate) fn service_control(
+    ui: &mut egui::Ui,
+    enabled: &mut bool,
+    ready: bool,
+    label: &str,
+    status: &str,
+    color: Color32,
+) -> egui::Response {
+    let colors = *palette(ui);
+    Frame::NONE
+        .fill(colors.row)
+        .corner_radius(5.0)
+        .inner_margin(6)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let response = ui.add_enabled(
+                    ready,
+                    egui::Checkbox::new(enabled, egui::RichText::new(label).size(10.5)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(status).size(9.5).color(color));
+                });
+                response
+            })
+            .inner
+        })
+        .inner
+}
+
+pub(crate) fn service_tabs(
+    ui: &mut egui::Ui,
+    second: &mut bool,
+    labels: [&str; 2],
+) -> [egui::Response; 2] {
+    let colors = *palette(ui);
+    Frame::NONE
+        .fill(colors.group)
+        .stroke(Stroke::new(1.0, colors.border_strong))
+        .corner_radius(6.0)
+        .inner_margin(2)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.horizontal(|ui| {
+                let width = ui.available_width() / 2.0;
+                std::array::from_fn(|i| {
+                    let mut response = ui.add_sized(
+                        [width, 23.0],
+                        egui::Button::new(egui::RichText::new(labels[i]).size(10.0))
+                            .selected(*second == (i == 1))
+                            .corner_radius(4.0),
+                    );
+                    if response.clicked() && *second != (i == 1) {
+                        *second = i == 1;
+                        response.mark_changed();
+                    }
+                    response
+                })
+            })
+            .inner
+        })
+        .inner
+}
+
+pub(crate) fn service_empty_state(ui: &mut egui::Ui, title: &str, detail: &str) -> egui::Response {
+    let height = ui.available_height().clamp(45.0, 110.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), height),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| {
+            ui.set_min_height(height);
+            ui.add_space((height - 55.0).max(0.0) / 2.0);
+            ui.label(
+                egui::RichText::new(title)
+                    .size(10.5)
+                    .family(inter_medium_family()),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(detail)
+                        .size(9.5)
+                        .color(palette(ui).text_muted),
+                )
+                .wrap(),
+            );
+        },
+    )
+    .response
 }

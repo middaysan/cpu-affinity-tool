@@ -5,6 +5,17 @@ use std::mem::size_of;
 use std::time::SystemTime;
 
 const MAX_HISTORY_BYTES: usize = 256 * 1024 * 1024;
+#[path = "history_api.rs"]
+mod api;
+#[path = "history_export.rs"]
+mod export;
+#[path = "history_runs.rs"]
+mod runs;
+use runs::RunHistory;
+fn next_api_epoch() -> u64 {
+    static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 #[cfg(all(debug_assertions, feature = "debug-mcp"))]
 #[path = "history_debug.rs"]
 mod debug;
@@ -14,6 +25,7 @@ pub(super) enum LoadSource<'a> {
     System,
     Tracked,
     Rule(&'a RuleTarget),
+    Run(&'a str),
 }
 impl<'a> From<Option<&'a RuleTarget>> for LoadSource<'a> {
     fn from(target: Option<&'a RuleTarget>) -> Self {
@@ -191,19 +203,60 @@ pub(super) struct HistoryStore {
     system: Loads,
     tracked: Loads,
     rules: Vec<RuleHistory>,
+    runs: Vec<RunHistory>,
     head: usize,
     len: usize,
     pub revision: u64,
+    api_epoch: u64,
+    row_revisions: Vec<u64>,
+    intervals: Vec<Option<(u64, i64, i64)>>,
 }
 
 pub(super) fn history_bytes(cpus: usize, rules: usize, seconds: u32) -> Option<usize> {
     let capacity = seconds as usize + 1;
     cpus.checked_mul(capacity)?
         .checked_mul(rules.checked_add(2)?.checked_mul(5)?.checked_add(1)?)?
-        .checked_add(capacity.checked_mul(size_of::<SampleTime>() + 2)?)
+        .checked_add(capacity.checked_mul(
+            size_of::<SampleTime>() + 2 + size_of::<u64>() + size_of::<Option<(u64, i64, i64)>>(),
+        )?)
 }
 
 impl HistoryStore {
+    /// Read one exact interval without copying a row or scanning its history.
+    pub fn group_mean_at(
+        &self,
+        source: LoadSource<'_>,
+        time: SampleTime,
+        selected: &[usize],
+    ) -> (Option<f32>, bool) {
+        let Some(row) = self.sample_index(source, time, 0) else {
+            return (None, false);
+        };
+        let Some((loads, _)) = self.source(source) else {
+            return (None, false);
+        };
+        let mut count = 0;
+        let mut total = 0.0;
+        let mut complete = true;
+        for (index, &cpu) in selected.iter().enumerate() {
+            if selected[..index].contains(&cpu) {
+                continue;
+            }
+            count += 1;
+            if cpu >= self.cpus {
+                complete = false;
+                continue;
+            }
+            let cell = row * self.cpus + cpu;
+            complete &= loads.read(cell).is_some();
+            total += loads.measured(cell).unwrap_or(0.0);
+        }
+        if count == 0 || (!complete && total <= 0.0) {
+            return (None, false);
+        }
+        (Some((total / count as f32).clamp(0.0, 100.0)), !complete)
+    }
+
     pub fn value_at<'a>(
         &self,
         target: impl Into<LoadSource<'a>>,
@@ -248,6 +301,11 @@ impl HistoryStore {
         match target {
             LoadSource::System => Some((&self.system, None)),
             LoadSource::Tracked => Some((&self.tracked, None)),
+            LoadSource::Run(id) => self
+                .runs
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| (&r.loads, r.added_after)),
             LoadSource::Rule(target) => self
                 .rules
                 .iter()
@@ -369,7 +427,7 @@ impl HistoryStore {
     ) -> Result<(), String> {
         let seconds =
             crate::app::models::AppStateStorage::normalize_cpu_load_history_seconds(seconds);
-        let bytes = history_bytes(cpus, targets.len(), seconds)
+        let bytes = history_bytes(cpus, targets.len() + self.runs.len(), seconds)
             .and_then(|v| v.checked_add(super::contributors::contributor_bytes(cpus, seconds)?))
             .and_then(|v| v.checked_add(os_api::cpu_load::history_buffer_bytes(cpus)?))
             .ok_or("CPU history size overflow")?;
@@ -431,6 +489,9 @@ impl HistoryStore {
             parking: reserved(cells, 0)?,
             states: reserved(capacity, 2)?,
             gaps: reserved(capacity, None)?,
+            row_revisions: reserved(capacity, 0)?,
+            intervals: reserved(capacity, None)?,
+            api_epoch: next_api_epoch(),
             system: Loads::new(cells)?,
             tracked: Loads::new(cells)?,
             rules: targets
@@ -446,6 +507,7 @@ impl HistoryStore {
             revision: self.revision.wrapping_add(1),
             ..Self::default()
         };
+        next.configure_runs(&self.runs.iter().map(|r| r.id.clone()).collect::<Vec<_>>())?;
         if self.cpus == cpus {
             let keep = self.len.min(capacity);
             for offset in 0..keep {
@@ -453,6 +515,8 @@ impl HistoryStore {
                 next.times[offset] = self.times[old];
                 next.states[offset] = self.states[old];
                 next.gaps[offset] = self.gaps[old];
+                next.row_revisions[offset] = self.row_revisions[old];
+                next.intervals[offset] = self.intervals[old];
                 for cpu in 0..cpus {
                     let from = old * cpus + cpu;
                     let to = offset * cpus + cpu;
@@ -476,6 +540,17 @@ impl HistoryStore {
                                 old * cpus + cpu,
                             );
                         }
+                    }
+                }
+            }
+            for run in &mut next.runs {
+                let previous = self.runs.iter().find(|r| r.id == run.id).unwrap();
+                run.added_after = previous.added_after;
+                for offset in 0..keep {
+                    let old = self.index(self.len - keep + offset);
+                    for cpu in 0..cpus {
+                        run.loads
+                            .copy_cell(offset * cpus + cpu, &previous.loads, old * cpus + cpu);
                     }
                 }
             }
@@ -528,6 +603,8 @@ impl HistoryStore {
             self.pending -= 1;
         }
         self.times[self.head] = SampleTime { seconds, wall };
+        let inserted = self.head;
+        self.intervals[inserted] = None;
         self.states[self.head] = 1;
         self.gaps[self.head] = None;
         self.finalized = Some(self.times[self.head]);
@@ -550,10 +627,16 @@ impl HistoryStore {
                 );
             }
         }
+        for run in &mut self.runs {
+            for cpu in 0..self.cpus {
+                run.loads.write(self.head * self.cpus + cpu, None);
+            }
+        }
         self.head = (self.head + 1) % self.times.len();
         self.len = (self.len + 1).min(self.times.len());
         self.trim();
         self.revision = self.revision.wrapping_add(1);
+        self.row_revisions[inserted] = self.revision;
     }
 
     #[cfg(test)]
@@ -652,6 +735,20 @@ impl HistoryStore {
                     .write_partial(cell, partial.and_then(|v| v.get(cpu)).copied().flatten());
             }
         }
+        for run in &mut self.runs {
+            if run.added_after.is_some_and(|added| time.seconds <= added) {
+                continue;
+            }
+            let values = snapshot.run_cpus.get(&run.id);
+            let partial = snapshot.run_partial_cpus.get(&run.id);
+            for cpu in 0..self.cpus {
+                let cell = row * self.cpus + cpu;
+                run.loads
+                    .write(cell, values.and_then(|v| v.get(cpu)).copied().flatten());
+                run.loads
+                    .write_partial(cell, partial.and_then(|v| v.get(cpu)).copied().flatten());
+            }
+        }
         self.states[row] = 1;
         self.pending -= 1;
         #[cfg(feature = "render-profiling")]
@@ -670,6 +767,7 @@ impl HistoryStore {
             self.finalized = Some(time);
         }
         self.revision = self.revision.wrapping_add(1);
+        self.row_revisions[row] = self.revision;
         true
     }
     #[cfg(test)]
@@ -701,6 +799,9 @@ impl HistoryStore {
             for rule in &mut self.rules {
                 rule.loads.write(cell, None);
             }
+            for run in &mut self.runs {
+                run.loads.write(cell, None);
+            }
         }
         if self
             .finalized
@@ -709,6 +810,7 @@ impl HistoryStore {
             self.finalized = Some(time);
         }
         self.revision = self.revision.wrapping_add(1);
+        self.row_revisions[row] = self.revision;
     }
 
     #[cfg(test)]
@@ -741,10 +843,17 @@ impl HistoryStore {
             + self.times.capacity() * size_of::<SampleTime>()
             + self.states.capacity()
             + self.gaps.capacity() * size_of::<Option<GapReason>>()
+            + self.row_revisions.capacity() * size_of::<u64>()
+            + self.intervals.capacity() * size_of::<Option<(u64, i64, i64)>>()
             + self.parking.capacity()
             + self.system.bytes()
             + self.tracked.bytes()
             + self.rules.iter().map(|r| r.loads.bytes()).sum::<usize>()
+            + self
+                .runs
+                .iter()
+                .map(|r| r.loads.bytes() + r.id.capacity() + size_of::<RunHistory>())
+                .sum::<usize>()
     }
 
     /// Only the visible CPU series is copied. The UI reuses its reserved Vec.

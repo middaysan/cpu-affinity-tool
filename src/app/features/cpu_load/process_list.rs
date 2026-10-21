@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 pub(super) struct ProcessRow {
-    pub target: RuleTarget,
+    pub target: Option<RuleTarget>,
     pub pid: u32,
     pub token: u64,
     identity: Option<Arc<os_api::cpu_load::CpuProcess>>,
@@ -13,6 +13,7 @@ pub(super) struct ProcessRow {
     pub cores: Vec<(usize, f32)>,
     pub known_cores: usize,
     pub cpu_count: usize,
+    pub partial: bool,
     pid_text: String,
     load_text: String,
     cores_text: String,
@@ -30,8 +31,8 @@ impl ProcessRow {
     fn update_cores_text(&mut self) {
         use std::fmt::Write;
         self.cores_text.clear();
-        let complete = self.cpu_count > 0 && self.known_cores == self.cpu_count;
-        if self.known_cores == 0 {
+        let complete = self.cpu_count > 0 && self.known_cores == self.cpu_count && !self.partial;
+        if self.known_cores == 0 && self.cores.is_empty() {
             self.cores_text.push_str("Unavailable");
         } else if self.cores.is_empty() {
             self.cores_text
@@ -61,6 +62,9 @@ pub(super) struct ProcessList {
     pub rows: Vec<ProcessRow>,
     pub ready: bool,
     pub time: Option<SystemTime>,
+    pub group: bool,
+    pub partial: bool,
+    pub cpu_count: usize,
 }
 impl ProcessList {
     pub fn from_tracking(
@@ -72,7 +76,7 @@ impl ProcessList {
             .iter()
             .flat_map(|(target, instances)| {
                 instances.iter().map(move |&(pid, token)| ProcessRow {
-                    target: target.clone(),
+                    target: Some(target.clone()),
                     pid,
                     token,
                     identity: names
@@ -83,6 +87,7 @@ impl ProcessList {
                     cores: Vec::new(),
                     known_cores: 0,
                     cpu_count: 0,
+                    partial: false,
                     pid_text: pid.to_string(),
                     load_text: super::view::percent(totals.get(&(pid, token)).copied().flatten()),
                     cores_text: "Unavailable".into(),
@@ -90,18 +95,74 @@ impl ProcessList {
             })
             .collect();
         rows.sort_unstable_by(|a, b| {
-            a.pid
-                .cmp(&b.pid)
-                .then(a.token.cmp(&b.token))
-                .then(a.target.group.0.cmp(&b.target.group.0))
-                .then(a.target.rule.0.cmp(&b.target.rule.0))
+            a.pid.cmp(&b.pid).then(a.token.cmp(&b.token)).then_with(|| {
+                a.target
+                    .as_ref()
+                    .map(|t| (&t.group.0, &t.rule.0))
+                    .cmp(&b.target.as_ref().map(|t| (&t.group.0, &t.rule.0)))
+            })
         });
         rows.dedup_by(|a, b| a.pid == b.pid && a.token == b.token && a.target == b.target);
         Self {
             rows,
             ready: true,
             time: None,
+            ..Default::default()
         }
+    }
+
+    pub fn from_contributions(
+        time: SystemTime,
+        cpu_count: usize,
+        known_cores: usize,
+        partial: bool,
+        contributions: impl Iterator<Item = (Arc<os_api::cpu_load::CpuProcess>, usize, f32)>,
+    ) -> Self {
+        let mut list = Self {
+            ready: true,
+            time: Some(time),
+            group: true,
+            partial,
+            cpu_count,
+            ..Default::default()
+        };
+        let mut by_instance = HashMap::new();
+        for (process, cpu, load) in contributions {
+            let index = *by_instance
+                .entry((process.pid, process.instance))
+                .or_insert_with(|| {
+                    let index = list.rows.len();
+                    list.rows.push(ProcessRow {
+                        target: None,
+                        pid: process.pid,
+                        token: process.instance,
+                        pid_text: process.pid.to_string(),
+                        identity: Some(process),
+                        total: None,
+                        cores: Vec::new(),
+                        known_cores,
+                        cpu_count,
+                        partial,
+                        load_text: String::new(),
+                        cores_text: String::new(),
+                    });
+                    index
+                });
+            let row = &mut list.rows[index];
+            match row.cores.binary_search_by_key(&cpu, |&(cpu, _)| cpu) {
+                // Multiple saved rules can own the same exact PID/CPU sample.
+                Ok(index) => row.cores[index].1 = row.cores[index].1.max(load),
+                Err(index) => row.cores.insert(index, (cpu, load)),
+            }
+        }
+        for row in &mut list.rows {
+            row.total = (cpu_count > 0)
+                .then(|| row.cores.iter().map(|&(_, v)| v).sum::<f32>() / cpu_count as f32);
+            row.load_text = super::view::measured_percent(row.total, partial);
+            row.update_cores_text();
+        }
+        list.rows.sort_unstable_by_key(|row| (row.pid, row.token));
+        list
     }
     pub fn record_cores(&mut self, count: usize, samples: &[os_api::cpu_load::ProcessCpuSample]) {
         for row in &mut self.rows {
@@ -142,8 +203,9 @@ impl ProcessList {
                 .iter()
                 .map(|row| {
                     row.cores.capacity() * std::mem::size_of::<(usize, f32)>()
-                        + row.target.group.0.capacity()
-                        + row.target.rule.0.capacity()
+                        + row.target.as_ref().map_or(0, |target| {
+                            target.group.0.capacity() + target.rule.0.capacity()
+                        })
                         + row.pid_text.capacity()
                         + row.load_text.capacity()
                         + row.cores_text.capacity()
@@ -163,7 +225,7 @@ pub(super) struct CurrentOrder {
 pub(super) fn draw(
     ui: &mut eframe::egui::Ui,
     list: &Arc<ProcessList>,
-    target: &RuleTarget,
+    target: Option<&RuleTarget>,
     available_height: f32,
 ) {
     crate::render_profile_scope!(CurrentProcesses);
@@ -174,7 +236,11 @@ pub(super) fn draw(
     use eframe::egui::{self, RichText};
     let colors = *palette(ui);
     let top = ui.cursor().top();
-    let rows = || list.rows.iter().filter(|row| &row.target == target);
+    let rows = || {
+        list.rows
+            .iter()
+            .filter(|row| target.is_none_or(|target| row.target.as_ref() == Some(target)))
+    };
     let count = rows().count();
     let mapped = rows()
         .filter(|r| r.cpu_count > 0 && r.known_cores == r.cpu_count)
@@ -184,12 +250,34 @@ pub(super) fn draw(
         .map(os_api::cpu_load::sample_clock_label)
         .unwrap_or_else(|| "—".into());
     ui.label(
-        RichText::new(format!("{count} tracked processes · Live · {clock}"))
-            .small()
-            .strong(),
+        RichText::new(format!(
+            "{count} {} · Live · {clock}",
+            if list.group {
+                "processes"
+            } else {
+                "tracked processes"
+            }
+        ))
+        .small()
+        .strong(),
     );
-    ui.label(RichText::new(if list.ready {format!("CPU mapping: {mapped}/{count} processes")} else {"Updating tracked processes…".into()}).small().color(if !list.ready||mapped<count {colors.warning.fg}else{colors.text_secondary}))
-        .on_hover_text("The footer and this table use tracked exact PID/creation-token instances. Refresh times can differ. This current table includes idle and unavailable instances; graph contributors include only measured work on the selected CPU/time. An unknown sibling can make the app's complete aggregate unavailable.");
+    let status = if list.group {
+        if list.ready {
+            format!(
+                "Load on {} displayed CPUs{}",
+                list.cpu_count,
+                if list.partial { " · Partial" } else { "" }
+            )
+        } else {
+            "Process data unavailable for this interval".into()
+        }
+    } else if list.ready {
+        format!("CPU mapping: {mapped}/{count} processes")
+    } else {
+        "Updating tracked processes…".into()
+    };
+    ui.label(RichText::new(status).small().color(if !list.ready||list.partial||mapped<count {colors.warning.fg}else{colors.text_secondary}))
+        .on_hover_text(if list.group {"Measured work on the displayed CPUs in the latest completed graph interval. Idle processes have no measured CPU location. Partial means some data is missing; an empty list is not a complete process roster."} else {"The Process monitor roster and this table use tracked exact PID/creation-token instances. Refresh times can differ. This current table includes idle and unavailable instances; graph contributors include only measured work on the selected CPU/time. An unknown sibling can make the app's complete aggregate unavailable."});
     let widths = [(ui.available_width() - 202.0).max(46.0), 46.0, 46.0, 86.0];
     use crate::app::shell::presenters::process_table::{self as table, Column, Sort};
     let cell = |ui: &mut egui::Ui, text: RichText, width: f32, right: bool| {
@@ -207,17 +295,17 @@ pub(super) fn draw(
             let response=if i<3 {table::heading(ui,widths[i],title,[Column::Name,Column::Pid,Column::Load][i], &mut order)} else {cell(ui,RichText::new(*title).small().weak(),widths[i],false)};
             #[cfg(all(debug_assertions, feature = "debug-mcp"))]
             crate::app::features::diagnostics::debug_mcp::control(format!("sort.processes.{i}"), &response);
-            if i==2 {response.on_hover_text("Process CPU time relative to the whole machine, sampled once per second with GetProcessTimes. This can remain available when scheduler/per-core attribution is unavailable. Its interval is not identical to Task Manager or the per-CPU trace.");}
+            if i==2 {response.on_hover_text(if list.group {"This process's measured share of the displayed CPUs. 100% means all displayed CPUs fully busy. Only work on these CPUs is counted; * marks a measured subtotal with missing data. Uses the same original interval as the graphs."} else {"Process CPU time relative to the whole machine, sampled once per second with GetProcessTimes. This can remain available when scheduler/per-core attribution is unavailable. Its interval is not identical to Task Manager or the per-CPU trace."});}
             else if i==3 {response.on_hover_text("Logical CPUs with measured positive work in the latest scheduler interval. A process can run on several CPUs; this is not a single instantaneous location or its allowed affinity. Idle means a complete measured zero interval; Unavailable and * preserve missing/partial data.");}
         });
         let indices = ui.ctx().data_mut(|d| {
             let cache = d.get_temp_mut_or_default::<CurrentOrder>(id.with("cache"));
-            if cache.source.as_ref().is_none_or(|old| !Arc::ptr_eq(old,list)) || cache.target.as_ref()!=Some(target) {
-                cache.source=Some(list.clone()); cache.target=Some(target.clone()); cache.revision=cache.revision.wrapping_add(1);
+            if cache.source.as_ref().is_none_or(|old| !Arc::ptr_eq(old,list)) || cache.target.as_ref()!=target {
+                cache.source=Some(list.clone()); cache.target=target.cloned(); cache.revision=cache.revision.wrapping_add(1);
             }
             cache.order.sort=order.sort;
             let sort=order.sort.unwrap_or(Sort{column:Column::Pid,descending:false});
-            cache.order.prepare(cache.revision,list.rows.len(),|i| &list.rows[i].target==target,|a,b| {
+            cache.order.prepare(cache.revision,list.rows.len(),|i| target.is_none_or(|target| list.rows[i].target.as_ref()==Some(target)),|a,b| {
                 let (a,b)=(&list.rows[a],&list.rows[b]);
                 let primary=match sort.column {Column::Name=>sort.compare(table::name_cmp(a.name(),b.name())),Column::Load=>sort.load(a.total,b.total),_=>sort.compare(a.pid.cmp(&b.pid))};
                 primary.then(a.pid.cmp(&b.pid)).then(a.token.cmp(&b.token))
@@ -230,14 +318,14 @@ pub(super) fn draw(
         ui.separator();
         let height=(available_height-(ui.cursor().top()-top)).max(60.0);
         let scroll = egui::ScrollArea::vertical().id_salt("cpu-process-list").min_scrolled_height(height).max_height(height).auto_shrink([false,false]).show_rows(ui,COMPACT_TABLE_ROW_HEIGHT,count,|ui,range| {
-            if count==0 {ui.label(if list.ready{"No tracked processes for this app."}else{"Waiting for the first tracked-process snapshot…"});}
+            if count==0 {ui.label(if list.group {if !list.ready {"No process data for this interval."} else if list.cpu_count==0 {"No CPUs selected. Enable All CPUs."} else if list.partial {"No measured activity; some data is unavailable."} else {"No measured process activity on these CPUs."}} else if list.ready{"No tracked processes for this app."}else{"Waiting for the first tracked-process snapshot…"});}
             for &index in &indices[range] {
                 let row=&list.rows[index];
                 let row_response = ui.push_id((row.pid,row.token),|ui|ui.horizontal(|ui| {
                     cell(ui,RichText::new(row.name()).small(),widths[0],false).on_hover_text(row.name());
                     cell(ui,RichText::new(row.pid_text()).small(),widths[1],true);
                     cell(ui,RichText::new(row.load_text()).small(),widths[2],true);
-                    let complete=row.cpu_count>0&&row.known_cores==row.cpu_count;
+                    let complete=row.cpu_count>0&&row.known_cores==row.cpu_count&&!row.partial;
                     cell(ui,RichText::new(row.cores_text()).small().color(if complete{colors.text_primary}else{colors.warning.fg}),widths[3],false).on_hover_ui(|ui| {
                         ui.label(format!("CPU mapping: {}/{} logical CPUs measured",row.known_cores,row.cpu_count));
                         for &(cpu,load) in &row.cores {ui.label(format!("CPU{cpu}: {}",super::view::percent(Some(load))));}
@@ -282,7 +370,7 @@ mod tests {
                     )),
                     ..Default::default()
                 },
-                |ui| draw(ui, &list, &target, 330.0),
+                |ui| draw(ui, &list, Some(&target), 330.0),
             );
             output.textures_delta.clear();
         }
@@ -423,7 +511,7 @@ mod tests {
         let row = list
             .rows
             .iter()
-            .find(|r| r.target == one && r.pid == 1)
+            .find(|r| r.target.as_ref() == Some(&one) && r.pid == 1)
             .unwrap();
         assert_eq!(row.total, Some(2.0));
         assert_eq!(row.cores, vec![(0, 40.0)]);
@@ -434,7 +522,11 @@ mod tests {
         let idle = list.rows.iter().find(|r| r.pid == 3).unwrap();
         assert_eq!(idle.known_cores, 2);
         assert!(idle.cores.is_empty());
-        let reused = list.rows.iter().find(|r| r.target == two).unwrap();
+        let reused = list
+            .rows
+            .iter()
+            .find(|r| r.target.as_ref() == Some(&two))
+            .unwrap();
         assert!(reused.total.is_none() && reused.known_cores == 0);
         assert_eq!(
             reused.name(),

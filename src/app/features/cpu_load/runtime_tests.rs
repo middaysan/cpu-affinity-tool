@@ -29,6 +29,77 @@ fn debug_disabled_acknowledgement_requires_the_worker_release_revision() {
 use crate::app::shared::ids::{GroupId, RuleId};
 
 #[test]
+fn group_meter_uses_latest_finalized_tracked_interval_and_keeps_missing_data_unknown() {
+    let runtime = runtime();
+    {
+        let mut history = runtime.history.write().unwrap();
+        history.configure(2, 30, &[]).unwrap();
+        history.push(
+            1.0,
+            SystemTime::UNIX_EPOCH,
+            &[Some(90.0); 2],
+            &[],
+            &HashMap::new(),
+        );
+        history.record_tracked(&[Some(20.0), Some(40.0)]);
+        history.push_pending(
+            SampleTime {
+                seconds: 2.0,
+                wall: SystemTime::UNIX_EPOCH,
+            },
+            &[],
+        );
+    }
+    assert_eq!(runtime.tracked_group_load(&[0, 1, 1]), (Some(30.0), false));
+    assert_eq!(runtime.tracked_group_load(&[]), (None, false));
+    {
+        let mut history = runtime.history.write().unwrap();
+        history.mark_lost_reason(
+            SampleTime {
+                seconds: 2.0,
+                wall: SystemTime::UNIX_EPOCH,
+            },
+            super::super::history::GapReason::TraceUnavailable,
+        );
+    }
+    assert_eq!(runtime.tracked_group_load(&[0, 1]), (None, false));
+    let _writer = runtime.history.write().unwrap();
+    assert_eq!(runtime.tracked_group_load(&[0, 1]), (None, false));
+}
+
+#[test]
+fn system_modal_opens_all_cpus_and_all_processes_without_a_saved_group() {
+    let mut runtime = runtime();
+    runtime.open(GraphTarget::System);
+    assert!(runtime.show_all_cpus);
+    assert!(!runtime.tracked_only());
+    assert!(!runtime.show_processes);
+    assert!(runtime.graph == Some(GraphTarget::System));
+}
+
+#[test]
+fn group_modal_opens_tracked_only_and_resets_process_view_on_reopen() {
+    let mut runtime = runtime();
+    let group = GraphTarget::Group {
+        id: GroupId("g".into()),
+        name: "Group".into(),
+        cpus: vec![0],
+    };
+    runtime.open(group.clone());
+    assert!(runtime.tracked_only());
+    runtime.show_processes = true;
+    runtime.set_tracked_only(false);
+    runtime.open(group);
+    assert!(runtime.tracked_only());
+    assert!(!runtime.show_processes);
+    runtime.open(GraphTarget::Process {
+        target: target(),
+        name: "App".into(),
+    });
+    assert!(!runtime.tracked_only());
+}
+
+#[test]
 fn delayed_frame_completes_original_graph_and_contributors_together() {
     use super::super::worker_history::{EventHistory, OwnerInput};
     use os_api::cpu_load::{
@@ -50,7 +121,9 @@ fn delayed_frame_completes_original_graph_and_contributors_together() {
         seconds: id as f64 + 10.0,
         timestamp: SystemTime::UNIX_EPOCH + Duration::from_secs(id),
     };
+    let runs = HashMap::new();
     let input = || OwnerInput {
+        runs: &runs,
         generation: Some(1),
         targets: Some(&targets),
         names: &names,
@@ -134,6 +207,7 @@ fn group_tracked_filter_changes_every_data_source_and_deduplicates_historical_pi
         wall: SystemTime::UNIX_EPOCH,
     };
     let process = |pid, load, rule: Option<&RuleId>| Contribution {
+        run: None,
         process: Arc::new(os_api::cpu_load::CpuProcess {
             pid,
             instance: 100,
@@ -239,6 +313,7 @@ fn unknown_app_totals_do_not_hide_exact_measured_process_contributors() {
         history.contributors.push(
             time,
             &[Contribution {
+                run: None,
                 process: Arc::new(os_api::cpu_load::CpuProcess {
                     pid: 42,
                     instance: 100,
@@ -373,12 +448,14 @@ fn graph_contributors_follow_exact_hover_cpu_and_never_fall_back_to_live_rows() 
             );
             let inputs = vec![
                 Contribution {
+                    run: None,
                     process: process.clone(),
                     rule: None,
                     cpu: 0,
                     load: 10.0 * time.seconds as f32,
                 },
                 Contribution {
+                    run: None,
                     process: process.clone(),
                     rule: Some(Arc::new(target.rule.clone())),
                     cpu: 1,

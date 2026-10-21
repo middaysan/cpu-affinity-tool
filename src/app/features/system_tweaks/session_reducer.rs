@@ -18,7 +18,7 @@ use crate::app::{
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender, TrySendError},
         Arc, Mutex, RwLock,
     },
@@ -26,6 +26,21 @@ use std::{
     time::{Duration, Instant},
 };
 pub(crate) enum TuningRequest {
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    ActivateSelectedManual {
+        profile: ProfileId,
+        feature: FeatureId,
+        target_id: String,
+    },
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    ApplyCurrentTweak {
+        feature: FeatureId,
+        config: Option<ModuleEnvelope>,
+    },
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    RefreshModuleCards,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    ConfigureBase(crate::app::features::rules::commands::BaseCommand),
     ApplyTweak {
         feature: FeatureId,
         target: TargetIdentity,
@@ -117,6 +132,10 @@ pub(crate) enum TuningRequest {
 }
 impl TuningRequest {
     fn is_base_change(&self) -> bool {
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        if matches!(self, Self::ConfigureBase(_)) {
+            return true;
+        }
         matches!(
             self,
             Self::SaveBase { .. }
@@ -199,6 +218,7 @@ struct Queued {
     id: u64,
     revision: u64,
     request: TuningRequest,
+    fence: Option<RequestFence>,
 }
 struct Admission {
     sender: SyncSender<Queued>,
@@ -211,6 +231,8 @@ struct Shared {
     cards_visible: AtomicBool,
     admission: Mutex<Admission>,
     latest: Mutex<Arc<TuningSnapshot>>,
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    receipts: Mutex<std::collections::VecDeque<TuningReceipt>>,
     #[cfg(test)]
     fixture: Mutex<Option<(Arc<ExecutionObservation>, Vec<(u32, u64)>)>>,
 }
@@ -218,7 +240,91 @@ pub(crate) struct TuningRuntime {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
 }
+#[derive(Clone, Copy, Debug)]
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub(crate) struct TuningReceipt {
+    pub id: u64,
+    pub revision: u64,
+    pub result: Result<(), SaveError>,
+}
+#[derive(Clone)]
+pub(crate) struct TuningClient {
+    shared: Arc<Shared>,
+}
+#[derive(Clone)]
+pub(crate) struct RequestFence {
+    pub generation: Arc<AtomicU64>,
+    pub expected: u64,
+}
+impl TuningClient {
+    pub(crate) fn snapshot(&self) -> Arc<TuningSnapshot> {
+        self.shared.latest.lock().unwrap().clone()
+    }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn receipt(&self, id: u64) -> Option<TuningReceipt> {
+        self.shared
+            .receipts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|receipt| receipt.id == id)
+            .copied()
+    }
+    pub(crate) fn request_at_revision(
+        &self,
+        request: TuningRequest,
+        expected: Option<u64>,
+    ) -> Result<u64, SaveError> {
+        self.request_guarded(request, expected, None)
+    }
+    pub(crate) fn request_guarded(
+        &self,
+        request: TuningRequest,
+        expected: Option<u64>,
+        fence: Option<RequestFence>,
+    ) -> Result<u64, SaveError> {
+        if !self.shared.modules_enabled && !request.is_base_change() {
+            return Err(SaveError::Invalid);
+        }
+        let mut admission = self.shared.admission.lock().unwrap();
+        if admission.closing.is_some() {
+            return Err(SaveError::Recovering);
+        }
+        if admission.pending {
+            return Err(SaveError::Pending);
+        }
+        let id = admission.next.ok_or(SaveError::Invalid)?;
+        let revision = match &request {
+            TuningRequest::SaveBase {
+                expected_revision, ..
+            } => *expected_revision,
+            _ => expected.unwrap_or_else(|| self.shared.latest.lock().unwrap().revision),
+        };
+        match admission.sender.try_send(Queued {
+            id,
+            revision,
+            request,
+            fence,
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(SaveError::Pending),
+            Err(TrySendError::Disconnected(_)) => return Err(SaveError::Recovering),
+        }
+        admission.next = id.checked_add(1);
+        admission.pending = true;
+        let mut latest = (**self.shared.latest.lock().unwrap()).clone();
+        latest.operation = TuningOperationState::Pending { id };
+        latest.restoration_effect = None;
+        *self.shared.latest.lock().unwrap() = Arc::new(latest);
+        Ok(id)
+    }
+}
 impl TuningRuntime {
+    pub(crate) fn client(&self) -> Option<TuningClient> {
+        self.worker.as_ref().map(|_| TuningClient {
+            shared: self.shared.clone(),
+        })
+    }
     pub(crate) fn start(
         service: HeadlessTuning,
         running: Arc<tokio::sync::RwLock<RunningApps>>,
@@ -256,6 +362,8 @@ impl TuningRuntime {
                 closing: None,
             }),
             latest: Mutex::new(initial),
+            #[cfg(all(target_os = "windows", feature = "windows"))]
+            receipts: Mutex::new(std::collections::VecDeque::new()),
             #[cfg(test)]
             fixture: Mutex::new(None),
         });
@@ -437,8 +545,16 @@ impl TuningRuntime {
                             250
                         })) {
                             Ok(queued) => {
+                                #[cfg(all(target_os = "windows", feature = "windows"))]
+                                let refresh_modules =
+                                    matches!(&queued.request, TuningRequest::RefreshModuleCards);
+                                #[cfg(not(all(target_os = "windows", feature = "windows")))]
+                                let refresh_modules = false;
                                 service.begin_operation();
-                                let result = if queued.revision != service.saved_revision() {
+                                let result = if queued.revision != service.saved_revision()
+                                    || queued.fence.as_ref().is_some_and(|fence| {
+                                        fence.generation.load(Ordering::Acquire) != fence.expected
+                                    }) {
                                     Err(SaveError::Invalid)
                                 } else {
                                     apply(&mut service, queued.request)
@@ -481,10 +597,22 @@ impl TuningRuntime {
                                     observation,
                                     false,
                                     None,
-                                    cards_visible,
+                                    cards_visible || refresh_modules,
                                 ));
                                 let mut admission = owned.admission.lock().unwrap();
                                 *owned.latest.lock().unwrap() = completed;
+                                #[cfg(all(target_os = "windows", feature = "windows"))]
+                                {
+                                    let mut receipts = owned.receipts.lock().unwrap();
+                                    if receipts.len() == 64 {
+                                        receipts.pop_front();
+                                    }
+                                    receipts.push_back(TuningReceipt {
+                                        id: queued.id,
+                                        revision: service.saved_revision(),
+                                        result,
+                                    });
+                                }
                                 admission.pending = false;
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -544,43 +672,23 @@ impl TuningRuntime {
         Self { shared, worker }
     }
     pub(crate) fn request(&self, request: TuningRequest) -> Result<u64, SaveError> {
-        if !self.shared.modules_enabled && !request.is_base_change() {
-            return Err(SaveError::Invalid);
-        }
-        let mut admission = self.shared.admission.lock().unwrap();
-        if admission.closing.is_some() || self.worker.is_none() {
-            return Err(SaveError::Recovering);
-        }
-        if admission.pending {
-            return Err(SaveError::Pending);
-        }
-        let id = admission.next.ok_or(SaveError::Invalid)?;
-        let revision = match &request {
-            TuningRequest::SaveBase {
-                expected_revision, ..
-            } => *expected_revision,
-            _ => self.shared.latest.lock().unwrap().revision,
-        };
-        match admission.sender.try_send(Queued {
-            id,
-            revision,
-            request,
-        }) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => return Err(SaveError::Pending),
-            Err(TrySendError::Disconnected(_)) => return Err(SaveError::Recovering),
-        }
-        admission.next = id.checked_add(1);
-        admission.pending = true;
-        let mut latest = (**self.shared.latest.lock().unwrap()).clone();
-        latest.operation = TuningOperationState::Pending { id };
-        latest.restoration_effect = None;
-        *self.shared.latest.lock().unwrap() = Arc::new(latest);
-        Ok(id)
+        self.request_at_revision(request, None)
+    }
+    pub(crate) fn request_at_revision(
+        &self,
+        request: TuningRequest,
+        expected: Option<u64>,
+    ) -> Result<u64, SaveError> {
+        self.client()
+            .ok_or(SaveError::Recovering)?
+            .request_at_revision(request, expected)
     }
     pub(crate) fn snapshot(&self) -> Arc<TuningSnapshot> {
         let closing = self.shared.admission.lock().unwrap().closing;
-        let latest = self.shared.latest.lock().unwrap().clone();
+        let latest = TuningClient {
+            shared: self.shared.clone(),
+        }
+        .snapshot();
         if closing.is_some_and(|t| t.elapsed() >= Duration::from_secs(5))
             && !latest.shutdown_complete
         {
@@ -657,7 +765,15 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
         return Err(SaveError::Invalid);
     }
     match request {
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        TuningRequest::RefreshModuleCards => Ok(()),
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        TuningRequest::ApplyCurrentTweak { feature, config } => {
+            service.apply_current_tweak(feature, config)
+        }
         TuningRequest::ApplyTweak { feature, target } => service.apply_tweak(feature, target),
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        TuningRequest::ConfigureBase(command) => service.configure_base(command),
         TuningRequest::ApplyConfiguredTweak {
             feature,
             target,
@@ -709,6 +825,12 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             eligibility,
         } => service.bind_rule(group, rule, profile, eligibility),
         TuningRequest::UnbindRule { group, rule } => service.unbind_rule(&group, &rule),
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        TuningRequest::ActivateSelectedManual {
+            profile,
+            feature,
+            target_id,
+        } => service.activate_selected_manual(profile, feature, &target_id),
         TuningRequest::ActivateManual {
             profile,
             feature,
@@ -1090,54 +1212,11 @@ fn tweak_cards(
             continue;
         };
         let availability = module.editor().availability();
-        let target = service
-            .tweak_targets
-            .get(&descriptor.id)
-            .cloned()
-            .or_else(|| {
-                // A saved disable can precede a failed restore. Recovery ownership,
-                // including disabled internal profiles, outlives transient selection.
-                owners.iter().rev().find_map(|owner| {
-                    (owner.feature() == &descriptor.id
-                        && config.profiles.iter().any(|profile| {
-                            profile.id == owner.profile()
-                                && super::service::is_tweak_profile(profile)
-                        }))
-                    .then(|| service.controller.target(owner))
-                    .flatten()
-                })
-            })
-            .or_else(|| {
-                config
-                    .profiles
-                    .iter()
-                    .rev()
-                    .filter(|p| {
-                        module.editor().selects_saved_exe()
-                            && super::service::is_tweak_profile(p)
-                            && p.modules[0].feature == descriptor.id
-                            && p.modules[0].enabled
-                    })
-                    .find_map(|p| {
-                        config
-                            .manual_targets
-                            .iter()
-                            .find(|t| t.profile == p.id)
-                            .map(|t| t.target.clone())
-                    })
-            })
-            .or_else(|| {
-                if module.editor().selects_saved_exe() {
-                    None
-                } else {
-                    templates
-                        .get(&descriptor.id)
-                        .and_then(|c| c.targets.first().cloned())
-                }
-            });
-        // Keep retained legacy intents and the controller's stable account key
-        // referring to one card, without a new baseline or native work here.
-        let target = target.and_then(|target| module.canonical_target(&target).ok());
+        let target = service.selected_tweak_target(&descriptor.id, &config, &owners, || {
+            templates
+                .get(&descriptor.id)
+                .and_then(|card| card.targets.first().cloned())
+        });
         let saved_config = config
             .profiles
             .iter()
@@ -2021,6 +2100,94 @@ mod card_tests {
         assert_eq!(card.target.as_ref(), Some(&*primary.lock().unwrap()));
         assert!(card.ready && !card.owned);
         reopened.apply_tweak(feature, card.target.unwrap()).unwrap();
+    }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn api_apply_resolves_one_current_target_independently_of_hidden_ui_snapshots() {
+        let (mut service, setting, primary) = display_selection_fixture();
+        let feature = setting.descriptor().id;
+        let hidden = snapshot(
+            &service,
+            TuningOperationState::Idle,
+            Arc::new(ExecutionObservation::Unknown(UnknownReason::Unavailable)),
+            false,
+            None,
+            false,
+        );
+        assert!(hidden.tweak_cards[0].target.is_none());
+        service.apply_current_tweak(feature.clone(), None).unwrap();
+        service.confirm_display_tweak().unwrap();
+        let original = primary.lock().unwrap().clone();
+        *primary.lock().unwrap() = TargetIdentity::Device {
+            identity: "different-monitor".into(),
+        };
+        assert_eq!(
+            display_selection_card(&service).target,
+            Some(original),
+            "an active owner must retain its original target"
+        );
+        service.undo_tweak(&feature).unwrap();
+    }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn api_manual_activation_rejects_a_changed_target_selector() {
+        let setting = Setting::new("game_mode", false);
+        let primary = Arc::new(Mutex::new(TargetIdentity::Device {
+            identity: "monitor-a".into(),
+        }));
+        let mut registry = Registry::default();
+        registry
+            .register(Arc::new(MovingDisplay(setting.clone(), primary.clone())))
+            .unwrap();
+        let mut service = super::super::Tuning::from_registry(registry)
+            .headless(AppStateStorage::test_fixture(|_| {}), Box::new(NoSave));
+        service.admit_test_modules();
+        let feature = setting.descriptor().id;
+        let profile = service
+            .create_profile(
+                "Agent profile".into(),
+                vec![ModulePreference {
+                    feature: feature.clone(),
+                    enabled: true,
+                    mode: ActivationMode::Manual,
+                    config: setting.editor().default_config(),
+                }],
+            )
+            .unwrap();
+        let old = super::super::service::manual_target_id(&primary.lock().unwrap());
+        *primary.lock().unwrap() = TargetIdentity::Device {
+            identity: "monitor-b".into(),
+        };
+        assert!(service
+            .activate_selected_manual(profile, feature.clone(), &old)
+            .is_err());
+        assert!(service.controller.owners().is_empty());
+        let current = super::super::service::manual_target_id(&primary.lock().unwrap());
+        service
+            .activate_selected_manual(profile, feature, &current)
+            .unwrap();
+    }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn api_profile_activation_cannot_bypass_display_confirmation() {
+        let (mut service, setting, primary) = display_selection_fixture();
+        let feature = setting.descriptor().id;
+        let profile = service
+            .create_profile(
+                "API display".into(),
+                vec![ModulePreference {
+                    feature: feature.clone(),
+                    enabled: true,
+                    mode: ActivationMode::Manual,
+                    config: setting.editor().default_config(),
+                }],
+            )
+            .unwrap();
+        let id = super::super::service::manual_target_id(&primary.lock().unwrap());
+        assert!(service
+            .activate_selected_manual(profile, feature, &id)
+            .is_err());
+        assert!(service.controller.owners().is_empty());
     }
 
     #[test]

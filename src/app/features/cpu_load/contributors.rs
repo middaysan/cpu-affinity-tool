@@ -10,6 +10,7 @@ pub(super) enum ContributorScope<'a> {
     System,
     Tracked,
     Rule(&'a RuleId),
+    Run(&'a str),
 }
 impl<'a> From<Option<&'a RuleId>> for ContributorScope<'a> {
     fn from(rule: Option<&'a RuleId>) -> Self {
@@ -20,6 +21,7 @@ impl<'a> From<Option<&'a RuleId>> for ContributorScope<'a> {
 pub(super) struct Contribution {
     pub process: Arc<CpuProcess>,
     pub rule: Option<Arc<RuleId>>,
+    pub run: Option<Arc<str>>,
     pub cpu: usize,
     pub load: f32,
 }
@@ -78,12 +80,22 @@ struct Frame {
     system_partial: bool,
     invalid: [u64; 16],
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct ExportFrameToken {
+    start: usize,
+    len: usize,
+    available: bool,
+    partial: bool,
+    system_partial: bool,
+    invalid: [u64; 16],
+}
 struct Identity {
     process: Arc<CpuProcess>,
     rule: Option<Arc<RuleId>>,
+    run: Option<Arc<str>>,
     refs: usize,
 }
-type Key = (u32, u64, Option<Arc<RuleId>>);
+type Key = (u32, u64, Option<Arc<RuleId>>, Option<Arc<str>>);
 const MAX_IDENTITIES: usize = 8192;
 const _: () = assert!(MAX_IDENTITIES <= u16::MAX as usize + 1);
 // Sparse pool, not a dense PID × CPU × time matrix. Full frames are evicted
@@ -114,6 +126,74 @@ pub(super) struct ContributorHistory {
     duration: u32,
 }
 impl ContributorHistory {
+    pub fn export_token(&self, time: SampleTime) -> Option<ExportFrameToken> {
+        self.export_frame(time).map(|f| ExportFrameToken {
+            start: f.start,
+            len: f.len,
+            available: f.available,
+            partial: f.partial,
+            system_partial: f.system_partial,
+            invalid: f.invalid,
+        })
+    }
+    fn export_frame(&self, time: SampleTime) -> Option<Frame> {
+        let mut low = 0;
+        let mut high = self.len;
+        while low < high {
+            let mid = (low + high) / 2;
+            if self.frames[self.index(mid)]?.time.seconds < time.seconds {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        (low < self.len)
+            .then(|| self.frames[self.index(low)])
+            .flatten()
+            .filter(|f| f.time == time)
+    }
+    pub fn export_quality(&self, time: SampleTime, cpu: usize, system: bool) -> &'static str {
+        match self.export_frame(time) {
+            Some(frame)
+                if frame.available
+                    && !(system
+                        && cpu < 1024
+                        && frame.invalid[cpu / 64] & (1 << (cpu % 64)) != 0) =>
+            {
+                if frame.partial || (system && frame.system_partial) {
+                    "partial"
+                } else {
+                    "complete"
+                }
+            }
+            _ => "unavailable",
+        }
+    }
+    pub fn export_entries(
+        &self,
+        time: SampleTime,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<Contribution>, bool) {
+        let Some(frame) = self.export_frame(time).filter(|f| f.available) else {
+            return (Vec::new(), false);
+        };
+        let end = offset.saturating_add(limit.min(128)).min(frame.len);
+        let rows = (offset.min(end)..end)
+            .map(|index| {
+                let entry = self.entries[(frame.start + index) % self.entries.len()];
+                let id = self.identities[entry.identity as usize].as_ref().unwrap();
+                Contribution {
+                    process: id.process.clone(),
+                    rule: id.rule.clone(),
+                    run: id.run.clone(),
+                    cpu: entry.cpu as usize,
+                    load: entry.load,
+                }
+            })
+            .collect();
+        (rows, end < frame.len)
+    }
     pub fn new(cpus: usize, seconds: u32) -> Result<Self, String> {
         let bytes =
             contributor_bytes(cpus, seconds).ok_or("CPU contributor history size overflow")?;
@@ -166,8 +246,12 @@ impl ContributorHistory {
             let id = self.identities[entry.identity as usize].as_mut().unwrap();
             id.refs -= 1;
             if id.refs == 0 {
-                self.lookup
-                    .remove(&(id.process.pid, id.process.instance, id.rule.clone()));
+                self.lookup.remove(&(
+                    id.process.pid,
+                    id.process.instance,
+                    id.rule.clone(),
+                    id.run.clone(),
+                ));
                 self.identities[entry.identity as usize] = None;
                 self.free.push(entry.identity as usize);
             }
@@ -207,7 +291,7 @@ impl ContributorHistory {
         };
         for value in inputs
             .iter()
-            .filter(|v| v.rule.is_none() && !v.load.is_finite() && v.cpu < 1024)
+            .filter(|v| v.rule.is_none() && v.run.is_none() && !v.load.is_finite() && v.cpu < 1024)
         {
             frame.invalid[value.cpu / 64] |= 1 << (value.cpu % 64);
         }
@@ -220,6 +304,7 @@ impl ContributorHistory {
                     value.process.pid,
                     value.process.instance,
                     value.rule.clone(),
+                    value.run.clone(),
                 );
                 let index = if let Some(&index) = self.lookup.get(&key) {
                     index
@@ -232,6 +317,7 @@ impl ContributorHistory {
                     let identity = Some(Identity {
                         process: value.process.clone(),
                         rule: value.rule.clone(),
+                        run: value.run.clone(),
                         refs: 0,
                     });
                     if index == self.identities.len() {
@@ -264,6 +350,67 @@ impl ContributorHistory {
             let index = (self.frame_head + self.frames.len() - 1) % self.frames.len();
             self.frames[index].as_mut().unwrap().system_partial = true;
         }
+    }
+    pub fn process_list(
+        &self,
+        time: SampleTime,
+        cpus: &[usize],
+        scope: ContributorScope<'_>,
+        known_cpus: usize,
+    ) -> super::process_list::ProcessList {
+        let mut selected = cpus.to_vec();
+        selected.sort_unstable();
+        selected.dedup();
+        let missing = || super::process_list::ProcessList {
+            group: true,
+            time: Some(time.wall),
+            cpu_count: selected.len(),
+            ..Default::default()
+        };
+        let (mut low, mut high) = (0, self.len);
+        while low < high {
+            let mid = (low + high) / 2;
+            if self.frames[self.index(mid)].unwrap().time.seconds < time.seconds {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        if low == self.len {
+            return missing();
+        }
+        let frame = self.frames[self.index(low)].unwrap();
+        if frame.time != time || !frame.available {
+            return missing();
+        }
+        let system = matches!(scope, ContributorScope::System);
+        let invalid = |cpu: usize| {
+            system && (cpu >= 1024 || frame.invalid[cpu / 64] & (1 << (cpu % 64)) != 0)
+        };
+        let known = known_cpus.min(selected.iter().filter(|&&cpu| !invalid(cpu)).count());
+        let partial = frame.partial || (system && frame.system_partial) || known < selected.len();
+        let inputs = (0..frame.len).filter_map(|offset| {
+            let entry = self.entries[(frame.start + offset) % self.entries.len()];
+            let cpu = entry.cpu as usize;
+            if selected.binary_search(&cpu).is_err() || invalid(cpu) {
+                return None;
+            }
+            let identity = self.identities[entry.identity as usize].as_ref().unwrap();
+            let included = match scope {
+                ContributorScope::System => identity.rule.is_none() && identity.run.is_none(),
+                ContributorScope::Tracked => identity.rule.is_some(),
+                ContributorScope::Rule(rule) => identity.rule.as_deref() == Some(rule),
+                ContributorScope::Run(run) => identity.run.as_deref() == Some(run),
+            };
+            included.then(|| (identity.process.clone(), cpu, entry.load))
+        });
+        super::process_list::ProcessList::from_contributions(
+            time.wall,
+            selected.len(),
+            known,
+            partial,
+            inputs,
+        )
     }
     pub fn copy<'a>(
         &self,
@@ -307,9 +454,10 @@ impl ContributorHistory {
             }
             let identity = self.identities[entry.identity as usize].as_ref().unwrap();
             if match scope {
-                ContributorScope::System => identity.rule.is_none(),
+                ContributorScope::System => identity.rule.is_none() && identity.run.is_none(),
                 ContributorScope::Tracked => identity.rule.is_some(),
                 ContributorScope::Rule(rule) => identity.rule.as_deref() == Some(rule),
+                ContributorScope::Run(run) => identity.run.as_deref() == Some(run),
             } {
                 view.rows
                     .push(ContributorRow::new(identity.process.clone(), entry.load));
@@ -349,6 +497,7 @@ impl ContributorHistory {
                 inputs.push(Contribution {
                     process: identity.process.clone(),
                     rule: identity.rule.clone(),
+                    run: identity.run.clone(),
                     cpu: entry.cpu as usize,
                     load: entry.load,
                 });
@@ -394,6 +543,78 @@ mod tests {
         })
     }
     #[test]
+    fn group_processes_sum_displayed_cpus_and_deduplicate_tracked_owners() {
+        let mut history = ContributorHistory::new(3, 30).unwrap();
+        let time = SampleTime {
+            seconds: 1.0,
+            wall: SystemTime::UNIX_EPOCH,
+        };
+        let a = Arc::new(RuleId("a".into()));
+        let b = Arc::new(RuleId("b".into()));
+        let row = |pid, token, cpu, load, rule| Contribution {
+            process: process(pid, token, "sample.exe"),
+            rule,
+            run: None,
+            cpu,
+            load,
+        };
+        history.push(
+            time,
+            &[
+                row(42, 100, 0, 20.0, Some(a.clone())),
+                row(42, 100, 0, 20.0, Some(b)),
+                row(42, 100, 1, 40.0, Some(a.clone())),
+                row(42, 100, 2, 90.0, Some(a.clone())),
+                row(42, 200, 0, 10.0, Some(a)),
+                row(99, 1, 0, 50.0, None),
+            ],
+            true,
+        );
+        let tracked = history.process_list(time, &[0, 1], ContributorScope::Tracked, 2);
+        assert!(tracked.ready && !tracked.partial);
+        assert_eq!(tracked.time, Some(time.wall));
+        assert_eq!(tracked.rows.len(), 2);
+        let shared = tracked.rows.iter().find(|r| r.token == 100).unwrap();
+        assert_eq!(shared.total, Some(30.0));
+        assert_eq!(shared.cores, [(0, 20.0), (1, 40.0)]);
+        let all = history.process_list(time, &[0], ContributorScope::System, 1);
+        assert_eq!(all.rows.len(), 1);
+        assert_eq!(all.rows[0].pid, 99);
+        assert_eq!(all.rows[0].total, Some(50.0));
+        let partial = history.process_list(time, &[0, 1], ContributorScope::Tracked, 1);
+        assert!(partial.partial && partial.rows.iter().all(|r| r.partial));
+        assert!(partial.rows[0].load_text().ends_with('*'));
+        let missing = history.process_list(
+            SampleTime {
+                seconds: 1.5,
+                ..time
+            },
+            &[0],
+            ContributorScope::Tracked,
+            1,
+        );
+        assert!(!missing.ready && missing.rows.is_empty());
+        history.push(
+            SampleTime {
+                seconds: 2.0,
+                ..time
+            },
+            &[],
+            false,
+        );
+        let lost = history.process_list(
+            SampleTime {
+                seconds: 2.0,
+                ..time
+            },
+            &[0],
+            ContributorScope::Tracked,
+            0,
+        );
+        assert!(!lost.ready && lost.rows.is_empty());
+    }
+
+    #[test]
     fn compact_entry_preserves_capacity_and_accounts_exact_reservation() {
         assert_eq!(size_of::<Entry>(), 8);
         assert!(MAX_IDENTITIES <= usize::from(u16::MAX) + 1);
@@ -426,6 +647,7 @@ mod tests {
             .map(|n| Contribution {
                 process: process(n as u32, n as u64 + 100, "retained.exe"),
                 rule: Some(rule.clone()),
+                run: None,
                 cpu: 31,
                 load: 0.125,
             })
@@ -458,6 +680,7 @@ mod tests {
             &[Contribution {
                 process: process(0, 900_000, "reused.exe"),
                 rule: Some(rule.clone()),
+                run: None,
                 cpu: 31,
                 load: 7.25,
             }],
@@ -492,6 +715,7 @@ mod tests {
         let row = |token, load, rule| Contribution {
             process: process(42, token, "tracked.exe"),
             rule,
+            run: None,
             cpu: 0,
             load,
         };
@@ -554,18 +778,21 @@ mod tests {
             Contribution {
                 process: old.clone(),
                 rule: None,
+                run: None,
                 cpu: 0,
                 load: 20.0,
             },
             Contribution {
                 process: old.clone(),
                 rule: None,
+                run: None,
                 cpu: 1,
                 load: 80.0,
             },
             Contribution {
                 process: old.clone(),
                 rule: Some(rule.clone()),
+                run: None,
                 cpu: 0,
                 load: 20.0,
             },
@@ -585,6 +812,7 @@ mod tests {
             &[Contribution {
                 process: new,
                 rule: None,
+                run: None,
                 cpu: 0,
                 load: 90.0,
             }],
@@ -653,12 +881,14 @@ mod tests {
                 Contribution {
                     process: a.clone(),
                     rule: None,
+                    run: None,
                     cpu: 0,
                     load: 5.0,
                 },
                 Contribution {
                     process: b.clone(),
                     rule: None,
+                    run: None,
                     cpu: 0,
                     load: 70.0,
                 },
@@ -683,6 +913,7 @@ mod tests {
             &[Contribution {
                 process: a.clone(),
                 rule: None,
+                run: None,
                 cpu: 0,
                 load: f32::NAN,
             }],
@@ -696,6 +927,7 @@ mod tests {
             .map(|_| Contribution {
                 process: a.clone(),
                 rule: None,
+                run: None,
                 cpu: 0,
                 load: 1.0,
             })

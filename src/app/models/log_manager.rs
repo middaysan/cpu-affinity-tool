@@ -9,9 +9,16 @@ pub enum LogRetention {
     Important,
     Sticky,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LogSource {
+    Application,
+    ProcessMonitor,
+}
 
 /// Represents a single log entry with a message and a timestamp.
 pub struct LogEntry {
+    pub(crate) source: LogSource,
+    pub sequence: u64,
     pub message: String,
     pub timestamp: std::time::SystemTime,
     pub retention: LogRetention,
@@ -44,11 +51,23 @@ pub struct LogManager {
     /// Chronological log entries with bounded retention for non-sticky classes.
     pub entries: VecDeque<LogEntry>,
     local_crash_context: Option<String>,
+    sequence: u64,
+    epoch: u64,
 }
 
 impl LogManager {
     fn push_entry(&mut self, message: String, retention: LogRetention) {
+        self.push_source_entry(message, retention, LogSource::Application);
+    }
+    fn push_source_entry(&mut self, message: String, retention: LogRetention, source: LogSource) {
+        if self.sequence == u64::MAX {
+            self.clear();
+            self.sequence = 0;
+        }
+        self.sequence += 1;
         let entry = LogEntry {
+            source,
+            sequence: self.sequence,
             message,
             timestamp: std::time::SystemTime::now(),
             retention,
@@ -101,6 +120,30 @@ impl LogManager {
     pub fn add_entry(&mut self, message: String) {
         self.push_entry(message, LogRetention::Regular);
     }
+    pub(crate) fn add_monitor_entry(&mut self, message: String, sticky: bool) {
+        if sticky && self.has_sticky_message(&message) {
+            return;
+        }
+        self.push_source_entry(
+            message,
+            if sticky {
+                LogRetention::Sticky
+            } else {
+                LogRetention::Regular
+            },
+            LogSource::ProcessMonitor,
+        );
+    }
+    pub(crate) fn monitor_entries(&self) -> impl Iterator<Item = &LogEntry> {
+        self.entries
+            .iter()
+            .rev()
+            .filter(|entry| entry.source == LogSource::ProcessMonitor)
+            .take(100)
+    }
+    pub(crate) fn add_monitor_important_entry(&mut self, message: String) {
+        self.push_source_entry(message, LogRetention::Important, LogSource::ProcessMonitor);
+    }
 
     /// Adds a new important log entry.
     pub fn add_important_entry(&mut self, message: String) {
@@ -133,16 +176,60 @@ impl LogManager {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{LogManager, LogRetention, IMPORTANT_LOG_CAP, REGULAR_LOG_CAP};
+    #[test]
+    fn monitor_view_is_typed_bounded_and_does_not_match_unrelated_message_text() {
+        let mut manager = LogManager::default();
+        manager.add_entry("MONITOR: unrelated application text".into());
+        for index in 0..105 {
+            manager.add_monitor_entry(format!("Correction {index}"), false);
+        }
+        let rows: Vec<_> = manager.monitor_entries().collect();
+        assert_eq!(rows.len(), 100);
+        assert_eq!(rows[0].message, "Correction 104");
+        assert_eq!(rows[99].message, "Correction 5");
+        assert!(rows
+            .iter()
+            .all(|row| row.source == super::LogSource::ProcessMonitor));
+    }
+
+    #[test]
+    fn log_sequences_survive_class_rotation_and_clear_changes_epoch() {
+        let mut manager = LogManager::default();
+        manager.add_important_entry("first".into());
+        let first = manager.entries[0].sequence;
+        for index in 0..(REGULAR_LOG_CAP + 5) {
+            manager.add_entry(format!("{index}"));
+        }
+        let last = manager.entries.back().unwrap().sequence;
+        assert!(last > first);
+        assert_eq!(manager.entries[0].sequence, first);
+        assert!(manager
+            .entries
+            .iter()
+            .zip(manager.entries.iter().skip(1))
+            .all(|(a, b)| a.sequence < b.sequence));
+        let epoch = manager.epoch();
+        manager.clear();
+        manager.add_entry("after clear".into());
+        assert_ne!(manager.epoch(), epoch);
+        assert!(manager.entries[0].sequence > last);
+    }
 
     #[test]
     fn formatting_preserves_time_and_multiline_unicode_message() {
         let entry = super::LogEntry {
+            source: super::LogSource::Application,
+            sequence: 1,
             message: "Ошибка\nsecond line".into(),
             timestamp: std::time::UNIX_EPOCH + std::time::Duration::from_secs(90_061),
             retention: LogRetention::Regular,

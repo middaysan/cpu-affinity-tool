@@ -124,6 +124,17 @@ fn main() {
             "CPU Affinity Tool",
             options,
             Box::new(move |cc| {
+                if let Some(window) = cc.winit_window() {
+                    // egui-winit 0.36.2 reapplies initial limits in physical pixels.
+                    // Keep them logical so Winit's WM_GETMINMAXINFO follows DPI
+                    // changes rather than clamping to the first monitor's pixels.
+                    let [minimum, maximum] = windows_window_limits(
+                        &windows_viewport(start_hidden),
+                        cc.egui_ctx.zoom_factor(),
+                    );
+                    window.set_min_inner_size(minimum);
+                    window.set_max_inner_size(maximum);
+                }
                 #[cfg(feature = "render-profiling")]
                 if let Some(gl) = &cc.gl {
                     use eframe::glow::HasContext;
@@ -187,6 +198,14 @@ fn main() {
         eprintln!("Application error: {}", e);
         std::process::exit(EXIT_GUI_STARTUP_ERROR);
     }
+    drop(_guard);
+    stop_async_runtime(rt);
+}
+
+fn stop_async_runtime(runtime: Runtime) {
+    // Native OS calls cannot always be cancelled. Shell shutdown has already
+    // revoked admission and completed the owned configuration/recovery path.
+    runtime.shutdown_timeout(Duration::from_millis(250));
 }
 
 fn windows_viewport(start_hidden: bool) -> eframe::egui::ViewportBuilder {
@@ -199,6 +218,17 @@ fn windows_viewport(start_hidden: bool) -> eframe::egui::ViewportBuilder {
         .with_min_inner_size([400.0, 600.0])
         .with_max_inner_size([400.0, 1000.0])
         .with_maximize_button(false)
+}
+
+fn windows_window_limits(
+    viewport: &eframe::egui::ViewportBuilder,
+    zoom_factor: f32,
+) -> [Option<winit::dpi::Size>; 2] {
+    [viewport.min_inner_size, viewport.max_inner_size].map(|size| {
+        size.map(|size| {
+            winit::dpi::LogicalSize::new(size.x * zoom_factor, size.y * zoom_factor).into()
+        })
+    })
 }
 
 #[cfg(test)]
@@ -275,6 +305,31 @@ mod viewport_tests {
     }
 
     #[test]
+    fn closing_does_not_wait_forever_for_a_blocked_native_api_call() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, finish) = std::sync::mpsc::channel();
+        let (finished, done) = std::sync::mpsc::channel();
+        runtime.spawn_blocking(move || {
+            started.send(()).unwrap();
+            let _ = finish.recv();
+            let _ = finished.send(());
+        });
+        ready
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let began = std::time::Instant::now();
+        super::stop_async_runtime(runtime);
+        assert!(began.elapsed() < std::time::Duration::from_secs(2));
+        release.send(()).unwrap();
+        done.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+    }
+
+    #[test]
     fn compact_layout_window_keeps_fixed_width_and_resizable_height() {
         let viewport = super::windows_viewport(false);
         let minimum = viewport.min_inner_size.unwrap();
@@ -283,6 +338,38 @@ mod viewport_tests {
         assert_eq!(minimum.x, 400.0);
         assert_eq!(maximum.x, 400.0);
         assert!(maximum.y > minimum.y);
+    }
+
+    #[test]
+    fn window_limits_follow_dpi_without_changing_logical_width_or_height() {
+        use winit::dpi::{LogicalSize, Size};
+
+        for hidden in [false, true] {
+            for zoom in [1.0, 1.25] {
+                let viewport = super::windows_viewport(hidden);
+                let [minimum, maximum] = super::windows_window_limits(&viewport, zoom);
+                let (minimum, maximum) = (minimum.unwrap(), maximum.unwrap());
+                for height in [600.0, 700.0, 1000.0] {
+                    let desired = LogicalSize::new(400.0 * zoom as f64, height * zoom as f64);
+                    let mut scale = 1.0;
+                    let mut physical = desired.to_physical::<u32>(scale);
+                    // Model Winit's preserved logical client size, followed by
+                    // Windows checking the current min/max bounds at each DPI.
+                    for next_scale in [1.75, 1.0, 1.25, 2.0, 1.5, 1.0] {
+                        let resized = physical
+                            .to_logical::<f64>(scale)
+                            .to_physical::<u32>(next_scale);
+                        physical =
+                            Size::clamp(Size::Physical(resized), minimum, maximum, next_scale)
+                                .to_physical::<u32>(next_scale);
+                        let expected = desired.to_physical::<u32>(next_scale);
+                        assert_eq!(physical.width, expected.width);
+                        assert!(physical.height.abs_diff(expected.height)<=1,"DPI round trips may round one physical pixel, but must not multiply logical size: {physical:?} vs {expected:?}");
+                        scale = next_scale;
+                    }
+                }
+            }
+        }
     }
 
     #[test]

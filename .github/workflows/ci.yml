@@ -70,6 +70,17 @@ jobs:
             Remove-Item -LiteralPath vendor/eframe/Cargo.lock
           }
 
+      - name: Test local Winit DPI rectangle policy
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath Cargo.lock -Destination vendor/winit/Cargo.lock
+          try {
+            cargo test --manifest-path vendor/winit/Cargo.toml --lib --no-default-features --features rwh_06 --target-dir target dpi_
+            if ($LASTEXITCODE -ne 0) { throw 'Local Winit DPI regression tests failed' }
+          } finally {
+            Remove-Item -LiteralPath vendor/winit/Cargo.lock
+          }
+
       - name: Test local epaint hinting compatibility
         shell: pwsh
         run: |

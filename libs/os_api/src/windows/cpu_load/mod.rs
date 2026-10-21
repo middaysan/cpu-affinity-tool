@@ -41,6 +41,19 @@ pub fn history_clock() -> Result<(f64, std::time::SystemTime), String> {
     }
     Ok((at as f64 / frequency as f64, std::time::SystemTime::now()))
 }
+pub fn history_frequency() -> Result<i64, String> {
+    static FREQUENCY: std::sync::OnceLock<Result<i64, String>> = std::sync::OnceLock::new();
+    FREQUENCY
+        .get_or_init(|| {
+            let mut value = 0;
+            unsafe { QueryPerformanceFrequency(&mut value) }.map_err(|e| e.to_string())?;
+            if value <= 0 {
+                return Err("Invalid QPC frequency".into());
+            }
+            Ok(value)
+        })
+        .clone()
+}
 
 /// Read-only self-measurement for explicit telemetry overhead probes.
 pub struct ResourceSample {

@@ -2,9 +2,9 @@
 
 This file records reviewed RustSec findings that remain in the lockfile so release checks do not silently normalize known advisories.
 
-## Current audit review (2026-10-17)
+## Current audit review (2026-10-21)
 
-Both lockfiles were rechecked against RustSec database commit `999ec89d5d3f10f20be14750ec8c2d8b44e0ac9b` (2026-10-17). Both audits pass without advisory ignores and report zero vulnerabilities. The separate `libs/os_api` lockfile has no informational warnings. No dependency or lockfile was changed for this review.
+Both lockfiles were rechecked against RustSec database commit `4b587f00996ebe5c05a73eaef105ef241e876414` (2026-10-21). Both audits pass without advisory ignores and report zero vulnerabilities. The separate `libs/os_api` lockfile has no informational warnings. No dependency or lockfile was changed for this review.
 
 The application lockfile reports these informational findings:
 

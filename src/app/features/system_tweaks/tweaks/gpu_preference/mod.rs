@@ -68,6 +68,11 @@ impl ModuleEditor for GpuPreference {
     fn selects_saved_exe(&self) -> bool {
         true
     }
+    fn tweak_saved_executable_target(&self, path: &std::path::Path) -> Option<TargetIdentity> {
+        Some(TargetIdentity::Device {
+            identity: format!("gpu_exe:{}", path.to_string_lossy()),
+        })
+    }
     fn qualify_tweak_target(&self, target: &TargetIdentity) -> Result<TargetIdentity, ModuleError> {
         if gpu(target).is_ok() {
             let canonical = self.canonical_target(target)?;

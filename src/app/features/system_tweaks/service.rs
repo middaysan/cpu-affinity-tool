@@ -1,4 +1,7 @@
 //! Candidate-state saves and the small field controller. Called only by the application worker.
+#[path = "config_commands.rs"]
+#[cfg(all(target_os = "windows", feature = "windows"))]
+mod config_commands;
 use super::{
     config::*,
     persistence::{self, RecoveryStore},
@@ -35,6 +38,39 @@ pub(crate) enum SavedState {
     Unavailable,
 }
 pub(crate) struct SelectedStatePersistence;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub(crate) fn manual_target_id(target: &TargetIdentity) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    target.hash(&mut hash);
+    format!("{:016x}", hash.finish())
+}
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub(crate) fn manual_target_candidates(
+    module: &dyn super::platform::registry::Module,
+    selected: Option<TargetIdentity>,
+) -> Vec<TargetIdentity> {
+    if module.descriptor().id.as_str() == "display_refresh"
+        || !module
+            .descriptor()
+            .activation_modes
+            .contains(&ActivationMode::Manual)
+        || !module.editor().availability().is_available()
+    {
+        return vec![];
+    }
+    let candidates = if module.editor().selects_saved_exe() {
+        selected.into_iter().collect()
+    } else {
+        module.targets()
+    };
+    candidates
+        .into_iter()
+        .filter(TargetIdentity::valid)
+        .filter_map(|target| module.canonical_target(&target).ok())
+        .take(256)
+        .collect()
+}
 impl StatePersistence for SelectedStatePersistence {
     fn save(&mut self, candidate: &mut AppStateStorage) -> Result<SavedState, SaveError> {
         candidate.try_save_state().map_err(|_| SaveError::Storage)?;
@@ -548,6 +584,23 @@ impl HeadlessTuning {
             .ok_or(SaveError::Invalid)?;
         self.publish(candidate, rules)
     }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn activate_selected_manual(
+        &mut self,
+        profile: ProfileId,
+        feature: FeatureId,
+        target_id: &str,
+    ) -> Result<(), SaveError> {
+        let module = self.registry.get(&feature).ok_or(SaveError::Invalid)?;
+        let saved = self.configured()?;
+        let selected =
+            self.selected_tweak_target(&feature, &saved, &self.controller.owners(), || None);
+        let target = manual_target_candidates(module.as_ref(), selected)
+            .into_iter()
+            .find(|target| manual_target_id(target) == target_id)
+            .ok_or(SaveError::Invalid)?;
+        self.activate_manual(profile, feature, target)
+    }
     pub(crate) fn activate_manual(
         &mut self,
         profile: ProfileId,
@@ -816,6 +869,80 @@ impl HeadlessTuning {
         target: TargetIdentity,
     ) -> Result<(), SaveError> {
         self.apply_tweak_with_options(feature, target, None)
+    }
+    pub(super) fn selected_tweak_target(
+        &self,
+        feature: &FeatureId,
+        config: &TuningConfig,
+        owners: &std::collections::BTreeSet<OwnerKey>,
+        discovered: impl FnOnce() -> Option<TargetIdentity>,
+    ) -> Option<TargetIdentity> {
+        let module = self.registry.get(feature)?;
+        self.tweak_targets
+            .get(feature)
+            .cloned()
+            .or_else(|| {
+                owners.iter().rev().find_map(|owner| {
+                    (owner.feature() == feature
+                        && config.profiles.iter().any(|profile| {
+                            profile.id == owner.profile() && is_tweak_profile(profile)
+                        }))
+                    .then(|| self.controller.target(owner))
+                    .flatten()
+                })
+            })
+            .or_else(|| {
+                config
+                    .profiles
+                    .iter()
+                    .rev()
+                    .filter(|profile| {
+                        module.editor().selects_saved_exe()
+                            && is_tweak_profile(profile)
+                            && &profile.modules[0].feature == feature
+                            && profile.modules[0].enabled
+                    })
+                    .find_map(|profile| {
+                        config
+                            .manual_targets
+                            .iter()
+                            .find(|target| target.profile == profile.id)
+                            .map(|target| target.target.clone())
+                    })
+            })
+            .or_else(|| {
+                if module.editor().selects_saved_exe() {
+                    None
+                } else {
+                    discovered()
+                }
+            })
+            .and_then(|target| module.canonical_target(&target).ok())
+    }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn apply_current_tweak(
+        &mut self,
+        feature: FeatureId,
+        config: Option<ModuleEnvelope>,
+    ) -> Result<(), SaveError> {
+        let module = self
+            .registry
+            .get(&feature)
+            .cloned()
+            .ok_or(SaveError::Invalid)?;
+        if module.editor().tweak().is_none() || !module.editor().availability().is_available() {
+            return Err(SaveError::Invalid);
+        }
+        let saved = match self.state.tuning.decode() {
+            TuningLoad::Known(config) => *config,
+            _ => TuningConfig::default(),
+        };
+        let target = self
+            .selected_tweak_target(&feature, &saved, &self.controller.owners(), || {
+                module.targets().into_iter().find(TargetIdentity::valid)
+            })
+            .ok_or(SaveError::Invalid)?;
+        self.apply_tweak_with_options(feature, target, config)
     }
     pub(crate) fn apply_configured_tweak(
         &mut self,
