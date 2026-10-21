@@ -10,6 +10,30 @@ pub struct EditableGroup {
     pub run_all_enabled: bool,
 }
 
+pub(super) fn validate_group_values(
+    name: &str,
+    cpus: &[usize],
+    total: usize,
+) -> Result<(String, Vec<usize>), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Group name cannot be empty".into());
+    }
+    if name.len() > 256 || name.contains('\0') {
+        return Err("Group name must contain at most 256 bytes and no NUL".into());
+    }
+    if cpus.is_empty() {
+        return Err("At least one core must be selected".into());
+    }
+    if cpus.len() > 4096 || cpus.iter().any(|cpu| *cpu >= total) {
+        return Err("Select existing logical CPUs".into());
+    }
+    let mut cpus = cpus.to_vec();
+    cpus.sort_unstable();
+    cpus.dedup();
+    Ok((name.into(), cpus))
+}
+
 pub fn set_group_is_hidden(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     index: usize,
@@ -49,15 +73,11 @@ pub fn create_group(
     core_selection: &[bool],
     run_all_enabled: bool,
 ) -> Result<(), String> {
-    let group_name_trimmed = group_name.trim();
-    if group_name_trimmed.is_empty() {
-        return Err("Group name cannot be empty".to_string());
-    }
-
-    let selected_cores = selected_cores(core_selection);
-    if selected_cores.is_empty() {
-        return Err("At least one core must be selected".to_string());
-    }
+    let (group_name_trimmed, selected_cores) = validate_group_values(
+        group_name,
+        &selected_cores(core_selection),
+        core_selection.len(),
+    )?;
 
     let mut state = persistent_state.write().unwrap();
     state.groups.push(CoreGroup {
@@ -77,15 +97,8 @@ pub fn update_group_properties(
     core_selection: &[bool],
     run_all_button: bool,
 ) -> Result<bool, String> {
-    let group_name_trimmed = name.trim();
-    if group_name_trimmed.is_empty() {
-        return Err("Group name cannot be empty".to_string());
-    }
-
-    let selected_cores = selected_cores(core_selection);
-    if selected_cores.is_empty() {
-        return Err("At least one core must be selected".to_string());
-    }
+    let (group_name_trimmed, selected_cores) =
+        validate_group_values(&name, &selected_cores(core_selection), core_selection.len())?;
 
     let mut state = persistent_state.write().unwrap();
     if index < state.groups.len() {
@@ -96,15 +109,6 @@ pub fn update_group_properties(
     } else {
         Ok(false)
     }
-}
-
-pub fn remove_group(persistent_state: &Arc<RwLock<AppStateStorage>>, index: usize) -> bool {
-    let mut state = persistent_state.write().unwrap();
-    if index < state.groups.len() {
-        state.groups.remove(index);
-        return true;
-    }
-    false
 }
 
 pub fn load_group_for_edit(
@@ -185,7 +189,8 @@ pub fn load_rule(
         .cloned()
 }
 
-pub fn update_rule(
+#[cfg(test)]
+fn update_rule(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     group_index: usize,
     program_index: usize,
@@ -201,7 +206,8 @@ pub fn update_rule(
     false
 }
 
-pub fn remove_rule_from_group(
+#[cfg(test)]
+fn remove_rule_from_group(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     group_index: usize,
     program_index: usize,
@@ -268,9 +274,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn sample_persistent_state() -> Arc<RwLock<AppStateStorage>> {
-        Arc::new(RwLock::new(AppStateStorage {
-            version: 5,
-            groups: vec![CoreGroup {
+        Arc::new(RwLock::new(AppStateStorage::test_fixture(|state| {
+            state.version = 5;
+            state.groups = vec![CoreGroup {
                 name: "Games".to_string(),
                 cores: vec![1, 3],
                 programs: vec![AppToRun {
@@ -287,19 +293,20 @@ mod tests {
                 }],
                 is_hidden: false,
                 run_all_button: true,
-            }],
-            cpu_schema: CpuSchema {
+            }];
+            state.cpu_schema = CpuSchema {
                 model: "Test CPU".to_string(),
                 clusters: Vec::new(),
-            },
-            theme_index: 0,
-            process_monitoring_enabled: false,
-            windows_event_log_diagnostics_enabled: true,
-            start_minimized: false,
-            rule_identities: None,
-            loaded_version: 5,
-            pending_pre_v6_backup: false,
-        }))
+            };
+            state.theme_index = 0;
+            state.process_monitoring_enabled = false;
+            state.windows_event_log_diagnostics_enabled = true;
+            state.start_minimized = false;
+            state.rule_identities = None;
+            state.loaded_version = 5;
+            state.pending_pre_v6_backup = false;
+            state.tuning = Default::default();
+        })))
     }
 
     #[test]

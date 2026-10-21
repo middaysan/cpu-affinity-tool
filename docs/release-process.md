@@ -24,6 +24,7 @@ Use these files together:
 - `scripts/assert-windows-pdb-matches.ps1`
 - `scripts/test-windows-pdb-verifier.ps1`
 - `scripts/assert-windows-release-manifest.ps1`
+- `scripts/test-windows-tuning-recovery.ps1`
 - `changelogs/vX.Y.Z.txt`
 - `changelogs/linux-beta-vX.Y.Z-N.txt`
 
@@ -44,7 +45,7 @@ When a stable tag matching `v*` is pushed:
 2. the workflow validates the tag format against `vX.Y.Z`
 3. the workflow confirms `Cargo.toml` version matches `X.Y.Z`
 4. the workflow requires `changelogs/vX.Y.Z.txt`
-5. the workflow runs formatting, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `libs/os_api` tests, `cargo test --features windows --bin cpu-affinity-tool`, and the line-table production build through `scripts/build-windows-release.ps1`
+5. the workflow runs formatting, `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `libs/os_api` tests, `cargo test --features windows --bin cpu-affinity-tool`, the local eframe/epaint/Winit regressions, isolated forced-process recovery through `scripts/test-windows-tuning-recovery.ps1`, and the line-table production build through `scripts/build-windows-release.ps1`
 6. the workflow requires `cpu_affinity_tool.pdb` to match the EXE's embedded PDB basename, CodeView GUID, and age through `scripts/assert-windows-pdb-matches.ps1`, then runs `scripts/assert-windows-release-manifest.ps1` against the built exe and requires `requestedExecutionLevel=requireAdministrator` plus `uiAccess=false`
 7. the workflow uploads `cpu-affinity-tool.exe` and its matching `cpu_affinity_tool.pdb`
 8. a publish job on `ubuntu-24.04` creates the GitHub Release with the body from `changelogs/vX.Y.Z.txt`
@@ -67,9 +68,10 @@ Before pushing a stable Windows tag, align:
 
 - Git tag: `vX.Y.Z`
 - `Cargo.toml` version
+- the local `cpu-affinity-tool` package version in `Cargo.lock`
 - `changelogs/vX.Y.Z.txt`
 - release-facing docs if platform or process truth changed
-- if the release includes the first shipped schema `v10` build, call out that the first explicit save upgrades `state.json` to `v10`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6`, `v7`, `v8`, or `v9` to `v10` does not. State clearly that version-aware loading preserves the prior enabled behavior for missing pre-`v10` descendant-management values, while missing values in `v10` and newly created rules default it to off.
+- configuration compatibility: current explicit saves upgrade older supported state to schema `v11`. Loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save; `v6` and later do not create that particular backup. Missing pre-`v10` descendant-management values retain the prior enabled behavior, while missing values in `v10` or later and newly created rules default to off. Downgrading after a current-schema save is unsupported.
 
 Before pushing a Linux beta tag, align:
 
@@ -77,16 +79,16 @@ Before pushing a Linux beta tag, align:
 - `Cargo.toml` version: `X.Y.Z`
 - `changelogs/linux-beta-vX.Y.Z-N.txt`
 - Linux beta release-facing docs if platform or process truth changed
-- if the prerelease includes the first shipped schema `v10` build, call out that the first explicit save upgrades `state.json` to `v10`; loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save, while `v6`, `v7`, `v8`, or `v9` to `v10` does not. State clearly that version-aware loading preserves the prior enabled behavior for missing pre-`v10` descendant-management values, while missing values in `v10` and newly created rules default it to off.
+- the same current-schema migration and downgrade limits described above; Linux retains Windows-only persisted data without executing Windows settings
 
 ## Recommended stable release steps
 
-1. Update `Cargo.toml` to the target version.
+1. Update `Cargo.toml` and its local `Cargo.lock` package entry to the target version.
 2. Create or update `changelogs/vX.Y.Z.txt`.
 3. Run the release checklist in `docs/release-checklist.md`.
 4. Run the manual smoke from `docs/release-smoke-matrix.md`.
-5. Push the release commit.
-6. Push the stable tag `vX.Y.Z`.
+5. Push the release commit and require green Windows/Linux pull-request CI, then merge the reviewed head into the default branch.
+6. Verify the merged tree and push the stable tag `vX.Y.Z` on that default-branch commit.
 7. Confirm the GitHub Release workflow succeeded and published `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb`.
 
 ## Recommended Linux beta release steps

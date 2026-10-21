@@ -1,6 +1,8 @@
 mod app;
 pub mod events;
 pub mod presenters;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+mod render_preparation;
 mod routes;
 pub mod sessions;
 

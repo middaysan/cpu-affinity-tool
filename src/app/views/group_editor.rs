@@ -1,7 +1,7 @@
 use crate::app::models::{CoreInfo, CoreType, CpuSchema};
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    content_frame, form_text_edit, ghost_button, glass_frame, inset_frame, inter_semibold_family,
+    close_button, content_frame, form_text_edit, glass_frame, inset_frame, inter_semibold_family,
     paint_focus_ring, paint_selected_tone_feedback, palette, toned_button, ToneRole, ToneTokens,
     UiPalette, BUTTON_FONT_SIZE, FORM_INPUT_HEIGHT,
 };
@@ -27,6 +27,15 @@ fn draw_group_form_ui(
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.label(RichText::new("Group name").strong());
             group_name_input(ui, &mut groups.group_name).request_focus();
+            if is_edit {
+                if let Some(id) = &groups.editing_group_id {
+                    ui.add(egui::Label::new(
+                        RichText::new(format!("Group ID: {}", id.0)).size(9.0).weak(),
+                    ).truncate()).on_hover_text(format!(
+                        "{}\nInternal saved identity, retained when the group is renamed or reordered.", id.0,
+                    ));
+                }
+            }
         });
 
         ui.add_space(6.0);
@@ -276,49 +285,64 @@ fn draw_core_buttons_impl(
     mut record_rect: impl FnMut(egui::Rect),
 ) {
     let colors = palette(ui);
+    let all_selected = cores.iter().all(|c| groups.core_selection[c.index]);
+    let mut all_response = ui
+        .scope(|ui| {
+            ui.spacing_mut().interact_size.y = CORE_TILE_HEIGHT / 2.0;
+            ui.spacing_mut().button_padding.y = 1.0;
+            let all_tokens = core_tile_tokens(CoreType::Other, all_selected, colors);
+            let mut all_label = RichText::new(if all_selected {
+                "Clear all"
+            } else {
+                "Select all"
+            })
+            .size(9.0);
+            if let Some(tokens) = all_tokens {
+                all_label = all_label.color(tokens.fg);
+            }
+            let all_button = egui::Button::new(all_label)
+                .selected(all_selected)
+                .truncate();
+            if let Some(tokens) = all_tokens {
+                let response = ui.add_sized(
+                    egui::vec2(68.0, CORE_TILE_HEIGHT / 2.0),
+                    all_button
+                        .fill(tokens.fill)
+                        .stroke(egui::Stroke::new(1.0, tokens.border)),
+                );
+                paint_focus_ring(ui, &response);
+                paint_selected_tone_feedback(ui, &response, tokens);
+                response
+            } else {
+                let response = ui.add_sized(egui::vec2(68.0, CORE_TILE_HEIGHT / 2.0), all_button);
+                paint_focus_ring(ui, &response);
+                response
+            }
+        })
+        .inner
+        .on_hover_text(if all_selected {
+            "Clear selection for every thread in this section."
+        } else {
+            "Select every thread in this section."
+        });
+    record_rect(all_response.rect);
+    if all_response.clicked() {
+        let mut changed = false;
+        for c in cores.iter() {
+            let target = !all_selected;
+            if groups.core_selection[c.index] != target {
+                groups.core_selection[c.index] = target;
+                changed = true;
+            }
+        }
+        if changed {
+            all_response.mark_changed();
+        }
+        groups.last_clicked_core = None;
+    }
+
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-        let all_selected = cores.iter().all(|c| groups.core_selection[c.index]);
-        let all_tokens = core_tile_tokens(CoreType::Other, all_selected, colors);
-        let mut all_label =
-            RichText::new(if all_selected { "✓ All" } else { "All" }).size(BUTTON_FONT_SIZE);
-        if let Some(tokens) = all_tokens {
-            all_label = all_label.color(tokens.fg);
-        }
-        let all_button = egui::Button::new(all_label)
-            .selected(all_selected)
-            .truncate();
-        let mut all_response = if let Some(tokens) = all_tokens {
-            let response = ui.add_sized(
-                egui::vec2(46.0, CORE_TILE_HEIGHT),
-                all_button
-                    .fill(tokens.fill)
-                    .stroke(egui::Stroke::new(1.0, tokens.border)),
-            );
-            paint_focus_ring(ui, &response);
-            paint_selected_tone_feedback(ui, &response, tokens);
-            response
-        } else {
-            let response = ui.add_sized(egui::vec2(46.0, CORE_TILE_HEIGHT), all_button);
-            paint_focus_ring(ui, &response);
-            response
-        };
-        record_rect(all_response.rect);
-        if all_response.clicked() {
-            let mut changed = false;
-            for c in cores.iter() {
-                let target = !all_selected;
-                if groups.core_selection[c.index] != target {
-                    groups.core_selection[c.index] = target;
-                    changed = true;
-                }
-            }
-            if changed {
-                all_response.mark_changed();
-            }
-            groups.last_clicked_core = None;
-        }
-
         for core in cores.iter() {
             let is_selected = groups.core_selection[core.index];
             let size = egui::vec2(CORE_TILE_WIDTH, CORE_TILE_HEIGHT);
@@ -389,10 +413,7 @@ pub fn create_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    if ghost_button(ui, egui::Button::new("Close"))
-                        .on_hover_text("Close")
-                        .clicked()
-                    {
+                    if close_button(ui).on_hover_text("Close").clicked() {
                         cancel_clicked = true;
                     }
                 });
@@ -443,10 +464,7 @@ pub fn edit_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    if ghost_button(ui, egui::Button::new("Close"))
-                        .on_hover_text("Close")
-                        .clicked()
-                    {
+                    if close_button(ui).on_hover_text("Close").clicked() {
                         cancel_clicked = true;
                     }
                 });
@@ -484,6 +502,30 @@ pub fn edit_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn edit_shows_the_existing_group_id_without_changing_it() {
+        use crate::app::{models::AppStateStorage, runtime::AppState, shared::ids::GroupId};
+        use eframe::egui;
+        use std::sync::{Arc, RwLock};
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+        let mut app = AppState::new_for_test(
+            Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
+            20,
+        );
+        app.ui.group_form.editing_group_id = Some(GroupId("g-kept".into()));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            super::edit_group_window(&mut app, ui)
+        });
+        output.textures_delta.clear();
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.job.text == "Group ID: g-kept")));
+        assert_eq!(
+            app.ui.group_form.editing_group_id,
+            Some(GroupId("g-kept".into()))
+        );
+    }
+
     use super::{
         core_tile_text, core_tile_tokens, core_tile_widget_info, draw_core_buttons_for_test,
         group_name_input, selected_core_tile_fill, CORE_TILE_WIDTH,
@@ -501,7 +543,7 @@ mod tests {
         ctx.set_fonts(ui_font_definitions());
         let mut name = String::from("New group");
         let mut input_rect = Rect::NOTHING;
-        let output = ctx.run_ui(
+        let mut output = ctx.run_ui(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(470.0, 600.0))),
                 ..Default::default()
@@ -511,6 +553,7 @@ mod tests {
                 input_rect = group_name_input(ui, &mut name).rect;
             },
         );
+        output.textures_delta.clear();
         let text = output
             .shapes
             .iter()
@@ -553,7 +596,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut tile_rects = Vec::new();
 
-        let _ = ctx.run_ui(
+        let mut output = ctx.run_ui(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(190.0, 500.0))),
                 ..Default::default()
@@ -562,6 +605,7 @@ mod tests {
                 tile_rects = draw_core_buttons_for_test(ui, &mut groups, &mut cores);
             },
         );
+        output.textures_delta.clear();
         tile_rects
     }
 
@@ -611,7 +655,7 @@ mod tests {
         ctx.set_fonts(ui_font_definitions());
         let mut measured = Vec::new();
 
-        let _ = ctx.run_ui(RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
             for (label, thread_index) in [("P19", 19), ("P127", 127)] {
                 let text = core_tile_text(label, thread_index);
                 let primary = ui.fonts_mut(|fonts| {
@@ -632,6 +676,7 @@ mod tests {
             }
         });
 
+        output.textures_delta.clear();
         for (primary, secondary) in measured {
             assert!(primary.x <= CORE_TILE_WIDTH - 4.0);
             assert!(secondary.x <= CORE_TILE_WIDTH - 4.0);
@@ -666,6 +711,7 @@ mod tests {
 
         assert_eq!(unselected.len(), 21);
         assert_eq!(selected.len(), unselected.len());
+        assert!(unselected[0].bottom() < unselected[1].top());
         for (control_index, (unselected_rect, selected_rect)) in
             unselected.iter().zip(&selected).enumerate()
         {
@@ -675,7 +721,7 @@ mod tests {
             }
             assert_eq!(selected_rect, unselected_rect);
             let expected_size = if control_index == 0 {
-                egui::vec2(46.0, 34.0)
+                egui::vec2(68.0, 17.0)
             } else {
                 egui::vec2(CORE_TILE_WIDTH, 34.0)
             };

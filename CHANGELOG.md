@@ -6,6 +6,48 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-22
+
+### Added
+
+- Windows System Tweaks with typed Apply/Undo operations, bounded recovery journals, process scheduling ownership and display-change confirmation with automatic rollback. Retained older settings remain available for recovery and Undo.
+- An optional localhost Streamable HTTP MCP server inside the same Windows EXE. Its compact controls provide enable/disable, port, Copy connection and a self-contained Copy AI prompt. One permanent protected key grants full access to supported group/rule/settings operations, ordinary or explicitly elevated program launches, exact-instance process control, bounded output, logs, crash reports and CPU telemetry. MCP is disabled by default; share its full-access connection only with a trusted agent.
+- A bounded, human-readable journal of the last 100 MCP commands and a separate Process monitor log. Service controls remain accessible while disabled, without toggling a service just by opening its window.
+- Continuous CPU history in RAM while monitoring is enabled, including with graphs closed or the window in the tray. Choose 30 seconds, 5 minutes (default), or 30 minutes. Original-time scheduler intervals, PID lifetime identity and explicit unavailable/partial/lost data keep graphs and contributors consistent when events arrive late.
+- Shared group/application CPU windows with Graphs / Processes views, exact-time contributors, current tracked process rows, sorting and pinned history. Group graphs default to tracked applications; an explicit All system processes option includes other observed CPU work.
+- Right-click CPU graphs to save the visible chart as PNG or all retained CPU/process history as UTF-8 CSV. Agents can download the same bounded CSV through `export_cpu_history`, with immutable artifacts and UTF-8 byte cursors.
+- Running-process name suggestions in Application rule tracking fields. Cached background discovery and case-insensitive matching help choose executable names without scanning Windows on each keystroke.
+- A manual Memory integrity guide in System Tweaks with a direct Core isolation settings action. The app does not change this security setting or manage its Undo.
+- Opt-in nonshipping render profiling and a separate debug-only MCP bridge for isolated GUI checks. Ordinary releases exclude debug automation, authority overrides and profiling hooks; production MCP is an independent optional feature.
+
+### Changed
+
+- Windows renders through WGPU/DX12 with memory-oriented allocation hints. Linux retains Glow and its separate desktop beta scope. Shared theme rasterization, bounded font preparation, cached graph meshes/table sorting and a 60 Hz scroll paint budget reduce repeated GUI work while keeping reactive rendering. Artifact-specific measurements and remaining backend limits are documented separately.
+- Compact MCP, Process monitor and CPU load status buttons now sit at the top right. App settings starts with one Light / Dark / System selector and shows the version last. CPU monitoring remains independent from affinity/priority enforcement.
+- Align process tables, subtle row separators, modal layouts, stronger dimming and compact CPU tiles. Selected CPUs use a green label/outline; a yellow in-label dot marks retained application activity. Group load shows tracked work on the group's CPUs; the header CPU control shows overall system load.
+- Keep the group toolbar fixed while cards scroll. Give application names more room, use compact Run controls and preserve full-name drag targets. Application rule settings use full-width paths and clearer launch/tracking sections.
+- Label the group meter **Group CPU load** and refresh the README with current screenshots, setup steps and linked support guides.
+- Update compatible Rust dependencies and raise the minimum toolchain to Rust 1.95. Local eframe, epaint and Winit patches retain upstream provenance, licenses, regression tests and removal criteria.
+
+### Fixed
+
+- Preserve logical window sizing when moving between monitors with different scaling, including native rectangle handling and subsequent Explorer drops.
+- Restore ordinary Explorer imports into the elevated Windows window through root-scoped Shell drops. Keep the original physical release point so the chosen group receives the file; importing never launches it.
+- Honor hidden startup before the first Windows paint, preserve tray restoration geometry and hide the root before graphics teardown. Keep startup errors reachable when the tray or shortcut-forwarding path cannot start.
+- Retire ended desktop sessions despite old LSA logon records, without discarding current-session ownership or changing current settings.
+- Preserve delayed/final CPU work at its original interval and avoid attributing a reused PID's work to an earlier lifetime. Missing data remains unavailable rather than becoming a zero.
+- Keep the MCP native-worker budget across listener restarts and cancelled HTTP callers, so uninterruptible native calls cannot bypass the application-wide bound.
+- Reclaim scheduling metadata only after confirmed exact-process exit, keeping alive or uncertain process ownership and previously attempted fields intact.
+- Apply MCP's existing Realtime priority restriction before either saved EXE or installed-app activation. Preserve neutral launch scheduling for module-owned fields and retain manual configurations.
+- Enforce launch-name limits before MCP admission and bound retained display labels/error text so all managed runs remain inspectable within the response budget. Operational process/run identities and saved names are unchanged.
+- Keep graph export menus above reopened modal windows, including after theme changes.
+
+### Compatibility
+
+- Windows remains the stable portable x64 EXE plus matching PDB distribution and still requires administrator approval. CPU recording, System Tweaks and production MCP are Windows-only; Linux beta artifacts remain separate.
+- Current saves use schema v11. Existing configuration locations and pre-v6 backup behavior remain; explicit saves upgrade older schemas. Downgrading after a current-schema save is unsupported. MCP authority is stored separately from editable application state.
+- CPU history is bounded and memory-only until explicitly exported. CSV contains the retained period and observed positive process work, not an unlimited archive or proof that an absent process was idle. Disabling MCP leaves resumed programs/output and independent CPU monitoring running.
+
 ## [1.6.3] - 2026-09-20
 
 ### Added

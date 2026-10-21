@@ -1,5 +1,14 @@
+fn check_debug_mcp_profile() {
+    if std::env::var_os("CARGO_FEATURE_DEBUG_MCP").is_some()
+        && matches!(std::env::var("PROFILE").as_deref(), Ok("release"))
+    {
+        panic!("debug-mcp is forbidden in release builds, including with debug assertions enabled");
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn main() {
+    check_debug_mcp_profile();
     println!("cargo:rerun-if-changed=assets/cpu_presets.json");
     println!("cargo:rerun-if-changed=assets/icon.ico");
     println!("cargo:rerun-if-changed=app.manifest");
@@ -12,4 +21,6 @@ fn main() {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn main() {}
+fn main() {
+    check_debug_mcp_profile();
+}

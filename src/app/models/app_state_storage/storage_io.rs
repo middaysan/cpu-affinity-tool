@@ -1,15 +1,20 @@
 use super::state_path::STATE_FILE_NAME;
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const TEMP_FILE_ATTEMPTS: usize = 64;
+pub(super) const MAX_STATE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) enum StateRead {
+    Text(String),
+    Oversized { size: usize },
+}
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) trait StateFilesystem {
-    fn read_to_string(&self, path: &Path) -> io::Result<String>;
+    fn read_bounded(&self, path: &Path) -> io::Result<StateRead>;
     fn create_dir_all(&mut self, path: &Path) -> io::Result<()>;
     fn path_exists(&self, path: &Path) -> io::Result<bool>;
     fn stage_new_and_sync(&mut self, path: &Path, contents: &[u8]) -> io::Result<()>;
@@ -23,8 +28,17 @@ pub(crate) trait StateFilesystem {
 pub(super) struct RealStateFilesystem;
 
 impl StateFilesystem for RealStateFilesystem {
-    fn read_to_string(&self, path: &Path) -> io::Result<String> {
-        fs::read_to_string(path)
+    fn read_bounded(&self, path: &Path) -> io::Result<StateRead> {
+        let mut bytes = Vec::new();
+        File::open(path)?
+            .take((MAX_STATE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_STATE_BYTES {
+            return Ok(StateRead::Oversized { size: bytes.len() });
+        }
+        String::from_utf8(bytes)
+            .map(StateRead::Text)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "state UTF-8"))
     }
 
     fn create_dir_all(&mut self, path: &Path) -> io::Result<()> {
@@ -77,20 +91,58 @@ impl StateFilesystem for RealStateFilesystem {
 pub(super) fn read_state_file_with_filesystem(
     path: &Path,
     filesystem: &impl StateFilesystem,
-) -> Option<String> {
-    filesystem.read_to_string(path).ok()
+) -> io::Result<StateRead> {
+    filesystem.read_bounded(path)
 }
 
+#[cfg(test)]
 pub(super) fn save_to_path_with_filesystem<T: Serialize>(
     value: &T,
     path: &Path,
     filesystem: &mut impl StateFilesystem,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let json = serde_json::to_string_pretty(value)?;
+    let serialized = serialize_state_bounded(value)?;
+    publish_state_bytes_with_filesystem(&serialized, path, filesystem)
+}
+
+pub(super) fn serialize_state_bounded<T: Serialize>(
+    value: &T,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    struct BoundedWriter(Vec<u8>);
+    impl Write for BoundedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self
+                .0
+                .len()
+                .checked_add(bytes.len())
+                .is_none_or(|size| size > MAX_STATE_BYTES)
+            {
+                return Err(io::Error::other("serialized state exceeds read limit"));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut output = BoundedWriter(Vec::new());
+    serde_json::to_writer_pretty(&mut output, value)?;
+    Ok(output.0)
+}
+
+pub(super) fn publish_state_bytes_with_filesystem(
+    serialized: &[u8],
+    path: &Path,
+    filesystem: &mut impl StateFilesystem,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if serialized.len() > MAX_STATE_BYTES {
+        return Err("serialized state exceeds read limit".into());
+    }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     filesystem.create_dir_all(parent)?;
 
-    let staged_path = stage_state_file(filesystem, path, json.as_bytes())?;
+    let staged_path = stage_state_file(filesystem, path, serialized)?;
     if let Err(error) = filesystem.publish_staged(&staged_path, path) {
         let _ = filesystem.remove_file(&staged_path);
         return Err(Box::new(error));
@@ -105,7 +157,7 @@ pub(super) fn save_to_path_with_filesystem<T: Serialize>(
 
 #[cfg(test)]
 pub(super) fn backup_state_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let mut filesystem = RealStateFilesystem;
+    let mut filesystem = RealStateFilesystem::default();
     backup_state_file_with_filesystem(path, &mut filesystem)
 }
 
@@ -197,7 +249,7 @@ fn rotated_backup_path(
 }
 
 #[cfg(target_os = "windows")]
-fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()> {
+pub(super) fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{
@@ -244,19 +296,19 @@ fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()>
 }
 
 #[cfg(not(target_os = "windows"))]
-fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()> {
+pub(super) fn publish_staged_file(staged_path: &Path, destination: &Path) -> io::Result<()> {
     // The staged file is in the destination directory, so rename is an atomic same-filesystem
     // replacement on the Linux beta path.
     fs::rename(staged_path, destination)
 }
 
 #[cfg(target_os = "windows")]
-fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+pub(super) fn sync_parent_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn sync_parent_directory(path: &Path) -> io::Result<()> {
+pub(super) fn sync_parent_directory(path: &Path) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     File::open(parent)?.sync_all()
 }
@@ -276,6 +328,7 @@ mod tests {
     struct FakeFilesystem {
         files: BTreeMap<PathBuf, Vec<u8>>,
         staged_paths: Vec<PathBuf>,
+        mutation_count: usize,
         fail_stage: bool,
         fail_publish: bool,
         fail_copy: bool,
@@ -293,14 +346,23 @@ mod tests {
     }
 
     impl StateFilesystem for FakeFilesystem {
-        fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        fn read_bounded(&self, path: &Path) -> io::Result<super::StateRead> {
             self.files
                 .get(path)
-                .map(|contents| String::from_utf8(contents.clone()).unwrap())
+                .map(|contents| {
+                    if contents.len() > super::MAX_STATE_BYTES {
+                        super::StateRead::Oversized {
+                            size: super::MAX_STATE_BYTES + 1,
+                        }
+                    } else {
+                        super::StateRead::Text(String::from_utf8(contents.clone()).unwrap())
+                    }
+                })
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing file"))
         }
 
         fn create_dir_all(&mut self, _path: &Path) -> io::Result<()> {
+            self.mutation_count += 1;
             Ok(())
         }
 
@@ -309,6 +371,7 @@ mod tests {
         }
 
         fn stage_new_and_sync(&mut self, path: &Path, contents: &[u8]) -> io::Result<()> {
+            self.mutation_count += 1;
             self.staged_paths.push(path.to_path_buf());
             if self.fail_stage {
                 self.files.insert(path.to_path_buf(), b"partial".to_vec());
@@ -325,6 +388,7 @@ mod tests {
         }
 
         fn publish_staged(&mut self, staged_path: &Path, destination: &Path) -> io::Result<()> {
+            self.mutation_count += 1;
             if self.fail_publish {
                 return Err(io::Error::other("simulated publish failure"));
             }
@@ -337,11 +401,13 @@ mod tests {
         }
 
         fn remove_file(&mut self, path: &Path) -> io::Result<()> {
+            self.mutation_count += 1;
             self.files.remove(path);
             Ok(())
         }
 
         fn copy_file_new_and_sync(&mut self, source: &Path, destination: &Path) -> io::Result<()> {
+            self.mutation_count += 1;
             if self.fail_copy {
                 return Err(io::Error::other("simulated backup failure"));
             }
@@ -360,12 +426,342 @@ mod tests {
         }
 
         fn sync_parent(&mut self, _path: &Path) -> io::Result<()> {
+            self.mutation_count += 1;
             Ok(())
         }
     }
 
     fn state_path() -> PathBuf {
         PathBuf::from("state/state.json")
+    }
+
+    fn p1_state(version: &str, tuning: Option<&str>, extension: Option<&str>) -> String {
+        let base = super::super::schema_refresh::build_default_state();
+        let mut value = serde_json::to_value(base).unwrap();
+        value["version"] = json!(11);
+        let mut text = serde_json::to_string(&value).unwrap();
+        text = text.replace("\"version\":11", &format!("\"version\":{version}"));
+        text.pop();
+        if let Some(tuning) = tuning {
+            text.push_str(&format!(",\"tuning\":{tuning}"));
+        }
+        if let Some(extension) = extension {
+            text.push_str(&format!(",\"future_state\":{extension}"));
+        }
+        text.push('}');
+        text
+    }
+    fn p1_config() -> String {
+        serde_json::to_string(&json!({"version":1,"lineage":vec![1;32],"profiles":[],"associations":[],"allocations":{"next_profile":1,"next_owner":1,"next_config_generation":1},"activations":[],"withdrawals":[]})).unwrap()
+    }
+    fn assert_blocked_original_without_mutation(original: &str) {
+        let path = state_path();
+        let mut fs = FakeFilesystem::default();
+        fs.write_file(&path, original);
+        let state = super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(
+            state.save_blocked(),
+            "preserved evidence must block every save"
+        );
+        assert_eq!(state.preserved_evidence(), Some(original));
+        assert_eq!(fs.read_file(&path), original);
+        assert_eq!(fs.files.len(), 1);
+        assert_eq!(fs.mutation_count, 0);
+        let mut cloned = state.clone();
+        cloned.mark_ready_for_current_schema_save(
+            crate::app::features::rules::RulesContext::from_storage(&cloned)
+                .to_persisted_identities(),
+        );
+        assert!(cloned
+            .try_save_to_path_with_filesystem(&path, &mut fs)
+            .is_err());
+        assert_eq!(cloned.preserved_evidence(), Some(original));
+        assert_eq!(fs.read_file(&path), original);
+        assert_eq!(fs.files.len(), 1);
+        assert_eq!(fs.mutation_count, 0);
+    }
+
+    #[test]
+    fn p1_storage_tuning_evidence_survives_base_decode_failure_and_duplicate_tuning() {
+        for tuning in ["{}".to_owned(), p1_config()] {
+            let original = p1_state("11", Some(&tuning), None)
+                .replace("\"theme_index\":0", "\"theme_index\":null");
+            assert_blocked_original_without_mutation(&original);
+        }
+        let mut duplicate = p1_state("11", Some(&p1_config()), None);
+        duplicate.pop();
+        duplicate.push_str(",\"tuning\":{}}");
+        assert_blocked_original_without_mutation(&duplicate);
+    }
+
+    #[test]
+    fn p1_storage_duplicate_top_extensions_are_blocked_without_rewrite() {
+        for duplicate_key in ["future_state", "future_\\u0073tate"] {
+            let mut original = p1_state("11", None, Some("{\"first\":1e+2}"));
+            original.pop();
+            original.push_str(&format!(",\"{duplicate_key}\":{{\"second\":2}}}}"));
+            assert_blocked_original_without_mutation(&original);
+        }
+    }
+
+    #[test]
+    fn p1_storage_output_bound_precedes_upgrade_backup_and_all_publication() {
+        for version in ["5", "11"] {
+            let path = state_path();
+            let mut value: serde_json::Value =
+                serde_json::from_str(&p1_state(version, None, None)).unwrap();
+            value["groups"] = json!([{
+                "name": "", "cores": [0, 1], "programs": [],
+                "is_hidden": false, "run_all_button": true
+            }]);
+            let compact = serde_json::to_string(&value).unwrap();
+            value["groups"][0]["name"] =
+                json!("x".repeat(super::MAX_STATE_BYTES - compact.len() - 1));
+            let original = serde_json::to_string(&value).unwrap();
+            assert_eq!(original.len(), super::MAX_STATE_BYTES - 1);
+            let mut fs = FakeFilesystem::default();
+            fs.write_file(&path, &original);
+            let mut state =
+                super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+            assert!(!state.save_blocked());
+            assert_eq!(fs.mutation_count, 0);
+            state.mark_ready_for_current_schema_save(
+                crate::app::features::rules::RulesContext::from_storage(&state)
+                    .to_persisted_identities(),
+            );
+            assert!(serde_json::to_string_pretty(&state).unwrap().len() > super::MAX_STATE_BYTES);
+            assert!(
+                state
+                    .try_save_to_path_with_filesystem(&path, &mut fs)
+                    .is_err(),
+                "cannot publish state that the bounded reader rejects"
+            );
+            assert_eq!(fs.mutation_count, 0);
+            assert_eq!(fs.read_file(&path), original);
+            assert_eq!(fs.files.len(), 1);
+            assert!(fs.staged_paths.is_empty());
+            assert_eq!(state.pending_pre_v6_backup, version == "5");
+        }
+    }
+    #[test]
+    fn p1_storage_v11_round_trip_uses_real_save_seam_and_old_missing_tuning_stays_off() {
+        use crate::app::features::system_tweaks::config::TuningLoad;
+        let path = state_path();
+        let original = p1_state("11", Some(&p1_config()), None);
+        let mut fs = FakeFilesystem::default();
+        fs.write_file(&path, &original);
+        let mut state =
+            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(matches!(state.tuning.decode(), TuningLoad::Known(_)));
+        assert_eq!(state.loaded_version, 11);
+        assert_eq!(fs.read_file(&path), original);
+        state.theme_index = 2;
+        state
+            .try_save_to_path_with_filesystem(&path, &mut fs)
+            .unwrap();
+        assert_eq!(fs.staged_paths.len(), 1);
+        let state = super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(matches!(state.tuning.decode(), TuningLoad::Known(_)));
+        for version in ["3", "6", "9", "10"] {
+            let raw = p1_state(version, None, None);
+            let mut fs = FakeFilesystem::default();
+            fs.write_file(&path, &raw);
+            let mut state =
+                super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+            assert_eq!(state.tuning.decode(), TuningLoad::Off);
+            assert_eq!(fs.read_file(&path), raw);
+            state.mark_ready_for_current_schema_save(
+                crate::app::features::rules::RulesContext::from_storage(&state)
+                    .to_persisted_identities(),
+            );
+            state
+                .try_save_to_path_with_filesystem(&path, &mut fs)
+                .unwrap();
+            let saved = fs.read_file(&path);
+            assert!(serde_json::from_str::<serde_json::Value>(&saved)
+                .unwrap()
+                .get("tuning")
+                .is_none());
+            assert_eq!(
+                super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs)
+                    .tuning
+                    .decode(),
+                TuningLoad::Off
+            );
+        }
+    }
+    #[test]
+    fn p1_storage_unknown_raw_envelope_and_top_extensions_survive_unrelated_save_exactly() {
+        let path = state_path();
+        let tuning = "{ \"version\":99, \"profile\":{\"future\":1e+2,\"text\":\"\\u0061\"} }";
+        let extension = "{ \"n\":1e+2, \"escape\":\"\\u0062\" }";
+        let mut fs = FakeFilesystem::default();
+        fs.write_file(&path, p1_state("11", Some(tuning), Some(extension)));
+        let mut state =
+            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert_eq!(
+            state.tuning.decode(),
+            crate::app::features::system_tweaks::config::TuningLoad::Unknown
+        );
+        state.theme_index = 1;
+        state
+            .try_save_to_path_with_filesystem(&path, &mut fs)
+            .unwrap();
+        let saved = fs.read_file(&path);
+        assert!(saved.contains(tuning), "unknown tuning bytes preserved");
+        assert!(
+            saved.contains(extension),
+            "top-level extension bytes preserved"
+        );
+        let state = super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert_eq!(state.tuning.raw(), Some(tuning));
+    }
+    #[test]
+    fn p1_storage_future_and_malformed_explicit_version_never_recover_or_publish() {
+        let path = state_path();
+        for version in [
+            "12",
+            "4294967296",
+            "18446744073709551615",
+            "null",
+            "\"11\"",
+            "-1",
+            "11.5",
+            "{}",
+        ] {
+            let original = p1_state(version, None, None);
+            let mut fs = FakeFilesystem::default();
+            fs.write_file(&path, &original);
+            let state =
+                super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+            assert!(
+                state.save_blocked(),
+                "explicit unsupported version is blocked"
+            );
+            assert_eq!(state.preserved_evidence(), Some(original.as_str()));
+            assert_eq!(fs.files.len(), 1);
+            assert!(fs.staged_paths.is_empty());
+            let mut cloned = state.clone();
+            cloned.theme_index = 2;
+            cloned.mark_ready_for_current_schema_save(
+                crate::app::features::rules::RulesContext::from_storage(&cloned)
+                    .to_persisted_identities(),
+            );
+            assert!(cloned
+                .try_save_to_path_with_filesystem(&path, &mut fs)
+                .is_err());
+            assert_eq!(fs.read_file(&path), original);
+            assert_eq!(fs.files.len(), 1);
+            assert!(fs.staged_paths.is_empty());
+        }
+    }
+    #[test]
+    fn p1_storage_malformed_or_oversized_tuning_retains_evidence_and_refuses_save() {
+        let path = state_path();
+        for tuning in [
+            "true".to_owned(),
+            "{}".to_owned(),
+            format!(
+                "{{\"version\":99,\"data\":\"{}\"}}",
+                "x".repeat(4 * 1024 * 1024)
+            ),
+        ] {
+            let original = p1_state("11", Some(&tuning), None);
+            let mut fs = FakeFilesystem::default();
+            fs.write_file(&path, &original);
+            let mut state =
+                super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+            assert!(state.save_blocked());
+            assert_eq!(state.tuning.raw(), Some(tuning.as_str()));
+            assert!(state
+                .try_save_to_path_with_filesystem(&path, &mut fs)
+                .is_err());
+            assert_eq!(fs.read_file(&path), original);
+            assert_eq!(fs.files.len(), 1);
+            assert!(fs.staged_paths.is_empty());
+        }
+    }
+    #[test]
+    fn p1_storage_old_tuning_extension_cannot_activate_after_upgrade() {
+        let path = state_path();
+        let original = p1_state("10", Some(&p1_config()), None);
+        let mut fs = FakeFilesystem::default();
+        fs.write_file(&path, &original);
+        let mut state =
+            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(state.save_blocked());
+        state.mark_ready_for_current_schema_save(
+            crate::app::features::rules::RulesContext::from_storage(&state)
+                .to_persisted_identities(),
+        );
+        assert!(state
+            .try_save_to_path_with_filesystem(&path, &mut fs)
+            .is_err());
+        assert_eq!(fs.read_file(&path), original);
+        assert!(fs.staged_paths.is_empty());
+    }
+    #[test]
+    fn p1_storage_whole_state_bound_retains_disk_without_recovery_or_large_memory_copy() {
+        let path = state_path();
+        let raw = format!(
+            "{{\"version\":18446744073709551615,\"data\":\"{}\"}}",
+            "x".repeat(16 * 1024 * 1024)
+        );
+        let mut fs = FakeFilesystem::default();
+        fs.write_file(&path, &raw);
+        let mut state =
+            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(state.save_blocked());
+        assert!(
+            state.preserved_evidence().is_none(),
+            "oversize retains disk plus finite size only"
+        );
+        let refusal = state
+            .try_save_to_path_with_filesystem(&path, &mut fs)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            refusal,
+            format!(
+                "state evidence exceeds read limit (at least {} bytes); save refused",
+                super::MAX_STATE_BYTES + 1
+            )
+        );
+        assert_eq!(fs.files.len(), 1);
+        assert_eq!(fs.read_file(&path), raw);
+        assert!(fs.staged_paths.is_empty());
+    }
+
+    #[test]
+    fn p1_storage_duplicate_explicit_versions_retain_evidence_without_recovery() {
+        let path = state_path();
+        for versions in [("20", "2"), ("null", "10"), ("10", "11"), ("10", "10")] {
+            let mut original = p1_state(versions.0, None, None);
+            original.pop();
+            original.push_str(&format!(",\"version\":{}}}", versions.1));
+            let mut fs = FakeFilesystem::default();
+            fs.write_file(&path, &original);
+            let state =
+                super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+
+            assert!(state.save_blocked(), "ambiguous version header is blocked");
+            assert_eq!(state.preserved_evidence(), Some(original.as_str()));
+            assert_eq!(fs.read_file(&path), original);
+            assert_eq!(fs.files.len(), 1);
+            assert!(fs.staged_paths.is_empty());
+
+            let mut cloned = state.clone();
+            cloned.mark_ready_for_current_schema_save(
+                crate::app::features::rules::RulesContext::from_storage(&cloned)
+                    .to_persisted_identities(),
+            );
+            assert!(cloned
+                .try_save_to_path_with_filesystem(&path, &mut fs)
+                .is_err());
+            assert_eq!(fs.read_file(&path), original);
+            assert_eq!(fs.files.len(), 1);
+            assert!(fs.staged_paths.is_empty());
+        }
     }
 
     #[test]
@@ -458,6 +854,7 @@ mod tests {
         );
 
         assert_eq!(recovered.version, super::super::CURRENT_APP_STATE_VERSION);
+        assert!(!recovered.save_blocked());
         assert_eq!(backup_failure.read_file(&path), "{broken json");
         assert!(!backup_failure
             .files
@@ -475,6 +872,7 @@ mod tests {
         );
 
         assert_eq!(recovered.version, super::super::CURRENT_APP_STATE_VERSION);
+        assert!(!recovered.save_blocked());
         assert_eq!(publish_failure.read_file(&path), "{broken json");
         assert_eq!(
             publish_failure.read_file(&path.with_file_name("state.json.old")),

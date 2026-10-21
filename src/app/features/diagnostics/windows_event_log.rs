@@ -469,34 +469,50 @@ mod tests {
         let worker_receiver = Arc::clone(&release_receiver);
         let mut manager = WindowsEventLogManager::new_with_test_scan(move || {
             let call = call_counter.fetch_add(1, Ordering::SeqCst) + 1;
-            if call == 1 {
-                entered_sender.send(()).unwrap();
-                worker_receiver.lock().unwrap().recv().unwrap();
-            }
+            entered_sender.send(call).unwrap();
+            worker_receiver.lock().unwrap().recv().unwrap();
             Ok(None)
         });
 
         manager.enable();
         assert!(manager.start_initial_scan());
-        entered_receiver
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
+        assert_eq!(
+            entered_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            1
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(manager.worker_is_active());
         manager.disable();
         assert!(manager.enable());
         assert!(!manager.start_initial_scan());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         release_sender.send(()).unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(2);
-        while calls.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
-            let _ = manager.poll();
-            std::thread::yield_now();
-        }
+        let second_call = loop {
+            match entered_receiver.try_recv() {
+                Ok(call) => break call,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    assert!(Instant::now() < deadline, "rearmed worker did not enter");
+                    let _ = manager.poll();
+                    std::thread::yield_now();
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("rearmed worker entry channel disconnected");
+                }
+            }
+        };
+        assert_eq!(second_call, 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(manager.worker_is_active());
+        release_sender.send(()).unwrap();
         assert!(matches!(
             poll_until_complete(&mut manager),
             WindowsEventLogPoll::Completed(Ok(None))
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!manager.worker_is_active());
     }
 }

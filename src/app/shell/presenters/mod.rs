@@ -3,8 +3,6 @@ pub mod central;
 #[cfg(all(target_os = "windows", feature = "windows"))]
 #[path = "../../views/crash_reports.rs"]
 pub mod crash_reports;
-#[path = "../../views/footer.rs"]
-pub mod footer;
 #[path = "../../views/group_editor.rs"]
 pub mod group_editor;
 #[path = "../../views/header.rs"]
@@ -13,7 +11,13 @@ pub mod header;
 pub mod installed_app_picker;
 #[path = "../../views/logs.rs"]
 pub mod logs;
+#[path = "../../views/process_table.rs"]
+pub(crate) mod process_table;
 #[path = "../../views/run_settings.rs"]
 pub mod run_settings;
+#[path = "../../views/service_controls.rs"]
+pub mod service_controls;
 #[path = "../../views/shared_elements.rs"]
 pub mod shared_elements;
+#[path = "../../features/system_tweaks/view.rs"]
+pub mod system_tweaks;

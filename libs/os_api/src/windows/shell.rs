@@ -724,7 +724,10 @@ fn explorer_broker_token_is_acceptable(
     !token_is_elevated && integrity_rid.is_some_and(|rid| rid < SECURITY_MANDATORY_HIGH_RID)
 }
 
-fn require_unelevated_explorer_browser(shell_browser: &IShellBrowser) -> Result<(), String> {
+fn require_unelevated_explorer_browser(
+    shell_browser: &IShellBrowser,
+    expected_pid: Option<u32>,
+) -> Result<(), String> {
     unsafe {
         let ole_window: IOleWindow = shell_browser
             .cast()
@@ -735,6 +738,9 @@ fn require_unelevated_explorer_browser(shell_browser: &IShellBrowser) -> Result<
         let mut process_id = 0u32;
         if GetWindowThreadProcessId(browser_window, Some(&mut process_id)) == 0 || process_id == 0 {
             return Err("failed to resolve the Explorer process".to_string());
+        }
+        if expected_pid.is_some_and(|expected| expected != process_id) {
+            return Err("Explorer broker differs from the verified interactive shell".into());
         }
 
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id)
@@ -797,6 +803,20 @@ fn require_unelevated_explorer_browser(shell_browser: &IShellBrowser) -> Result<
 }
 
 fn execute_in_explorer_process(file: &str, arguments: Option<&str>) -> Result<(), String> {
+    execute_in_explorer_process_inner(file, arguments, None)
+}
+pub(super) fn execute_in_verified_explorer_process(
+    file: &str,
+    arguments: Option<&str>,
+    expected_pid: u32,
+) -> Result<(), String> {
+    execute_in_explorer_process_inner(file, arguments, Some(expected_pid))
+}
+fn execute_in_explorer_process_inner(
+    file: &str,
+    arguments: Option<&str>,
+    expected_pid: Option<u32>,
+) -> Result<(), String> {
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
             .ok()
@@ -824,7 +844,7 @@ fn execute_in_explorer_process(file: &str, arguments: Option<&str>) -> Result<()
         let shell_browser: IShellBrowser = service_provider
             .QueryService(&raw const top_level_browser_service)
             .map_err(|error| format!("failed to query the Explorer shell browser: {error}"))?;
-        require_unelevated_explorer_browser(&shell_browser)?;
+        require_unelevated_explorer_browser(&shell_browser, expected_pid)?;
         let shell_view: IShellView = shell_browser
             .QueryActiveShellView()
             .map_err(|error| format!("failed to query the Explorer shell view: {error}"))?;

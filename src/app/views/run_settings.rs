@@ -1,13 +1,13 @@
 use crate::app::runtime::AppState;
 use crate::app::shell::presenters::shared_elements::{
-    content_frame, danger_color, form_text_edit, ghost_button, glass_frame, success_color,
+    close_button, content_frame, danger_color, form_text_edit, glass_frame, success_color,
     toned_button, ToneRole,
 };
 use crate::app::shell::sessions::RuleShortcutResult;
 use crate::app::shell::{GroupRoute, WindowRoute};
 use eframe::egui::text::LayoutJob;
 use eframe::egui::{
-    self, Align, CentralPanel, ComboBox, FontId, Label, Layout, RichText, TextFormat, Vec2,
+    self, Align, CentralPanel, ComboBox, FontId, Label, Layout, RichText, TextFormat,
 };
 use os_api::PriorityClass;
 use std::path::PathBuf;
@@ -50,12 +50,12 @@ fn shortcut_message_for_current_frame(
     }
 }
 
-fn aumid_layout_job(aumid: &str, max_width: f32, color: egui::Color32) -> LayoutJob {
+fn wrapped_identifier_layout_job(value: &str, max_width: f32, color: egui::Color32) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = max_width;
     job.wrap.break_anywhere = true;
     job.append(
-        aumid,
+        value,
         0.0,
         TextFormat {
             font_id: FontId::monospace(10.0),
@@ -64,6 +64,21 @@ fn aumid_layout_job(aumid: &str, max_width: f32, color: egui::Color32) -> Layout
         },
     );
     job
+}
+
+fn binary_path_field(ui: &mut egui::Ui, path: &mut String) -> egui::Response {
+    let edit = form_text_edit(path).desired_width(f32::INFINITY).show(ui);
+    if edit.galley.size().x > edit.text_clip_rect.width() {
+        ui.add(
+            Label::new(wrapped_identifier_layout_job(
+                path,
+                ui.available_width(),
+                ui.visuals().text_color(),
+            ))
+            .selectable(true),
+        );
+    }
+    edit.response.response
 }
 
 pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
@@ -75,6 +90,11 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     if !app.ensure_current_edit_loaded() {
         return;
     }
+    app.ui
+        .app_edit_state
+        .process_names
+        .prepare(root_ui.ctx(), !cfg!(test));
+    let process_names = app.ui.app_edit_state.process_names.names.clone();
 
     let mut is_close = false;
     let mut save_clicked = false;
@@ -95,7 +115,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                 );
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ghost_button(ui, egui::Button::new("Close"))
+                if close_button(ui)
                     .on_hover_text("Close")
                     .clicked()
                 {
@@ -108,7 +128,6 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             glass_frame(ui).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.spacing_mut().text_edit_width = (ui.available_width() - 120.0).clamp(80.0, 360.0);
                 let selected_app = app
                     .ui
                     .app_edit_state
@@ -117,108 +136,97 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                     .expect("edit_app_clone must be initialized");
                 let installed_aumid = selected_app.installed_aumid().map(str::to_owned);
 
-                egui::Grid::new("app_settings_grid")
-                    .spacing(Vec2::new(8.0, 6.0))
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("App Name:").strong());
-                        if ui.add(form_text_edit(&mut selected_app.name)).changed() {
-                            draft_changed = true;
-                        }
-                        ui.end_row();
+                ui.label(RichText::new("App name").strong());
+                if ui.add(form_text_edit(&mut selected_app.name).desired_width(f32::INFINITY)).changed() {
+                    draft_changed = true;
+                }
+                ui.add_space(6.0);
 
-                        if selected_app.is_path_target() {
-                            ui.label(RichText::new("Binary Path:").strong());
-                            ui.horizontal(|ui| {
-                                let mut bin_path_str = selected_app
-                                    .bin_path()
-                                    .map(|path| path.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                if ui.add(form_text_edit(&mut bin_path_str).desired_width((ui.available_width() - 58.0).max(60.0))).changed() {
+                if selected_app.is_path_target() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Binary path").strong());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Browse").on_hover_text(browse_binary_hover_text()).clicked() {
+                                if let Some(path) = pick_binary_path() {
                                     if let Some(bin_path) = selected_app.bin_path_mut() {
-                                        *bin_path = PathBuf::from(bin_path_str);
+                                        *bin_path = path;
                                         draft_changed = true;
                                     }
                                 }
-
-                                if ui
-                                    .button("Browse")
-                                    .on_hover_text(browse_binary_hover_text())
-                                    .clicked()
-                                {
-                                    if let Some(path) = pick_binary_path() {
-                                        if let Some(bin_path) = selected_app.bin_path_mut() {
-                                            *bin_path = path;
-                                            draft_changed = true;
-                                        }
-                                    }
-                                }
-                            });
-                            ui.end_row();
-                        } else {
-                            ui.label(RichText::new("Installed App:").strong());
-                            ui.label(&selected_app.name);
-                            ui.end_row();
-                        }
-
-                        ui.label(RichText::new("Priority:").strong());
-                        ComboBox::from_id_salt("priority_combo")
-                            .selected_text(format!("{:?}", selected_app.priority))
-                            .show_ui(ui, |ui| {
-                                draft_changed |= ui
-                                    .selectable_value(
-                                        &mut selected_app.priority,
-                                        PriorityClass::Realtime,
-                                        "RealTime",
-                                    )
-                                    .changed();
-                                draft_changed |= ui
-                                    .selectable_value(
-                                        &mut selected_app.priority,
-                                        PriorityClass::High,
-                                        "High",
-                                    )
-                                    .changed();
-                                draft_changed |= ui
-                                    .selectable_value(
-                                        &mut selected_app.priority,
-                                        PriorityClass::AboveNormal,
-                                        "Above Normal",
-                                    )
-                                    .changed();
-                                draft_changed |= ui
-                                    .selectable_value(
-                                        &mut selected_app.priority,
-                                        PriorityClass::Normal,
-                                        "Normal",
-                                    )
-                                    .changed();
-                                draft_changed |= ui
-                                    .selectable_value(
-                                        &mut selected_app.priority,
-                                        PriorityClass::BelowNormal,
-                                        "Below Normal",
-                                    )
-                                    .changed();
-                                draft_changed |= ui
-                                    .selectable_value(
-                                        &mut selected_app.priority,
-                                        PriorityClass::Idle,
-                                        "Low",
-                                    )
-                                    .changed();
-                            });
-                        ui.end_row();
+                            }
+                        });
                     });
+                    let mut path = selected_app.bin_path()
+                        .map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
+                    if binary_path_field(ui, &mut path).changed() {
+                        if let Some(bin_path) = selected_app.bin_path_mut() {
+                            *bin_path = PathBuf::from(path);
+                            draft_changed = true;
+                        }
+                    }
+                }
 
                 if let Some(aumid) = installed_aumid {
                     ui.add_space(5.0);
-                    ui.label(RichText::new("AUMID:").strong());
-                    ui.add(Label::new(aumid_layout_job(
+                    ui.label(RichText::new("Installed app ID (AUMID)").strong());
+                    ui.add(Label::new(wrapped_identifier_layout_job(
                         &aumid,
                         ui.available_width(),
                         ui.visuals().text_color(),
                     )));
                 }
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Priority").strong());
+                    ComboBox::from_id_salt("priority_combo")
+                        .width(140.0)
+                        .selected_text(format!("{:?}", selected_app.priority))
+                        .show_ui(ui, |ui| {
+                            draft_changed |= ui
+                                .selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::Realtime,
+                                    "RealTime",
+                                )
+                                .changed();
+                            draft_changed |= ui
+                                .selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::High,
+                                    "High",
+                                )
+                                .changed();
+                            draft_changed |= ui
+                                .selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::AboveNormal,
+                                    "Above Normal",
+                                )
+                                .changed();
+                            draft_changed |= ui
+                                .selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::Normal,
+                                    "Normal",
+                                )
+                                .changed();
+                            draft_changed |= ui
+                                .selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::BelowNormal,
+                                    "Below Normal",
+                                )
+                                .changed();
+                            draft_changed |= ui
+                                .selectable_value(
+                                    &mut selected_app.priority,
+                                    PriorityClass::Idle,
+                                    "Low",
+                                )
+                                .changed();
+                        });
+                });
 
                 ui.add_space(6.0);
                 if ui
@@ -235,7 +243,15 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                 ui.add_space(6.0);
 
                 if selected_app.is_args_editable() {
-                    ui.label(RichText::new("Command Line Arguments:").strong());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Command line arguments").strong());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Add Argument").clicked() {
+                                selected_app.args.push(String::new());
+                                draft_changed = true;
+                            }
+                        });
+                    });
                     ui.add_space(3.0);
 
                     let mut arg_to_remove = None;
@@ -260,17 +276,12 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                         draft_changed = true;
                     }
 
-                    ui.add_space(3.0);
-                    if ui.button("Add Argument").clicked() {
-                        selected_app.args.push(String::new());
-                        draft_changed = true;
-                    }
-
-                    ui.add_space(9.0);
+                    ui.add_space(6.0);
                     ui.separator();
                     ui.add_space(6.0);
                 }
 
+                ui.label(RichText::new("Process tracking").strong());
                 if ui
                     .checkbox(
                         &mut selected_app.manage_descendants,
@@ -286,11 +297,16 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                     draft_changed = true;
                 }
 
-                ui.add_space(9.0);
-                ui.separator();
-                ui.add_space(6.0);
-
-                ui.label(RichText::new("Tracked Process Names:").strong());
+                ui.add_space(3.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Tracked process names").strong());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Add Process Name").clicked() {
+                            selected_app.additional_processes.push(String::new());
+                            draft_changed = true;
+                        }
+                    });
+                });
                 ui.add_space(3.0);
 
                 let mut proc_to_remove = None;
@@ -305,7 +321,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                     for (i, proc_name) in selected_app.additional_processes.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(format!("{}:", i + 1));
-                            if ui.add(form_text_edit(proc_name).desired_width((ui.available_width() - 65.0).clamp(60.0, 360.0))).changed() {
+                            if crate::app::features::rules::process_names::field(ui,proc_name,(ui.available_width() - 65.0).clamp(60.0,360.0),&process_names,i) {
                                 draft_changed = true;
                             }
                             if ui.button("Remove").clicked() {
@@ -320,13 +336,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                     draft_changed = true;
                 }
 
-                ui.add_space(3.0);
-                if ui.button("Add Process Name").clicked() {
-                    selected_app.additional_processes.push(String::new());
-                    draft_changed = true;
-                }
-
-                ui.add_space(9.0);
+                ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(6.0);
 
@@ -352,10 +362,10 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                         {
                             create_shortcut_clicked = true;
                         }
-                        if let Some(message) = shortcut_message {
-                            ui.label(RichText::new(message).weak());
-                        }
                     });
+                    if let Some(message) = shortcut_message {
+                        ui.add(Label::new(RichText::new(message).weak()).wrap());
+                    }
                     if !draft_changed {
                         if let Some(result) = &shortcut_result {
                             match result {
@@ -411,6 +421,17 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
         });
     });
 
+    if root_ui
+        .ctx()
+        .data_mut(|d| d.remove_temp::<bool>(egui::Id::new("process-names-refresh")))
+        .unwrap_or(false)
+    {
+        app.ui.app_edit_state.process_names.request_refresh();
+        app.ui
+            .app_edit_state
+            .process_names
+            .prepare(root_ui.ctx(), !cfg!(test));
+    }
     if draft_changed {
         app.clear_current_app_shortcut_result();
     }
@@ -430,8 +451,8 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::{
-        aumid_layout_job, shortcut_button_enabled_for_current_frame,
-        shortcut_message_for_current_frame,
+        binary_path_field, shortcut_button_enabled_for_current_frame,
+        shortcut_message_for_current_frame, wrapped_identifier_layout_job,
     };
     use eframe::egui::Color32;
 
@@ -452,8 +473,43 @@ mod tests {
 
     #[test]
     fn long_aumid_layout_wraps_inside_its_value_column() {
-        let job = aumid_layout_job("Publisher.App_123!Main", 240.0, Color32::WHITE);
+        let job = wrapped_identifier_layout_job("Publisher.App_123!Main", 240.0, Color32::WHITE);
         assert_eq!(job.wrap.max_width, 240.0);
         assert!(job.wrap.break_anywhere);
+    }
+
+    #[test]
+    fn long_binary_path_is_fully_readable_without_changing_the_editable_value() {
+        for width in [220.0, 356.0] {
+            let ctx = eframe::egui::Context::default();
+            let original = format!(
+                "C:\\Program Files\\{}\\rustdesk.exe",
+                "LongDirectoryWithoutSpaces".repeat(5)
+            );
+            let mut path = original.clone();
+            let mut field = eframe::egui::Rect::NOTHING;
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                ui.set_width(width);
+                field = binary_path_field(ui, &mut path).rect;
+            });
+            output.textures_delta.clear();
+            assert!((field.width() - width).abs() < 1.0);
+            assert_eq!(path, original);
+            let preview = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    eframe::egui::Shape::Text(text)
+                        if text.galley.text() == original && text.galley.rows.len() > 1 =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .expect("a long executable path must be visible in full, with soft wrapping");
+            assert!(preview.galley.job.wrap.break_anywhere);
+            let bounds = preview.galley.rect.translate(preview.pos.to_vec2());
+            assert!(bounds.right() <= field.right() + 1.0);
+        }
     }
 }

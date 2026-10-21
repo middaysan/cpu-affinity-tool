@@ -12,6 +12,63 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[test]
+fn cpu_load_history_defaults_to_five_minutes_and_normalizes_bounded_persisted_choices() {
+    let original = sample_state();
+    let mut raw = serde_json::to_value(&original).unwrap();
+    raw.as_object_mut()
+        .unwrap()
+        .remove("cpu_load_history_seconds");
+    let loaded: AppStateStorage = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&loaded).unwrap()["cpu_load_history_seconds"],
+        300
+    );
+    for seconds in [30, 300, 1800] {
+        raw["cpu_load_history_seconds"] = json!(seconds);
+        let loaded: AppStateStorage = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["cpu_load_history_seconds"],
+            seconds
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.groups).unwrap(),
+            serde_json::to_value(&original.groups).unwrap()
+        );
+    }
+    for invalid in [0, 60, 301, 1801, u32::MAX] {
+        raw["cpu_load_history_seconds"] = json!(invalid);
+        let loaded: AppStateStorage = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["cpu_load_history_seconds"],
+            300
+        );
+    }
+}
+
+#[test]
+fn cpu_load_preference_defaults_on_and_survives_reload_without_changing_rules() {
+    let original = sample_state();
+    let mut raw = serde_json::to_value(&original).unwrap();
+    raw.as_object_mut()
+        .unwrap()
+        .remove("cpu_load_monitoring_enabled");
+    let mut loaded: AppStateStorage = serde_json::from_value(raw).unwrap();
+    assert!(loaded.cpu_load_monitoring_enabled);
+    loaded.cpu_load_monitoring_enabled = false;
+    let saved = serde_json::to_string(&loaded).unwrap();
+    let restored: AppStateStorage = serde_json::from_str(&saved).unwrap();
+    assert!(!restored.cpu_load_monitoring_enabled);
+    assert_eq!(
+        serde_json::to_value(&restored.groups).unwrap(),
+        serde_json::to_value(&original.groups).unwrap()
+    );
+    assert_eq!(
+        restored.process_monitoring_enabled,
+        original.process_monitoring_enabled
+    );
+}
+
 fn with_temp_state_path(test_name: &str, test_fn: impl FnOnce(&Path)) {
     let unique_suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -36,9 +93,9 @@ fn with_temp_state_path(test_name: &str, test_fn: impl FnOnce(&Path)) {
 }
 
 fn sample_state() -> AppStateStorage {
-    AppStateStorage {
-        version: CURRENT_APP_STATE_VERSION,
-        groups: vec![CoreGroup {
+    AppStateStorage::test_fixture(|state| {
+        state.version = CURRENT_APP_STATE_VERSION;
+        state.groups = vec![CoreGroup {
             name: "Games".to_string(),
             cores: vec![0, 1],
             programs: vec![AppToRun::new_path(
@@ -50,19 +107,20 @@ fn sample_state() -> AppStateStorage {
             )],
             is_hidden: false,
             run_all_button: true,
-        }],
-        cpu_schema: CpuSchema {
+        }];
+        state.cpu_schema = CpuSchema {
             model: "Sample CPU".to_string(),
             clusters: Vec::new(),
-        },
-        theme_index: 2,
-        process_monitoring_enabled: true,
-        windows_event_log_diagnostics_enabled: true,
-        start_minimized: false,
-        rule_identities: None,
-        loaded_version: CURRENT_APP_STATE_VERSION,
-        pending_pre_v6_backup: false,
-    }
+        };
+        state.theme_index = 2;
+        state.process_monitoring_enabled = true;
+        state.windows_event_log_diagnostics_enabled = true;
+        state.start_minimized = false;
+        state.rule_identities = None;
+        state.loaded_version = CURRENT_APP_STATE_VERSION;
+        state.pending_pre_v6_backup = false;
+        state.tuning = Default::default();
+    })
 }
 
 fn sample_state_with_version(version: u32) -> AppStateStorage {
@@ -73,10 +131,10 @@ fn sample_state_with_version(version: u32) -> AppStateStorage {
 }
 
 fn current_schema_state() -> AppStateStorage {
-    AppStateStorage {
-        version: CURRENT_APP_STATE_VERSION,
-        groups: Vec::new(),
-        cpu_schema: CpuSchema {
+    AppStateStorage::test_fixture(|state| {
+        state.version = CURRENT_APP_STATE_VERSION;
+        state.groups = Vec::new();
+        state.cpu_schema = CpuSchema {
             model: effective_cpu_model(),
             clusters: vec![CpuCluster {
                 name: "Pinned".to_string(),
@@ -86,15 +144,16 @@ fn current_schema_state() -> AppStateStorage {
                     label: "P0".to_string(),
                 }],
             }],
-        },
-        theme_index: 1,
-        process_monitoring_enabled: false,
-        windows_event_log_diagnostics_enabled: true,
-        start_minimized: false,
-        rule_identities: None,
-        loaded_version: CURRENT_APP_STATE_VERSION,
-        pending_pre_v6_backup: false,
-    }
+        };
+        state.theme_index = 1;
+        state.process_monitoring_enabled = false;
+        state.windows_event_log_diagnostics_enabled = true;
+        state.start_minimized = false;
+        state.rule_identities = None;
+        state.loaded_version = CURRENT_APP_STATE_VERSION;
+        state.pending_pre_v6_backup = false;
+        state.tuning = Default::default();
+    })
 }
 
 fn current_schema_state_with_version(version: u32) -> AppStateStorage {
@@ -160,21 +219,24 @@ fn test_backup_rotation() {
 }
 
 #[test]
-fn test_load_v10_state_keeps_current_schema_without_rewrite() {
+fn test_load_v10_state_keeps_version_without_rewrite() {
     with_temp_state_path("v10_current", |state_path| {
-        let serialized = serde_json::to_string_pretty(&current_schema_state()).unwrap();
+        let serialized =
+            serde_json::to_string_pretty(&current_schema_state_with_version(10)).unwrap();
         fs::write(state_path, &serialized).unwrap();
 
         let loaded = AppStateStorage::load_from_path(state_path);
         let persisted = fs::read_to_string(state_path).unwrap();
 
-        assert_eq!(loaded.version, CURRENT_APP_STATE_VERSION);
+        assert_eq!(loaded.version, 10);
+        assert_eq!(loaded.loaded_version, 10);
+        assert!(!loaded.pending_pre_v6_backup);
         assert_eq!(persisted, serialized);
     });
 }
 
 #[test]
-fn test_load_v9_rule_defaults_descendant_management_on_and_persists_v10() {
+fn test_load_v9_rule_defaults_descendant_management_on_and_persists_current_schema() {
     with_temp_state_path("v9_descendant_management", |state_path| {
         let mut value = serde_json::to_value(sample_state_with_version(9)).unwrap();
         value["groups"][0]["programs"][0]
@@ -194,7 +256,7 @@ fn test_load_v9_rule_defaults_descendant_management_on_and_persists_v10() {
         persist_explicit_current_schema_upgrade(&mut loaded, state_path);
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
-        assert_eq!(persisted["version"], json!(10));
+        assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
         assert_eq!(
             persisted["groups"][0]["programs"][0]["manage_descendants"],
             json!(true)
@@ -205,7 +267,7 @@ fn test_load_v9_rule_defaults_descendant_management_on_and_persists_v10() {
 #[test]
 fn test_load_v10_rule_missing_descendant_management_defaults_off() {
     with_temp_state_path("v10_missing_descendant_management", |state_path| {
-        let mut value = serde_json::to_value(sample_state()).unwrap();
+        let mut value = serde_json::to_value(sample_state_with_version(10)).unwrap();
         value["groups"][0]["programs"][0]
             .as_object_mut()
             .unwrap()
@@ -215,8 +277,8 @@ fn test_load_v10_rule_missing_descendant_management_defaults_off() {
 
         let loaded = AppStateStorage::load_from_path(state_path);
 
-        assert_eq!(loaded.version, CURRENT_APP_STATE_VERSION);
-        assert_eq!(loaded.loaded_version, CURRENT_APP_STATE_VERSION);
+        assert_eq!(loaded.version, 10);
+        assert_eq!(loaded.loaded_version, 10);
         assert!(!loaded.groups[0].programs[0].manage_descendants);
         assert_eq!(fs::read_to_string(state_path).unwrap(), original);
     });
@@ -255,7 +317,7 @@ fn test_load_v7_state_forces_event_log_diagnostics_enabled_without_rewrite() {
 }
 
 #[test]
-fn test_explicit_v7_save_upgrades_to_v10_with_enabled_event_log_diagnostics() {
+fn test_explicit_v7_save_upgrades_to_current_schema_with_enabled_event_log_diagnostics() {
     with_temp_state_path("v7_event_log_upgrade", |state_path| {
         let mut state = serde_json::to_value(current_schema_state_with_version(7)).unwrap();
         let fields = state.as_object_mut().unwrap();
@@ -269,7 +331,7 @@ fn test_explicit_v7_save_upgrades_to_v10_with_enabled_event_log_diagnostics() {
         let persisted: Value =
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
 
-        assert_eq!(persisted["version"], json!(10));
+        assert_eq!(persisted["version"], json!(CURRENT_APP_STATE_VERSION));
         assert_eq!(
             persisted["windows_event_log_diagnostics_enabled"],
             json!(true)
@@ -426,21 +488,22 @@ fn test_load_v5_state_backfills_tracked_names_until_explicit_v7_save() {
 #[test]
 fn test_load_v5_generic_state_refreshes_when_cpu_model_is_known_without_rewrite() {
     with_temp_state_path("v5_generic", |state_path| {
-        let generic = AppStateStorage {
-            version: 5,
-            groups: Vec::new(),
-            cpu_schema: CpuSchema {
+        let generic = AppStateStorage::test_fixture(|state| {
+            state.version = 5;
+            state.groups = Vec::new();
+            state.cpu_schema = CpuSchema {
                 model: "Generic CPU".to_string(),
                 clusters: Vec::new(),
-            },
-            theme_index: 0,
-            process_monitoring_enabled: false,
-            windows_event_log_diagnostics_enabled: true,
-            start_minimized: false,
-            rule_identities: None,
-            loaded_version: 5,
-            pending_pre_v6_backup: false,
-        };
+            };
+            state.theme_index = 0;
+            state.process_monitoring_enabled = false;
+            state.windows_event_log_diagnostics_enabled = true;
+            state.start_minimized = false;
+            state.rule_identities = None;
+            state.loaded_version = 5;
+            state.pending_pre_v6_backup = false;
+            state.tuning = Default::default();
+        });
 
         let before = serde_json::to_string_pretty(&generic).unwrap();
         fs::write(state_path, &before).unwrap();

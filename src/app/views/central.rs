@@ -3,9 +3,9 @@ use crate::app::models::{AppRuntimeKey, AppStatus};
 use crate::app::runtime::{AppState, CentralPanelSnapshot};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::presenters::shared_elements::{
-    content_frame, drag_grip, ghost_button, group_frame, inset_frame, inter_medium_family,
-    inter_semibold_family, palette, row_fill, success_color, toned_sized_button, warning_color,
-    ToneRole, BUTTON_FONT_SIZE,
+    app_run_button, content_frame, draggable_name, ghost_button, group_frame, inset_frame,
+    inter_medium_family, inter_semibold_family, palette, row_fill, success_color,
+    toned_sized_button, warning_color, ToneRole, BUTTON_FONT_SIZE,
 };
 use eframe::egui::{self, Align, CentralPanel, Color32, Layout, RichText, ScrollArea, Vec2};
 use std::path::PathBuf;
@@ -45,6 +45,7 @@ enum CentralAction {
     },
     LogMessage(String),
     ConsumeDroppedFiles(GroupId),
+    DiscardDroppedFiles,
 }
 
 #[derive(Clone)]
@@ -98,25 +99,52 @@ pub fn draw_central_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
     CentralPanel::default()
         .frame(content_frame(root_ui))
         .show(root_ui, |ui| {
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.heading(RichText::new("Affinity groups").strong());
-                    ui.label(
-                        RichText::new("CPU placement and application rules")
-                            .small()
-                            .weak(),
-                    );
-                });
-                ui.with_layout(Layout::right_to_left(Align::BOTTOM), |ui| {
-                    ui.label(
-                        RichText::new(format!("{group_count} groups · drag to reorder"))
-                            .small()
-                            .weak(),
-                    );
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let description_width = (ui.available_width() - 105.0 - 8.0).max(40.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(description_width, 25.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("CPU placement and application rules")
+                                    .small()
+                                    .weak(),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text("CPU placement and application rules");
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("{group_count} groups · drag to reorder"))
+                                    .small()
+                                    .weak(),
+                            )
+                            .truncate(),
+                        );
+                    },
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if toned_sized_button(
+                        ui,
+                        [105.0, 25.0],
+                        egui::Button::new(
+                            RichText::new("+ New group").size(BUTTON_FONT_SIZE).strong(),
+                        ),
+                        ToneRole::Primary,
+                    )
+                    .clicked()
+                    {
+                        app.start_creating_group();
+                    }
                 });
             });
             ui.add_space(5.0);
             ScrollArea::vertical()
+                .id_salt("affinity-groups-scroll")
+                .max_height(ui.available_height())
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
@@ -308,7 +336,13 @@ fn render_groups(
         .dropped_files
         .as_ref()
         .is_some_and(|files| !files.is_empty());
-    let file_drop_pos = ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()));
+    let file_drop_pos = if has_dropped_files {
+        app.ui
+            .file_drop_position
+            .or_else(|| ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos())))
+    } else {
+        ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()))
+    };
     let groups_len = snapshot.groups.len();
 
     for (group_index, group) in snapshot.groups.iter().enumerate() {
@@ -320,14 +354,55 @@ fn render_groups(
         let group_response = group_frame(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
             let colors = palette(ui);
-            ui.horizontal(|ui| {
-                let group_grip_response = ui
-                    .push_id(("central-group-grip", group_id.0.as_str()), |ui| {
-                        drag_grip(ui, "Drag to reorder group; when focused, use Up or Down")
-                    })
-                    .inner;
 
-                if group_grip_response.has_focus() {
+            ui.horizontal(|ui| {
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                let meter_width = if app.cpu_load_enabled() {
+                    78.0 + ui.spacing().item_spacing.x
+                } else {
+                    0.0
+                };
+                #[cfg(not(all(target_os = "windows", feature = "windows")))]
+                let meter_width = 0.0;
+                let title_width = (ui.available_width() - 52.0 - meter_width).max(40.0);
+                let title = ui.allocate_ui_with_layout(
+                    egui::vec2(title_width, 32.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        let name = draggable_name(
+                            ui,
+                            egui::Id::new(("central-group-drag", group_id.0.as_str())),
+                            RichText::new(&group.name)
+                                .size(14.0)
+                                .family(inter_semibold_family())
+                                .strong(),
+                            egui::vec2(title_width, 18.0),
+                        )
+                        .on_hover_text(format!(
+                            "{}\nDrag to reorder group; when focused, use Up or Down",
+                            group.name
+                        ));
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format_core_summary(&group.cores))
+                                    .size(9.0)
+                                    .color(colors.text_muted),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(format_core_summary(&group.cores));
+                        name
+                    },
+                );
+                let title_response = title.inner;
+                let group_drag_payload = GroupDragPayload {
+                    group_id: group_id.clone(),
+                    preview_label: group.name.clone(),
+                    preview_width: title_response.rect.width().max(180.0),
+                };
+                title_response.dnd_set_drag_payload(group_drag_payload);
+
+                if title_response.has_focus() {
                     let move_direction = ui.input_mut(|input| {
                         if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
                             Some(GroupMoveDirection::Up)
@@ -347,46 +422,14 @@ fn render_groups(
                     }
                 }
 
-                egui::Frame::NONE
-                    .fill(colors.inset)
-                    .stroke(egui::Stroke::new(1.0, colors.border_strong))
-                    .corner_radius(6.0)
-                    .inner_margin(egui::Margin::symmetric(5, 3))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new((group_index + 1).to_string())
-                                .color(colors.text_secondary),
-                        );
-                    });
-
-                let title = ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(&group.name)
-                            .size(14.0)
-                            .family(inter_semibold_family())
-                            .strong(),
-                    );
-                    ui.label(
-                        RichText::new(format_core_summary(&group.cores))
-                            .size(9.0)
-                            .color(colors.text_muted),
-                    );
-                });
-                let title_response = ui
-                    .interact(
-                        title.response.rect,
-                        egui::Id::new(("central-group-drag", group_id.0.as_str())),
-                        egui::Sense::click_and_drag(),
-                    )
-                    .on_hover_cursor(egui::CursorIcon::Grab)
-                    .on_hover_text("Drag group to change its position");
-                let group_drag_payload = GroupDragPayload {
-                    group_id: group_id.clone(),
-                    preview_label: group.name.clone(),
-                    preview_width: title_response.rect.width().max(180.0),
-                };
-                group_grip_response.dnd_set_drag_payload(group_drag_payload.clone());
-                title_response.dnd_set_drag_payload(group_drag_payload);
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                crate::app::features::cpu_load::view::group_indicator(
+                    app,
+                    ui,
+                    &group_id,
+                    &group.name,
+                    &group.cores,
+                );
 
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                     if ghost_button(
@@ -485,38 +528,30 @@ fn render_groups(
                         .corner_radius(5.0)
                         .inner_margin(egui::Margin::symmetric(4, 1))
                         .show(ui, |ui| {
+                            let color = match app_status_tone(app_status) {
+                                AppStatusTone::Neutral => palette(ui).neutral_status,
+                                AppStatusTone::Success => success_color(ui),
+                                AppStatusTone::Warning => warning_color(ui),
+                            };
+                            let full_status = app_status_label(app_status);
+                            let status_tooltip =
+                                app.get_running_app_pids(&program.app_key).map_or_else(
+                                    || format!("Status: {full_status}"),
+                                    |pids| {
+                                        format!("Status: {full_status}\nTracking PIDs: {pids:?}")
+                                    },
+                                );
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
-                                let drag_response = ui
-                                    .push_id(
-                                        (
-                                            "central-rule-grip",
-                                            group_id.0.as_str(),
-                                            program.rule_id.0.as_str(),
-                                        ),
-                                        |ui| drag_grip(ui, "Drag to move application"),
-                                    )
-                                    .inner;
-
-                                let (rect, status_response) =
-                                    ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
-                                let color = match app_status_tone(app_status) {
-                                    AppStatusTone::Neutral => palette(ui).neutral_status,
-                                    AppStatusTone::Success => success_color(ui),
-                                    AppStatusTone::Warning => warning_color(ui),
-                                };
-                                let full_status = app_status_label(app_status);
-                                let status_tooltip =
-                                    app.get_running_app_pids(&program.app_key).map_or_else(
-                                        || format!("Status: {full_status}"),
-                                        |pids| {
-                                            format!(
-                                                "Status: {full_status}\nTracking PIDs: {pids:?}"
-                                            )
-                                        },
+                                #[cfg(not(all(target_os = "windows", feature = "windows")))]
+                                {
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        Vec2::splat(8.0),
+                                        egui::Sense::hover(),
                                     );
-                                status_response.on_hover_text(status_tooltip.clone());
-                                ui.painter().circle_filled(rect.center(), 3.5, color);
+                                    response.on_hover_text(status_tooltip.clone());
+                                    ui.painter().circle_filled(rect.center(), 3.5, color);
+                                }
 
                                 let action_presentation = app_action_presentation(
                                     app_status,
@@ -527,41 +562,57 @@ fn render_groups(
                                     AppStatusTone::Success => colors.success.fg,
                                     AppStatusTone::Warning => colors.warning.fg,
                                 };
+                                #[cfg(all(target_os = "windows", feature = "windows"))]
+                                let meter_width = if app.cpu_load_enabled() {
+                                    44.0 + ui.spacing().item_spacing.x
+                                } else {
+                                    0.0
+                                };
+                                #[cfg(not(all(target_os = "windows", feature = "windows")))]
+                                let meter_width = 0.0;
                                 let action_width = 42.0;
                                 let settings_width = 23.0;
-                                let status_width = (ui.available_width() * 0.28).clamp(88.0, 150.0);
+                                let status_galley = ui.painter().layout_no_wrap(
+                                    app_status_display_label(app_status, 0.0).to_owned(),
+                                    egui::FontId::proportional(10.0),
+                                    status_color,
+                                );
+                                let status_width = status_galley.size().x.ceil() + 2.0;
                                 let name_width = (ui.available_width()
                                     - status_width
                                     - action_width
                                     - settings_width
-                                    - 12.0)
-                                    .max(72.0);
-                                let name_response = ui.add_sized(
-                                    [name_width, 21.0],
-                                    egui::Label::new(
-                                        RichText::new(&program.name)
-                                            .size(BUTTON_FONT_SIZE)
-                                            .family(inter_medium_family())
-                                            .strong(),
-                                    )
-                                    .halign(Align::Min)
-                                    .truncate(),
-                                );
-                                name_response.on_hover_text(program.launch_target_detail.clone());
-
-                                ui.add_sized(
-                                    [status_width, 21.0],
-                                    egui::Label::new(
-                                        RichText::new(app_status_display_label(
-                                            app_status,
-                                            status_width,
-                                        ))
-                                        .size(10.0)
-                                        .color(status_color),
-                                    )
-                                    .truncate(),
+                                    - meter_width
+                                    - 16.0)
+                                    .max(48.0);
+                                let drag_response = draggable_name(
+                                    ui,
+                                    egui::Id::new((
+                                        "central-rule-drag",
+                                        group_id.0.as_str(),
+                                        program.rule_id.0.as_str(),
+                                    )),
+                                    RichText::new(&program.name)
+                                        .size(BUTTON_FONT_SIZE)
+                                        .family(inter_medium_family())
+                                        .strong(),
+                                    egui::vec2(name_width, 21.0),
                                 )
-                                .on_hover_text(status_tooltip);
+                                .on_hover_text(format!(
+                                    "{}\nDrag to move application",
+                                    program.launch_target_detail
+                                ));
+
+                                ui.add_space(4.0);
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(status_width, 21.0),
+                                    Layout::right_to_left(Align::Center),
+                                    |ui| {
+                                        ui.add(egui::Label::new(status_galley));
+                                    },
+                                )
+                                .response
+                                .on_hover_text(&status_tooltip);
 
                                 drag_response.dnd_set_drag_payload(RuleDragPayload {
                                     source_group_id: group_id.clone(),
@@ -571,6 +622,20 @@ fn render_groups(
                                     preview_width: name_width,
                                 });
 
+                                #[cfg(all(target_os = "windows", feature = "windows"))]
+                                crate::app::features::cpu_load::view::process_indicator(
+                                    app,
+                                    ui,
+                                    crate::app::features::cpu_load::RuleTarget {
+                                        group: group_id.clone(),
+                                        rule: program.rule_id.clone(),
+                                    },
+                                    &program.name,
+                                    app_status != AppStatus::NotRunning,
+                                    color,
+                                    &status_tooltip,
+                                );
+
                                 let button = egui::Button::new(
                                     RichText::new(action_presentation.label).size(BUTTON_FONT_SIZE),
                                 );
@@ -579,6 +644,8 @@ fn render_groups(
                                         false,
                                         button.min_size(egui::vec2(action_width, 21.0)),
                                     )
+                                } else if action_presentation.action == Some(AppRowAction::Run) {
+                                    app_run_button(ui, [action_width, 21.0], button)
                                 } else if app_status == AppStatus::SettingsMismatch {
                                     toned_sized_button(
                                         ui,
@@ -600,16 +667,19 @@ fn render_groups(
                                     }
                                 }
 
-                                if ghost_button(
+                                let edit_response = ghost_button(
                                     ui,
                                     egui::Button::new(
                                         RichText::new(ICON_EDIT).size(BUTTON_FONT_SIZE),
                                     )
                                     .min_size(egui::vec2(settings_width, 21.0)),
                                 )
-                                .on_hover_text("Edit app settings")
-                                .clicked()
-                                {
+                                .on_hover_text("Edit app settings");
+                                crate::debug_mcp_control!(
+                                    format!("rule.edit.{}.{}", group_id.0, program.rule_id.0),
+                                    edit_response
+                                );
+                                if edit_response.clicked() {
                                     actions.push(CentralAction::OpenAppRunSettings {
                                         group_id: group_id.clone(),
                                         rule_id: program.rule_id.clone(),
@@ -620,7 +690,12 @@ fn render_groups(
 
                     if target_rule_index.is_none() {
                         if let Some(pos) = rule_pointer_pos {
-                            if row_response.response.rect.contains(pos) {
+                            if row_response
+                                .response
+                                .rect
+                                .intersect(ui.clip_rect())
+                                .contains(pos)
+                            {
                                 let insert_index = if pos.y < row_response.response.rect.center().y
                                 {
                                     program_index
@@ -668,7 +743,11 @@ fn render_groups(
         if !group_drop_target_claimed {
             if let (Some(payload), Some(pos)) = (active_group_payload.as_deref(), group_pointer_pos)
             {
-                let target_rect = group_response.response.rect.expand2(Vec2::new(0.0, 6.0));
+                let target_rect = group_response
+                    .response
+                    .rect
+                    .expand2(Vec2::new(0.0, 6.0))
+                    .intersect(ui.clip_rect());
                 if target_rect.contains(pos) {
                     let insertion_slot = if pos.y < group_response.response.rect.center().y {
                         group_index
@@ -708,7 +787,12 @@ fn render_groups(
 
         if (has_hovered_files || has_dropped_files) && hovered_file_drop_group.is_none() {
             if let Some(pos) = file_drop_pos {
-                if group_response.response.rect.contains(pos) {
+                if group_response
+                    .response
+                    .rect
+                    .intersect(ui.clip_rect())
+                    .contains(pos)
+                {
                     hovered_file_drop_group = Some(group_id.clone());
                     if has_hovered_files {
                         paint_group_file_drop_target(ui, group_response.response.rect);
@@ -720,7 +804,12 @@ fn render_groups(
         if drop_indicator.is_none() && target_rule_index.is_none() {
             if let Some(pos) = rule_drag_pos {
                 let append_index = group.programs.len();
-                if group_response.response.rect.contains(pos) {
+                if group_response
+                    .response
+                    .rect
+                    .intersect(ui.clip_rect())
+                    .contains(pos)
+                {
                     if let Some(payload) = active_rule_payload.as_deref() {
                         match classify_rule_drop(snapshot, payload, &group.group_id, append_index) {
                             RuleDropClassification::Valid => {
@@ -746,8 +835,13 @@ fn render_groups(
             paint_rule_drop_rejection(ctx, message);
         }
 
-        let dropped_rule_here =
-            rule_drop_pos.is_some_and(|pos| group_response.response.rect.contains(pos));
+        let dropped_rule_here = rule_drop_pos.is_some_and(|pos| {
+            group_response
+                .response
+                .rect
+                .intersect(ui.clip_rect())
+                .contains(pos)
+        });
         let dropped_rule = if dropped_rule_here {
             egui::DragAndDrop::take_payload::<RuleDragPayload>(ctx)
         } else {
@@ -783,6 +877,8 @@ fn render_groups(
         hovered_file_drop_group,
     ) {
         actions.push(CentralAction::ConsumeDroppedFiles(group_id));
+    } else if has_dropped_files && app.ui.file_drop_position.is_some() {
+        actions.push(CentralAction::DiscardDroppedFiles);
     }
 
     actions
@@ -1022,6 +1118,11 @@ fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
             CentralAction::ConsumeDroppedFiles(group_id) => {
                 let _ = app.consume_dropped_files_into_group(group_id);
             }
+            CentralAction::DiscardDroppedFiles => {
+                app.ui.dropped_files = None;
+                app.ui.file_drop_position = None;
+                app.ui.file_drop_hover_target = None;
+            }
         }
     }
 }
@@ -1032,6 +1133,347 @@ mod tests {
     use crate::app::models::AppToRun;
     use crate::app::runtime::{CentralGroupSnapshot, CentralProgramSnapshot};
     use os_api::PriorityClass;
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn toolbar_has_no_duplicate_cpu_summary_and_new_group_stays_fixed() {
+        use std::sync::{Arc, RwLock};
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+        ctx.all_styles_mut(crate::app::shell::presenters::shared_elements::apply_widget_style);
+        let mut app = AppState::new_for_test(
+            Arc::new(RwLock::new(
+                crate::app::models::AppStateStorage::test_fixture(|state| {
+                    state.cpu_load_monitoring_enabled = true;
+                    state.groups = (0..12)
+                        .map(|index| crate::app::models::CoreGroup {
+                            name: format!("Group {index}"),
+                            cores: vec![0],
+                            programs: vec![],
+                            is_hidden: false,
+                            run_all_button: false,
+                        })
+                        .collect();
+                }),
+            )),
+            20,
+        );
+        let group_id = app.rules.group_id_for_index(0).unwrap();
+        let name_id = egui::Id::new(("central-group-drag", group_id.0.as_str()));
+        let frame = |app: &mut AppState, time, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 450.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| draw_central_panel(app, ui),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let mut output = frame(&mut app, 0.0, vec![]);
+        for index in 1..3 {
+            output = frame(&mut app, index as f64 * 0.1, vec![]);
+        }
+        let position = |output: &egui::FullOutput, label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let new_group = position(&output, "+ New group");
+        let description = position(&output, "CPU placement and application rules");
+        assert!(description.x < new_group.x);
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.text() == "All CPUs")));
+        let before = ctx.read_response(name_id).unwrap().rect.top();
+        output = frame(
+            &mut app,
+            0.4,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(200.0, 250.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -300.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+        for index in 5..10 {
+            output = frame(&mut app, index as f64 * 0.1, vec![]);
+        }
+        assert_eq!(
+            position(&output, "CPU placement and application rules"),
+            description
+        );
+        assert_eq!(position(&output, "+ New group"), new_group);
+        assert!(ctx.read_response(name_id).unwrap().rect.top() < before - 1.0);
+    }
+
+    #[test]
+    fn file_import_uses_the_recorded_release_position_and_discards_outside_drops() {
+        use std::sync::{Arc, RwLock};
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+        let mut app = AppState::new_for_test(
+            Arc::new(RwLock::new(
+                crate::app::models::AppStateStorage::test_fixture(|_| {}),
+            )),
+            20,
+        );
+        let snapshot = CentralPanelSnapshot {
+            groups: vec![group("g", "G", vec![])],
+        };
+        for (position, accepted) in [
+            (egui::pos2(30.0, 30.0), true),
+            (egui::pos2(-10.0, -10.0), false),
+        ] {
+            app.ui.dropped_files = Some(vec![PathBuf::from(r"C:\one.exe")]);
+            app.ui.file_drop_position = Some(position);
+            let mut actions = vec![];
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 600.0),
+                    )),
+                    events: vec![egui::Event::PointerMoved(if accepted {
+                        egui::pos2(350.0, 550.0)
+                    } else {
+                        egui::pos2(30.0, 30.0)
+                    })],
+                    ..Default::default()
+                },
+                |ui| {
+                    actions = render_groups(&mut app, ui, &ctx, &snapshot);
+                },
+            )
+            .textures_delta
+            .clear();
+            assert_eq!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, CentralAction::ConsumeDroppedFiles(id) if id.0 == "g")),
+                accepted
+            );
+            assert_eq!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, CentralAction::DiscardDroppedFiles)),
+                !accepted
+            );
+        }
+    }
+
+    #[test]
+    fn short_group_and_app_names_drag_from_their_padded_name_area_without_grips() {
+        use std::sync::{Arc, RwLock};
+        for group_drag in [true, false] {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+            ctx.all_styles_mut(crate::app::shell::presenters::shared_elements::apply_widget_style);
+            let mut app = AppState::new_for_test(
+                Arc::new(RwLock::new(
+                    crate::app::models::AppStateStorage::test_fixture(|_| {}),
+                )),
+                20,
+            );
+            let mut g = group("g", "G", vec![program("r", "X", app_key("X"))]);
+            g.run_all_button = false;
+            let mut h = group("h", "H", vec![]);
+            h.run_all_button = false;
+            let snapshot = CentralPanelSnapshot { groups: vec![g, h] };
+            let frame = |app: &mut AppState, events| {
+                let mut actions = Vec::new();
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 600.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        actions = render_groups(app, ui, &ctx, &snapshot);
+                    },
+                );
+                output.textures_delta.clear();
+                (output, actions)
+            };
+            for _ in 0..2 {
+                frame(&mut app, vec![]);
+            }
+            let id = if group_drag {
+                egui::Id::new(("central-group-drag", "h"))
+            } else {
+                egui::Id::new(("central-rule-drag", "g", "r"))
+            };
+            let response = ctx
+                .read_response(id)
+                .expect("name must own a stable drag hit target");
+            assert!(
+                response.rect.width() > 70.0,
+                "short names must retain the full allotted drag width"
+            );
+            if group_drag {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+                let (_, actions) = frame(
+                    &mut app,
+                    vec![egui::Event::Key {
+                        key: egui::Key::ArrowUp,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Default::default(),
+                    }],
+                );
+                assert!(actions.iter().any(|action| matches!(action, CentralAction::MoveGroupToIndex {group_id, target_index: 0} if group_id.0 == "h")),
+                    "keyboard reorder must remain available on the group name");
+            }
+            let start = response.rect.right_center() - egui::vec2(5.0, 0.0);
+            frame(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(start),
+                    egui::Event::PointerButton {
+                        pos: start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+            let (output, _) = frame(
+                &mut app,
+                vec![egui::Event::PointerMoved(start - egui::vec2(20.0, 0.0))],
+            );
+            if group_drag {
+                assert_eq!(
+                    egui::DragAndDrop::payload::<GroupDragPayload>(&ctx)
+                        .unwrap()
+                        .group_id,
+                    GroupId("h".into())
+                );
+            } else {
+                assert_eq!(
+                    egui::DragAndDrop::payload::<RuleDragPayload>(&ctx)
+                        .unwrap()
+                        .rule_id,
+                    RuleId("r".into())
+                );
+            }
+            assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Circle(circle) if circle.radius == 1.0)),
+                "the old six-dot drag grips must not remain");
+            let target_id =
+                egui::Id::new(("central-group-drag", if group_drag { "g" } else { "h" }));
+            let target = ctx.read_response(target_id).unwrap().rect.center();
+            frame(&mut app, vec![egui::Event::PointerMoved(target)]);
+            let (_, actions) = frame(
+                &mut app,
+                vec![egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+            );
+            if group_drag {
+                assert!(actions.iter().any(|action| matches!(action, CentralAction::MoveGroupToIndex {group_id, target_index: 0} if group_id.0 == "h")));
+            } else {
+                assert!(actions.iter().any(
+                    |action| matches!(action, CentralAction::MoveRuleToGroup {
+                    source_group_id, rule_id, target_group_id, target_rule_index: 0,
+                } if source_group_id.0 == "g" && rule_id.0 == "r" && target_group_id.0 == "h")
+                ));
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn cpu_meters_keep_long_names_and_actions_inside_400_pixels() {
+        use std::sync::{Arc, RwLock};
+        for monitoring in [true, false] {
+            let context = egui::Context::default();
+            context
+                .set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+            context
+                .all_styles_mut(crate::app::shell::presenters::shared_elements::apply_widget_style);
+            let mut app = AppState::new_for_test(
+                Arc::new(RwLock::new(
+                    crate::app::models::AppStateStorage::test_fixture(|state| {
+                        state.cpu_load_monitoring_enabled = monitoring
+                    }),
+                )),
+                20,
+            );
+            let mut group = group(
+                "g",
+                &"A long affinity group name ".repeat(5),
+                vec![program(
+                    "r",
+                    &"Long game executable name ".repeat(4),
+                    app_key("Game"),
+                )],
+            );
+            group.cores = (0..20).collect();
+            group.run_all_button = false;
+            let snapshot = CentralPanelSnapshot {
+                groups: vec![group],
+            };
+            for _ in 0..3 {
+                let mut content = egui::Rect::NOTHING;
+                let mut output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 600.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        render_groups(&mut app, ui, &context, &snapshot);
+                        content = ui.min_rect();
+                    },
+                );
+                output.textures_delta.clear();
+                assert!(
+                    !output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.job.text == "1")),
+                    "group ordinal badge must be absent"
+                );
+                assert!(
+                    content.right() <= 400.0,
+                    "content overflow with monitoring={monitoring}: {content:?}"
+                );
+                let edit = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.job.text.ends_with(" Edit") => {
+                            Some(text.galley.rect.translate(text.pos.to_vec2()))
+                        }
+                        _ => None,
+                    })
+                    .expect("group Edit action must remain visible");
+                assert!(
+                    edit.right() <= 400.0,
+                    "group Edit action is pushed out: {edit:?}"
+                );
+            }
+        }
+    }
 
     fn app_key(name: &str) -> AppRuntimeKey {
         AppToRun::new_path(
@@ -1393,6 +1835,89 @@ mod tests {
         );
         assert_eq!(adjacent_group_target(2, 3, GroupMoveDirection::Down), None);
         assert_eq!(adjacent_group_target(0, 0, GroupMoveDirection::Down), None);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn compact_status_returns_unused_space_to_names_with_readable_gaps() {
+        use std::sync::{Arc, RwLock};
+        let mut name_widths = Vec::new();
+        for enabled in [false, true] {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+            ctx.all_styles_mut(crate::app::shell::presenters::shared_elements::apply_widget_style);
+            let mut app = AppState::new_for_test(
+                Arc::new(RwLock::new(
+                    crate::app::models::AppStateStorage::test_fixture(|state| {
+                        state.cpu_load_monitoring_enabled = enabled;
+                    }),
+                )),
+                20,
+            );
+            let snapshot = CentralPanelSnapshot {
+                groups: vec![group(
+                    "g",
+                    "G",
+                    vec![program(
+                        "r",
+                        "A long application name that needs the row width",
+                        app_key("Stopped test"),
+                    )],
+                )],
+            };
+            let mut output = None;
+            for _ in 0..3 {
+                let mut frame = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 600.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        render_groups(&mut app, ui, &ctx, &snapshot);
+                    },
+                );
+                frame.textures_delta.clear();
+                output = Some(frame);
+            }
+            let output = output.unwrap();
+            let name = ctx
+                .read_response(egui::Id::new(("central-rule-drag", "g", "r")))
+                .unwrap()
+                .rect;
+            name_widths.push(name.width());
+            let status = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "Stopped" => {
+                        Some(text.galley.rect.translate(text.pos.to_vec2()))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let gap = status.left() - name.right();
+            assert!(
+                (7.0..=12.0).contains(&gap),
+                "reserve a small gap, not a proportional empty column: {gap}"
+            );
+            if enabled {
+                let meter = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Rect(shape) if shape.rect.size() == egui::vec2(44.0, 18.0) => {
+                            Some(shape.rect)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!((3.0..=7.0).contains(&(meter.left() - status.right())));
+            }
+        }
+        assert!((name_widths[0] - name_widths[1] - 48.0).abs() < 1.0);
     }
 
     #[test]

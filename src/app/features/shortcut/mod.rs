@@ -317,27 +317,28 @@ mod tests {
     }
 
     fn storage_with(programs: Vec<AppToRun>) -> (AppStateStorage, RulesContext) {
-        let storage = AppStateStorage {
-            version: 7,
-            groups: vec![CoreGroup {
+        let storage = AppStateStorage::test_fixture(|state| {
+            state.version = 7;
+            state.groups = vec![CoreGroup {
                 name: "Performance".to_string(),
                 cores: vec![0, 1],
                 programs,
                 is_hidden: false,
                 run_all_button: true,
-            }],
-            cpu_schema: CpuSchema {
+            }];
+            state.cpu_schema = CpuSchema {
                 model: "Test CPU".to_string(),
                 clusters: Vec::new(),
-            },
-            theme_index: 0,
-            process_monitoring_enabled: false,
-            windows_event_log_diagnostics_enabled: true,
-            start_minimized: false,
-            rule_identities: None,
-            loaded_version: 7,
-            pending_pre_v6_backup: false,
-        };
+            };
+            state.theme_index = 0;
+            state.process_monitoring_enabled = false;
+            state.windows_event_log_diagnostics_enabled = true;
+            state.start_minimized = false;
+            state.rule_identities = None;
+            state.loaded_version = 7;
+            state.pending_pre_v6_backup = false;
+            state.tuning = Default::default();
+        });
         let rules = RulesContext::from_storage(&storage);
         (storage, rules)
     }

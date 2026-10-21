@@ -5,9 +5,24 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 const TEMP_SHORTCUT_ATTEMPTS: usize = 100;
+pub(crate) fn foreground_process() -> Result<(usize, u32), String> {
+    #[cfg(windows)]
+    {
+        os_api::OS::foreground_process()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("foreground observation unavailable".into())
+    }
+}
 
 pub fn set_current_process_priority(priority: PriorityClass) -> Result<(), String> {
     os_api::OS::set_current_process_priority(priority)
+}
+
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub fn pin_current_process_to_last_cpu() -> Result<usize, String> {
+    os_api::OS::pin_current_process_to_last_cpu()
 }
 
 pub fn get_cpu_model() -> String {
@@ -391,11 +406,11 @@ mod tests {
 }
 
 #[cfg(target_os = "windows")]
-pub fn set_taskbar_visible(hwnd: windows::Win32::Foundation::HWND, visible: bool) {
-    os_api::OS::set_taskbar_visible(hwnd, visible);
+pub fn normalize_winit_event_target_window() -> Result<(), String> {
+    os_api::OS::normalize_winit_event_target_window()
 }
 
 #[cfg(target_os = "windows")]
-pub fn restore_and_focus_window(hwnd: windows::Win32::Foundation::HWND) {
-    os_api::OS::restore_and_focus(hwnd);
+pub fn set_taskbar_visible(hwnd: windows::Win32::Foundation::HWND, visible: bool) {
+    os_api::OS::set_taskbar_visible(hwnd, visible);
 }

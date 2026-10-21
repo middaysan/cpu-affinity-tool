@@ -1,4 +1,6 @@
 mod launch;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub(crate) mod managed_runs;
 mod monitor_events;
 mod reconcile;
 mod store;

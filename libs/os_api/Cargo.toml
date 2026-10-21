@@ -3,18 +3,39 @@ name = "os_api"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Explicit nonshipping development/lab probes; never enabled by release builds.
+tuning-test-controls = []
+render-profiling = []
+
 [dependencies]
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56.0"
 windows = { version = "0.62.2", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_Power",
+    "Win32_System_SystemServices",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Accessibility",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_System_Com_StructuredStorage",
     "Win32_Foundation",
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Performance",
     "Win32_System_Environment",
     "Win32_Globalization",
     "Win32_UI",
@@ -24,6 +45,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Variant",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_Controls",
     "Win32_Storage_FileSystem",
     "Win32_Storage_Packaging_Appx",
@@ -33,13 +55,19 @@ windows = { version = "0.62.2", features = [
     "Win32_System_RemoteDesktop",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Authentication_Identity",
     "Win32_System_ApplicationInstallationAndServicing",
     "Win32_System_EventLog",
-    "Win32_System_Time"
+    "Win32_System_Time",
+    "Win32_System_WinRT",
+    "System_Profile",
+    "Storage_Streams",
+    "Win32_System_Registry",
+    "Win32_Security_Cryptography",
 ] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", features = ["sched", "process"] }
-libc = "0.2.186"
+libc = "0.2.190"
 shlex = "2.0.1"
 errno = "0.3.14"

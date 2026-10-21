@@ -19,6 +19,25 @@ pub enum StartupIntentError {
 const RUN_RULE_FLAG: &str = "--run-rule";
 const MAX_ID_LEN: usize = 128;
 
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub(crate) fn prepare_background_scheduling_with(
+    priority: impl FnOnce(os_api::PriorityClass) -> Result<(), String>,
+    affinity: impl FnOnce() -> Result<usize, String>,
+) -> [String; 2] {
+    let priority = priority(os_api::PriorityClass::BelowNormal);
+    let affinity = affinity();
+    [
+        match priority {
+            Ok(()) => "Own process: BelowNormal priority".into(),
+            Err(error) => format!("Could not set own process priority: {error}"),
+        },
+        match affinity {
+            Ok(cpu) => format!("Own process: CPU{cpu} affinity (last available logical CPU)"),
+            Err(error) => format!("Could not set own process affinity: {error}"),
+        },
+    ]
+}
+
 pub fn parse_startup_args(args: &[String]) -> Result<StartupIntent, StartupIntentError> {
     match args {
         [] => Ok(StartupIntent::NormalGui),
@@ -62,6 +81,30 @@ pub(crate) fn is_cli_safe_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn self_scheduling_keeps_below_normal_and_reports_affinity_independently() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let messages = prepare_background_scheduling_with(
+            |priority| {
+                assert_eq!(priority, os_api::PriorityClass::BelowNormal);
+                calls.borrow_mut().push("priority");
+                Err("priority denied".into())
+            },
+            || {
+                calls.borrow_mut().push("affinity");
+                Ok(15)
+            },
+        );
+        assert_eq!(*calls.borrow(), ["priority", "affinity"]);
+        assert!(messages[0].contains("priority denied"));
+        assert!(messages[1].contains("CPU15"));
+        let messages =
+            prepare_background_scheduling_with(|_| Ok(()), || Err("affinity unavailable".into()));
+        assert!(messages[0].contains("BelowNormal"));
+        assert!(messages[1].contains("affinity unavailable"));
+    }
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()

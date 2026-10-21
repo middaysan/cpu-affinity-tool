@@ -340,7 +340,7 @@ pub fn report_file_name(timestamp: SystemTime, process_id: u32, attempt: usize) 
 }
 
 #[cfg(any(feature = "windows", test))]
-fn format_utc_timestamp(timestamp: SystemTime) -> String {
+pub(crate) fn format_utc_timestamp(timestamp: SystemTime) -> String {
     const MAX_SUPPORTED_MILLIS: u64 = 253_402_300_799_999;
     let millis = timestamp
         .duration_since(UNIX_EPOCH)
@@ -394,6 +394,10 @@ pub struct CrashReportEntry {
 }
 
 impl CrashReportEntry {
+    #[cfg(target_os = "windows")]
+    pub(crate) fn opaque_id(&self) -> String {
+        format!("{:016x}-{:016x}", self.identity.volume, self.identity.index)
+    }
     pub fn path_in(&self, report_directory: &Path) -> PathBuf {
         report_directory.join(&self.file_name)
     }
@@ -769,6 +773,42 @@ pub fn validated_report_path(
     snapshot: &ReportSnapshot,
     report: &CrashReportEntry,
 ) -> Result<PathBuf, DeleteError> {
+    let _file = open_validated_report(snapshot, report)?;
+    Ok(report.path_in(&snapshot.report_directory))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn read_report_page(
+    snapshot: &ReportSnapshot,
+    report: &CrashReportEntry,
+    after: u64,
+    limit: usize,
+) -> Result<Vec<u8>, DeleteError> {
+    use std::io::{Read, Seek, SeekFrom};
+    if limit == 0 || limit > 16384 || after > report.size_bytes {
+        return Err(DeleteError::Failed("Invalid report byte page".into()));
+    }
+    let mut file = open_validated_report(snapshot, report)?;
+    if file
+        .metadata()
+        .map_err(|e| DeleteError::Failed(e.to_string()))?
+        .len()
+        != report.size_bytes
+    {
+        return Err(DeleteError::IdentityChanged);
+    }
+    file.seek(SeekFrom::Start(after))
+        .map_err(|e| DeleteError::Failed(e.to_string()))?;
+    let mut bytes = Vec::new();
+    file.take(limit as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| DeleteError::Failed(e.to_string()))?;
+    Ok(bytes)
+}
+fn open_validated_report(
+    snapshot: &ReportSnapshot,
+    report: &CrashReportEntry,
+) -> Result<File, DeleteError> {
     if !snapshot.reports.iter().any(|candidate| {
         candidate.file_name == report.file_name && candidate.identity == report.identity
     }) {
@@ -797,7 +837,7 @@ pub fn validated_report_path(
     {
         return Err(DeleteError::IdentityChanged);
     }
-    Ok(path)
+    Ok(file)
 }
 
 pub fn prepare_report_directory(report_directory: &Path) -> Result<PathBuf, String> {
@@ -1665,6 +1705,28 @@ mod tests {
         assert!(text.contains("\nstartup_phase: running_ui\n"));
         assert!(text.ends_with(REPORT_COMPLETION_MARKER));
         assert!(report.len() <= MAX_REPORT_BYTES);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn report_page_reads_only_the_listed_identity_and_obeys_byte_bounds() {
+        let temp = TempDir::new("agent-report-read");
+        let saved = write_report(&temp.reports(), &sample_input(Some("boom"), None)).unwrap();
+        let snapshot = scan_reports(&temp.reports()).unwrap();
+        let report = &snapshot.reports[0];
+        let bytes = read_report_page(&snapshot, report, 0, 16).unwrap();
+        assert_eq!(bytes, fs::read(&saved).unwrap()[..16]);
+        assert!(read_report_page(&snapshot, report, 0, 16385).is_err());
+        fs::remove_file(&saved).unwrap();
+        fs::write(
+            &saved,
+            format_report(&sample_input(Some("replacement"), None)),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_report_page(&snapshot, report, 0, 16),
+            Err(DeleteError::IdentityChanged)
+        ));
     }
 
     #[test]
