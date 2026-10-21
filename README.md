@@ -44,7 +44,7 @@ Child-process management is an explicit per-rule option and starts off for new r
 
 **CPU load** records CPU and process activity independently of Process monitor. Recording continues with graphs closed or the app in the tray. History stays in RAM: choose 30 seconds, 5 minutes (default), or 30 minutes.
 
-Open a system, group, or application graph to inspect individual logical CPUs and the processes contributing at a selected time. Group graphs start with your tracked apps; **All system processes** expands the scope. The **Processes** tab has sortable columns.
+Open a system, group, or application graph to inspect individual logical CPUs, their sampled parking state, and the processes contributing at a selected time. Group graphs start with your tracked apps; **All system processes** expands the scope. The **Processes** tab has sortable columns.
 
 ![CPU history with a selected logical CPU and process contributions](assets/screenshots/cpu-history.png)
 
@@ -77,7 +77,7 @@ An agent can manage groups and rules, change monitoring settings, launch program
 ## Platforms and data
 
 - **Windows x64** is the stable release platform. The current renderer uses DirectX 12, and the release requires administrator approval. Saved-rule shortcuts may show the same UAC prompt.
-- **Linux** has a separate desktop beta for x86_64 glibc, with X11/Wayland sessions and [beta prereleases](https://github.com/middaysan/cpu-affinity-tool/releases). System Tweaks and production MCP are Windows-only; Linux does not have full Windows feature parity. macOS is unsupported.
+- **Linux** has a separate desktop beta for x86_64 glibc, with X11/Wayland sessions and [beta prereleases](https://github.com/middaysan/cpu-affinity-tool/releases). CPU recording, System Tweaks and production MCP are Windows-only; Linux does not have full Windows feature parity. macOS is unsupported.
 - New Windows configurations use `%LOCALAPPDATA%\CpuAffinityTool\state.json`. An existing `state.json` beside the EXE keeps its legacy location. **Logs → Data folder** opens the active directory.
 - Saving with the current build upgrades older configuration formats. Keep a backup before switching builds; downgrading after a current-format save is unsupported.
 - Logs and available crash reports stay local and are not uploaded automatically. Review them before sharing. CPU history is retained in memory and saved to a file only when you export it.

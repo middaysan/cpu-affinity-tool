@@ -2,7 +2,7 @@
 
 Thanks for your interest in improving CPU Affinity Tool.
 
-Windows is the primary stable release platform. Linux has a separate x86_64 glibc desktop beta, with CI build/test coverage and manual X11/Wayland smoke checks. System Tweaks and production MCP remain Windows-only.
+Windows is the primary stable release platform. Linux has a separate x86_64 glibc desktop beta, with CI build/test coverage and manual X11/Wayland smoke checks. CPU recording, System Tweaks and production MCP remain Windows-only.
 
 ## Build basics
 
