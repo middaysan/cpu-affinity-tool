@@ -13,12 +13,12 @@ Three independent Astra lanes reviewed correctness/lifecycle, performance/resour
 | Saved AUMID activation returned before the common Realtime guard | Resolve the effective saved-rule priority before either launch target or restart side effects | Realtime rejection, allowed normal/high priority and unchanged neutral launch for module-reserved priority |
 | Oversized run labels bypassed the published input bound and could make all retained runs exceed the response cap | Validate launch names before admission; bound only retained display labels and exit summaries by Unicode count and escaped JSON bytes | Rejected empty/257-character names without advancing admission, accepted valid Unicode, exact operational IDs, full 64-row structured/text wrapper including mixed escaped strings |
 
-The responsible lanes reviewed the combined deltas without finding another concrete blocker. These are source-review conclusions, not penetration-test or performance measurements. Full local reviewer reports and RED logs remain in the ignored task/evidence workspace.
+The responsible lanes reviewed the combined deltas without finding another concrete blocker. Exact-head CI additionally exposed platform-only accessor/test cfg gaps and a newly deprecated Atomic API on Rust 1.99. The cfg gates were corrected; equivalent long-stable CAS loops retain Rust 1.95 compatibility, with concurrent output-budget and lifetime-identity exhaustion characterizations. These are source-review conclusions, not penetration-test or performance measurements. Full local reviewer reports and RED logs remain in the ignored task/evidence workspace.
 
 ## Local validation
 
-- Windows application: 791 passed, 10 intentionally ignored opt-in probes; native library: 178 passed, 15 ignored plus one passing doctest.
-- Debug MCP/diagnostics configuration: 820 passed, 11 ignored. Ordinary and debug Clippy passed with warnings denied; formatting and the Python MCP adapter's nine tests passed.
+- Windows application: 792 passed, 10 intentionally ignored opt-in probes; native library: 179 passed, 15 ignored plus one passing doctest.
+- Debug MCP/diagnostics configuration: 821 passed, 11 ignored. Ordinary and debug Clippy passed with warnings denied; formatting and the Python MCP adapter's nine tests passed.
 - Launcher isolation self-test, all required isolated tuning-recovery scenarios and both real-binary crash-report probes passed. The probes use their own native test objects/files and do not apply the user's Windows settings.
 - Local eframe frame tests, Winit DPI rectangle-policy tests and epaint library tests passed. Stable tag builds now run these same three vendor gates before upload.
 - Both lockfiles passed cargo-audit against RustSec commit `4b587f00996ebe5c05a73eaef105ef241e876414` without vulnerability ignores. Informational target-reachability findings are recorded in `dependency-advisories.md`; the selected release graph excludes the dev-only schema validator.

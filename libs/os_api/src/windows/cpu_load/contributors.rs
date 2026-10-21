@@ -18,6 +18,48 @@ pub struct CpuContribution {
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
 const MAX_PROCESSES: usize = 4096;
 
+fn reserve_identity(counter: &AtomicU64) -> Result<u64, &'static str> {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let next = current
+            .checked_add(1)
+            .ok_or("CPU contributor identity exhausted")?;
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Ok(current),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn contributor_identity_reservation_is_unique_and_never_wraps() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(reserve_identity(&counter), Ok(u64::MAX - 1));
+        assert!(reserve_identity(&counter).is_err());
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+        let shared = Arc::new(AtomicU64::new(1));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let shared = shared.clone();
+                std::thread::spawn(move || {
+                    (0..128)
+                        .map(|_| reserve_identity(&shared).unwrap())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let values: std::collections::HashSet<_> = workers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap())
+            .collect();
+        assert_eq!(values.len(), 1024);
+        assert_eq!(shared.load(Ordering::Relaxed), 1025);
+    }
+}
+
 struct Interval {
     process: Arc<CpuProcess>,
     ticks: Vec<u64>,
@@ -57,9 +99,7 @@ impl Contributors {
         if slot >= MAX_PROCESSES {
             return Err("CPU contributor process limit reached".into());
         }
-        let instance = NEXT_INSTANCE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
-            .map_err(|_| "CPU contributor identity exhausted")?;
+        let instance = reserve_identity(&NEXT_INSTANCE)?;
         let interval = Some(Interval {
             process: Arc::new(CpuProcess {
                 pid,

@@ -144,7 +144,7 @@ impl SchedulingHandoff {
         }
         Ok(selected)
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(test, target_os = "windows"))]
     pub(crate) fn external_write(
         &self,
         pid: u32,

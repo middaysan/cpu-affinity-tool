@@ -95,12 +95,20 @@ impl Output {
         stream.bytes.drain(..remove);
         stream.base += remove as u64;
         self.used.fetch_sub(remove, Ordering::Relaxed);
-        let previous = self
-            .used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                Some((used + bytes.len()).min(GLOBAL_BYTES))
-            })
-            .unwrap();
+        // Keep the declared Rust 1.95 minimum while newer compilers retire fetch_update.
+        let mut previous = self.used.load(Ordering::Relaxed);
+        loop {
+            let next = (previous + bytes.len()).min(GLOBAL_BYTES);
+            match self.used.compare_exchange_weak(
+                previous,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => previous = actual,
+            }
+        }
         let accepted = bytes.len().min(GLOBAL_BYTES.saturating_sub(previous));
         if accepted < bytes.len() {
             let old = stream.bytes.len();
@@ -432,6 +440,37 @@ pub(crate) fn maximum_run_list_fixture(text: &str, error: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn concurrent_output_reservations_keep_the_global_byte_bound_and_release_it() {
+        let used = Arc::new(AtomicUsize::new(0));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let used = used.clone();
+                std::thread::spawn(move || {
+                    (0..16)
+                        .map(|_| {
+                            let output = Output::new(used.clone());
+                            output.append(0, &vec![b'x'; STREAM_BYTES]);
+                            output
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let outputs: Vec<_> = workers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap())
+            .collect();
+        let retained: usize = outputs
+            .iter()
+            .flat_map(|o| &o.streams)
+            .map(|s| s.lock().unwrap().bytes.len())
+            .sum();
+        assert_eq!(retained, GLOBAL_BYTES);
+        assert_eq!(used.load(Ordering::Relaxed), retained);
+        drop(outputs);
+        assert_eq!(used.load(Ordering::Relaxed), 0);
+    }
     #[test]
     fn managed_run_labels_bound_legacy_text_without_changing_identity_or_source() {
         let legacy = "😀".repeat(15000);
