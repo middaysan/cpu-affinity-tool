@@ -215,7 +215,7 @@ Current runtime split:
   - `tuning` request/snapshot runtime and typed module editor registry
 - `shell::UiSession` owns transient UI-only state:
   - App settings parent-menu lifetime, independent of its nested history selector
-  - the footer's retained tracked-process presentation rows, one-second refresh admission and unavailable-data status; ordinary GUI passes borrow the cached rows
+  - the Process monitor modal's retained tracked-process presentation rows, one-second refresh admission and unavailable-data status; ordinary GUI passes borrow the cached rows
   - active route
   - group form session
   - rule editor session

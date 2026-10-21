@@ -31,5 +31,7 @@ the fix. Recheck two-way mixed-DPI dragging from both ends of the title bar,
 vertical/negative-coordinate monitor arrangements, keyboard moves/snapping,
 fixed logical width and allowed height, CPU-graph pointer alignment, tray restore
 and hidden startup. Pure policy tests cannot certify native drag-message order.
-The first local validation is a release build only: automated/native test runs
-remain deferred by the user's current instruction.
+Historical note: the initial delivery used a release build only, with tests
+deferred at the user's request. That deferral was later superseded. Release
+preparation on 2026-10-21 passed the pure `dpi_` regressions locally and in Windows
+CI; both Windows CI and the stable release workflow now enforce those tests.

@@ -15,6 +15,8 @@ Three independent Astra lanes reviewed correctness/lifecycle, performance/resour
 
 The responsible lanes reviewed the combined deltas without finding another concrete blocker. Exact-head CI additionally exposed platform-only accessor/test cfg gaps and a newly deprecated Atomic API on Rust 1.99. The cfg gates were corrected; equivalent long-stable CAS loops retain Rust 1.95 compatibility, with concurrent output-budget and lifetime-identity exhaustion characterizations. These are source-review conclusions, not penetration-test or performance measurements. Full local reviewer reports and RED logs remain in the ignored task/evidence workspace.
 
+A fifth focused release/packaging lane inspected workflow gates, manifest/PDB/debug fences, retained vendor licenses and archive provenance without establishing another technical blocker. Its documentation follow-up corrected current smoke instructions for header controls, process modals, tracked-group load/scope, selection cues and activity dots, and dated Winit's initial test deferral. Dated native measurements were preserved.
+
 ## Local validation
 
 - Windows application: 792 passed, 10 intentionally ignored opt-in probes; native library: 179 passed, 15 ignored plus one passing doctest.
