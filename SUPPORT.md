@@ -32,7 +32,7 @@ If affinity or priority is not applied, open **Process monitor** and check **Ena
 
 New Windows configurations use `%LOCALAPPDATA%\CpuAffinityTool\state.json`. If `state.json` already exists beside the EXE, that legacy sidecar remains active. Open **Logs → Data folder** to find the active directory. Keep a backup before testing another build.
 
-The development build saves schema v11. Loading an older supported format does not rewrite it immediately; an explicit save upgrades it. Loading pre-v6 data creates a `state.json.pre-v6*` backup before the first current-format save. Upgrading v6 or later does not create that particular backup. Downgrading after a current-format save is unsupported. MCP connection credentials are stored separately; see [MCP storage and access](docs/mcp.md).
+Version 1.7.0 saves schema v11. Loading an older supported format does not rewrite it immediately; an explicit save upgrades it. Loading pre-v6 data creates a `state.json.pre-v6*` backup before the first current-format save. Upgrading v6 or later does not create that particular backup. Downgrading after a current-format save is unsupported. MCP connection credentials are stored separately; see [MCP storage and access](docs/mcp.md).
 
 Windows saved-rule shortcuts target the current `cpu-affinity-tool.exe` path. Recreate them after moving the portable folder. They use the same elevated executable and may show UAC. Shortcut creation uses the Desktop of the current elevated Windows account; approving UAC with another administrator's credentials can put the shortcut on that account's Desktop. Linux beta does not create saved-rule `.desktop` launchers.
 

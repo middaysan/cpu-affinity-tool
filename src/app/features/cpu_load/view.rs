@@ -1618,7 +1618,7 @@ mod tests {
             .collect();
         assert!(!labels.contains(&"All processes"));
         assert!(!labels.contains(&"Tracked"));
-        assert!(labels.contains(&"CPU graphs"));
+        assert!(labels.contains(&"Group CPU load"));
         let heights: Vec<_> = output
             .shapes
             .iter()

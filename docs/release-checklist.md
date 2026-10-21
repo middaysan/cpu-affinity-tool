@@ -19,11 +19,11 @@ The dated MR22 review and remaining acceptance limits are recorded in `docs/rele
 - Confirm Windows uses WGPU/DX12 with `MemoryUsage`, Linux retains Glow, and local eframe/epaint/Winit patches retain provenance and license files. Include Windows hidden startup, tray restore, close, mixed-DPI moves, both themes and per-core graph/table smoke for renderer changes.
 - Confirm the bundled Inter font and its SIL Open Font License file are present under `assets/fonts` and included in the release commit.
 - Confirm shortcut docs explain current elevated token Desktop placement, including credential-over-the-shoulder UAC placing shortcuts on the elevated account's Desktop.
-- Confirm version markers are aligned manually before tagging: release tag `vX.Y.Z`, `Cargo.toml`, and `changelogs/vX.Y.Z.txt`. The workflow validates these again after the tag is pushed.
-- Confirm the changelog and any release note summary call out the schema `v10` save boundary when applicable:
+- Confirm version markers are aligned manually before tagging: release tag `vX.Y.Z`, `Cargo.toml`, its local package entry in `Cargo.lock`, and `changelogs/vX.Y.Z.txt`. The workflow validates the tag, manifest and notes again after the tag is pushed.
+- Confirm the changelog and release summary call out the current schema `v11` save boundary:
   - the first explicit save after loading pre-`v6` state writes `state.json.pre-v6*`
-  - `v6`, `v7`, `v8`, or `v9` to `v10` saves do not write `state.json.pre-v6*`
-  - missing `manage_descendants` in pre-`v10` rules preserves existing automatic descendant management; missing values in `v10` and newly created rules default it to off
+  - explicit saves upgrade older supported formats to `v11`; `v6` and later do not write `state.json.pre-v6*`
+  - missing `manage_descendants` in pre-`v10` rules preserves existing automatic descendant management; missing values in `v10` or later and newly created rules default it to off
   - downgrade to older binaries is unsupported after that first current-schema save
 - Review release-impacting files if they changed: `build.rs`, `app.manifest`, `assets/icon.ico`, `assets/cpu_presets.json`, `scripts/build-windows-release.ps1`, `scripts/assert-windows-pdb-matches.ps1`, `scripts/test-windows-pdb-verifier.ps1`, `scripts/assert-windows-release-manifest.ps1`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, and `.github/workflows/release-linux-beta.yml`.
 

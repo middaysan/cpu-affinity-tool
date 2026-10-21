@@ -6,6 +6,8 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-22
+
 ### Added
 
 - Windows System Tweaks with typed Apply/Undo operations, bounded recovery journals, process scheduling ownership and display-change confirmation with automatic rollback. Retained older settings remain available for recovery and Undo.
@@ -24,6 +26,7 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 - Compact MCP, Process monitor and CPU load status buttons now sit at the top right. App settings starts with one Light / Dark / System selector and shows the version last. CPU monitoring remains independent from affinity/priority enforcement.
 - Align process tables, subtle row separators, modal layouts, stronger dimming and compact CPU tiles. Selected CPUs use a green label/outline; a yellow in-label dot marks retained application activity. Group load shows tracked work on the group's CPUs; the header CPU control shows overall system load.
 - Keep the group toolbar fixed while cards scroll. Give application names more room, use compact Run controls and preserve full-name drag targets. Application rule settings use full-width paths and clearer launch/tracking sections.
+- Label the group meter **Group CPU load** and refresh the README with current screenshots, setup steps and linked support guides.
 - Update compatible Rust dependencies and raise the minimum toolchain to Rust 1.95. Local eframe, epaint and Winit patches retain upstream provenance, licenses, regression tests and removal criteria.
 
 ### Fixed
@@ -41,10 +44,9 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Compatibility
 
-- Windows remains the stable portable x64 EXE plus matching PDB distribution and still requires administrator approval. Linux beta artifacts remain separate, without System Tweaks or production MCP parity.
+- Windows remains the stable portable x64 EXE plus matching PDB distribution and still requires administrator approval. CPU recording, System Tweaks and production MCP are Windows-only; Linux beta artifacts remain separate.
 - Current saves use schema v11. Existing configuration locations and pre-v6 backup behavior remain; explicit saves upgrade older schemas. Downgrading after a current-schema save is unsupported. MCP authority is stored separately from editable application state.
 - CPU history is bounded and memory-only until explicitly exported. CSV contains the retained period and observed positive process work, not an unlimited archive or proof that an absent process was idle. Disabling MCP leaves resumed programs/output and independent CPU monitoring running.
-- No release tag or next-version number is selected by these Unreleased notes.
 
 ## [1.6.3] - 2026-09-20
 

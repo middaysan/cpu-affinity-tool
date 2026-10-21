@@ -29,10 +29,10 @@ The final EXE/PDB identity, manifest, release-code fence and exact-head Windows/
 
 The expanded Windows CI gate has a 45-minute budget, matching the stable tag workflow. A cold optimized build passed the application/native/debug/vendor/recovery tests and release/PDB checks but reached the former 30-minute job deadline while compiling the crash-probe executable. No checks were removed or relaxed.
 
-## Remaining release decisions and limits
+## Release selection and remaining limits
 
-- Select the next version and create its versioned release notes before tagging. `Cargo.toml` still reports the already-published 1.6.3; the consolidated Unreleased section describes the new behavior. These checks do not authorize reusing the old release tag.
-- Merge and release-tag/publication remain separate user decisions. A green old-head run is not acceptance of the newly integrated tree; inspect the final MR head's CI.
+- The user selected 1.7.0 on 2026-10-22 and authorized merging MR22 after green CI, then tagging and publishing. `Cargo.toml`, the local package in `Cargo.lock`, `CHANGELOG.md` and `changelogs/v1.7.0.txt` are aligned. The final polish changes only the group caption to **Group CPU load** and its existing assertion strings; it adds no runtime behavior.
+- A green old-head run is not acceptance of the release commit. Inspect the final MR head's Windows/Linux CI before merging; the stable tag workflow independently verifies and builds the merged release tree before publication.
 - Prior Windows 11 mixed-DPI/Explorer/tray and elevated MCP/CPU19 evidence remains host-specific. A fresh final-candidate native smoke/long soak can strengthen acceptance; Windows 10, RDP and other GPU/driver combinations are not certified here.
 - The pinned renderer does not recover its graphics device in place during driver replacement. The earlier externally triggered AMD-driver-reset attempt remains excluded from performance evidence. No new renderer recovery stack or automatic relaunch was introduced during this review.
 

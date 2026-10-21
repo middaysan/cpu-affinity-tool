@@ -279,7 +279,7 @@ fn paint_meter(
                 (rect.bottom() + button_rect.bottom() - 2.0) * 0.5,
             ),
             egui::Align2::CENTER_CENTER,
-            "CPU graphs",
+            "Group CPU load",
             egui::FontId::proportional(8.5),
             colors.text_muted,
         );
@@ -319,7 +319,7 @@ mod tests {
             .collect();
         assert!(!labels.contains(&"Tracked"));
         assert!(!labels.contains(&"All processes"));
-        assert!(labels.contains(&"CPU graphs"));
+        assert!(labels.contains(&"Group CPU load"));
         assert_eq!(labels.iter().filter(|&&label| label == "—").count(), 1);
     }
 
@@ -402,7 +402,7 @@ mod tests {
                     assert_eq!(texts.len(), 2);
                     let caption = texts
                         .iter()
-                        .find(|text| text.galley.text() == "CPU graphs")
+                        .find(|text| text.galley.text() == "Group CPU load")
                         .unwrap();
                     assert!(caption.pos.y > rect.bottom());
                 }
