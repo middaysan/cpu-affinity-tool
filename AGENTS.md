@@ -533,6 +533,8 @@ Do not invent dependency purpose just because a crate appears in `Cargo.toml`.
 
 The root package requires Rust 1.95 or newer, matching the `eframe` / `egui` 0.36 desktop stack. CI and release workflows use the stable toolchain.
 
+The Windows CI verification job has a 45-minute budget, matching the stable Windows release build job, so cold optimized application/test builds can finish the existing gates. Linux CI retains its 30-minute budget.
+
 Local verification commands:
 - `cargo test --manifest-path libs/os_api/Cargo.toml`
 - `cargo test --features windows --bin cpu-affinity-tool`

@@ -25,6 +25,8 @@ The responsible lanes reviewed the combined deltas without finding another concr
 
 The final EXE/PDB identity, manifest, release-code fence and exact-head Windows/Linux CI are checked separately after integration. Historical CPU19 and memory measurements remain tied to their named artifacts in `mcp-validation.md` and `cpu19-performance-probe.md`; the latest review did not rerun a long resource soak.
 
+The expanded Windows CI gate has a 45-minute budget, matching the stable tag workflow. A cold optimized build passed the application/native/debug/vendor/recovery tests and release/PDB checks but reached the former 30-minute job deadline while compiling the crash-probe executable. No checks were removed or relaxed.
+
 ## Remaining release decisions and limits
 
 - Select the next version and create its versioned release notes before tagging. `Cargo.toml` still reports the already-published 1.6.3; the consolidated Unreleased section describes the new behavior. These checks do not authorize reusing the old release tag.
