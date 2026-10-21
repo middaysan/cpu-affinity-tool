@@ -22,6 +22,8 @@ Set up a game and its background apps once, instead of repeating the changes in 
 
 Both monitors start enabled for new configurations; existing saved preferences are preserved.
 
+Upgrading keeps your saved groups and application rules. If an older configuration has no **CPU load** preference, recording starts enabled with a 5-minute history. **MCP** starts off, and System Tweaks applies changes only when you request them.
+
 **App settings** contains the System / Light / Dark theme selector and **Start minimized**. Start minimized opens the next launch in the tray; it does not register the tool to start at Windows sign-in.
 
 Performance depends on the application and workload. Compare CPU activity and responsiveness before keeping a new configuration. [How affinity helps and where it has limits](docs/why.md) · [Comparison with other tools](docs/comparison.md).

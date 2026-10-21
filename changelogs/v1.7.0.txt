@@ -25,6 +25,7 @@ Save process rules, see where CPU time goes, and manage the same setup through a
 
 ### Upgrading and limits
 - Back up the active `state.json` before upgrading; **Logs → Data folder** opens its directory. An explicit save upgrades older formats to schema v11. Loading pre-v6 data also creates a `state.json.pre-v6*` backup; v6 and later do not get that particular backup. Downgrading after a current-format save is unsupported. Existing monitoring preferences are preserved.
+- Existing groups and application rules are retained. If the old file has no CPU-load preference, recording starts enabled with a 5-minute history. Process monitor keeps its saved state; MCP starts off. Keep an existing sidecar `state.json` beside the replacement EXE, or retain the existing application-data location.
 - New rules default child-process management to off. Existing pre-v10 rules retain the prior enabled behavior when that field was absent. Start minimized does not register Windows sign-in startup.
 - CPU history stays in RAM until exported; turning CPU recording off releases it. Exports contain the retained period, not an unlimited archive. System Tweaks changes can persist after exit; Undo preserves later changes made elsewhere.
 - One permanent MCP key grants full access to supported tools. Share it only with a trusted agent. Ordinary-user launch is the default; administrator launch is explicit. Disabling MCP does not terminate resumed programs or stop independent CPU recording.

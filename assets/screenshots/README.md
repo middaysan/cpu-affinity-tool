@@ -1,6 +1,6 @@
 # Application screenshots
 
-Captured on 2026-10-22 from the current Windows development UI at source commit `fc02c4d20c199edd1e89ebbda0182585e2aebeda`. The existing diagnostic executable shares that UI; its package version still says 1.6.3, but these are development screenshots, not screenshots of the published 1.6.3 release.
+Captured on 2026-10-22 from the Windows UI during 1.7.0 development. The main view and `main-light.png` were refreshed at source commit `9dba66e75f121df9fcc3a1e238789c6566733faa` using the diagnostic build with package version 1.7.0, including the approved **Group CPU load** caption. The other five images were captured at `fc02c4d20c199edd1e89ebbda0182585e2aebeda`; that earlier diagnostic build still reported package version 1.6.3. It contains development features and does not represent the published 1.6.3 release.
 
 The main view remains at [`../screenshot.png`](../screenshot.png). The other images show:
 
