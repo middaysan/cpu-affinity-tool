@@ -92,7 +92,7 @@ Key directories:
 - `src/app/models/app_state_storage/` - internal persistence modules for state path resolution, storage I/O, migrations, and schema refresh; `app_state_storage.rs` remains the public storage schema and API entrypoint
 - `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, including startup-only own-process scheduling in `self_affinity.rs` and suspended-launch affinity inheritance handling in `launch.rs`; Linux remains a single-file desktop beta backend
 - `libs/os_api/src/windows/file_drop.rs` - GUI-thread Shell file-drop registration for the Windows root, with window-scoped UIPI exceptions, bounded path-only payloads and captured physical release coordinates; no worker or process-wide filter
-- `assets/` - icon, screenshot, bundled Inter UI font and license, `cpu_presets.json`, and social-preview guidance
+- `assets/` - icon, current main-window screenshot, bundled Inter UI font and license, `cpu_presets.json`, and social-preview guidance; `assets/screenshots/` holds additional actual development UI captures and their provenance
 - `design/` - standalone HTML design reference for the approved compact Inter-based interface; it loads only repository-local assets and is not runtime input
 - `docs/` - release/process documentation and user-facing comparison/rationale references
 - `scripts/` - committed release/build verification helper scripts
@@ -123,6 +123,7 @@ Important root files:
 - `docs/release-smoke-matrix.md` - compact manual smoke reference subordinate to the release checklist
 - `docs/dependency-advisories.md` - reviewed RustSec findings that remain in resolved dependencies, including reachability and re-evaluation conditions
 - `docs/mcp.md` - optional production Windows HTTP MCP setup, full-access key, exact process/run control, bounded output and original-time CPU cursor contracts
+- `docs/system-tweaks.md` - user guide to the current compact Windows settings, explicit Apply/Undo, persistence and read-only guides/checks
 - `docs/mcp-validation.md` - artifact-specific Windows MCP acceptance, release comparisons, CPU19 diagnostic soak and remaining renderer/platform limits
 - `docs/tuning-native-probe.md` - actual module apply/restore evidence, recovery checks and remaining validation limits
 - `docs/github-metadata.md` - manual GitHub UI metadata plan

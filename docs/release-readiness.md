@@ -35,3 +35,16 @@ The expanded Windows CI gate has a 45-minute budget, matching the stable tag wor
 - Merge and release-tag/publication remain separate user decisions. A green old-head run is not acceptance of the newly integrated tree; inspect the final MR head's CI.
 - Prior Windows 11 mixed-DPI/Explorer/tray and elevated MCP/CPU19 evidence remains host-specific. A fresh final-candidate native smoke/long soak can strengthen acceptance; Windows 10, RDP and other GPU/driver combinations are not certified here.
 - The pinned renderer does not recover its graphics device in place during driver replacement. The earlier externally triggered AMD-driver-reset attempt remains excluded from performance evidence. No new renderer recovery stack or automatic relaunch was introduced during this review.
+
+## Follow-up validation — 2026-10-22
+
+The frozen candidate above subsequently completed a read-only CPU19 comparison against the latest retained, previously measured release. The most recent short-run baseline had been overwritten and was explicitly not substituted with an unmeasured build. Both retained releases ran for 32 continuous minutes, with six theme changes each; eight short release starts and separate diagnostic ABBA sessions supplemented the comparison. The final release SHA256 remained `0A0553D1FEB85F2290955FB89486F509ACE9FD804DADBB679620EC10A782E9C6`.
+
+- Mean process CPU was 1.257% versus 1.314% of one logical CPU. Last-ten-minute private commit was 157.375 versus 160.617 MiB; working set was 113.676 versus 115.881 MiB. No monotonic memory growth was observed over the final run.
+- Median time to the native window was 350.43 versus 347.29 ms; normal close was 326.27 versus 336.53 ms.
+- GPU-completion p95 was approximately 0.47 ms for both. The final release had three rare completion tails, up to 32.572 ms. Their exact cause and connection to application changes remain unproven. Native HAGS capability and PresentMon's queue-based timing limitation were confirmed; the largest tail preceded a Windows presentation-mode transition.
+- A separate 20-minute capture using the existing diagnostic binary recorded 15,154 presents without reproducing those GPU tails: GPU-active maximum 1.464 ms, completion maximum 3.172 ms. A different 22.253 ms D3D12 submission interval completed its associated GPU packet in 0.276 ms; driver waiting versus CPU scheduling was not resolved. This is diagnostic localization, not a fix or proof of the historical cause.
+
+The user accepted the rare GPU-tail residual as nonblocking. These are host-specific observations, not a performance guarantee. Exact-release long runs used Graphs/CPU19/all-system-processes on the same eight-CPU group; automated table scrolling belonged to the separate diagnostic sessions. Original settings and binaries were preserved, temporary credentials removed, and owned test processes, traces and helpers closed.
+
+The README follow-up adds seven actual development UI captures and a current System Tweaks user guide. Two focused Astra passes checked the documentation, feature claims and screenshot captions. Its changes are documentation and image assets only; it does not change the runtime source, package version or release status.

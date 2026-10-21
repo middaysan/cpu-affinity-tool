@@ -1,214 +1,112 @@
 # CPU Affinity Tool
 
-Windows utility for managing CPU affinity of games and background applications.
+Save CPU affinity and priority rules for Windows applications. Organize apps into CPU groups, launch them with the settings you chose, and keep those settings applied while they run.
 
-- Primary stable released platform: Windows
-- Linux desktop beta: source build on `x86_64` `glibc`, manual smoke on `X11` or `Wayland`, plus prerelease artifacts under `linux-beta-v*` tags
-- Stable download artifact: Windows only
-- Windows rendering: WGPU / DirectX 12 with memory-oriented allocation; Linux beta retains OpenGL
-- Linux beta prereleases: [GitHub Releases](https://github.com/middaysan/cpu-affinity-tool/releases)
-- Download: [Latest Release](https://github.com/middaysan/cpu-affinity-tool/releases/latest)
-- License: [MIT](./LICENSE)
-- Bundled UI font: [Inter](assets/fonts/LICENSE.txt), licensed under the SIL Open Font License 1.1
+Set up a game and its background apps once, instead of repeating the changes in Task Manager after every launch. Inspect CPU history, adjust selected Windows settings, or connect a local agent to manage the same setup.
 
-![CPU Affinity Tool main window](assets/screenshot.png)
+**[Download for Windows](https://github.com/middaysan/cpu-affinity-tool/releases/latest)** · [Getting started](#getting-started) · [MCP guide](docs/mcp.md) · [Documentation](#documentation)
 
-## What problem it solves
+> **Development preview:** this README and its screenshots describe the changes in [PR #22](https://github.com/middaysan/cpu-affinity-tool/pull/22). The latest published release, v1.6.3, does not include all the features shown here.
 
-Games, browsers, launchers, Discord, overlays, recording tools, and work apps can compete for the same CPU time. Windows can handle many workloads well on its own, but some systems behave better when the foreground workload and background workload are kept apart.
+![Affinity groups with saved application rules and live CPU meters](assets/screenshot.png)
 
-CPU Affinity Tool lets you save and apply repeatable launch rules instead of reopening Task Manager or re-running command-line commands every time.
+*Development build with example groups and a real demo workload. CPU selections depend on your processor. [Light theme](assets/screenshots/main-light.png).*
 
-It is meant to give you explicit control over:
+## Getting started
 
-- which CPU cores an app can use
-- which priority class an app starts with
-- whether those settings should be re-applied while the app is running
+These steps use the development interface shown above. Published v1.6.3 has the earlier interface; [build this branch](#build-from-source) to try the preview features.
 
-This is a control tool, not a promise of better FPS.
+1. Run `cpu-affinity-tool.exe` from a stable folder. The Windows release asks for administrator approval.
+2. Choose **New group**, name the group, and select its logical CPUs.
+3. Use **Add installed...**, **Add file...**, or drag and drop to add an application. Save its launch and tracking settings.
+4. Select **Run**. Open **Process monitor** and keep **Enable process monitor** checked if you want ongoing affinity and priority corrections.
+5. Open **CPU load** to check recording and choose the history duration. Click a group or application load meter to open **Graphs / Processes**.
 
-## Who this is for
+Both monitors start enabled for new configurations; existing saved preferences are preserved.
 
-- Gamers who keep browsers, Discord, launchers, overlays, or recording tools open in the background
-- Users with hybrid CPUs, multi-chiplet CPUs, or other workloads where core placement matters
-- Users who want repeatable launch rules instead of one-off Task Manager changes
-- Users who want saved affinity and priority rules for a fixed set of games or applications
+**App settings** contains the System / Light / Dark theme selector and **Start minimized**. Start minimized opens the next launch in the tray; it does not register the tool to start at Windows sign-in.
 
-## Features
+Performance depends on the application and workload. Compare CPU activity and responsiveness before keeping a new configuration. [How affinity helps and where it has limits](docs/why.md) · [Comparison with other tools](docs/comparison.md).
 
-- Save CPU core groups for different workloads
-- Launch apps with saved affinity and priority rules
-- Add apps from direct paths and launcher files with **Add file...**
-- Add supported installed apps with **Add installed...** (`Start`-backed entries on Windows, desktop entries plus matching `PATH` executables during search on Linux beta)
-- Re-apply affinity and priority while **Monitoring active** is shown
-- Keep a new rule's descendant-process management off unless its child processes are known to need the same settings
-- Autorun selected apps with the tool
-- Create Windows desktop shortcuts for saved rules so a configured app can use a quick shortcut launch
-- Add targets by drag and drop, including ordinary Explorer into the elevated Windows app ([native input details](docs/explorer-file-drops.md))
-- Inspect launches, corrections, and monitoring events in **Logs**
-- Review locally saved **Crash reports** after a main application panic or native UI-loop error; reports are never uploaded automatically
-- Open the active data folder directly from **Logs**
-- Choose light, dark, or system theme in **App settings**
-- Enable **Start minimized** in App settings to open the next Windows session in the tray (not Windows login autostart)
-- Click the monitor information button to inspect and sort verified process filenames, PIDs, and owning groups
-- Optionally connect a local AI agent over HTTP MCP, with one permanent full-access connection key for configuration, launches, exact process control, output and System Tweaks ([setup and API behavior](docs/mcp.md), [Windows validation](docs/mcp-validation.md))
+## What you can do
 
-## When it helps
+### Keep a repeatable process setup
 
-- A game is CPU-bound and background apps are competing for the same cores
-- You have heavy background activity such as browsers, voice chat, launchers, or recording tools
-- Your CPU layout is asymmetric or segmented, such as hybrid-core or multi-chiplet designs
-- You want a repeatable launch layout that stays consistent across runs
+- Create groups of logical CPUs for foreground work, background apps, or a particular workload.
+- Add executables, supported launcher files, or installed apps. Drag and drop from Explorer also works.
+- Save priority, startup behavior, and extra process names, plus launch arguments for file-based targets. Name suggestions come from running processes.
+- Use **Process monitor** to find your saved apps and reapply their affinity and priority. Its **Processes** and **Logs** tabs show what it found and changed.
+- Reorder groups and apps, launch a group together, or create a Windows desktop shortcut for a saved rule.
 
-## When it does not
+Child-process management is an explicit per-rule option and starts off for new rules. Protected or inaccessible processes may refuse changes; failures appear in **Logs**.
 
-- The real bottleneck is the GPU
-- Your background load is already light enough that contention is negligible
-- The game or application does not respond well to affinity pinning
-- Windows scheduling already behaves well for your workload
+### See where CPU time goes
 
-For a longer explanation, see [docs/why.md](docs/why.md).
+**CPU load** records CPU and process activity independently of Process monitor. Recording continues with graphs closed or the app in the tray. History stays in RAM: choose 30 seconds, 5 minutes (default), or 30 minutes.
 
-## Quick Start
+Open a system, group, or application graph to inspect individual logical CPUs and the processes contributing at a selected time. Group graphs start with your tracked apps; **All system processes** expands the scope. The **Processes** tab has sortable columns.
 
-1. Download the latest Windows release and run `cpu-affinity-tool.exe`.
-2. Accept the UAC prompt. The current Windows build requires administrator rights.
-3. Create a CPU core group for the workload you want to isolate.
-4. Add an app with **Add file...**, **Add installed...**, or drag and drop.
-5. Set the desired affinity and priority, then save the rule.
-6. On Windows, optionally open the saved rule settings and create a desktop shortcut for quick shortcut launch.
-7. Launch the app from the tool or shortcut and keep **Monitoring active** if you want settings re-applied automatically. New rules manage their verified root process by default; enable descendant management only when you intentionally want child processes to receive the same settings. Use the pause/resume icon to the left of the status when you want to suspend or resume corrections. Monitoring is enabled for a new configuration; existing saved preferences are preserved.
+![CPU history with a selected logical CPU and process contributions](assets/screenshots/cpu-history.png)
 
-On Windows, if CPU Affinity Tool closes because of a main application panic or its native UI loop returns an error, open **Logs** and select **Crash reports**. After the next completed background scan, **Logs** retains a summary of the newest validated report even if normal activity is cleared. The app normally keeps the newest 20 complete reports, up to 256 KiB each, under the active data directory. If repeated startup failures prevent normal background cleanup, each writer stops after it observes 64 managed files instead of adding synchronous cleanup to application startup; simultaneous GUI processes can exceed that safety ceiling slightly. **Show in Explorer** is available only through a verified non-elevated Windows shell; otherwise the path remains copyable and no editor is launched. Review a report before sharing it because it may contain local paths or system details; make and redact a copy if needed. Forced termination, native faults, out-of-memory termination, and background task panics may not produce a report. For a native crash that does not create one of these reports, see the manual, opt-in [Windows LocalDumps guide](docs/windows-native-crash-diagnostics.md).
+*Actual recorded activity in the development build. The example workload is generated by a local test process.*
 
-## Comparison
+Right-click a graph to save the visible chart as **PNG** or export all retained CPU/process history as **CSV**. A connected agent can download the same history through MCP. Turning recording off releases the retained history.
 
-| Tool | Saved launch rules | Automatic affinity and priority monitoring | Complexity | Best fit |
-| --- | --- | --- | --- | --- |
-| CPU Affinity Tool | Yes | Yes | Low | Focused Windows affinity workflows with saved rules |
-| Task Manager | No | No | Low | One-off manual changes |
-| Process Lasso | Yes | Yes | Medium | Broader third-party process automation on Windows |
-| PowerShell / CLI methods | Script-dependent | Script-dependent | High | Users who want fully manual or scripted control |
+[View the process table](assets/screenshots/processes.png) · [View the export menu](assets/screenshots/history-export.png)
 
-See [docs/comparison.md](docs/comparison.md) for a fuller breakdown.
+### Change individual Windows settings
 
-## FAQ
+**System Tweaks** brings together selected Windows controls: AC power mode, Game Mode, background clips, windowed-game settings, display refresh rate, per-app GPU preference, accessibility shortcuts, and mouse acceleration. Hardware and network guidance and an optional read-only PC check are alongside them.
 
-### Does it improve FPS?
+![System Tweaks with current Windows settings and explicit actions](assets/screenshots/system-tweaks.png)
 
-Not by itself. It can help when CPU contention is real, but it is not a guaranteed FPS booster.
+*Current settings are read from Windows. No tweaks were applied to take this screenshot.*
 
-### Does it work for every game?
+Manual changes remain applied after you close the app. **Undo** uses the recorded original values and preserves later changes made elsewhere. Display changes have a confirmation countdown. See the [System Tweaks guide](docs/system-tweaks.md) for what each control changes.
 
-No. Some games benefit, some show little change, and some do not react well to manual affinity pinning.
+### Connect a local agent
 
-### Do I need administrator privileges?
+The Windows EXE includes an optional **localhost Streamable HTTP MCP server**, disabled by default. Open **MCP**, enable it, then choose **Copy AI prompt** for setup instructions or **Copy connection** for manual configuration.
 
-Yes. The current Windows release is built with `requireAdministrator`, so you should expect a UAC prompt on launch.
-Saved-rule desktop shortcuts launch the same elevated executable, so they may show the same UAC prompt before the saved rule runs or forwards to an already running instance.
+An agent can manage groups and rules, change monitoring settings, launch programs, inspect exact process instances, read bounded program output and logs, use System Tweaks, and download CPU history. The MCP window keeps a readable journal of the last 100 commands.
 
-### Can Windows or the application override affinity settings?
+**One permanent key gives full access to the supported tools. Share it only with an agent you trust.** Ordinary-user launch is the default for agent-started programs; administrator launch is explicit. No separate server executable is needed.
 
-Yes. Some applications or helper processes may change affinity or priority after launch. That is why the tool includes automatic CPU affinity re-apply behavior for app processes.
+[Connection window](assets/screenshots/mcp-connection.png) · [Setup and API guide](docs/mcp.md)
 
-### Is this an alternative to Process Lasso?
+## Platforms and data
 
-It overlaps with a narrower part of that use case. CPU Affinity Tool is a focused Windows utility for saved affinity and priority workflows, not a full replacement for every Process Lasso feature.
-
-### Is Linux or macOS supported?
-
-Windows is the only stable published release artifact today. Linux has a desktop beta path from source for `x86_64` `glibc` systems; normal desktop sessions on `X11` or `Wayland` are covered by manual beta smoke validation, and Linux beta prereleases are published separately under `linux-beta-v*` tags. There is still no stable Linux release, installer, AppImage, or Flatpak. macOS is not supported.
-
-### Where is the configuration stored?
-
-If `state.json` already exists next to the executable, the app keeps using that legacy sidecar file. Otherwise, new Windows installs default to `%LOCALAPPDATA%\CpuAffinityTool\state.json`.
-
-## Troubleshooting
-
-### The app I want is not listed in Add installed...
-
-Use **Add file...** instead. On Windows, **Add installed...** is a launch-safe subset of Start-backed apps. On Linux beta, it primarily uses desktop entries and only surfaces matching `PATH` executables when you search, so it may still miss portable apps or targets outside normal launcher and shell paths.
-
-### Affinity or priority is not applied
-
-- Make sure you launched the target from CPU Affinity Tool
-- Keep **Monitoring active** if the app changes settings after launch
-- Verify that you accepted the UAC prompt and the tool is running elevated
-
-### The application overrides the configured settings
-
-Some applications spawn helper processes or reset their own settings. Active monitoring is designed to correct that, but it may not cover every application behavior.
-
-### Windows security software or antivirus prompts appear
-
-The current release is a Windows executable that requests elevation. Verify that you downloaded it from the official release page and that the prompt matches the expected executable path.
-
-### Shortcut or launch path behavior looks wrong
-
-Try **Add file...** with the direct executable or launcher path. For installed apps, try **Add installed...** first and fall back to **Add file...** if the target is not listed correctly.
-
-Saved-rule desktop shortcuts are Windows-only in the current release path. They target the current `cpu-affinity-tool.exe` path, so recreate them after moving a portable app folder. Shortcut creation uses the Desktop folder for the current elevated Windows token; if you start the tool with credential-over-the-shoulder UAC using another administrator account, the shortcut can be created on that account's Desktop instead of the unelevated user's Desktop. Linux beta builds do not expose the shortcut control or generate `.desktop` launchers.
+- **Windows x64** is the stable release platform. The current renderer uses DirectX 12, and the release requires administrator approval. Saved-rule shortcuts may show the same UAC prompt.
+- **Linux** has a separate desktop beta for x86_64 glibc, with X11/Wayland sessions and [beta prereleases](https://github.com/middaysan/cpu-affinity-tool/releases). System Tweaks and production MCP are Windows-only; Linux does not have full Windows feature parity. macOS is unsupported.
+- New Windows configurations use `%LOCALAPPDATA%\CpuAffinityTool\state.json`. An existing `state.json` beside the EXE keeps its legacy location. **Logs → Data folder** opens the active directory.
+- Saving with the current build upgrades older configuration formats. Keep a backup before switching builds; downgrading after a current-format save is unsupported.
+- Logs and available crash reports stay local and are not uploaded automatically. Review them before sharing. CPU history is retained in memory and saved to a file only when you export it.
 
 ## Build from source
 
-Supported build targets:
+Use **Rust 1.95 or newer**. Windows builds need the MSVC C++ build tools and Windows SDK.
 
-- Windows release path
-- Linux desktop beta path from source
-- Rust stable toolchain
-
-Windows release build:
-
-```bash
-cargo build --release --features windows --bin cpu-affinity-tool
+```powershell
+# Windows production EXE and matching debug symbols
+pwsh -NoProfile -File scripts/build-windows-release.ps1
 ```
 
-Linux beta run/build:
+The executable is written to `target/release/cpu-affinity-tool.exe`.
 
-```bash
+```sh
+# Linux desktop beta
 cargo run --features linux --bin cpu-affinity-tool-linux
-cargo build --release --features linux --bin cpu-affinity-tool-linux
 ```
 
-Linux beta notes:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dependencies and validation commands, and the [release process](docs/release-process.md) for packaging.
 
-- supported target: `x86_64` Linux with `glibc`
-- expected environment for manual beta smoke: desktop session on `X11` or `Wayland`
-- Linux CI and prerelease builds run on pinned `ubuntu-24.04` GitHub-hosted runners
-- Debian/Ubuntu-like systems may need `libclang-dev libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev` before building
-- Linux beta prereleases are published separately under `linux-beta-v*` tags as a raw binary, `tar.gz`, and `SHA256SUMS.txt`
-- Linux still does not have a stable published release artifact
-- tray/taskbar/focus behavior still does not have Windows parity
+## Documentation
 
-Windows-only Event Log diagnostics are enabled by default and perform one bounded local lookup of recent `Application Error` records after the first rendered frame, with at most one delayed retry when that lookup succeeds but finds nothing. Logs shows only a sanitized Record ID, UTC time, exception code, faulting-module basename, module version, faulting offset, and process creation time when Windows supplied valid values. The lookup is not proof of a crash cause, never uploads data, and can be disabled from Logs. It does not create dumps, modify Windows Error Reporting, or change registry settings.
+- [Troubleshooting, data locations, shortcuts and crash reports](SUPPORT.md)
+- [Local agent setup and MCP API](docs/mcp.md)
+- [System Tweaks controls and Undo](docs/system-tweaks.md)
+- [Affinity: uses and limits](docs/why.md) · [Tool comparison](docs/comparison.md)
+- [Release notes](CHANGELOG.md) · [Reported issues](https://github.com/middaysan/cpu-affinity-tool/issues)
+- [Contributing](CONTRIBUTING.md) · [Private security reporting](SECURITY.md)
 
-Useful verification commands:
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings
-cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings
-cargo test --manifest-path libs/os_api/Cargo.toml
-cargo test --features windows --bin cpu-affinity-tool
-cargo build --release --features windows --bin cpu-affinity-tool
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-crash-reports.ps1
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-tuning-recovery.ps1
-cargo test --features linux --bin cpu-affinity-tool-linux
-cargo build --release --features linux --bin cpu-affinity-tool-linux
-```
-
-Expected Windows artifact:
-
-```text
-target/release/cpu-affinity-tool.exe
-```
-
-For release-process details, see [docs/release-process.md](docs/release-process.md).
-
-## Contributing, Support, Security, License
-
-- Contributing guide: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Support and diagnostics: [SUPPORT.md](SUPPORT.md)
-- Security reporting: [SECURITY.md](SECURITY.md)
-- License: [LICENSE](LICENSE)
-- Bundled Inter font license: [assets/fonts/LICENSE.txt](assets/fonts/LICENSE.txt)
+[MIT license](LICENSE). The interface uses [Inter](assets/fonts/README.md), distributed under the [SIL Open Font License](assets/fonts/LICENSE.txt).

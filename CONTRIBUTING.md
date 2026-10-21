@@ -2,25 +2,59 @@
 
 Thanks for your interest in improving CPU Affinity Tool.
 
-This project is currently a Windows-first utility. Linux code exists in the repository, but it is still experimental and is not part of the supported release contract.
+Windows is the primary stable release platform. Linux has a separate x86_64 glibc desktop beta, with CI build/test coverage and manual X11/Wayland smoke checks. System Tweaks and production MCP remain Windows-only.
 
 ## Build basics
 
-Use Rust stable and build the Windows binary with:
+Use Rust **1.95 or newer**. On Windows, install the MSVC C++ build tools and Windows SDK, then build the production EXE and matching PDB with:
 
-```bash
-cargo build --release --bin cpu-affinity-tool
+```powershell
+pwsh -NoProfile -File scripts/build-windows-release.ps1
 ```
 
-Useful verification commands:
+For a Windows development session:
 
-```bash
+```powershell
+cargo run --features windows --bin cpu-affinity-tool
+```
+
+For the Linux desktop beta:
+
+```sh
+cargo run --features linux --bin cpu-affinity-tool-linux
+cargo build --release --features linux --bin cpu-affinity-tool-linux
+```
+
+Debian/Ubuntu-like systems may need `libclang-dev libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev`. Linux CI and beta prerelease builds use pinned Ubuntu 24.04 runners. Tray, taskbar and focus behavior does not have full Windows parity.
+
+## Validation
+
+Run formatting and the native library tests on the relevant platform:
+
+```sh
 cargo fmt --all -- --check
-cargo clippy -- -D warnings
 cargo test --manifest-path libs/os_api/Cargo.toml
-cargo test
-cargo build --release
 ```
+
+On Windows:
+
+```powershell
+cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings
+cargo test --features windows --bin cpu-affinity-tool
+pwsh -NoProfile -File scripts/build-windows-release.ps1
+pwsh -NoProfile -File scripts/test-windows-pdb-verifier.ps1 -ExePath target/release/cpu-affinity-tool.exe -PdbPath target/release/cpu_affinity_tool.pdb
+pwsh -NoProfile -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe
+```
+
+On Linux:
+
+```sh
+cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings
+cargo test --features linux --bin cpu-affinity-tool-linux
+cargo build --release --features linux --bin cpu-affinity-tool-linux
+```
+
+The [release checklist](docs/release-checklist.md) adds native crash/recovery probes, dependency audits, vendor regressions and manual Windows smoke. The [Linux beta checklist](docs/linux-beta-release-checklist.md) covers its separate prerelease path. See [release process](docs/release-process.md) for version, tag and artifact requirements.
 
 ## Reporting bugs
 
