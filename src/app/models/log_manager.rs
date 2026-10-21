@@ -178,6 +178,7 @@ impl LogManager {
         self.entries.clear();
         self.epoch = self.epoch.wrapping_add(1);
     }
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
     pub(crate) fn epoch(&self) -> u64 {
         self.epoch
     }
