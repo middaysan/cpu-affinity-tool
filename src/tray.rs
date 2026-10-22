@@ -12,7 +12,6 @@ pub enum TrayCmd {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub struct RestoreRequest {
     pub requested_at: std::time::Instant,
-    pub input_tick: Option<u32>,
 }
 
 impl RestoreRequest {
@@ -20,10 +19,6 @@ impl RestoreRequest {
     pub fn now() -> Self {
         Self {
             requested_at: std::time::Instant::now(),
-            #[cfg(target_os = "windows")]
-            input_tick: os_api::OS::last_input_tick(),
-            #[cfg(not(target_os = "windows"))]
-            input_tick: None,
         }
     }
 }
@@ -38,8 +33,35 @@ fn menu_command(id: &str) -> Option<TrayCmd> {
 }
 
 #[cfg(any(test, target_os = "windows"))]
-fn tray_command_for_double_click(left_button: bool) -> Option<TrayCmd> {
-    left_button.then(|| TrayCmd::Show(RestoreRequest::now()))
+#[derive(Clone, Copy)]
+enum TrayPointerEvent {
+    LeftPress,
+    LeftDoublePress,
+    LeftRelease,
+    OtherButton,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Default)]
+struct TrayDoubleClick(std::sync::atomic::AtomicBool);
+
+#[cfg(any(test, target_os = "windows"))]
+impl TrayDoubleClick {
+    fn command(&self, event: TrayPointerEvent) -> Option<TrayCmd> {
+        use std::sync::atomic::Ordering::Relaxed;
+        match event {
+            TrayPointerEvent::LeftDoublePress => self.0.store(true, Relaxed),
+            TrayPointerEvent::LeftRelease => {
+                if self.0.swap(false, Relaxed) {
+                    return Some(TrayCmd::Show(RestoreRequest::now()));
+                }
+            }
+            TrayPointerEvent::LeftPress | TrayPointerEvent::OtherButton => {
+                self.0.store(false, Relaxed)
+            }
+        }
+        None
+    }
 }
 
 pub struct TrayRuntime {
@@ -56,7 +78,7 @@ impl TrayRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::{menu_command, tray_command_for_double_click, TrayCmd};
+    use super::{menu_command, TrayCmd, TrayDoubleClick, TrayPointerEvent};
 
     #[test]
     fn menu_events_map_to_typed_commands() {
@@ -66,12 +88,44 @@ mod tests {
     }
 
     #[test]
+    fn left_double_press_must_not_restore_before_button_release() {
+        assert!(
+            TrayDoubleClick::default()
+                .command(TrayPointerEvent::LeftDoublePress)
+                .is_none(),
+            "WM_LBUTTONDBLCLK is the second DOWN, not the completed gesture"
+        );
+    }
+
+    #[test]
     fn only_left_double_click_restores_the_window() {
+        let gesture = TrayDoubleClick::default();
+        for event in [
+            TrayPointerEvent::LeftPress,
+            TrayPointerEvent::LeftRelease,
+            TrayPointerEvent::LeftDoublePress,
+        ] {
+            assert!(gesture.command(event).is_none());
+        }
+        let released_at = std::time::Instant::now();
         assert!(matches!(
-            tray_command_for_double_click(true),
-            Some(TrayCmd::Show(_))
+            gesture.command(TrayPointerEvent::LeftRelease),
+            Some(TrayCmd::Show(request)) if request.requested_at >= released_at
         ));
-        assert_eq!(tray_command_for_double_click(false), None);
+        assert!(gesture.command(TrayPointerEvent::LeftRelease).is_none());
+    }
+
+    #[test]
+    fn another_press_cancels_an_unfinished_double_click() {
+        for cancel in [TrayPointerEvent::LeftPress, TrayPointerEvent::OtherButton] {
+            let gesture = TrayDoubleClick::default();
+            assert!(gesture.command(TrayPointerEvent::LeftDoublePress).is_none());
+            assert!(gesture.command(cancel).is_none());
+            assert!(
+                gesture.command(TrayPointerEvent::LeftRelease).is_none(),
+                "a missing release must not turn a later single click into Restore"
+            );
+        }
     }
 }
 
@@ -81,7 +135,7 @@ mod sys {
     use std::sync::mpsc;
     use tray_icon::{
         menu::{Menu, MenuEvent, MenuId, MenuItem},
-        Icon, MouseButton, TrayIconBuilder, TrayIconEvent,
+        Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
     };
 
     /// Initializes the tray. The application shell owns all window operations.
@@ -122,6 +176,8 @@ mod sys {
             let ctx = ctx.clone();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 if let Some(command) = super::menu_command(event.id.0.as_str()) {
+                    #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+                    eprintln!("DEBUG: [Tray gesture] menu {command:?}");
                     let _ = tx.send(command);
                     ctx.request_repaint();
                 }
@@ -131,10 +187,33 @@ mod sys {
         {
             let tx = tx.clone();
             let ctx = ctx.clone();
+            let gesture = super::TrayDoubleClick::default();
             TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-                if let TrayIconEvent::DoubleClick { button, .. } = event {
-                    let left_button = matches!(button, MouseButton::Left);
-                    if let Some(command) = super::tray_command_for_double_click(left_button) {
+                use super::TrayPointerEvent as Pointer;
+                let pointer = match event {
+                    TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } => Some(Pointer::LeftDoublePress),
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Down,
+                        ..
+                    } => Some(Pointer::LeftPress),
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } => Some(Pointer::LeftRelease),
+                    TrayIconEvent::DoubleClick { .. } | TrayIconEvent::Click { .. } => {
+                        Some(Pointer::OtherButton)
+                    }
+                    _ => None,
+                };
+                if let Some(pointer) = pointer {
+                    if let Some(command) = gesture.command(pointer) {
+                        #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+                        eprintln!("DEBUG: [Tray gesture] left double-click released {command:?}");
                         let _ = tx.send(command);
                         ctx.request_repaint();
                     }

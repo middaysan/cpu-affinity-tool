@@ -6,11 +6,8 @@ use std::path::{Path, PathBuf};
 
 const TEMP_SHORTCUT_ATTEMPTS: usize = 100;
 #[cfg(target_os = "windows")]
-pub fn activate_own_window(
-    hwnd: windows::Win32::Foundation::HWND,
-    tick: u32,
-) -> os_api::WindowActivation {
-    os_api::OS::activate_own_window(hwnd, tick)
+pub fn activate_own_window(hwnd: windows::Win32::Foundation::HWND) -> os_api::WindowActivation {
+    os_api::OS::activate_own_window(hwnd)
 }
 pub(crate) fn foreground_process() -> Result<(usize, u32), String> {
     #[cfg(windows)]

@@ -5,16 +5,14 @@ use std::time::{Duration, Instant};
 pub(super) struct RestoreFocus {
     deadline: Instant,
     next: Instant,
-    input_tick: u32,
     remaining: u8,
 }
 
 impl RestoreFocus {
-    pub fn new(now: Instant, input_tick: u32) -> Self {
+    pub fn new(now: Instant) -> Self {
         Self {
             deadline: now + Duration::from_millis(300),
-            next: now + Duration::from_millis(16),
-            input_tick,
+            next: now,
             remaining: 2,
         }
     }
@@ -23,7 +21,7 @@ impl RestoreFocus {
     pub fn poll(
         &mut self,
         now: Instant,
-        activate: impl FnOnce(u32) -> WindowActivation,
+        activate: impl FnOnce() -> WindowActivation,
     ) -> Option<Duration> {
         if now >= self.deadline {
             return None;
@@ -31,7 +29,7 @@ impl RestoreFocus {
         if now < self.next {
             return Some(self.next - now);
         }
-        let delay = match activate(self.input_tick) {
+        let delay = match activate() {
             WindowActivation::Foreground | WindowActivation::Cancelled => return None,
             WindowActivation::NotReady => Duration::from_millis(25),
             WindowActivation::Denied => {
@@ -52,31 +50,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ready_restore_attempts_activation_in_the_same_gui_turn() {
+        let now = Instant::now();
+        let mut focus = RestoreFocus::new(now);
+        let mut attempted = false;
+        assert_eq!(
+            focus.poll(now, || {
+                attempted = true;
+                WindowActivation::Foreground
+            }),
+            None
+        );
+        assert!(
+            attempted,
+            "do not add a frame delay before activating an already-restored native window"
+        );
+    }
+
+    #[test]
     fn waits_for_native_restore_and_retries_denial_only_once() {
         let now = Instant::now();
-        let mut focus = RestoreFocus::new(now, 42);
-        assert_eq!(
-            focus.poll(now, |_| panic!("viewport commands not applied yet")),
-            Some(Duration::from_millis(16))
-        );
+        let mut focus = RestoreFocus::new(now);
+        assert!(focus.poll(now, || { WindowActivation::NotReady }).is_some());
         assert!(focus
-            .poll(now + Duration::from_millis(16), |tick| {
-                assert_eq!(tick, 42);
-                WindowActivation::NotReady
-            })
-            .is_some());
-        assert!(focus
-            .poll(now + Duration::from_millis(41), |_| {
+            .poll(now + Duration::from_millis(25), || {
                 WindowActivation::Denied
             })
             .is_some());
         assert!(focus
-            .poll(now + Duration::from_millis(50), |_| panic!(
-                "retry too soon"
-            ))
+            .poll(now + Duration::from_millis(50), || panic!("retry too soon"))
             .is_some());
         assert_eq!(
-            focus.poll(now + Duration::from_millis(116), |_| {
+            focus.poll(now + Duration::from_millis(100), || {
                 WindowActivation::Denied
             }),
             None
@@ -84,19 +89,16 @@ mod tests {
     }
 
     #[test]
-    fn success_later_user_input_and_expiry_end_activation() {
+    fn success_invalid_window_and_expiry_end_activation() {
         for outcome in [WindowActivation::Foreground, WindowActivation::Cancelled] {
             let now = Instant::now();
-            let mut focus = RestoreFocus::new(now, 1);
-            assert_eq!(
-                focus.poll(now + Duration::from_millis(16), |_| outcome),
-                None
-            );
+            let mut focus = RestoreFocus::new(now);
+            assert_eq!(focus.poll(now, || outcome), None);
         }
         let now = Instant::now();
-        let mut focus = RestoreFocus::new(now, 1);
+        let mut focus = RestoreFocus::new(now);
         assert_eq!(
-            focus.poll(now + Duration::from_millis(300), |_| panic!(
+            focus.poll(now + Duration::from_millis(300), || panic!(
                 "expired request must not steal focus"
             )),
             None

@@ -918,14 +918,12 @@ mod tests {
     }
 
     #[test]
-    fn tray_queue_preserves_the_latest_gesture_time_and_input_guard() {
+    fn tray_queue_preserves_the_latest_gesture_time() {
         let first = crate::tray::RestoreRequest {
             requested_at: std::time::Instant::now(),
-            input_tick: Some(41),
         };
         let last = crate::tray::RestoreRequest {
             requested_at: first.requested_at + std::time::Duration::from_millis(1),
-            input_tick: Some(42),
         };
         assert_eq!(
             reduce_tray_commands(false, [TrayCmd::Show(first), TrayCmd::Show(last)]),
@@ -1077,7 +1075,6 @@ mod tests {
             let mut app = App::new_for_test(sample_state());
             app.restore_focus = Some(super::super::restore_focus::RestoreFocus::new(
                 std::time::Instant::now(),
-                0,
             ));
             let ctx = egui::Context::default();
             let mut output = ctx.run_ui(Default::default(), |ui| {
@@ -1305,6 +1302,19 @@ mod tests {
                     2 if elapsed >= Duration::from_millis(500) => {
                         self.shell
                             .show_from_tray(ctx, crate::tray::RestoreRequest::now());
+                        assert!(
+                            unsafe { IsWindowVisible(self.shell.hwnd.unwrap()) }.as_bool(),
+                            "restore native visibility before returning to frame rendering"
+                        );
+                        assert!(
+                            !unsafe {
+                                windows::Win32::UI::WindowsAndMessaging::IsIconic(
+                                    self.shell.hwnd.unwrap(),
+                                )
+                            }
+                            .as_bool(),
+                            "the root must be unminimized in the Restore GUI turn"
+                        );
                         self.phase = 3;
                     }
                     3 if elapsed >= Duration::from_millis(800)
@@ -2060,6 +2070,11 @@ impl App {
     }
 
     fn show_from_tray(&mut self, ctx: &egui::Context, request: RestoreRequest) {
+        #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+        eprintln!(
+            "DEBUG: [Tray focus] queued_age_ms={:.2}",
+            request.requested_at.elapsed().as_secs_f64() * 1000.0
+        );
         self.startup_visibility_pending = false;
         self.is_hidden = false;
         // Winit can deliver the previous minimized=true once more before applying
@@ -2074,9 +2089,16 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         #[cfg(target_os = "windows")]
         {
-            self.restore_focus = request
-                .input_tick
-                .map(|tick| super::restore_focus::RestoreFocus::new(request.requested_at, tick));
+            // Apply through the retained Winit owner before painting another frame.
+            // Waiting for queued viewport commands delayed the foreground attempt.
+            if let Some(window) = &self.winit_window {
+                window.set_visible(true);
+                window.set_minimized(false);
+            }
+            self.restore_focus = Some(super::restore_focus::RestoreFocus::new(
+                request.requested_at,
+            ));
+            self.poll_restore_focus(ctx);
         }
         #[cfg(not(target_os = "windows"))]
         let _ = request;
@@ -2094,10 +2116,14 @@ impl App {
         let Some(focus) = &mut self.restore_focus else {
             return;
         };
-        let delay = focus.poll(std::time::Instant::now(), |tick| {
-            self.hwnd
-                .map(|hwnd| crate::app::adapters::os::activate_own_window(hwnd, tick))
-                .unwrap_or(os_api::WindowActivation::Cancelled)
+        let delay = focus.poll(std::time::Instant::now(), || {
+            let outcome = self
+                .hwnd
+                .map(crate::app::adapters::os::activate_own_window)
+                .unwrap_or(os_api::WindowActivation::Cancelled);
+            #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+            eprintln!("DEBUG: [Tray focus] native={outcome:?}");
+            outcome
         });
         if let Some(delay) = delay {
             ctx.request_repaint_after(delay);
