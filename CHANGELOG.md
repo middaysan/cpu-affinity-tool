@@ -6,6 +6,17 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Tray Restore checks actual Windows foreground ownership after the native window is visible and restored, with a short bounded retry that stops on later user input, hide or exit.
+- Group CPU lists use the available header width instead of stopping after eight entries; the hover text retains the full list.
+- Parked CPU tiles retain their neutral background. Only the parking status is yellow, and its help explains the displayed sample time and why interval load can be nonzero.
+
+### Changed
+
+- Windows no longer includes the unused Glow/OpenGL renderer; Linux keeps its existing Glow backend.
+- Updated the README lead screenshot to the supplied side-by-side groups and CPU selection view.
+
 ## [1.7.0] - 2026-10-22
 
 ### Added

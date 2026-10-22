@@ -8,9 +8,9 @@ Set up a game and its background apps once, instead of repeating the changes in 
 
 **New in [1.7.0](https://github.com/middaysan/cpu-affinity-tool/releases/tag/v1.7.0):** CPU/process history with PNG and CSV export, System Tweaks, and optional local AI-agent control through MCP.
 
-![Affinity groups with saved application rules and live CPU meters](assets/screenshot.png)
+![Affinity groups and CPU topology selection shown side by side](assets/screenshot.png)
 
-*Example groups and a real demo workload, captured during 1.7.0 development. CPU selections depend on your processor. [Light theme](assets/screenshots/main-light.png).*
+*Affinity groups and the CPU selection screen, shown side by side. CPU selections depend on your processor. [Light theme](assets/screenshots/main-light.png).*
 
 ## Getting started
 

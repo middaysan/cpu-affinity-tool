@@ -4,14 +4,34 @@ use std::sync::mpsc::Receiver;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCmd {
-    Show,
+    Show(RestoreRequest),
     Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub struct RestoreRequest {
+    pub requested_at: std::time::Instant,
+    pub input_tick: Option<u32>,
+}
+
+impl RestoreRequest {
+    #[cfg(any(test, target_os = "windows"))]
+    pub fn now() -> Self {
+        Self {
+            requested_at: std::time::Instant::now(),
+            #[cfg(target_os = "windows")]
+            input_tick: os_api::OS::last_input_tick(),
+            #[cfg(not(target_os = "windows"))]
+            input_tick: None,
+        }
+    }
 }
 
 #[cfg(any(test, target_os = "windows"))]
 fn menu_command(id: &str) -> Option<TrayCmd> {
     match id {
-        "1" => Some(TrayCmd::Show),
+        "1" => Some(TrayCmd::Show(RestoreRequest::now())),
         "3" => Some(TrayCmd::Quit),
         _ => None,
     }
@@ -19,7 +39,7 @@ fn menu_command(id: &str) -> Option<TrayCmd> {
 
 #[cfg(any(test, target_os = "windows"))]
 fn tray_command_for_double_click(left_button: bool) -> Option<TrayCmd> {
-    left_button.then_some(TrayCmd::Show)
+    left_button.then(|| TrayCmd::Show(RestoreRequest::now()))
 }
 
 pub struct TrayRuntime {
@@ -40,14 +60,17 @@ mod tests {
 
     #[test]
     fn menu_events_map_to_typed_commands() {
-        assert_eq!(menu_command("1"), Some(TrayCmd::Show));
+        assert!(matches!(menu_command("1"), Some(TrayCmd::Show(_))));
         assert_eq!(menu_command("3"), Some(TrayCmd::Quit));
         assert_eq!(menu_command("unknown"), None);
     }
 
     #[test]
     fn only_left_double_click_restores_the_window() {
-        assert_eq!(tray_command_for_double_click(true), Some(TrayCmd::Show));
+        assert!(matches!(
+            tray_command_for_double_click(true),
+            Some(TrayCmd::Show(_))
+        ));
         assert_eq!(tray_command_for_double_click(false), None);
     }
 }

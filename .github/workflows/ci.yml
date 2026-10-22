@@ -56,6 +56,9 @@ jobs:
       - name: Check debug MCP protocol
         run: python scripts/test_cpu_affinity_mcp.py
 
+      - name: Check platform renderer dependencies
+        run: python scripts/test-renderer-dependencies.py
+
       - name: Run headless debug MCP tests
         run: cargo test --features windows,debug-mcp,diagnostics-test-controls --bin cpu-affinity-tool debug_mcp
 

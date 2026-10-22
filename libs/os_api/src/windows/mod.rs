@@ -15,6 +15,7 @@ mod self_affinity;
 mod shell;
 pub(crate) mod tuning;
 mod window;
+pub use window::WindowActivation;
 pub(crate) mod windows_tweaks;
 
 pub use event_log::WindowsApplicationFailure;

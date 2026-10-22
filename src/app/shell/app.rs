@@ -20,7 +20,7 @@ use crate::app::shell::presenters::{
 use crate::app::shell::sessions::ShortcutCreationRole;
 use crate::app::shell::{GroupRoute, WindowRoute};
 use crate::app::startup::StartupIntent;
-use crate::tray::{init_tray, TrayCmd, TrayRuntime};
+use crate::tray::{init_tray, RestoreRequest, TrayCmd, TrayRuntime};
 use eframe::egui;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -52,6 +52,8 @@ pub struct App {
     is_hidden: bool,
     startup_visibility_pending: bool,
     restore_pending: bool,
+    #[cfg(target_os = "windows")]
+    restore_focus: Option<super::restore_focus::RestoreFocus>,
 }
 
 const MONITOR_EVENT_GUI_DRAIN_LIMIT: usize = 64;
@@ -131,7 +133,7 @@ fn start_minimized_requires_a_reachable_tray() {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayCommandAction {
     None,
-    Show,
+    Show(RestoreRequest),
     Quit,
 }
 
@@ -146,9 +148,9 @@ fn reduce_tray_commands(
     let mut action = TrayCommandAction::None;
     for command in commands {
         match command {
-            TrayCmd::Show => {
+            TrayCmd::Show(request) => {
                 if action != TrayCommandAction::Quit {
-                    action = TrayCommandAction::Show;
+                    action = TrayCommandAction::Show(request);
                 }
             }
             TrayCmd::Quit => action = TrayCommandAction::Quit,
@@ -279,10 +281,10 @@ impl App {
             println!("DEBUG: [Main Thread] App::new started");
             println!(
                 "DEBUG: [Eframe] Backend: {}",
-                if cc.gl.is_some() {
-                    "Glow (OpenGL)"
+                if cfg!(target_os = "windows") {
+                    "WGPU (DX12)"
                 } else {
-                    "WGPU"
+                    "Glow (OpenGL)"
                 }
             );
             println!(
@@ -394,6 +396,8 @@ impl App {
                 is_hidden: start_hidden,
                 startup_visibility_pending: true,
                 restore_pending: false,
+                #[cfg(target_os = "windows")]
+                restore_focus: None,
             },
             Err(e) => {
                 state
@@ -422,6 +426,8 @@ impl App {
                     is_hidden: false,
                     startup_visibility_pending: true,
                     restore_pending: false,
+                    #[cfg(target_os = "windows")]
+                    restore_focus: None,
                 }
             }
         }
@@ -561,6 +567,8 @@ impl App {
             is_hidden: false,
             startup_visibility_pending: false,
             restore_pending: false,
+            #[cfg(target_os = "windows")]
+            restore_focus: None,
         }
     }
 }
@@ -614,6 +622,8 @@ impl eframe::App for App {
             }
         }
         self.handle_tray_events(ctx);
+        #[cfg(target_os = "windows")]
+        self.poll_restore_focus(ctx);
         #[cfg(all(target_os = "windows", feature = "windows"))]
         self.state.poll_mcp(ctx);
         if self.closing_requested {
@@ -757,7 +767,7 @@ impl eframe::App for App {
     }
 
     #[cfg(target_os = "windows")]
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         // The backend can wait in driver cleanup after this callback returns.
         self.hide_native_window();
     }
@@ -895,20 +905,55 @@ mod tests {
 
     #[test]
     fn tray_command_reducer_coalesces_show_requests() {
+        assert!(matches!(
+            reduce_tray_commands(
+                false,
+                [
+                    TrayCmd::Show(crate::tray::RestoreRequest::now()),
+                    TrayCmd::Show(crate::tray::RestoreRequest::now())
+                ]
+            ),
+            TrayCommandAction::Show(_)
+        ));
+    }
+
+    #[test]
+    fn tray_queue_preserves_the_latest_gesture_time_and_input_guard() {
+        let first = crate::tray::RestoreRequest {
+            requested_at: std::time::Instant::now(),
+            input_tick: Some(41),
+        };
+        let last = crate::tray::RestoreRequest {
+            requested_at: first.requested_at + std::time::Duration::from_millis(1),
+            input_tick: Some(42),
+        };
         assert_eq!(
-            reduce_tray_commands(false, [TrayCmd::Show, TrayCmd::Show]),
-            TrayCommandAction::Show
+            reduce_tray_commands(false, [TrayCmd::Show(first), TrayCmd::Show(last)]),
+            TrayCommandAction::Show(last)
         );
     }
 
     #[test]
     fn tray_command_reducer_makes_quit_terminal_regardless_of_order() {
         assert_eq!(
-            reduce_tray_commands(false, [TrayCmd::Show, TrayCmd::Quit, TrayCmd::Show]),
+            reduce_tray_commands(
+                false,
+                [
+                    TrayCmd::Show(crate::tray::RestoreRequest::now()),
+                    TrayCmd::Quit,
+                    TrayCmd::Show(crate::tray::RestoreRequest::now())
+                ]
+            ),
             TrayCommandAction::Quit
         );
         assert_eq!(
-            reduce_tray_commands(false, [TrayCmd::Quit, TrayCmd::Show]),
+            reduce_tray_commands(
+                false,
+                [
+                    TrayCmd::Quit,
+                    TrayCmd::Show(crate::tray::RestoreRequest::now())
+                ]
+            ),
             TrayCommandAction::Quit
         );
     }
@@ -916,7 +961,7 @@ mod tests {
     #[test]
     fn tray_command_reducer_ignores_later_show_after_quit_is_latched() {
         assert_eq!(
-            reduce_tray_commands(true, [TrayCmd::Show]),
+            reduce_tray_commands(true, [TrayCmd::Show(crate::tray::RestoreRequest::now())]),
             TrayCommandAction::Quit
         );
         assert_eq!(reduce_tray_commands(false, []), TrayCommandAction::None);
@@ -937,7 +982,7 @@ mod tests {
         assert!(!super::should_hide_to_tray(true, true, None, true));
         let mut app = App::new_for_test(sample_state());
         let ctx = egui::Context::default();
-        app.show_from_tray(&ctx);
+        app.show_from_tray(&ctx, crate::tray::RestoreRequest::now());
         assert!(app.restore_pending);
         let mut input = egui::RawInput::default();
         input
@@ -1007,16 +1052,48 @@ mod tests {
         app.is_hidden = true;
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(Default::default(), |ui| {
-            app.handle_tray_commands(ui.ctx(), [TrayCmd::Show]);
+            app.handle_tray_commands(
+                ui.ctx(),
+                [TrayCmd::Show(crate::tray::RestoreRequest::now())],
+            );
         });
         output.textures_delta.clear();
         let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
         assert!(commands.contains(&egui::ViewportCommand::Visible(true)));
         assert!(commands.contains(&egui::ViewportCommand::Minimized(false)));
+        #[cfg(target_os = "windows")]
+        assert!(!commands.contains(&egui::ViewportCommand::Focus),
+            "Windows activation must use native readback after restoration, bypassing cached Winit focus");
         assert!(!commands
             .iter()
             .any(|c| matches!(c, egui::ViewportCommand::OuterPosition(_))));
         assert!(!app.is_hidden);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn hiding_or_closing_cancels_pending_native_activation() {
+        for close in [false, true] {
+            let mut app = App::new_for_test(sample_state());
+            app.restore_focus = Some(super::super::restore_focus::RestoreFocus::new(
+                std::time::Instant::now(),
+                0,
+            ));
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                if close {
+                    app.begin_close(ui.ctx());
+                } else {
+                    app.hide_to_tray(ui.ctx());
+                }
+                app.poll_restore_focus(ui.ctx());
+            });
+            output.textures_delta.clear();
+            assert!(app.restore_focus.is_none());
+            assert!(!output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .contains(&egui::ViewportCommand::Focus));
+        }
     }
 
     #[test]
@@ -1160,7 +1237,7 @@ mod tests {
         assert!(app.handle_tray_commands(&ctx, [TrayCmd::Quit]));
         assert!(app.closing_requested);
 
-        assert!(app.handle_tray_commands(&ctx, [TrayCmd::Show]));
+        assert!(app.handle_tray_commands(&ctx, [TrayCmd::Show(crate::tray::RestoreRequest::now())]));
         assert!(app.is_hidden);
     }
 
@@ -1226,7 +1303,8 @@ mod tests {
                         self.phase = 2;
                     }
                     2 if elapsed >= Duration::from_millis(500) => {
-                        self.shell.show_from_tray(ctx);
+                        self.shell
+                            .show_from_tray(ctx, crate::tray::RestoreRequest::now());
                         self.phase = 3;
                     }
                     3 if elapsed >= Duration::from_millis(800)
@@ -1247,8 +1325,8 @@ mod tests {
                 ui.label("Isolated minimize/restore/close regression");
             }
 
-            fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
-                self.shell.on_exit(gl);
+            fn on_exit(&mut self) {
+                self.shell.on_exit();
                 let visible = unsafe { IsWindowVisible(self.shell.hwnd.unwrap()) }.as_bool();
                 *self.result.lock().unwrap() = Some((self.phase, visible));
             }
@@ -1766,6 +1844,7 @@ impl App {
             self.closing_requested = true;
             #[cfg(target_os = "windows")]
             {
+                self.restore_focus = None;
                 self.is_hidden = true;
                 self.hide_native_window();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -1801,8 +1880,8 @@ impl App {
     ) -> bool {
         match reduce_tray_commands(self.closing_requested, commands) {
             TrayCommandAction::None => false,
-            TrayCommandAction::Show => {
-                self.show_from_tray(ctx);
+            TrayCommandAction::Show(request) => {
+                self.show_from_tray(ctx, request);
                 false
             }
             TrayCommandAction::Quit => {
@@ -1963,6 +2042,10 @@ impl App {
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         self.is_hidden = true;
         self.restore_pending = false;
+        #[cfg(target_os = "windows")]
+        {
+            self.restore_focus = None;
+        }
         #[cfg(all(target_os = "windows", feature = "windows"))]
         self.state.poll_cpu_load(false);
 
@@ -1976,7 +2059,7 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 
-    fn show_from_tray(&mut self, ctx: &egui::Context) {
+    fn show_from_tray(&mut self, ctx: &egui::Context, request: RestoreRequest) {
         self.startup_visibility_pending = false;
         self.is_hidden = false;
         // Winit can deliver the previous minimized=true once more before applying
@@ -1989,8 +2072,38 @@ impl App {
         self.set_taskbar_visible(true);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        #[cfg(target_os = "windows")]
+        {
+            self.restore_focus = request
+                .input_tick
+                .map(|tick| super::restore_focus::RestoreFocus::new(request.requested_at, tick));
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = request;
+        #[cfg(not(target_os = "windows"))]
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         ctx.request_repaint();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn poll_restore_focus(&mut self, ctx: &egui::Context) {
+        if self.is_hidden || self.closing_requested {
+            self.restore_focus = None;
+            return;
+        }
+        let Some(focus) = &mut self.restore_focus else {
+            return;
+        };
+        let delay = focus.poll(std::time::Instant::now(), |tick| {
+            self.hwnd
+                .map(|hwnd| crate::app::adapters::os::activate_own_window(hwnd, tick))
+                .unwrap_or(os_api::WindowActivation::Cancelled)
+        });
+        if let Some(delay) = delay {
+            ctx.request_repaint_after(delay);
+        } else {
+            self.restore_focus = None;
+        }
     }
 
     #[cfg(target_os = "windows")]

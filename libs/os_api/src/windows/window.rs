@@ -11,6 +11,54 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::BOOL;
 
 use super::OS;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowActivation {
+    Foreground,
+    NotReady,
+    Denied,
+    Cancelled,
+}
+
+impl OS {
+    /// Snapshot the user input preceding an explicit Restore request.
+    pub fn last_input_tick() -> Option<u32> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+        let mut info = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { GetLastInputInfo(&mut info).as_bool().then_some(info.dwTime) }
+    }
+
+    /// Activate only a restored window owned by this GUI thread. Never changes
+    /// geometry, topmost state or input attachment. Windows may refuse activation.
+    pub fn activate_own_window(hwnd: HWND, input_tick: u32) -> WindowActivation {
+        use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+        unsafe {
+            let mut pid = 0;
+            let thread = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if thread != GetCurrentThreadId() || pid != GetCurrentProcessId() {
+                return WindowActivation::Cancelled;
+            }
+            if GetForegroundWindow() == hwnd {
+                return WindowActivation::Foreground;
+            }
+            if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+                return WindowActivation::NotReady;
+            }
+            if Self::last_input_tick() != Some(input_tick) {
+                return WindowActivation::Cancelled;
+            }
+            let _ = SetForegroundWindow(hwnd);
+            if GetForegroundWindow() == hwnd {
+                WindowActivation::Foreground
+            } else {
+                WindowActivation::Denied
+            }
+        }
+    }
+}
 fn qualified_foreground(window: usize, thread: u32, pid: u32) -> Result<(usize, u32), String> {
     if window == 0 || thread == 0 || pid == 0 {
         Err("foreground observation unavailable".into())
@@ -271,6 +319,25 @@ mod startup_window_tests {
                 let _ = UnregisterClassW(self.class, Some(self.instance));
             }
         }
+    }
+
+    #[test]
+    fn activation_waits_for_native_visibility_and_rejects_other_threads() {
+        let window = TestWindow::new(w!("CPU Affinity Tool activation regression"));
+        let tick = OS::last_input_tick().unwrap();
+        assert_eq!(
+            OS::activate_own_window(window.hwnd, tick),
+            WindowActivation::NotReady
+        );
+        let raw = window.hwnd.0 as usize;
+        std::thread::spawn(move || {
+            assert_eq!(
+                OS::activate_own_window(HWND(raw as *mut _), tick),
+                WindowActivation::Cancelled
+            );
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

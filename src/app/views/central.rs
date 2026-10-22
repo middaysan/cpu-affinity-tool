@@ -201,12 +201,10 @@ fn format_core_summary(cores: &[usize]) -> String {
 
     let visible = cores
         .iter()
-        .take(8)
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let suffix = if cores.len() > 8 { ", …" } else { "" };
-    format!("{} threads · {visible}{suffix}", cores.len())
+    format!("{} threads · {visible}", cores.len())
 }
 
 fn app_status_label(status: AppStatus) -> &'static str {
@@ -364,7 +362,22 @@ fn render_groups(
                 };
                 #[cfg(not(all(target_os = "windows", feature = "windows")))]
                 let meter_width = 0.0;
-                let title_width = (ui.available_width() - 52.0 - meter_width).max(40.0);
+                let edit_text = format!("{ICON_EDIT} Edit");
+                let edit_width = (ui
+                    .painter()
+                    .layout_no_wrap(
+                        edit_text.clone(),
+                        egui::FontId::proportional(BUTTON_FONT_SIZE),
+                        colors.text_secondary,
+                    )
+                    .size()
+                    .x
+                    + 2.0 * ui.spacing().button_padding.x)
+                    .max(ui.spacing().interact_size.x);
+                let title_width =
+                    (ui.available_width() - edit_width - ui.spacing().item_spacing.x - meter_width)
+                        .max(40.0);
+                let core_summary = format_core_summary(&group.cores);
                 let title = ui.allocate_ui_with_layout(
                     egui::vec2(title_width, 32.0),
                     Layout::top_down(Align::Min),
@@ -384,13 +397,13 @@ fn render_groups(
                         ));
                         ui.add(
                             egui::Label::new(
-                                RichText::new(format_core_summary(&group.cores))
+                                RichText::new(&core_summary)
                                     .size(9.0)
                                     .color(colors.text_muted),
                             )
                             .truncate(),
                         )
-                        .on_hover_text(format_core_summary(&group.cores));
+                        .on_hover_text(&core_summary);
                         name
                     },
                 );
@@ -434,9 +447,7 @@ fn render_groups(
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                     if ghost_button(
                         ui,
-                        egui::Button::new(
-                            RichText::new(format!("{ICON_EDIT} Edit")).size(BUTTON_FONT_SIZE),
-                        ),
+                        egui::Button::new(RichText::new(edit_text).size(BUTTON_FONT_SIZE)),
                     )
                     .on_hover_text("Edit group settings")
                     .clicked()
@@ -1731,13 +1742,86 @@ mod tests {
     }
 
     #[test]
-    fn test_format_core_summary_is_compact_and_handles_empty_groups() {
+    fn test_format_core_summary_retains_every_cpu_for_layout_clipping_and_hover() {
         assert_eq!(format_core_summary(&[]), "No CPU threads assigned");
         assert_eq!(format_core_summary(&[0, 1, 6, 7]), "4 threads · 0, 1, 6, 7");
         assert_eq!(
             format_core_summary(&[0, 1, 2, 3, 4, 5, 6, 7, 8]),
-            "9 threads · 0, 1, 2, 3, 4, 5, 6, 7, …"
+            "9 threads · 0, 1, 2, 3, 4, 5, 6, 7, 8"
         );
+        assert_eq!(
+            format_core_summary(&(0..12).collect::<Vec<_>>()),
+            "12 threads · 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11"
+        );
+    }
+
+    #[test]
+    fn core_summary_only_elides_when_it_reaches_header_controls() {
+        use std::sync::{Arc, RwLock};
+        for monitoring in [true, false] {
+            for (count, elided) in [(12, false), (64, true)] {
+                let ctx = egui::Context::default();
+                ctx.set_fonts(
+                    crate::app::shell::presenters::shared_elements::ui_font_definitions(),
+                );
+                ctx.all_styles_mut(
+                    crate::app::shell::presenters::shared_elements::apply_widget_style,
+                );
+                let mut app = AppState::new_for_test(
+                    Arc::new(RwLock::new(
+                        crate::app::models::AppStateStorage::test_fixture(|state| {
+                            state.cpu_load_monitoring_enabled = monitoring;
+                        }),
+                    )),
+                    64,
+                );
+                let mut group = group("g", "Performance", vec![]);
+                group.cores = (0..count).collect();
+                let snapshot = CentralPanelSnapshot {
+                    groups: vec![group],
+                };
+                for _ in 0..3 {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(400.0, 600.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| {
+                            render_groups(&mut app, ui, &ctx, &snapshot);
+                        },
+                    );
+                    output.textures_delta.clear();
+                    let summary = output
+                        .shapes
+                        .iter()
+                        .find_map(|s| match &s.shape {
+                            egui::Shape::Text(t)
+                                if t.galley.job.text.starts_with(&format!("{count} threads")) =>
+                            {
+                                Some(t)
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        summary.galley.job.text,
+                        format_core_summary(&(0..count).collect::<Vec<_>>())
+                    );
+                    assert_eq!(
+                        summary.galley.elided, elided,
+                        "monitoring={monitoring}, count={count}"
+                    );
+                    let title = ctx
+                        .read_response(egui::Id::new(("central-group-drag", "g")))
+                        .unwrap()
+                        .rect;
+                    assert!(summary.pos.x + summary.galley.rect.right() <= title.right() + 0.5);
+                }
+            }
+        }
     }
 
     #[test]
