@@ -106,10 +106,6 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     let mut background = app.ui.app_edit_state.background.clone();
     #[cfg(all(target_os = "windows", feature = "windows"))]
-    let tuning_snapshot = app.tuning_snapshot();
-    #[cfg(all(target_os = "windows", feature = "windows"))]
-    let mut inspect_background = false;
-    #[cfg(all(target_os = "windows", feature = "windows"))]
     let background_error = app.ui.app_edit_state.background_error.clone();
 
     CentralPanel::default().frame(content_frame(root_ui)).show(root_ui, |ui| {
@@ -254,9 +250,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                 {
                     if let Some(draft) = &mut background {
                         let supported = selected_app.bin_path().is_some_and(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe")));
-                        let (changed, inspect) = crate::app::features::system_tweaks::background_ui::draw_rule(ui, &tuning_snapshot.background, draft, supported, false);
-                        draft_changed |= changed;
-                        inspect_background |= inspect;
+                        draft_changed |= crate::app::features::system_tweaks::background_ui::draw_rule(ui, draft, supported, false);
                     }
                     if let Some(error) = &background_error {
                         ui.add(Label::new(RichText::new(error).weak()).wrap());
@@ -459,18 +453,6 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     {
         app.ui.app_edit_state.background = background;
-        if inspect_background
-            && app
-                .request_tuning(
-                    crate::app::features::system_tweaks::TuningRequest::InspectBackground,
-                )
-                .is_err()
-        {
-            app.ui.app_edit_state.background_error = Some(
-                "CPU list is busy or unavailable. Try again after the current operation finishes."
-                    .into(),
-            );
-        }
     }
     if draft_changed {
         app.clear_current_app_shortcut_result();

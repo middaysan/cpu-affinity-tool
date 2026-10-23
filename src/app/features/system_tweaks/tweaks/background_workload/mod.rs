@@ -65,6 +65,12 @@ impl Default for Config {
     }
 }
 impl Config {
+    pub(crate) fn without_cpu_placement(mut self) -> Self {
+        self.cpu_mode = CpuMode::PriorityEco;
+        self.manual_ids.clear();
+        self.manual_topology.clear();
+        self
+    }
     pub(crate) fn valid(&self) -> bool {
         self.catalog_version == os_api::background::CATALOG_VERSION
             && self.games.len() <= 64

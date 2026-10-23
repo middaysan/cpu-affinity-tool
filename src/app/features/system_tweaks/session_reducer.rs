@@ -32,6 +32,7 @@ pub(crate) enum TuningRequest {
         enabled: bool,
         config: Box<super::tweaks::background_workload::Config>,
     },
+    #[allow(dead_code)]
     InspectBackground,
     #[allow(dead_code)]
     PreviewBackground,
@@ -194,6 +195,8 @@ pub(crate) struct ProfileCard {
 }
 #[derive(Clone)]
 pub(crate) struct TuningSnapshot {
+    // Bounded background telemetry remains available to debug-only diagnostics.
+    #[cfg_attr(not(feature = "debug-mcp"), allow(dead_code))]
     pub background: super::background_policy::Snapshot,
     pub tweak_cards: Vec<TweakCard>,
     pub pc_checks: Vec<super::pc_checks::PcCheck>,

@@ -43,6 +43,7 @@ pub(crate) fn put_rule_policy(
 ) -> Result<(), SaveError> {
     let previous = rule_policy(saved, &game.rule)?;
     let mut desired = draft.clone();
+    desired.config = desired.config.without_cpu_placement();
     // Retain original source metadata when the logical rule moves groups.
     desired.config.games = vec![previous.config.games.first().cloned().unwrap_or(game)];
     if !desired.config.valid() {

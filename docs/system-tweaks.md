@@ -21,7 +21,7 @@ The System section contains the game and comfort settings below. **Game GPU** is
 
 Comfort settings are preference choices, without an FPS gain. Screen refresh rate is the desktop's nominal Hz, not measured game FPS.
 
-The development branch also contains a session-only background-load preview in each **Application rule**, with one default-Off checkbox and optional core placement under **Advanced**. It follows that saved EXE instead of creating persistent Manual ownership. It has no separate System Tweaks card. System-role mutation is currently not admitted pending controlled VM/function validation. See [background-workload controls, ownership and validation limits](background-workload.md).
+The development branch also contains a session-only background-load preview in each **Application rule**, with one default-Off checkbox and a fixed priority/EcoQoS policy. There is no Advanced/core-placement UI. It follows that saved EXE instead of creating persistent Manual ownership. It has no separate System Tweaks card. System-role mutation is currently not admitted pending controlled VM/function validation. See [background-workload controls, ownership and validation limits](background-workload.md).
 
 ## Undo and persistence
 

@@ -64,7 +64,7 @@ Right-click a graph to save the visible chart as **PNG** or export all retained 
 
 Manual changes remain applied after you close the app. **Undo** uses the recorded original values and preserves later changes made elsewhere. Display changes have a confirmation countdown. See the [System Tweaks guide](docs/system-tweaks.md) for what each control changes.
 
-**Development preview:** this branch adds an optional per-app background-load reduction checkbox in Application rule settings, with optional CPU placement under Advanced. System roles remain unchanged while their controlled VM validation is pending; the native CPU mechanisms have been checked only on owned test processes. This is not part of the published 1.7.0 release. [Preview controls and limits](docs/background-workload.md).
+**Development preview:** this branch adds one optional per-app background-load reduction checkbox in Application rule settings. It requests priority/EcoQoS only, with no manual core selection. System roles remain unchanged while their controlled VM validation is pending; the native CPU mechanisms have been checked only on owned test processes. This is not part of the published 1.7.0 release. [Preview controls and limits](docs/background-workload.md).
 
 ### Connect a local agent
 

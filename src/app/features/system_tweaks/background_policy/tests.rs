@@ -14,6 +14,46 @@ use std::sync::{
 };
 
 #[test]
+fn background_checkbox_cannot_save_or_activate_hidden_legacy_core_placement() {
+    let (mut service, _) = service();
+    let legacy = Config {
+        games: vec![GameRule {
+            group: "g".into(),
+            rule: "r".into(),
+        }],
+        cpu_mode: CpuMode::EfficientCores,
+        manual_ids: vec![7],
+        ..Default::default()
+    };
+    service.configure_background(false, legacy).unwrap();
+    let before = service.state().tuning.raw().unwrap().to_owned();
+    let (_, _, active) = policies(&service).pop().unwrap();
+    assert_eq!(active.cpu_mode, CpuMode::PriorityEco);
+    assert!(active.manual_ids.is_empty());
+    assert_eq!(
+        service.state().tuning.raw(),
+        Some(before.as_str()),
+        "reading policy must retain old recovery-compatible state"
+    );
+    let mut saved = service.configured().unwrap();
+    let draft = rule_policy(&saved, "r").unwrap();
+    put_rule_policy(
+        &mut saved,
+        GameRule {
+            group: "moved".into(),
+            rule: "r".into(),
+        },
+        &draft,
+    )
+    .unwrap();
+    let stored = rule_policy(&saved, "r").unwrap();
+    assert_eq!(stored.config.cpu_mode, CpuMode::PriorityEco);
+    assert!(stored.config.manual_ids.is_empty());
+    assert!(stored.config.manual_topology.is_empty());
+    assert_eq!(stored.config.games[0].group, "g");
+}
+
+#[test]
 fn background_per_rule_defaults_off_and_splits_legacy_selection_without_resetting_other_game() {
     use super::super::config::TuningConfig;
     let mut saved = TuningConfig::default();

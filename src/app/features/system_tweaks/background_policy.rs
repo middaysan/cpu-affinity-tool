@@ -19,7 +19,9 @@ use std::{
 
 pub(crate) const PROFILE_NAME: &str = "Background workload [session v1]";
 mod rule_settings;
-pub(crate) use rule_settings::{put_rule_policy, rule_policy, RulePolicy};
+#[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+pub(crate) use rule_settings::rule_policy;
+pub(crate) use rule_settings::{put_rule_policy, RulePolicy};
 #[cfg(any(windows, test))]
 const PREVIEW_TIME: Duration = Duration::from_secs(600);
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
@@ -208,9 +210,13 @@ pub(crate) fn policies(service: &HeadlessTuning) -> Vec<(ProfileId, bool, Config
             profile.modules.iter().filter_map(|preference| {
                 (preference.feature.as_str() == ID && preference.mode == ActivationMode::Session)
                     .then(|| {
-                        configured(&preference.config)
-                            .ok()
-                            .map(|config| (profile.id, preference.enabled, config))
+                        configured(&preference.config).ok().map(|config| {
+                            (
+                                profile.id,
+                                preference.enabled,
+                                config.without_cpu_placement(),
+                            )
+                        })
                     })
                     .flatten()
             })

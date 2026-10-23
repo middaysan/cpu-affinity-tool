@@ -8,7 +8,7 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Added
 
-- Local preview of per-app background CPU sessions: one default-Off checkbox in Application rule, optional whole-physical-core CPU placement under Advanced, and no separate System Tweaks card. Native mechanism checks use test-owned processes; the system-role mutation qualification set remains empty pending controlled VM/function validation. See `docs/background-workload.md` for scope and limits.
+- Local preview of per-app background CPU sessions: one default-Off checkbox in Application rule, priority/EcoQoS-only sessions, no Advanced/manual core selection and no separate System Tweaks card. Old placement recovery data remains readable. Native mechanism checks use test-owned processes; the system-role mutation qualification set remains empty pending controlled VM/function validation. See `docs/background-workload.md` for scope and limits.
 
 ### Fixed
 
