@@ -1,5 +1,4 @@
 //! Session-only background policy, advanced by the existing tuning worker.
-#[cfg(test)]
 use super::tweaks::background_workload::GameRule;
 use super::{
     config::{ModulePreference, Profile, TuningLoad},
@@ -19,6 +18,8 @@ use std::{
 };
 
 pub(crate) const PROFILE_NAME: &str = "Background workload [session v1]";
+mod rule_settings;
+pub(crate) use rule_settings::{put_rule_policy, rule_policy, RulePolicy};
 #[cfg(any(windows, test))]
 const PREVIEW_TIME: Duration = Duration::from_secs(600);
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
@@ -28,7 +29,10 @@ fn feature() -> FeatureId {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CandidateRow {
+    // Kept in bounded snapshots for debug-only inspection after removing the card.
+    #[allow(dead_code)]
     pub role: &'static str,
+    #[allow(dead_code)]
     pub pid: u32,
     pub status: String,
 }
@@ -254,23 +258,14 @@ pub(crate) fn snapshot(service: &HeadlessTuning) -> Snapshot {
         })
         .collect::<std::collections::BTreeSet<_>>()
         .len();
-    if let TuningLoad::Known(config) = service.state().tuning.decode() {
-        if let Some(preference) = config
-            .profiles
-            .iter()
-            .find(|profile| profile.name == PROFILE_NAME)
-            .and_then(|profile| {
-                profile
-                    .modules
-                    .iter()
-                    .find(|module| module.feature.as_str() == ID)
-            })
-        {
-            if let Ok(config) = configured(&preference.config) {
-                snapshot.config = config;
-                snapshot.enabled = preference.enabled;
-            }
-        }
+    let policies = policies(service);
+    snapshot.enabled = policies.iter().any(|(_, enabled, _)| *enabled);
+    if let Some((_, _, config)) = policies
+        .iter()
+        .find(|(_, enabled, _)| *enabled)
+        .or_else(|| policies.first())
+    {
+        snapshot.config = config.clone();
     }
     if !snapshot.enabled && snapshot.preview_until.is_none() && snapshot.changed_targets == 0 {
         snapshot.status = "Off · no background settings changed".into();
@@ -469,9 +464,7 @@ impl HeadlessTuning {
 
 #[derive(Clone)]
 pub(crate) struct GameChoice {
-    pub group: String,
     pub rule: String,
-    pub label: String,
 }
 pub(crate) fn game_choices(
     state: &crate::app::models::AppStateStorage,
@@ -495,9 +488,7 @@ pub(crate) fn game_choices(
                         return None;
                     }
                     Some(GameChoice {
-                        group: rules.group_id_for_index(gi)?.0,
                         rule: rules.rule_id_for_index(gi, ri)?.0,
-                        label: format!("{} · {}", app.name, group.name),
                     })
                 })
         })
@@ -517,9 +508,9 @@ fn tick_inner(
     now: Instant,
 ) {
     let policies = policies(service);
+    runtime.snapshot.enabled = policies.iter().any(|(_, enabled, _)| *enabled);
     let own_policy=policies.iter().find(|(id,_,_)| matches!(service.state().tuning.decode(),TuningLoad::Known(ref saved) if saved.profiles.iter().any(|p|p.id==*id && p.name==PROFILE_NAME)));
-    if let Some((_, enabled, config)) = own_policy {
-        runtime.snapshot.enabled = *enabled;
+    if let Some((_, _, config)) = own_policy {
         runtime.snapshot.config = config.clone();
     }
     let expired = runtime.preview_expired(now);

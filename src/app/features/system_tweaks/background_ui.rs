@@ -1,10 +1,7 @@
 //! Cached background-session presentation. No native calls or worker ownership.
+#![cfg(any(test, all(target_os = "windows", feature = "windows")))]
+use super::background_policy;
 use super::tweaks::background_workload::{Config, CpuMode};
-use super::{
-    background_policy,
-    session_reducer::{TuningRequest, TuningSnapshot},
-    tweaks::background_workload::GameRule,
-};
 use eframe::egui;
 
 fn toggle_core(
@@ -44,39 +41,39 @@ fn pool_controls(
     let efficient = os_api::background::efficient_pool(topology).is_ok();
     let before = config.cpu_mode;
     ui.horizontal_wrapped(|ui| {
-        ui.label("CPU policy");
+        ui.label("Background CPU placement");
         ui.add_enabled_ui(!pending, |ui| {
             let combo = egui::ComboBox::from_id_salt("background-cpu-mode")
                 .selected_text(match config.cpu_mode {
-                    CpuMode::PriorityEco => "Priority + EcoQoS",
-                    CpuMode::EfficientCores => "Prefer efficient cores",
-                    CpuMode::ManualPool => "Manual whole-core pool",
+                    CpuMode::PriorityEco => "No core restriction",
+                    CpuMode::EfficientCores => "Use efficient cores",
+                    CpuMode::ManualPool => "Choose physical cores",
                 })
                 .show_ui(ui, |ui| {
                     let priority = ui.selectable_value(
                         &mut config.cpu_mode,
                         CpuMode::PriorityEco,
-                        "Priority + EcoQoS",
+                        "No core restriction",
                     );
-                    crate::debug_mcp_control!("tweaks.background.policy.priority", priority);
+                    crate::debug_mcp_control!("rule.background.policy.priority", priority);
                     ui.add_enabled_ui(efficient, |ui| {
                         let efficient = ui.selectable_value(
                             &mut config.cpu_mode,
                             CpuMode::EfficientCores,
-                            "Prefer efficient cores",
+                            "Use efficient cores",
                         );
-                        crate::debug_mcp_control!("tweaks.background.policy.efficient", efficient);
+                        crate::debug_mcp_control!("rule.background.policy.efficient", efficient);
                     });
                     ui.add_enabled_ui(!topology.is_empty(), |ui| {
                         let manual = ui.selectable_value(
                             &mut config.cpu_mode,
                             CpuMode::ManualPool,
-                            "Manual whole-core pool",
+                            "Choose physical cores",
                         );
-                        crate::debug_mcp_control!("tweaks.background.policy.manual", manual);
+                        crate::debug_mcp_control!("rule.background.policy.manual", manual);
                     });
                 });
-            crate::debug_mcp_control!("tweaks.background.policy", combo.response);
+            crate::debug_mcp_control!("rule.background.policy", combo.response);
         });
     });
     let mut changed = before != config.cpu_mode;
@@ -92,10 +89,7 @@ fn pool_controls(
         ui.add(egui::Label::new(format!("CPU pool unavailable: {error}")).wrap());
     } else if topology.is_empty() {
         ui.add(
-            egui::Label::new(
-                "Check applicability to read physical-core topology and choose an optional pool.",
-            )
-            .wrap(),
+            egui::Label::new("Load the CPU list to choose an optional core restriction.").wrap(),
         );
     }
     if config.cpu_mode == CpuMode::ManualPool && !topology.is_empty() {
@@ -117,7 +111,7 @@ fn pool_controls(
                     egui::Checkbox::new(&mut selected, format!("G{group} · core {core}")),
                 );
                 crate::debug_mcp_control!(
-                    &format!("tweaks.background.core.{group}.{core}"),
+                    &format!("rule.background.core.{group}.{core}"),
                     response
                 );
                 if response.changed() {
@@ -146,110 +140,113 @@ fn pool_controls(
         });
         if config.manual_ids.is_empty() {
             ui.add(
-                egui::Label::new("No pool selected. Only priority and EcoQoS can apply.").wrap(),
+                egui::Label::new("No cores selected. Background CPU placement stays unrestricted.")
+                    .wrap(),
             );
         }
-    }
-    if let Some(status) = &background.placement_status {
-        ui.add(egui::Label::new(status).wrap());
     }
     changed
 }
 
-pub(crate) fn draw(
+pub(crate) fn draw_rule(
     ui: &mut egui::Ui,
-    snapshot: &TuningSnapshot,
+    background: &background_policy::Snapshot,
+    draft: &mut background_policy::RulePolicy,
+    supported: bool,
     pending: bool,
-) -> Option<TuningRequest> {
-    let background = &snapshot.background;
-    let mut config = background.config.clone();
-    let mut enabled = background.enabled;
-    let mut changed = false;
-    let mut request = None;
-    let colors = crate::app::shell::presenters::shared_elements::palette(ui);
-    egui::Frame::group(ui.style()).inner_margin(8.0).show(ui,|ui|{
-        ui.label(egui::RichText::new("Reduce background impact").strong());
-        ui.add(egui::Label::new(egui::RichText::new("Temporarily lower background CPU priority and use EcoQoS while your selected games run. Undo restores this app's changes.").size(10.5).color(colors.text_muted)).wrap());
-        ui.add(egui::Label::new(egui::RichText::new(&background.status).size(10.5)).wrap());
-        let response=ui.add_enabled(!pending && !config.games.is_empty(),egui::Checkbox::new(&mut enabled,"Enable for selected games"));
-        crate::debug_mcp_control!("tweaks.background.enable",response);
-        changed|=response.changed();
-        let choices=background_policy::game_choices(&snapshot.state,&snapshot.rules);
-        let games=egui::CollapsingHeader::new(format!("Selected games ({})",config.games.len())).id_salt("background-games").default_open(config.games.is_empty()).show(ui,|ui|{
-            if choices.is_empty(){ ui.add(egui::Label::new("Add a game's EXE in Affinity groups first. Store activation targets are not supported here.").wrap()); }
-            for choice in &choices {
-                let mut selected=config.games.iter().any(|game|game.rule==choice.rule);
-                let response=ui.add_enabled(!pending && (selected || config.games.len()<64),egui::Checkbox::new(&mut selected,&choice.label));
-                crate::debug_mcp_control!(&format!("tweaks.background.game.{}",choice.rule),response);
-                if response.changed(){
-                    config.games.retain(|game|game.rule!=choice.rule);
-                    if selected { config.games.push(GameRule{group:choice.group.clone(),rule:choice.rule.clone()}); }
-                    changed=true;
-                }
-            }
-            let missing:Vec<_>=config.games.iter().filter(|game|!choices.iter().any(|choice|choice.rule==game.rule)).cloned().collect();
-            for game in missing {
-                let mut selected=true;
-                if ui.add_enabled(!pending,egui::Checkbox::new(&mut selected,format!("Unavailable saved game ({})",game.rule))).changed(){config.games.retain(|saved|saved.rule!=game.rule);changed=true;}
-            }
-            ui.add(egui::Label::new(egui::RichText::new("Runs until the game exits, including while you Alt-Tab. The game itself is never a background target.").size(10.0).color(colors.text_muted)).wrap());
-        });
-        crate::debug_mcp_control!("tweaks.background.games",games.header_response);
-        ui.add_space(3.0);
-        changed|=pool_controls(ui,background,&mut config,pending);
-        ui.horizontal_wrapped(|ui|{
-            let check=ui.add_enabled(!pending,egui::Button::new("Check applicability"));
-            crate::debug_mcp_control!("tweaks.background.inspect",check);
-            if check.clicked(){request=Some(TuningRequest::InspectBackground);}
-            let preview=ui.add_enabled(!pending && background.preview_until.is_none(),egui::Button::new("Preview for 10 min"));
-            crate::debug_mcp_control!("tweaks.background.preview",preview);
-            if preview.clicked(){request=Some(TuningRequest::PreviewBackground);}
-            let undo=ui.add_enabled(!pending && (enabled || background.preview_until.is_some() || background.changed_targets>0),egui::Button::new("Undo now"));
-            crate::debug_mcp_control!("tweaks.background.undo",undo);
-            if undo.clicked(){request=Some(TuningRequest::UndoBackground);}
-        });
-        ui.add(egui::Label::new(egui::RichText::new("Local preview · System roles remain unchanged until controlled Windows VM validation is complete.").size(10.0).color(colors.warning.fg)).wrap());
-        if background.preview_until.is_some(){ui.add(egui::Label::new("Preview stops automatically after 10 minutes. Closing this app also restores session changes.").wrap());}
-        let details=egui::CollapsingHeader::new("Background roles and details").id_salt("background-details").show(ui,|ui|{
-            ui.add(egui::Label::new("Signed images and verified service/task roles are checked separately from permission to change them. Access denied and unqualified roles are skipped.").wrap());
-            for role in [os_api::background::Role::Appraiser,os_api::background::Role::DeviceCensus,os_api::background::Role::FrameworkOptimizer,os_api::background::Role::DiagnosticsTelemetry] {
-                let mut include=!config.excluded_roles.contains(&role);
-                if ui.add_enabled(!pending,egui::Checkbox::new(&mut include,role.label())).changed(){config.excluded_roles.retain(|saved|*saved!=role);if !include{config.excluded_roles.push(role);}changed=true;}
-            }
-            ui.separator();
-            if !background.inspected {ui.label("Use Check applicability to inspect running background work.");}
-            else if background.candidates.is_empty(){ui.label("No catalogued background tasks are running. Nothing changed.");}
-            else {
-                for row in &background.candidates {
-                    ui.label(egui::RichText::new(format!("{} · PID {}",row.role,row.pid)).strong());
-                    ui.add(egui::Label::new(egui::RichText::new(&row.status).size(10.0).color(colors.text_muted)).wrap());
-                }
-            }
-            ui.add_space(3.0);
-            if !background.events.is_empty(){
-                egui::CollapsingHeader::new("Recent session events").id_salt("background-events").show(ui,|ui|{
-                    for event in background.events.iter().rev(){ui.add(egui::Label::new(egui::RichText::new(event).size(10.0)).wrap());}
-                });
-            }
-            ui.add(egui::Label::new(egui::RichText::new("This does not stop services, block updates, cap CPU usage or change download bandwidth. Use Windows or the download app's settings for network limits. A performance gain is not guaranteed.").size(10.0).color(colors.text_muted)).wrap());
-        });
-        crate::debug_mcp_control!("tweaks.background.details",details.header_response);
+) -> (bool, bool) {
+    let response = ui.add_enabled(
+        !pending && (supported || draft.enabled),
+        egui::Checkbox::new(
+            &mut draft.enabled,
+            "Reduce background load while this app runs",
+        ),
+    );
+    crate::debug_mcp_control!("rule.background.enable", response);
+    let changed = response.changed();
+    response.on_hover_ui(|ui| {
+        ui.set_max_width(260.0_f32.min(ui.ctx().content_rect().width() - 16.0).max(80.0));
+        ui.add(egui::Label::new(if supported {
+            "Temporarily lower the priority and energy use of qualified Windows background tasks while this app is running. Restore this program's changes after the app exits. Your app's priority and affinity stay separate."
+        } else {
+            "Requires an executable (.exe) launch target. Installed-app activation targets are not supported."
+        }).wrap());
     });
-    if changed {
-        if config.games.is_empty() {
-            enabled = false;
-        }
-        request = Some(TuningRequest::ConfigureBackground {
-            enabled,
-            config: Box::new(config),
-        });
+    let mut pool_changed = false;
+    let mut inspect = false;
+    if draft.enabled && supported {
+        ui.add(egui::Label::new(egui::RichText::new(
+            "Local preview: Windows system tasks remain unchanged until role validation is complete."
+        ).small().weak()).wrap());
+        let advanced = egui::CollapsingHeader::new("Advanced")
+            .id_salt("rule-background-advanced")
+            .show(ui, |ui| {
+                ui.add(egui::Label::new("Optional CPU placement for background tasks, separate from this app's CPU affinity.").wrap());
+                let load = ui.add_enabled(!pending, egui::Button::new("Load CPU list"));
+                crate::debug_mcp_control!("rule.background.load_cpus", load);
+                inspect = load.clicked();
+                pool_changed = pool_controls(ui, background, &mut draft.config, pending);
+            });
+        crate::debug_mcp_control!("rule.background.advanced", advanced.header_response);
     }
-    request
+    (changed || pool_changed, inspect)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rule_background_has_one_default_off_draft_and_collapsed_core_options() {
+        for width in [240.0, 420.0] {
+            let ctx = egui::Context::default();
+            let snapshot = background_policy::Snapshot::default();
+            let mut draft = background_policy::RulePolicy::default();
+            let mut action = (true, true);
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                ui.set_width(width);
+                action = draw_rule(ui, &snapshot, &mut draft, true, false);
+            });
+            output.textures_delta.clear();
+            assert_eq!(action, (false, false));
+            let text = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains("Reduce background load while this app runs"),
+                "{text}"
+            );
+            assert!(!text.contains("Advanced"), "{text}");
+            assert!(!text.contains("CPU placement"), "{text}");
+            assert!(!draft.enabled);
+            draft.enabled = true;
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                ui.set_width(width);
+                draw_rule(ui, &snapshot, &mut draft, true, false);
+            });
+            output.textures_delta.clear();
+            let text = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("Advanced"), "{text}");
+            assert!(
+                !text.contains("Load CPU list"),
+                "advanced controls should start collapsed: {text}"
+            );
+            assert_eq!(draft.config.cpu_mode, CpuMode::PriorityEco);
+        }
+    }
     #[test]
     fn manual_pool_selects_whole_physical_core_and_refuses_unavailable_sibling() {
         let mut topology: Vec<_> = (0..4)

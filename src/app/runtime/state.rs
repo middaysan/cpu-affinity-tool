@@ -153,6 +153,7 @@ enum LegacyCompletion {
     Rule(
         crate::app::shell::sessions::RuleEditorTarget,
         Option<AppToRun>,
+        Option<crate::app::features::system_tweaks::background_policy::RulePolicy>,
     ),
     Group(Option<GroupId>, String, Vec<bool>, bool),
     Import(ImportIntent, String),
@@ -440,7 +441,7 @@ impl AppState {
             let pending = self.pending_legacy.take().unwrap();
             if matches!(snapshot.operation, crate::app::features::system_tweaks::TuningOperationState::Idle) && snapshot.revision > pending.revision {
                 match pending.completion {
-                    Some(LegacyCompletion::Rule(target, draft)) if self.ui.app_edit_state.target.as_ref() == Some(&target) && self.ui.app_edit_state.current_edit == draft => self.close_app_run_settings(),
+                    Some(LegacyCompletion::Rule(target, draft, background)) if self.ui.app_edit_state.target.as_ref() == Some(&target) && self.ui.app_edit_state.current_edit == draft && self.ui.app_edit_state.background == background => self.close_app_run_settings(),
                     Some(LegacyCompletion::Group(target, name, selection, run_all)) if self.ui.group_form.editing_group_id == target && self.ui.group_form.group_name == name && self.ui.group_form.core_selection == selection && self.ui.group_form.run_all_enabled == run_all => self.cancel_group_form_session(),
                     Some(LegacyCompletion::Import(intent, message)) => {
                         match intent {
@@ -1864,6 +1865,8 @@ impl AppState {
     pub fn open_app_run_settings(&mut self, group_id: GroupId, rule_id: RuleId) {
         self.ui.app_edit_state.process_names.request_refresh();
         self.ui.app_edit_state.current_edit = None;
+        self.ui.app_edit_state.background = None;
+        self.ui.app_edit_state.background_error = None;
         self.ui.app_edit_state.target =
             Some(crate::app::shell::sessions::RuleEditorTarget { group_id, rule_id });
         self.ui.app_edit_state.shortcut_result = None;
@@ -1891,6 +1894,25 @@ impl AppState {
         if self.ui.app_edit_state.current_edit.is_none() {
             if let Some(original) = rules::load_rule(&self.persistent_state, group_idx, prog_idx) {
                 self.ui.app_edit_state.current_edit = Some(original);
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                {
+                    use crate::app::features::system_tweaks::{
+                        background_policy, config::TuningLoad,
+                    };
+                    let policy = self.persistent_state.read().ok().and_then(|state| {
+                        match state.tuning.decode() {
+                            TuningLoad::Off => Some(Ok(background_policy::RulePolicy::default())),
+                            TuningLoad::Known(config) => {
+                                Some(background_policy::rule_policy(&config, &target.rule_id.0))
+                            }
+                            _ => None,
+                        }
+                    });
+                    match policy {
+                        Some(Ok(policy)) => self.ui.app_edit_state.background = Some(policy),
+                        _ => self.ui.app_edit_state.background_error = Some("Background settings cannot be edited until the saved configuration is readable.".into()),
+                    }
+                }
             } else {
                 self.close_app_run_settings();
                 return false;
@@ -1918,12 +1940,14 @@ impl AppState {
                 let completion = LegacyCompletion::Rule(
                     target.clone(),
                     self.ui.app_edit_state.current_edit.clone(),
+                    self.ui.app_edit_state.background.clone(),
                 );
                 let _ = self.enqueue_legacy(
                     TuningRequest::EditRule {
                         group: target.group_id,
                         rule: target.rule_id,
                         app: Box::new(updated_app),
+                        background: self.ui.app_edit_state.background.clone(),
                     },
                     Some(completion),
                 );
@@ -1937,8 +1961,11 @@ impl AppState {
                 .rule_indices_for_ids(&target.group_id, &target.rule_id)
                 .and_then(|(group, rule)| self.get_group_program(group, rule))
                 .map(|app| app.launch_target_label());
-            let completion =
-                LegacyCompletion::Rule(target.clone(), self.ui.app_edit_state.current_edit.clone());
+            let completion = LegacyCompletion::Rule(
+                target.clone(),
+                self.ui.app_edit_state.current_edit.clone(),
+                self.ui.app_edit_state.background.clone(),
+            );
             if self.enqueue_legacy(
                 TuningRequest::RemoveRule {
                     group: target.group_id,
@@ -2225,6 +2252,8 @@ impl AppState {
 
     fn reset_app_run_settings_session(&mut self) {
         self.ui.app_edit_state.current_edit = None;
+        self.ui.app_edit_state.background = None;
+        self.ui.app_edit_state.background_error = None;
         self.ui.app_edit_state.target = None;
         self.ui.app_edit_state.shortcut_result = None;
     }
@@ -2966,6 +2995,28 @@ mod tests {
             .core_selection
             .iter()
             .all(|selected| !selected));
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn background_rule_cancel_discards_both_drafts_and_reopens_default_off() {
+        let mut app = sample_state();
+        let group = group_id(&app, 0);
+        let rule = rule_id(&app, 0, 0);
+        let before = serde_json::to_value(&*app.persistent_state.read().unwrap()).unwrap();
+        app.open_app_run_settings(group.clone(), rule.clone());
+        assert!(app.ensure_current_edit_loaded());
+        assert!(!app.ui.app_edit_state.background.as_ref().unwrap().enabled);
+        app.ui.app_edit_state.background.as_mut().unwrap().enabled = true;
+        app.ui.app_edit_state.current_edit.as_mut().unwrap().name = "Unsaved app".into();
+        app.close_app_run_settings();
+        assert_eq!(
+            serde_json::to_value(&*app.persistent_state.read().unwrap()).unwrap(),
+            before
+        );
+        app.open_app_run_settings(group, rule);
+        assert!(app.ensure_current_edit_loaded());
+        assert!(!app.ui.app_edit_state.background.as_ref().unwrap().enabled);
     }
 
     #[test]

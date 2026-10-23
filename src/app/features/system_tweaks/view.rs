@@ -198,9 +198,6 @@ pub(crate) fn draw_system_tweaks(app: &mut AppState, root_ui: &mut egui::Ui) {
                             section_heading(ui, "FOR COMFORT", Some("No FPS increase"));
                             draw_section(app, ui, TweakSection::Comfort, pending || !editable);
                             draw_previous_settings(app, ui, pending || !editable);
-                            ui.add_space(8.0);
-                            section_heading(ui,"WHILE GAMES RUN",Some("Temporary sessions"));
-                            if let Some(request)=crate::app::features::system_tweaks::background_ui::draw(ui,&snapshot,pending || !editable) { submit(app,request); }
                         }
                         TuningPageSection::Hardware => draw_hardware(app, ui, pending || !editable),
                         TuningPageSection::PcChecks => draw_pc_checks(app, ui, pending),
@@ -1122,16 +1119,14 @@ fn draw_operation_error(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn background_card_explains_local_qualification_and_has_explicit_preview_and_undo() {
+    fn background_policy_is_not_a_separate_system_tweaks_card() {
         let state = std::sync::Arc::new(std::sync::RwLock::new(
             crate::app::models::AppStateStorage::test_fixture(|_| {}),
         ));
         let mut app = empty_modules_app(state);
         let text = rendered_text(&mut app);
-        assert!(text.contains("Reduce background impact"), "{text}");
-        assert!(text.contains("Check applicability"), "{text}");
-        assert!(text.contains("Preview for 10 min"), "{text}");
-        assert!(text.contains("System roles remain unchanged"), "{text}");
+        assert!(!text.contains("Reduce background impact"), "{text}");
+        assert!(!text.contains("Preview for 10 min"), "{text}");
         finish(&mut app);
     }
     use super::*;

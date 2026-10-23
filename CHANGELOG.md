@@ -8,7 +8,7 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Added
 
-- Local preview of selected-game background CPU sessions, finite ten-minute preview, bounded applicability/details and optional whole-physical-core CPU Set policy. Native mechanism checks use test-owned processes; the system-role mutation qualification set remains empty pending controlled VM/function validation. See `docs/background-workload.md` for scope and limits.
+- Local preview of per-app background CPU sessions: one default-Off checkbox in Application rule, optional whole-physical-core CPU placement under Advanced, and no separate System Tweaks card. Native mechanism checks use test-owned processes; the system-role mutation qualification set remains empty pending controlled VM/function validation. See `docs/background-workload.md` for scope and limits.
 
 ### Fixed
 

@@ -20,6 +20,9 @@ pub struct RuleEditorSession {
     pub(crate) process_names: crate::app::features::rules::process_names::ProcessNames,
     /// The application currently being edited, if any.
     pub current_edit: Option<AppToRun>,
+    pub(crate) background:
+        Option<crate::app::features::system_tweaks::background_policy::RulePolicy>,
+    pub(crate) background_error: Option<String>,
     /// Transient logical identity of the rule being edited.
     pub target: Option<RuleEditorTarget>,
     /// Transient result from desktop shortcut creation.

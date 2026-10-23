@@ -26,12 +26,16 @@ use std::{
     time::{Duration, Instant},
 };
 pub(crate) enum TuningRequest {
+    // Retained for internal compatibility/fixtures; the rule editor saves atomically.
+    #[allow(dead_code)]
     ConfigureBackground {
         enabled: bool,
         config: Box<super::tweaks::background_workload::Config>,
     },
     InspectBackground,
+    #[allow(dead_code)]
     PreviewBackground,
+    #[allow(dead_code)]
     UndoBackground,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     ActivateSelectedManual {
@@ -135,6 +139,7 @@ pub(crate) enum TuningRequest {
         group: GroupId,
         rule: RuleId,
         app: Box<AppToRun>,
+        background: Option<super::background_policy::RulePolicy>,
     },
 }
 impl TuningRequest {
@@ -871,7 +876,12 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             target,
             index,
         } => service.move_rule_at(&group, &rule, &target, index),
-        TuningRequest::EditRule { group, rule, app } => service.edit_rule(&group, &rule, *app),
+        TuningRequest::EditRule {
+            group,
+            rule,
+            app,
+            background,
+        } => service.edit_rule_background(&group, &rule, *app, background),
     }
 }
 struct Actor {

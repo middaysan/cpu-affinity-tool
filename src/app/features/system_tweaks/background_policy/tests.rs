@@ -13,6 +13,68 @@ use std::sync::{
     Mutex,
 };
 
+#[test]
+fn background_per_rule_defaults_off_and_splits_legacy_selection_without_resetting_other_game() {
+    use super::super::config::TuningConfig;
+    let mut saved = TuningConfig::default();
+    let first = GameRule {
+        group: "old-group".into(),
+        rule: "first".into(),
+    };
+    let second = GameRule {
+        group: "old-group".into(),
+        rule: "second".into(),
+    };
+    assert_eq!(rule_policy(&saved, "first").unwrap(), RulePolicy::default());
+    let legacy = Config {
+        games: vec![first.clone(), second.clone()],
+        cpu_mode: CpuMode::EfficientCores,
+        ..Default::default()
+    };
+    saved.profiles.push(Profile {
+        version: 1,
+        id: ProfileId::new(1).unwrap(),
+        name: PROFILE_NAME.into(),
+        modules: vec![ModulePreference {
+            feature: feature(),
+            enabled: true,
+            mode: ActivationMode::Session,
+            config: legacy.envelope(),
+        }],
+    });
+    saved.next_profile = 2;
+    let mut draft = rule_policy(&saved, "first").unwrap();
+    assert!(draft.enabled);
+    draft.enabled = false;
+    draft.config.cpu_mode = CpuMode::PriorityEco;
+    put_rule_policy(&mut saved, first, &draft).unwrap();
+    assert_eq!(
+        rule_policy(&saved, "first").unwrap().config.cpu_mode,
+        CpuMode::PriorityEco
+    );
+    assert!(!rule_policy(&saved, "first").unwrap().enabled);
+    assert!(rule_policy(&saved, "second").unwrap().enabled);
+    assert_eq!(
+        rule_policy(&saved, "second").unwrap().config.cpu_mode,
+        CpuMode::EfficientCores
+    );
+    assert_eq!(saved.profiles.len(), 2);
+    let existing = saved.clone();
+    put_rule_policy(
+        &mut saved,
+        GameRule {
+            group: "new-group".into(),
+            rule: "first".into(),
+        },
+        &draft,
+    )
+    .unwrap();
+    assert_eq!(
+        saved, existing,
+        "group moves must preserve the saved session identity"
+    );
+}
+
 struct Save(Arc<AtomicBool>);
 impl super::super::StatePersistence for Save {
     fn save(
@@ -34,6 +96,78 @@ fn service() -> (HeadlessTuning, Arc<AtomicBool>) {
     );
     service.admit_test_modules();
     (service, fail)
+}
+
+#[test]
+fn background_rule_edit_saves_app_and_policy_atomically_and_preserves_other_rules() {
+    use crate::app::models::{AppToRun, CoreGroup, LaunchTarget};
+    let (mut service, fail) = service();
+    service
+        .save_base(|state| {
+            state.groups.push(CoreGroup {
+                name: "Games".into(),
+                cores: vec![0],
+                is_hidden: false,
+                run_all_button: false,
+                programs: ["first", "second"]
+                    .into_iter()
+                    .map(|name| AppToRun {
+                        name: name.into(),
+                        launch_target: LaunchTarget::Path {
+                            dropped_path: format!("C:\\{name}.exe").into(),
+                            bin_path: format!("C:\\{name}.exe").into(),
+                        },
+                        args: vec![],
+                        additional_processes: vec![],
+                        manage_descendants: false,
+                        autorun: false,
+                        priority: os_api::PriorityClass::Normal,
+                    })
+                    .collect(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    let group = service.rules().group_id_for_index(0).unwrap();
+    let first = service.rules().rule_id_for_index(0, 0).unwrap();
+    let second = service.rules().rule_id_for_index(0, 1).unwrap();
+    let before = serde_json::to_value(service.state()).unwrap();
+    let mut app = service.state().groups[0].programs[0].clone();
+    app.name = "Renamed".into();
+    let draft = RulePolicy {
+        enabled: true,
+        ..Default::default()
+    };
+    fail.store(true, Ordering::Relaxed);
+    assert_eq!(
+        service.edit_rule_background(&group, &first, app.clone(), Some(draft.clone())),
+        Err(SaveError::Storage)
+    );
+    assert_eq!(serde_json::to_value(service.state()).unwrap(), before);
+    fail.store(false, Ordering::Relaxed);
+    service
+        .edit_rule_background(&group, &first, app, Some(draft))
+        .unwrap();
+    let saved = service.configured().unwrap();
+    assert!(rule_policy(&saved, &first.0).unwrap().enabled);
+    assert!(
+        snapshot(&service).enabled,
+        "per-app policies must appear armed without the retired shared card profile"
+    );
+    assert!(!rule_policy(&saved, &second.0).unwrap().enabled);
+    assert_eq!(service.state().groups[0].programs[0].name, "Renamed");
+    assert_eq!(
+        service.state().groups[0].programs[0].priority,
+        os_api::PriorityClass::Normal
+    );
+    // A plain API update has no authority to reset the separate per-rule option.
+    let app = service.state().groups[0].programs[0].clone();
+    service.edit_rule(&group, &first, app).unwrap();
+    assert!(
+        rule_policy(&service.configured().unwrap(), &first.0)
+            .unwrap()
+            .enabled
+    );
 }
 
 #[test]
