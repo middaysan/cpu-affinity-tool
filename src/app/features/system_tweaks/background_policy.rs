@@ -19,6 +19,7 @@ use std::{
 };
 
 pub(crate) const PROFILE_NAME: &str = "Background workload [session v1]";
+#[cfg(any(windows, test))]
 const PREVIEW_TIME: Duration = Duration::from_secs(600);
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 fn feature() -> FeatureId {
@@ -87,6 +88,7 @@ pub(crate) struct Runtime {
     pub snapshot: Snapshot,
 }
 impl Runtime {
+    #[cfg(any(windows, test))]
     pub(crate) fn start_preview(
         &mut self,
         facts: ProcessFacts,
