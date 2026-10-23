@@ -110,6 +110,19 @@ pub(crate) struct TargetPlan {
     pub skipped: Vec<&'static str>,
     pub blocked: bool,
 }
+fn include_placement_intent(
+    plan: &mut TargetPlan,
+    target: &TargetIdentity,
+    witness: &os_api::background::PlacementWitness,
+) {
+    // Equal intent may join another session's original field; an unowned
+    // equal baseline remains a no-op in the controller.
+    if witness.baseline == witness.desired {
+        plan.noops += 1;
+    }
+    plan.changes
+        .push(field(target, SETS, cpu_bytes(&witness.desired)));
+}
 pub(crate) fn plan_fields(
     target: &TargetIdentity,
     role: Role,
@@ -135,7 +148,15 @@ pub(crate) fn plan_fields(
                 plan.changes
                     .push(field(target, PRIORITY, 0x4000u32.to_le_bytes().to_vec()))
             }
-            Some(PriorityDecision::AlreadySuitable) => plan.noops += 1,
+            Some(PriorityDecision::AlreadySuitable) => {
+                plan.noops += 1;
+                // The controller joins an existing equal owner, but skips an
+                // unowned suitable baseline without creating an Undo record.
+                if priority == Some(0x4000) {
+                    plan.changes
+                        .push(field(target, PRIORITY, 0x4000u32.to_le_bytes().to_vec()));
+                }
+            }
             _ => plan.skipped.push("Priority getter unavailable"),
         }
     }
@@ -144,7 +165,10 @@ pub(crate) fn plan_fields(
         state: EXECUTION_SPEED,
     };
     match qos {
-        Some(current) if current == desired => plan.noops += 1,
+        Some(current) if current == desired => {
+            plan.noops += 1;
+            plan.changes.push(field(target, QOS, policy_bytes(desired)));
+        }
         Some(_) => plan.changes.push(field(target, QOS, policy_bytes(desired))),
         None => plan
             .skipped
@@ -350,14 +374,9 @@ impl Module for BackgroundWorkload {
                 Ok::<_, ModuleError>(witness)
             })();
             match prepared {
-                Ok(witness) if witness.baseline != witness.desired => {
-                    plan.changes
-                        .push(field(target, SETS, cpu_bytes(&witness.desired)));
+                Ok(witness) => {
+                    include_placement_intent(&mut plan, target, &witness);
                     Some(witness)
-                }
-                Ok(_) => {
-                    plan.noops += 1;
-                    None
                 }
                 Err(error) => {
                     notes.push(format!(

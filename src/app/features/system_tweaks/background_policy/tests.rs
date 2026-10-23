@@ -327,9 +327,9 @@ fn background_game_membership_uses_rule_identity_after_group_move() {
     };
     let sources = game_sources(&config, &observation);
     assert_eq!(sources.len(), 1);
-    assert!(
-        matches!(&sources[0].0, SessionSource::Game{ group,rule,pid:30,.. } if group == "new" && rule == "r")
-    );
+    let before = ExecutionObservation::fixture(&state, 1, vec![member("old", "r")], facts(99));
+    assert_eq!(sources[0].0, game_sources(&config, &before)[0].0,
+        "Moving a saved logical rule must not create a second trigger/owner or another session pool");
 }
 
 #[test]

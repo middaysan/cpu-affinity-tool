@@ -286,12 +286,20 @@ pub(crate) fn game_sources(
     };
     members
         .iter()
-        .filter(|member| config.games.iter().any(|game| game.rule == member.rule.0))
-        .flat_map(|member| {
+        .filter_map(|member| {
+            config
+                .games
+                .iter()
+                .find(|game| game.rule == member.rule.0)
+                .map(|game| (member, game))
+        })
+        .flat_map(|(member, game)| {
             member.instances.iter().map(|facts| {
                 (
                     SessionSource::Game {
-                        group: member.group.0.clone(),
+                        // Logical rule identity follows moves. Keep selection-time
+                        // group metadata stable so a move cannot create another owner.
+                        group: game.group.clone(),
                         rule: member.rule.0.clone(),
                         pid: facts.pid,
                         token: facts.token,

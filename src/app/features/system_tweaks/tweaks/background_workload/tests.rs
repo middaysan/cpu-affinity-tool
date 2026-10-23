@@ -192,6 +192,55 @@ fn background_missing_getter_skips_only_that_mechanism_and_ecoqos_is_explicit() 
 }
 
 #[test]
+fn background_suitable_values_keep_equal_owner_intents_for_the_controller() {
+    let target = TargetIdentity::Process {
+        pid: 99,
+        creation_token: 900,
+        image_path: "worker.exe".into(),
+    };
+    let ready = plan_fields(
+        &target,
+        Role::DiagnosticsTelemetry,
+        Some(0x4000),
+        Some(OwnedPolicy {
+            control: EXECUTION_SPEED,
+            state: EXECUTION_SPEED,
+        }),
+        &Config::default(),
+    );
+    assert_eq!(ready.noops, 2);
+    assert_eq!(ready.changes.len(), 2,
+        "The controller must distinguish an unowned suitable baseline from a field already owned by another session");
+    assert_eq!(ready.changes[0].key.field.as_str(), PRIORITY);
+    assert_eq!(ready.changes[0].desired, 0x4000u32.to_le_bytes());
+    assert_eq!(ready.changes[1].key.field.as_str(), QOS);
+
+    let witness = placement_plan(
+        &Config {
+            cpu_mode: CpuMode::ManualPool,
+            manual_ids: vec![102, 103],
+            manual_topology: topology(),
+            ..Default::default()
+        },
+        &topology(),
+        &[102, 103],
+    )
+    .unwrap()
+    .unwrap();
+    let mut plan = TargetPlan {
+        changes: vec![],
+        noops: 0,
+        skipped: vec![],
+        blocked: false,
+    };
+    include_placement_intent(&mut plan, &target, &witness);
+    assert_eq!(plan.noops, 1);
+    assert_eq!(plan.changes.len(), 1);
+    assert_eq!(plan.changes[0].key.field.as_str(), SETS);
+    assert_eq!(plan.changes[0].desired, cpu_bytes(&[102, 103]));
+}
+
+#[test]
 fn background_module_rejects_manual_ownership_before_native_preflight() {
     let module = std::sync::Arc::new(BackgroundWorkload::default());
     let owner = OwnerKey::Manual {
