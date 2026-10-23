@@ -1118,6 +1118,17 @@ fn draw_operation_error(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn background_policy_is_not_a_separate_system_tweaks_card() {
+        let state = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::app::models::AppStateStorage::test_fixture(|_| {}),
+        ));
+        let mut app = empty_modules_app(state);
+        let text = rendered_text(&mut app);
+        assert!(!text.contains("Reduce background impact"), "{text}");
+        assert!(!text.contains("Preview for 10 min"), "{text}");
+        finish(&mut app);
+    }
     use super::*;
     use crate::app::features::system_tweaks::platform::contract::ActivationMode;
     use crate::app::features::system_tweaks::platform::contract::TargetIdentity;

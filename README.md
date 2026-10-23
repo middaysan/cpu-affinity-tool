@@ -8,9 +8,9 @@ Set up a game and its background apps once, instead of repeating the changes in 
 
 **New in [1.7.0](https://github.com/middaysan/cpu-affinity-tool/releases/tag/v1.7.0):** CPU/process history with PNG and CSV export, System Tweaks, and optional local AI-agent control through MCP.
 
-![Affinity groups with saved application rules and live CPU meters](assets/screenshot.png)
+![Affinity groups and CPU topology selection shown side by side](assets/screenshot.png)
 
-*Example groups and a real demo workload, captured during 1.7.0 development. CPU selections depend on your processor. [Light theme](assets/screenshots/main-light.png).*
+*Affinity groups and the CPU selection screen, shown side by side. CPU selections depend on your processor. [Light theme](assets/screenshots/main-light.png).*
 
 ## Getting started
 
@@ -63,6 +63,8 @@ Right-click a graph to save the visible chart as **PNG** or export all retained 
 *Current settings are read from Windows. No tweaks were applied to take this screenshot.*
 
 Manual changes remain applied after you close the app. **Undo** uses the recorded original values and preserves later changes made elsewhere. Display changes have a confirmation countdown. See the [System Tweaks guide](docs/system-tweaks.md) for what each control changes.
+
+**Development preview:** this branch adds one optional per-app background-load reduction checkbox in Application rule settings. It requests priority/EcoQoS only, with no manual core selection. System roles remain unchanged while their controlled VM validation is pending; the native CPU mechanisms have been checked only on owned test processes. This is not part of the published 1.7.0 release. [Preview controls and limits](docs/background-workload.md).
 
 ### Connect a local agent
 

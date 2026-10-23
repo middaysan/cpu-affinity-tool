@@ -11,6 +11,83 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::BOOL;
 
 use super::OS;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowActivation {
+    Foreground,
+    NotReady,
+    Denied,
+    Cancelled,
+}
+
+fn activation_preflight(
+    owned: bool,
+    visible: bool,
+    minimized: bool,
+    foreground: bool,
+) -> Option<WindowActivation> {
+    if !owned {
+        Some(WindowActivation::Cancelled)
+    } else if !visible || minimized {
+        Some(WindowActivation::NotReady)
+    } else if foreground {
+        Some(WindowActivation::Foreground)
+    } else {
+        None
+    }
+}
+
+#[test]
+fn restored_owned_window_reaches_os_activation_after_pointer_motion() {
+    assert_eq!(
+        activation_preflight(true, true, false, false),
+        None,
+        "a raw last-input timestamp change must not veto an explicit Restore"
+    );
+    assert_eq!(
+        activation_preflight(false, true, false, true),
+        Some(WindowActivation::Cancelled)
+    );
+    assert_eq!(
+        activation_preflight(true, false, false, true),
+        Some(WindowActivation::NotReady)
+    );
+    assert_eq!(
+        activation_preflight(true, true, true, true),
+        Some(WindowActivation::NotReady)
+    );
+    assert_eq!(
+        activation_preflight(true, true, false, true),
+        Some(WindowActivation::Foreground)
+    );
+}
+
+impl OS {
+    /// Activate only a restored window owned by this GUI thread. Never changes
+    /// geometry, topmost state or input attachment. Windows owns foreground
+    /// permission; a raw input timestamp also changes on harmless mouse motion.
+    pub fn activate_own_window(hwnd: HWND) -> WindowActivation {
+        use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+        unsafe {
+            let mut pid = 0;
+            let thread = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if let Some(outcome) = activation_preflight(
+                thread == GetCurrentThreadId() && pid == GetCurrentProcessId(),
+                IsWindowVisible(hwnd).as_bool(),
+                IsIconic(hwnd).as_bool(),
+                GetForegroundWindow() == hwnd,
+            ) {
+                return outcome;
+            }
+            let _ = SetForegroundWindow(hwnd);
+            if GetForegroundWindow() == hwnd {
+                WindowActivation::Foreground
+            } else {
+                WindowActivation::Denied
+            }
+        }
+    }
+}
 fn qualified_foreground(window: usize, thread: u32, pid: u32) -> Result<(usize, u32), String> {
     if window == 0 || thread == 0 || pid == 0 {
         Err("foreground observation unavailable".into())
@@ -271,6 +348,24 @@ mod startup_window_tests {
                 let _ = UnregisterClassW(self.class, Some(self.instance));
             }
         }
+    }
+
+    #[test]
+    fn activation_waits_for_native_visibility_and_rejects_other_threads() {
+        let window = TestWindow::new(w!("CPU Affinity Tool activation regression"));
+        assert_eq!(
+            OS::activate_own_window(window.hwnd),
+            WindowActivation::NotReady
+        );
+        let raw = window.hwnd.0 as usize;
+        std::thread::spawn(move || {
+            assert_eq!(
+                OS::activate_own_window(HWND(raw as *mut _)),
+                WindowActivation::Cancelled
+            );
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

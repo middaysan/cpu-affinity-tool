@@ -1,4 +1,5 @@
 pub mod agent;
+pub(crate) mod background;
 mod common;
 mod cpu;
 pub(crate) mod cpu_load;
@@ -15,6 +16,7 @@ mod self_affinity;
 mod shell;
 pub(crate) mod tuning;
 mod window;
+pub use window::WindowActivation;
 pub(crate) mod windows_tweaks;
 
 pub use event_log::WindowsApplicationFailure;

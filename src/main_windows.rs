@@ -136,21 +136,6 @@ fn main() {
                     window.set_max_inner_size(maximum);
                 }
                 #[cfg(feature = "render-profiling")]
-                if let Some(gl) = &cc.gl {
-                    use eframe::glow::HasContext;
-                    let description = unsafe {
-                        format!(
-                            "{} / {} / {}",
-                            gl.get_parameter_string(eframe::glow::VENDOR),
-                            gl.get_parameter_string(eframe::glow::RENDERER),
-                            gl.get_parameter_string(eframe::glow::VERSION)
-                        )
-                    };
-                    app::features::diagnostics::render_profile::renderer(
-                        description.chars().take(512).collect(),
-                    );
-                }
-                #[cfg(feature = "render-profiling")]
                 if let Some(state) = &cc.wgpu_render_state {
                     let info = state.adapter.get_info();
                     app::features::diagnostics::render_profile::renderer(format!(

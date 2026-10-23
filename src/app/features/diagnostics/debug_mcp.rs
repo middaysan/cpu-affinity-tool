@@ -514,6 +514,12 @@ fn tweaks_state(app: &AppState) -> Value {
         "display_confirmation_ms":snapshot.display_confirmation.map(|t|t.saturating_duration_since(Instant::now()).as_millis()),
         "help":app.ui.tuning.tweak_help.as_ref().map(|(title,_)|title),
         "undo_confirmation":app.ui.tuning.confirm_undo_all,"cards":cards,"previous_owned":previous,
+        "background":{"enabled":snapshot.background.enabled,"status":snapshot.background.status,
+            "preview":snapshot.background.preview_until.is_some(),"active_games":snapshot.background.active_games,
+            "changed_targets":snapshot.background.changed_targets,"selected_games":snapshot.background.config.games.len(),
+            "cpu_policy":format!("{:?}",snapshot.background.config.cpu_mode),"inspected":snapshot.background.inspected,
+            "topology_cpus":snapshot.background.topology.len(),"topology_error":snapshot.background.topology_error,
+            "candidates":snapshot.background.candidates.iter().map(|row|json!({"role":row.role,"pid":row.pid,"status":row.status})).collect::<Vec<_>>()},
         "pc_checks":snapshot.pc_checks.iter().map(|c|json!({"id":c.id,"title":c.title,"summary":c.summary})).collect::<Vec<_>>()})
 }
 

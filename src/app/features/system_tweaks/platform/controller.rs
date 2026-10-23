@@ -14,6 +14,39 @@ use std::{
 };
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub enum SessionSource {
+    Game {
+        group: String,
+        rule: String,
+        pid: u32,
+        token: u64,
+    },
+    Preview {
+        pid: u32,
+        token: u64,
+    },
+}
+impl SessionSource {
+    pub fn instance(&self) -> (u32, u64) {
+        match self {
+            Self::Game { pid, token, .. } | Self::Preview { pid, token } => (*pid, *token),
+        }
+    }
+    pub(crate) fn valid(&self) -> bool {
+        let (pid, token) = self.instance();
+        if pid == 0 || token == 0 {
+            return false;
+        }
+        match self {
+            Self::Game { group, rule, .. } => [group, rule]
+                .iter()
+                .all(|id| !id.is_empty() && id.len() <= 128 && !id.contains('\0')),
+            Self::Preview { .. } => true,
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum OwnerKey {
     Manual {
         profile: ProfileId,
@@ -27,20 +60,49 @@ pub enum OwnerKey {
         pid: u32,
         token: u64,
     },
+    /// One trigger can own several exact targets without turning a game session
+    /// into a persistent Manual activation or conflating the two lifetimes.
+    SessionTarget {
+        profile: ProfileId,
+        feature: FeatureId,
+        source: SessionSource,
+        target_pid: u32,
+        target_token: u64,
+    },
 }
 impl OwnerKey {
     pub fn feature(&self) -> &FeatureId {
         match self {
-            Self::Manual { feature, .. } | Self::Session { feature, .. } => feature,
+            Self::Manual { feature, .. }
+            | Self::Session { feature, .. }
+            | Self::SessionTarget { feature, .. } => feature,
         }
     }
     pub fn profile(&self) -> ProfileId {
         match self {
-            Self::Manual { profile, .. } | Self::Session { profile, .. } => *profile,
+            Self::Manual { profile, .. }
+            | Self::Session { profile, .. }
+            | Self::SessionTarget { profile, .. } => *profile,
         }
     }
     pub fn is_session(&self) -> bool {
-        matches!(self, Self::Session { .. })
+        matches!(self, Self::Session { .. } | Self::SessionTarget { .. })
+    }
+    pub(crate) fn accepts_target(&self, target: &TargetIdentity) -> bool {
+        match self {
+            Self::SessionTarget {
+                source,
+                target_pid,
+                target_token,
+                ..
+            } => {
+                source.valid()
+                    && source.instance().0 != *target_pid
+                    && matches!(target, TargetIdentity::Process {pid, creation_token, ..}
+                    if *pid != 0 && *creation_token != 0 && pid == target_pid && creation_token == target_token)
+            }
+            _ => true,
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,7 +124,17 @@ struct OwnedField {
     written: Vec<u8>,
     desired: Vec<u8>,
     attempted: Option<Vec<u8>>,
+    context: Option<Vec<u8>>,
     owners: BTreeSet<OwnerKey>,
+}
+impl OwnedField {
+    fn read(&self, key: &ResourceKey) -> Result<Vec<u8>, ModuleError> {
+        self.module.read_with_context(key, self.context.as_deref())
+    }
+    fn write(&self, key: &ResourceKey, expected: &[u8], desired: &[u8]) -> Result<(), ModuleError> {
+        self.module
+            .write_with_context(key, expected, desired, self.context.as_deref())
+    }
 }
 #[cfg(test)]
 #[derive(Clone, Debug)]
@@ -145,6 +217,7 @@ impl Controller {
                         written: field.current,
                         desired: field.desired,
                         attempted: field.attempted,
+                        context: field.context,
                         owners: field.owners.into_iter().collect(),
                     },
                 );
@@ -294,6 +367,9 @@ impl Controller {
             self.errors = errors;
             return Err(error);
         }
+        for (key, field) in removed {
+            field.module.field_retired(&key);
+        }
         Ok(true)
     }
     pub fn status(&self, owner: &OwnerKey) -> Option<ModuleStatus> {
@@ -338,6 +414,7 @@ impl Controller {
                     current: f.written.clone(),
                     desired: f.desired.clone(),
                     attempted: f.attempted.clone(),
+                    context: f.context.clone(),
                     owners: f.owners.iter().cloned().collect(),
                 })
                 .collect(),
@@ -375,7 +452,7 @@ impl Controller {
     pub fn inspect(&mut self) {
         let mut failed = BTreeMap::new();
         for (key, field) in &self.fields {
-            let error = match field.module.read(key) {
+            let error = match field.read(key) {
                 Ok(actual) if field.attempted.is_none() && actual == field.written => None,
                 Ok(_) => Some(ModuleError::new(
                     ErrorKind::ExternalChange,
@@ -451,6 +528,9 @@ impl Controller {
         activation: Option<ActivationFacts>,
     ) -> Result<(), ModuleError> {
         let invalid = || ModuleError::new(ErrorKind::InvalidConfig, "fields");
+        if module.requires_session_target() && !matches!(owner, OwnerKey::SessionTarget { .. }) {
+            return Err(invalid());
+        }
         if !module.editor().availability().is_available() {
             return Err(ModuleError::new(
                 ErrorKind::Unsupported,
@@ -471,12 +551,17 @@ impl Controller {
                 (OwnerKey::Manual { .. }, None) => {}
                 (OwnerKey::Session { pid, token, .. }, Some(f))
                     if *pid == f.pid && *token == f.token && !f.image.is_empty() => {}
+                (OwnerKey::SessionTarget { source, .. }, Some(f))
+                    if source.valid()
+                        && source.instance() == (f.pid, f.token)
+                        && !f.image.is_empty() => {}
                 _ => return Err(invalid()),
             }
         }
         let descriptor = module.descriptor();
         let target = module.canonical_target(&target)?;
         if !target.valid()
+            || !owner.accepts_target(&target)
             || descriptor.access != ModuleAccess::Managed
             || config.feature != descriptor.id
             || config.version != descriptor.config_version
@@ -511,17 +596,24 @@ impl Controller {
                 {
                     return Err(ModuleError::new(ErrorKind::Conflict, "acquire"));
                 }
-                if field.module.read(&change.key)? != field.written {
+                if field.read(&change.key)? != field.written {
                     return Err(ModuleError::new(ErrorKind::ExternalChange, "acquire"));
                 }
-                prepared.push((change, field.written.clone()));
+                prepared.push((change, field.written.clone(), field.context.clone()));
             } else {
-                let baseline = module.read(&change.key)?;
+                let context = module.field_context(&change.key)?;
+                if context
+                    .as_ref()
+                    .is_some_and(|value| value.len() > MAX_FIELD_BYTES)
+                {
+                    return Err(invalid());
+                }
+                let baseline = module.read_with_context(&change.key, context.as_deref())?;
                 if baseline.len() > MAX_FIELD_BYTES {
                     return Err(invalid());
                 }
                 if baseline != change.desired {
-                    prepared.push((change, baseline));
+                    prepared.push((change, baseline, context));
                 }
             }
         }
@@ -530,18 +622,22 @@ impl Controller {
         }
         let new_fields = prepared
             .iter()
-            .filter(|(change, _)| !self.fields.contains_key(&change.key))
+            .filter(|(change, _, _)| !self.fields.contains_key(&change.key))
             .count();
         let mut bytes: usize = self
             .fields
             .values()
-            .map(|field| field.baseline.len() + field.written.len())
+            .map(|field| {
+                field.baseline.len()
+                    + field.written.len()
+                    + field.context.as_ref().map_or(0, Vec::len)
+            })
             .sum();
-        for (change, current) in &prepared {
+        for (change, current, context) in &prepared {
             bytes = if let Some(field) = self.fields.get(&change.key) {
                 bytes - field.written.len() + change.desired.len()
             } else {
-                bytes + current.len() + change.desired.len()
+                bytes + current.len() + change.desired.len() + context.as_ref().map_or(0, Vec::len)
             };
         }
         if self.fields.len() + new_fields > 256 || bytes > 4 * 1024 * 1024 {
@@ -555,7 +651,7 @@ impl Controller {
                 activation,
             },
         );
-        for (change, current) in &prepared {
+        for (change, current, context) in &prepared {
             let field = self
                 .fields
                 .entry(change.key.clone())
@@ -565,20 +661,21 @@ impl Controller {
                     written: current.clone(),
                     desired: change.desired.clone(),
                     attempted: None,
+                    context: context.clone(),
                     owners: BTreeSet::new(),
                 });
             field.desired = change.desired.clone();
             field.owners.insert(owner.clone());
         }
         self.persist()?;
-        for (FieldChange { key, desired }, current) in prepared {
+        for (FieldChange { key, desired }, current, _) in prepared {
             if self.fields[&key].written == desired {
                 continue;
             }
             self.fields.get_mut(&key).unwrap().attempted = Some(desired.clone());
             self.persist()?;
-            let write = module.write(&key, &current, &desired);
-            let observed = module.read(&key);
+            let write = self.fields[&key].write(&key, &current, &desired);
+            let observed = self.fields[&key].read(&key);
             let field = self.fields.get_mut(&key).unwrap();
             match observed {
                 Ok(actual) if actual == desired => {
@@ -639,7 +736,7 @@ impl Controller {
                             return Err(error.clone());
                         }
                         let field = &self.fields[key];
-                        let actual = field.module.read(key)?;
+                        let actual = field.read(key)?;
                         if actual != field.written
                             && field.attempted.as_ref() != Some(&actual)
                             && actual != field.baseline
@@ -671,7 +768,7 @@ impl Controller {
             }
             for key in &keys {
                 let field = self.fields.get(key).unwrap();
-                let actual = field.module.read(key)?;
+                let actual = field.read(key)?;
                 if actual != field.written
                     && field.attempted.as_ref() != Some(&actual)
                     && !(intent == RecoveryIntent::Restore && actual == field.baseline)
@@ -692,15 +789,11 @@ impl Controller {
                         field.module.confirm_applied(key, &field.written)?;
                         continue;
                     }
-                    let (module, current, desired) = (
-                        field.module.clone(),
-                        field.written.clone(),
-                        field.desired.clone(),
-                    );
+                    let (current, desired) = (field.written.clone(), field.desired.clone());
                     self.fields.get_mut(key).unwrap().attempted = Some(desired.clone());
                     self.persist()?;
-                    let result = module.write(key, &current, &desired);
-                    let actual = module.read(key)?;
+                    let result = self.fields[key].write(key, &current, &desired);
+                    let actual = self.fields[key].read(key)?;
                     if actual != desired {
                         return Err(result.err().unwrap_or_else(|| {
                             ModuleError::new(ErrorKind::Verification, "recover write")
@@ -726,7 +819,7 @@ impl Controller {
     }
     fn release_field(&mut self, owner: &OwnerKey, key: &ResourceKey) -> Result<(), ModuleError> {
         let field = self.fields.get(key).expect("owned field");
-        if field.attempted.is_some() || field.module.read(key)? != field.written {
+        if field.attempted.is_some() || field.read(key)? != field.written {
             return Err(ModuleError::new(ErrorKind::ExternalChange, "release"));
         }
         if field.owners.len() > 1 {
@@ -749,16 +842,12 @@ impl Controller {
             return Ok(());
         }
         if field.written != field.baseline {
-            let (module, written, baseline) = (
-                field.module.clone(),
-                field.written.clone(),
-                field.baseline.clone(),
-            );
+            let (written, baseline) = (field.written.clone(), field.baseline.clone());
             self.fields.get_mut(key).unwrap().attempted = Some(baseline.clone());
             self.persist()?;
-            let result = module.write(key, &written, &baseline);
+            let result = self.fields[key].write(key, &written, &baseline);
             let field = self.fields.get_mut(key).unwrap();
-            match module.read(key) {
+            match field.read(key) {
                 Ok(actual) if actual == baseline => {
                     field.written = actual;
                     field.attempted = None;
@@ -794,6 +883,7 @@ impl Controller {
             }
             return Err(error);
         }
+        field.module.field_retired(key);
         self.restoration_effect = Some(
             match (self.restoration_effect, field.module.descriptor().effect) {
                 (Some(Effect::RestartRequired), _) | (_, Effect::RestartRequired) => {
@@ -861,6 +951,7 @@ impl Controller {
                     self.errors.insert(owner.clone(), error.clone());
                     return Err(error);
                 }
+                field.module.field_retired(&key);
             }
         }
         self.recover_owner(owner, RecoveryIntent::Restore)?;

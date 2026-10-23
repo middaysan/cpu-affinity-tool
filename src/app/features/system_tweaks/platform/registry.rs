@@ -17,6 +17,10 @@ pub struct ModuleObservation {
     pub effect: Effect,
 }
 pub trait Module: Send + Sync {
+    /// Multi-target session adapters cannot be invoked as persistent Manual tweaks.
+    fn requires_session_target(&self) -> bool {
+        false
+    }
     fn descriptor(&self) -> ModuleDescriptor;
     fn editor(&self) -> &dyn ModuleEditor;
     /// Process targets are supplied by the worker from verified tracked instances.
@@ -56,7 +60,39 @@ pub trait Module: Send + Sync {
         target: &TargetIdentity,
         config: &ModuleEnvelope,
     ) -> Result<Vec<FieldChange>, ModuleError>;
+    /// Bounded cached explanations from the immediately preceding preflight.
+    /// Implementations must not perform another native query here.
+    fn preflight_notes(&self, _target: &TargetIdentity) -> Vec<String> {
+        vec![]
+    }
     fn read(&self, key: &ResourceKey) -> Result<Vec<u8>, ModuleError>;
+    /// Optional bounded, module-owned native identity/context witness. Parsing a
+    /// witness never grants mutation authority; the adapter must revalidate it.
+    fn field_context(&self, _key: &ResourceKey) -> Result<Option<Vec<u8>>, ModuleError> {
+        Ok(None)
+    }
+    fn read_with_context(
+        &self,
+        key: &ResourceKey,
+        context: Option<&[u8]>,
+    ) -> Result<Vec<u8>, ModuleError> {
+        if context.is_some() {
+            return Err(ModuleError::new(ErrorKind::Unsupported, "field context"));
+        }
+        self.read(key)
+    }
+    fn write_with_context(
+        &self,
+        key: &ResourceKey,
+        expected: &[u8],
+        desired: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<(), ModuleError> {
+        if context.is_some() {
+            return Err(ModuleError::new(ErrorKind::Unsupported, "field context"));
+        }
+        self.write(key, expected, desired)
+    }
     /// Compare and write on the same validated native handle. Empty bytes may encode absence.
     fn write(&self, key: &ResourceKey, expected: &[u8], desired: &[u8]) -> Result<(), ModuleError>;
     /// Some stored settings need a guarded runtime refresh even when bytes already match.
@@ -64,6 +100,9 @@ pub trait Module: Send + Sync {
     fn confirm_applied(&self, _key: &ResourceKey, _expected: &[u8]) -> Result<(), ModuleError> {
         Ok(())
     }
+    /// Release process-local writer metadata only after durable last-field retirement.
+    /// This notification performs no native write and cannot discard recovery evidence.
+    fn field_retired(&self, _key: &ResourceKey) {}
     fn action(&self, action: ModuleAction) -> Result<(), ModuleError> {
         match action {
             ModuleAction::Refresh => Ok(()),

@@ -52,6 +52,7 @@ struct GridData<'a> {
     mask: Option<&'a [usize]>,
     overview: &'a Overview,
     hovered: Option<SampleTime>,
+    sample_time: Option<SampleTime>,
     show_app_activity: bool,
 }
 
@@ -163,12 +164,24 @@ fn cpu_badge(
     badge
 }
 
+fn parking_help(time: Option<SampleTime>) -> String {
+    let sample = time
+        .map(|time| os_api::cpu_load::sample_clock_label(time.wall))
+        .unwrap_or_else(|| "time unavailable".into());
+    format!("Windows parking state at the displayed sample ({sample}), sampled once per second. \
+        Parked means Windows was limiting ordinary scheduling on this CPU at that instant; it does not mean zero work. \
+        Load covers the preceding recorded interval, so nonzero load and Parked can coexist. \
+        The small graph spans retained history. Unparked CPUs may still be idle. \
+        State — means the parking state is unavailable.")
+}
+
 fn tile_footer(
     ui: &mut egui::Ui,
     value: Option<f32>,
     partial: bool,
     parked: Option<bool>,
     outside: bool,
+    sample_time: Option<SampleTime>,
 ) {
     let colors = *palette(ui);
     let state_color = if parked == Some(true) {
@@ -214,7 +227,10 @@ fn tile_footer(
             load,
             colors.text_primary,
         );
-    response.on_hover_text("Windows parking state at the last poll, sampled once per second. Load covers the interval between samples, so a CPU can have nonzero load and be parked at the poll. Unparked CPUs may still be idle. State — means the parking state is unavailable.");
+    response.on_hover_ui(|ui| {
+        ui.set_max_width((ui.ctx().content_rect().width() - 24.0).clamp(80.0, 260.0));
+        ui.add(egui::Label::new(parking_help(sample_time)).wrap());
+    });
 }
 
 fn cpu_tile(
@@ -263,8 +279,6 @@ fn cpu_tile(
     let frame = egui::Frame::NONE
         .fill(if selected {
             colors.success.fill
-        } else if parked == Some(true) {
-            colors.warning.fill
         } else {
             colors.inset
         })
@@ -302,7 +316,7 @@ fn cpu_tile(
                     );
                 });
                 super::mini_chart::draw(ui, data.overview, cpu, data.hovered);
-                tile_footer(ui, value, partial, parked, outside);
+                tile_footer(ui, value, partial, parked, outside, data.sample_time);
             });
         });
     let rect = frame.response.rect;
@@ -989,6 +1003,7 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
         mask: if process { mask.as_deref() } else { None },
         overview: data.overview,
         hovered: data.hovered,
+        sample_time: if recorded { data.sample.time } else { None },
         show_app_activity: process,
     };
             if process {
@@ -1099,6 +1114,74 @@ mod tests {
     use std::sync::{Arc, RwLock};
 
     #[test]
+    fn parking_help_uses_original_sample_time_and_explains_interval_load() {
+        let time = SampleTime {
+            seconds: 7.0,
+            wall: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+        };
+        let help = parking_help(Some(time));
+        assert!(help.contains(&os_api::cpu_load::sample_clock_label(time.wall)));
+        assert!(help.contains("displayed sample"));
+        assert!(help.contains("interval"));
+        assert!(help.contains("nonzero load"));
+        assert!(!help.contains("last poll"));
+        assert!(parking_help(None).contains("time unavailable"));
+    }
+
+    #[test]
+    fn parked_tile_keeps_neutral_body_and_nonzero_load_in_both_themes() {
+        for dark in [true, false] {
+            let ctx = egui::Context::default();
+            ctx.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+            let overview = Overview::default();
+            let data = GridData {
+                values: &[Some(0.2)],
+                partial: &[],
+                parked: &[Some(true)],
+                mask: None,
+                overview: &overview,
+                hovered: None,
+                sample_time: None,
+                show_app_activity: false,
+            };
+            let mut tile = egui::Rect::NOTHING;
+            let mut colors = None;
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                colors = Some(*palette(ui));
+                cpu_tile(ui, 0, false, 83.0, &data);
+                tile = ctx
+                    .read_response(ui.id().with(("cpu-tile", 0usize)))
+                    .unwrap()
+                    .rect;
+            });
+            output.textures_delta.clear();
+            let colors = colors.unwrap();
+            assert!(
+                output
+                    .shapes
+                    .iter()
+                    .any(|s| matches!(&s.shape, egui::Shape::Rect(r)
+                if r.rect == tile && r.fill == colors.inset)),
+                "Parked must not tint the tile body"
+            );
+            for (text, color) in [("Parked", colors.warning.fg), ("<1%", colors.text_primary)] {
+                assert!(
+                    output
+                        .shapes
+                        .iter()
+                        .any(|s| matches!(&s.shape, egui::Shape::Text(t)
+                    if t.galley.text() == text && t.galley.job.sections[0].format.color == color)),
+                    "keep {text} with its own color and the measured load"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cpu_tile_places_activity_in_badge_and_keeps_plot_and_footer_tight() {
         for dark in [true, false] {
             for scale in [1.0, 1.75] {
@@ -1123,6 +1206,7 @@ mod tests {
                     mask: None,
                     overview: &overview,
                     hovered: None,
+                    sample_time: None,
                     show_app_activity: true,
                 };
                 let mut tile = egui::Rect::NOTHING;
@@ -1245,6 +1329,7 @@ mod tests {
             mask: None,
             overview: &overview,
             hovered: None,
+            sample_time: None,
             show_app_activity: false,
         };
         let mut reference = Vec::new();
@@ -1304,6 +1389,7 @@ mod tests {
                     mask: None,
                     overview: &overview,
                     hovered: None,
+                    sample_time: None,
                     show_app_activity: false,
                 };
                 ui.horizontal(|ui| {

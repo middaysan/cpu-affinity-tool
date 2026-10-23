@@ -81,6 +81,7 @@ impl StatePersistence for SelectedStatePersistence {
     }
 }
 pub(crate) struct HeadlessTuning {
+    pub(super) background: super::background_policy::Runtime,
     pub(super) tweak_targets: std::collections::BTreeMap<FeatureId, TargetIdentity>,
     pub(super) pc_checks: Vec<super::pc_checks::PcCheck>,
     pub(super) display_confirmation: Option<std::time::Instant>,
@@ -103,6 +104,7 @@ impl HeadlessTuning {
     ) -> Self {
         let rules = RulesContext::from_storage(&state);
         Self {
+            background: Default::default(),
             tweak_targets: Default::default(),
             pc_checks: vec![],
             display_confirmation: None,
@@ -259,7 +261,7 @@ impl HeadlessTuning {
             }
         }
     }
-    fn configured(&self) -> Result<TuningConfig, SaveError> {
+    pub(super) fn configured(&self) -> Result<TuningConfig, SaveError> {
         if !self.modules_enabled {
             return Err(SaveError::Invalid);
         }
@@ -284,7 +286,7 @@ impl HeadlessTuning {
         self.start_selected_recovery();
         Ok(())
     }
-    fn save_config(&mut self, config: TuningConfig) -> Result<(), SaveError> {
+    pub(super) fn save_config(&mut self, config: TuningConfig) -> Result<(), SaveError> {
         let mut candidate = self.state.clone();
         candidate.tuning = TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
         self.publish(candidate, self.rules.clone())?;
@@ -520,6 +522,45 @@ impl HeadlessTuning {
         let (g, r) = self.rule_index(group, rule)?;
         let mut candidate = self.state.clone();
         candidate.groups[g].programs[r] = app;
+        self.publish(candidate, self.rules.clone())
+    }
+    pub(crate) fn edit_rule_background(
+        &mut self,
+        group: &GroupId,
+        rule: &RuleId,
+        app: AppToRun,
+        background: Option<super::background_policy::RulePolicy>,
+    ) -> Result<(), SaveError> {
+        let Some(background) = background else {
+            return self.edit_rule(group, rule, app);
+        };
+        if !self.modules_enabled && background == super::background_policy::RulePolicy::default() {
+            return self.edit_rule(group, rule, app);
+        }
+        let (g, r) = self.rule_index(group, rule)?;
+        let is_exe = app.bin_path().is_some_and(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+        });
+        if background.enabled && !is_exe {
+            return Err(SaveError::Invalid);
+        }
+        let mut config = self.configured()?;
+        super::background_policy::put_rule_policy(
+            &mut config,
+            super::tweaks::background_workload::GameRule {
+                group: group.0.clone(),
+                rule: rule.0.clone(),
+            },
+            &background,
+        )?;
+        let mut candidate = self.state.clone();
+        candidate.groups[g].programs[r] = app;
+        // Both drafts publish atomically; a failed save must enable neither.
+        if config != self.configured()? {
+            candidate.tuning =
+                TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
+        }
         self.publish(candidate, self.rules.clone())
     }
     pub(crate) fn remove_rule(&mut self, group: &GroupId, rule: &RuleId) -> Result<(), SaveError> {

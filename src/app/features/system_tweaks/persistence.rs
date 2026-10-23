@@ -9,6 +9,95 @@ use std::{
 };
 const LIMIT: usize = 4 * 1024 * 1024;
 const MAX_FIELD_OWNERS: usize = 256;
+
+#[cfg(test)]
+mod background_activation_tests {
+    use super::*;
+    use crate::app::features::system_tweaks::platform::controller::SessionSource;
+
+    fn record(source: SessionSource) -> OwnerRecord {
+        let (pid, token) = source.instance();
+        let feature = FeatureId::new("background_workload").unwrap();
+        OwnerRecord {
+            owner: OwnerKey::SessionTarget {
+                profile: ProfileId::new(1).unwrap(),
+                feature: feature.clone(),
+                source,
+                target_pid: 99,
+                target_token: 900,
+            },
+            config: ModuleEnvelope {
+                feature,
+                kind: super::super::platform::codec::EnvelopeKind::Config,
+                version: SchemaVersion::new(1).unwrap(),
+                target: None,
+                payload: serde_json::json!({}),
+            },
+            activation: Some(ActivationFacts {
+                pid,
+                token,
+                image: "game.exe".into(),
+                trigger: ActivationEligibility::Running,
+            }),
+        }
+    }
+
+    #[test]
+    fn background_owner_binds_game_and_background_instances_without_becoming_manual() {
+        let mut record = record(SessionSource::Game {
+            group: "g1".into(),
+            rule: "r1".into(),
+            pid: 42,
+            token: 400,
+        });
+        assert!(record.owner.is_session());
+        assert!(record.has_valid_activation());
+        let encoded = serde_json::to_vec(&record).unwrap();
+        let decoded: OwnerRecord = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.owner, record.owner);
+        record.activation.as_mut().unwrap().token += 1;
+        assert!(!record.has_valid_activation());
+    }
+
+    #[test]
+    fn preview_session_requires_exact_activation_and_background_field_target() {
+        let record = record(SessionSource::Preview {
+            pid: 42,
+            token: 400,
+        });
+        assert!(record.has_valid_activation());
+        let target = TargetIdentity::Process {
+            pid: 99,
+            creation_token: 900,
+            image_path: "worker.exe".into(),
+        };
+        assert!(record.owner.accepts_target(&target));
+        let mut field = FieldRecord {
+            module: record.config.feature.clone(),
+            version: SchemaVersion::new(1).unwrap(),
+            key: ResourceKey {
+                target,
+                field: ResourceId::new("process_priority_class").unwrap(),
+            },
+            baseline: vec![0],
+            current: vec![1],
+            desired: vec![1],
+            attempted: None,
+            context: None,
+            owners: vec![record.owner],
+        };
+        assert!(field.is_well_formed());
+        field.key.target = TargetIdentity::Process {
+            pid: 99,
+            creation_token: 901,
+            image_path: "worker.exe".into(),
+        };
+        assert!(
+            !field.is_well_formed(),
+            "PID reuse cannot retarget a background session record"
+        );
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActivationFacts {
@@ -31,6 +120,24 @@ impl OwnerRecord {
         match (&self.owner, &self.activation) {
             // Manual changes do not depend on a running process.
             (OwnerKey::Manual { .. }, None) => true,
+            (
+                OwnerKey::SessionTarget {
+                    source,
+                    target_pid,
+                    target_token,
+                    ..
+                },
+                Some(facts),
+            ) => {
+                source.valid()
+                    && source.instance() == (facts.pid, facts.token)
+                    && *target_pid != 0
+                    && *target_token != 0
+                    && *target_pid != facts.pid
+                    && !facts.image.is_empty()
+                    && facts.image.len() <= 32767
+                    && !facts.image.contains('\0')
+            }
             (
                 OwnerKey::Session {
                     pid,
@@ -73,6 +180,8 @@ pub(crate) struct FieldRecord {
     pub current: Vec<u8>,
     pub desired: Vec<u8>,
     pub attempted: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Vec<u8>>,
     pub owners: Vec<OwnerKey>,
 }
 impl FieldRecord {
@@ -84,12 +193,22 @@ impl FieldRecord {
             && self
                 .attempted
                 .as_ref()
+                .is_none_or(|value| value.len() <= MAX_FIELD_BYTES)
+            && self
+                .context
+                .as_ref()
                 .is_none_or(|value| value.len() <= MAX_FIELD_BYTES);
 
         // A retained field must have at least one owner, within the supported bound.
         let valid_owner_count = !self.owners.is_empty() && self.owners.len() <= MAX_FIELD_OWNERS;
 
-        self.key.target.valid() && values_within_limit && valid_owner_count
+        self.key.target.valid()
+            && values_within_limit
+            && valid_owner_count
+            && self
+                .owners
+                .iter()
+                .all(|owner| owner.accepts_target(&self.key.target))
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -26,6 +26,18 @@ use std::{
     time::{Duration, Instant},
 };
 pub(crate) enum TuningRequest {
+    // Retained for internal compatibility/fixtures; the rule editor saves atomically.
+    #[allow(dead_code)]
+    ConfigureBackground {
+        enabled: bool,
+        config: Box<super::tweaks::background_workload::Config>,
+    },
+    #[allow(dead_code)]
+    InspectBackground,
+    #[allow(dead_code)]
+    PreviewBackground,
+    #[allow(dead_code)]
+    UndoBackground,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     ActivateSelectedManual {
         profile: ProfileId,
@@ -128,6 +140,7 @@ pub(crate) enum TuningRequest {
         group: GroupId,
         rule: RuleId,
         app: Box<AppToRun>,
+        background: Option<super::background_policy::RulePolicy>,
     },
 }
 impl TuningRequest {
@@ -182,6 +195,9 @@ pub(crate) struct ProfileCard {
 }
 #[derive(Clone)]
 pub(crate) struct TuningSnapshot {
+    // Bounded background telemetry remains available to debug-only diagnostics.
+    #[cfg_attr(not(feature = "debug-mcp"), allow(dead_code))]
+    pub background: super::background_policy::Snapshot,
     pub tweak_cards: Vec<TweakCard>,
     pub pc_checks: Vec<super::pc_checks::PcCheck>,
     pub display_confirmation: Option<Instant>,
@@ -500,6 +516,12 @@ impl TuningRuntime {
                                         failed = true;
                                         continue;
                                     }
+                                    if matches!(owner, OwnerKey::SessionTarget { .. })
+                                        && service.controller.retire_expired_target(&owner)
+                                            == Ok(true)
+                                    {
+                                        continue;
+                                    }
                                     let exited = actors.get_mut(&owner).is_some_and(|actor| {
                                         actor.lifetime() == LifetimeEvidence::Exited
                                     });
@@ -765,6 +787,15 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
         return Err(SaveError::Invalid);
     }
     match request {
+        TuningRequest::ConfigureBackground { enabled, config } => {
+            service.configure_background(enabled, *config)
+        }
+        TuningRequest::InspectBackground => {
+            service.background.request_inspect();
+            Ok(())
+        }
+        TuningRequest::PreviewBackground => service.preview_background(),
+        TuningRequest::UndoBackground => service.undo_background(),
         #[cfg(all(target_os = "windows", feature = "windows"))]
         TuningRequest::RefreshModuleCards => Ok(()),
         #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -848,7 +879,12 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             target,
             index,
         } => service.move_rule_at(&group, &rule, &target, index),
-        TuningRequest::EditRule { group, rule, app } => service.edit_rule(&group, &rule, *app),
+        TuningRequest::EditRule {
+            group,
+            rule,
+            app,
+            background,
+        } => service.edit_rule_background(&group, &rule, *app, background),
     }
 }
 struct Actor {
@@ -866,7 +902,7 @@ fn retained_actors(service: &HeadlessTuning) -> BTreeMap<OwnerKey, Actor> {
         .controller
         .owners()
         .into_iter()
-        .filter(OwnerKey::is_session)
+        .filter(|owner| matches!(owner, OwnerKey::Session { .. }))
     {
         let Some(record) = service.controller.owner_record(&owner) else {
             continue;
@@ -957,6 +993,13 @@ fn session_work_needed(service: &HeadlessTuning, actors: &BTreeMap<OwnerKey, Act
     if !actors.is_empty() || service.controller.owners().iter().any(OwnerKey::is_session) {
         return true;
     }
+    if service.background.needs_work()
+        || super::background_policy::policies(service)
+            .iter()
+            .any(|(_, on, config)| *on && !config.games.is_empty())
+    {
+        return true;
+    }
     let TuningLoad::Known(config) = service.state().tuning.decode() else {
         return false;
     };
@@ -974,6 +1017,7 @@ fn reconcile_sessions(
     observation: &ExecutionObservation,
     actors: &mut BTreeMap<OwnerKey, Actor>,
 ) {
+    super::background_policy::tick(service, observation, Instant::now());
     if !service.native_admitted || service.legacy_recovery {
         return;
     }
@@ -1023,6 +1067,9 @@ fn reconcile_sessions(
                             let Some(module) = service.registry().get(&preference.feature) else {
                                 continue;
                             };
+                            if module.requires_session_target() {
+                                continue;
+                            }
                             if !module.editor().availability().is_available() {
                                 continue;
                             }
@@ -1344,6 +1391,7 @@ fn snapshot(
 ) -> TuningSnapshot {
     if !service.modules_enabled {
         return TuningSnapshot {
+            background: Default::default(),
             tweak_cards: vec![],
             pc_checks: vec![],
             display_confirmation: None,
@@ -1523,6 +1571,7 @@ fn snapshot(
         operation
     };
     TuningSnapshot {
+        background: super::background_policy::snapshot(service),
         tweak_cards: tweak_cards(service, &templates, observe),
         pc_checks: service.pc_checks.clone(),
         display_confirmation: service.display_confirmation,

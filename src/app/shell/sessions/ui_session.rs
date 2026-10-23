@@ -93,6 +93,8 @@ impl UiSession {
             app_edit_state: RuleEditorSession {
                 process_names: Default::default(),
                 current_edit: None,
+                background: None,
+                background_error: None,
                 target: None,
                 shortcut_result: None,
             },

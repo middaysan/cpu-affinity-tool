@@ -21,6 +21,8 @@ The System section contains the game and comfort settings below. **Game GPU** is
 
 Comfort settings are preference choices, without an FPS gain. Screen refresh rate is the desktop's nominal Hz, not measured game FPS.
 
+The development branch also contains a session-only background-load preview in each **Application rule**, with one default-Off checkbox and a fixed priority/EcoQoS policy. There is no Advanced/core-placement UI. It follows that saved EXE instead of creating persistent Manual ownership. It has no separate System Tweaks card. System-role mutation is currently not admitted pending controlled VM/function validation. See [background-workload controls, ownership and validation limits](background-workload.md).
+
 ## Undo and persistence
 
 Before applying a setting, the app reads and records the original value. **Manual changes remain after closing or restarting the app.** Use the setting's Undo action, or **Undo my changes** to review restoring the changes managed by this tool.

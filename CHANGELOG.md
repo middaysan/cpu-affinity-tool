@@ -6,6 +6,22 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+### Added
+
+- Local preview of per-app background CPU sessions: one default-Off checkbox in Application rule, priority/EcoQoS-only sessions, no Advanced/manual core selection and no separate System Tweaks card. Old placement recovery data remains readable. Native mechanism checks use test-owned processes; the system-role mutation qualification set remains empty pending controlled VM/function validation. See `docs/background-workload.md` for scope and limits.
+
+### Fixed
+
+- Tray Restore shows and unminimizes the native window on the GUI thread before requesting Windows foreground activation, with a short bounded retry that stops on success, hide or exit. Ordinary mouse movement no longer cancels the request.
+- Tray double-click Restore waits for the final left-button release so that release cannot invalidate its own activation request. Single clicks and other mouse buttons do not restore the window.
+- Group CPU lists use the available header width instead of stopping after eight entries; the hover text retains the full list.
+- Parked CPU tiles retain their neutral background. Only the parking status is yellow, and its help explains the displayed sample time and why interval load can be nonzero.
+
+### Changed
+
+- Windows no longer includes the unused Glow/OpenGL renderer; Linux keeps its existing Glow backend.
+- Updated the README lead screenshot to the supplied side-by-side groups and CPU selection view.
+
 ## [1.7.0] - 2026-10-22
 
 ### Added

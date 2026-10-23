@@ -103,6 +103,10 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     let mut draft_changed = false;
     let shortcut_status = app.current_app_edit_shortcut_status();
     let shortcut_result = app.ui.app_edit_state.shortcut_result.clone();
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    let mut background = app.ui.app_edit_state.background.clone();
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    let background_error = app.ui.app_edit_state.background_error.clone();
 
     CentralPanel::default().frame(content_frame(root_ui)).show(root_ui, |ui| {
         ui.horizontal(|ui| {
@@ -241,6 +245,20 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(6.0);
+
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                {
+                    if let Some(draft) = &mut background {
+                        let supported = selected_app.bin_path().is_some_and(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe")));
+                        draft_changed |= crate::app::features::system_tweaks::background_ui::draw_rule(ui, draft, supported, false);
+                    }
+                    if let Some(error) = &background_error {
+                        ui.add(Label::new(RichText::new(error).weak()).wrap());
+                    }
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                }
 
                 if selected_app.is_args_editable() {
                     ui.horizontal(|ui| {
@@ -431,6 +449,10 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
             .app_edit_state
             .process_names
             .prepare(root_ui.ctx(), !cfg!(test));
+    }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    {
+        app.ui.app_edit_state.background = background;
     }
     if draft_changed {
         app.clear_current_app_shortcut_result();

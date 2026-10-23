@@ -44,6 +44,7 @@ struct ConfiguredRule {
     key: AppRuntimeKey,
     descendants: bool,
     additional: Vec<String>,
+    background_image: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Member {
@@ -72,6 +73,7 @@ pub(crate) enum ExecutionObservation {
         config: Arc<ConfigurationRevision>,
         members: Vec<Member>,
         foreground: ProcessFacts,
+        names: std::collections::BTreeMap<u32, String>,
     },
     Unknown(UnknownReason),
 }
@@ -91,6 +93,7 @@ impl ExecutionObservation {
             config: Arc::new(configuration(state).unwrap()),
             members,
             foreground,
+            names: Default::default(),
         }
     }
 }
@@ -101,6 +104,12 @@ pub(crate) struct ForegroundSample {
 }
 trait ObservationOs {
     fn enumerate(&mut self) -> Result<BTreeSet<u32>, UnknownReason>;
+    fn names(&self) -> std::collections::BTreeMap<u32, String> {
+        Default::default()
+    }
+    fn game_candidate(&mut self, _: &ProcessFacts) -> Result<bool, UnknownReason> {
+        Ok(true)
+    }
     fn inspect(&mut self, pid: u32) -> Result<ProcessFacts, UnknownReason>;
     fn foreground(&mut self) -> Result<ForegroundSample, UnknownReason>;
     fn recheck(&mut self) -> Result<(), UnknownReason> {
@@ -183,6 +192,7 @@ fn configuration(state: &AppStateStorage) -> Result<ConfigurationRevision, Unkno
         return Err(UnknownReason::Overflow);
     }
     let rules = RulesContext::from_storage(state);
+    let selected_background = super::background_policy::selected_rules(state);
     let mut rows = Vec::new();
     let mut ids = BTreeSet::new();
     let mut bytes = state.tuning.raw().map_or(0, str::len);
@@ -212,12 +222,25 @@ fn configuration(state: &AppStateStorage) -> Result<ConfigurationRevision, Unkno
             if bytes > MAX_BYTES {
                 return Err(UnknownReason::Overflow);
             }
+            let background_image = selected_background
+                .contains(&rule.0)
+                .then(|| {
+                    app.bin_path()
+                        .map(|path| path.to_string_lossy().into_owned())
+                })
+                .flatten();
+            if let Some(image) = &background_image {
+                bytes = bytes
+                    .checked_add(image.len())
+                    .ok_or(UnknownReason::Overflow)?;
+            }
             rows.push(ConfiguredRule {
                 group,
                 rule,
                 key,
                 descendants: app.manage_descendants,
                 additional: app.additional_processes.clone(),
+                background_image,
             });
         }
     }
@@ -292,6 +315,7 @@ fn observe(
     }
     let mut members = Vec::new();
     let mut bytes = config.byte_len;
+    let names = os.names();
     for (key, group, rule, instances) in copied {
         bytes = bytes
             .checked_add(key.as_str().len() + group.0.len() + rule.0.len())
@@ -320,6 +344,49 @@ fn observe(
             instances: facts,
         });
     }
+    // Read-only discovery for selected saved EXEs also works with the classic
+    // monitor paused. Reuse this enumeration; never insert into RunningApps.
+    for rule in config
+        .rules
+        .iter()
+        .filter(|rule| rule.background_image.is_some())
+    {
+        let image = rule.background_image.as_ref().unwrap();
+        let basename = std::path::Path::new(image)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(UnknownReason::InvalidMembership)?;
+        for (&pid, name) in &names {
+            if !name.eq_ignore_ascii_case(basename)
+                || members.iter().any(|member| {
+                    member.rule == rule.rule
+                        && member.instances.iter().any(|facts| facts.pid == pid)
+                })
+            {
+                continue;
+            }
+            let facts = os.inspect(pid)?;
+            if !facts.image.eq_ignore_ascii_case(image) || !os.game_candidate(&facts)? {
+                continue;
+            }
+            bytes = bytes
+                .checked_add(fact_bytes(&facts))
+                .ok_or(UnknownReason::Overflow)?;
+            if bytes > MAX_BYTES {
+                return Err(UnknownReason::Overflow);
+            }
+            if let Some(member) = members.iter_mut().find(|member| member.rule == rule.rule) {
+                member.instances.push(facts);
+            } else {
+                members.push(Member {
+                    key: rule.key.clone(),
+                    group: rule.group.clone(),
+                    rule: rule.rule.clone(),
+                    instances: vec![facts],
+                });
+            }
+        }
+    }
     let first = os.foreground()?;
     if first.window == 0 || first.pid == 0 {
         return Err(UnknownReason::ForegroundRace);
@@ -343,6 +410,10 @@ fn observe(
         config,
         members,
         foreground,
+        names: names
+            .into_iter()
+            .filter(|(_, name)| os_api::background::candidate_role(name).is_some())
+            .collect(),
     })
 }
 fn fact_bytes(fact: &ProcessFacts) -> usize {
@@ -355,14 +426,49 @@ fn fact_bytes(fact: &ProcessFacts) -> usize {
 }
 #[derive(Default)]
 struct NativeOs {
+    names: std::collections::BTreeMap<u32, String>,
+    #[cfg(windows)]
+    own: Option<os_api::tuning::TuningProcessIdentity>,
     #[cfg(windows)]
     guards: Vec<os_api::tuning::TuningProcessLifetimeGuard>,
 }
 impl ObservationOs for NativeOs {
+    fn game_candidate(&mut self, facts: &ProcessFacts) -> Result<bool, UnknownReason> {
+        #[cfg(windows)]
+        {
+            if self.own.is_none() {
+                self.own = Some(
+                    os_api::OS::tuning_process_identity(std::process::id())
+                        .map_err(|_| UnknownReason::Denied)?,
+                );
+            }
+            let own = self.own.as_ref().unwrap().token();
+            let Some(native) = &facts.native else {
+                return Ok(false);
+            };
+            let token = native.token();
+            Ok(token.session_id() != 0
+                && token.session_id() == own.session_id()
+                && token.sid() == own.sid()
+                && token.authentication_id() == own.authentication_id())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = facts;
+            Ok(false)
+        }
+    }
     fn enumerate(&mut self) -> Result<BTreeSet<u32>, UnknownReason> {
-        os_api::OS::snapshot_process_tree()
-            .map(|tree| tree.names.keys().copied().collect())
-            .map_err(|_| UnknownReason::IncompleteEnumeration)
+        let tree = os_api::OS::snapshot_process_tree()
+            .map_err(|_| UnknownReason::IncompleteEnumeration)?;
+        if tree.names.len() > MAX_PROCESSES || tree.names.values().any(|name| name.len() > 1024) {
+            return Err(UnknownReason::Overflow);
+        }
+        self.names = tree.names.into_iter().collect();
+        Ok(self.names.keys().copied().collect())
+    }
+    fn names(&self) -> std::collections::BTreeMap<u32, String> {
+        self.names.clone()
     }
     fn inspect(&mut self, pid: u32) -> Result<ProcessFacts, UnknownReason> {
         #[cfg(windows)]
@@ -408,6 +514,79 @@ impl ObservationOs for NativeOs {
 mod tests {
     use super::*;
     use crate::app::models::{AppToRun, CoreGroup};
+    #[test]
+    fn background_selected_saved_exe_is_discovered_without_classic_monitor_membership() {
+        struct Named(FakeOs, bool);
+        impl ObservationOs for Named {
+            fn enumerate(&mut self) -> Result<BTreeSet<u32>, UnknownReason> {
+                self.0.enumerate()
+            }
+            fn names(&self) -> std::collections::BTreeMap<u32, String> {
+                [(42, "fixture.exe".into())].into()
+            }
+            fn game_candidate(&mut self, _: &ProcessFacts) -> Result<bool, UnknownReason> {
+                Ok(self.1)
+            }
+            fn inspect(&mut self, pid: u32) -> Result<ProcessFacts, UnknownReason> {
+                self.0.inspect(pid)
+            }
+            fn foreground(&mut self) -> Result<ForegroundSample, UnknownReason> {
+                self.0.foreground()
+            }
+        }
+        let (running, state, os) = fixture();
+        running
+            .try_write()
+            .unwrap()
+            .mutate_membership(|running| running.apps.clear());
+        let mut saved = state.write().unwrap();
+        saved.groups[0].programs[0] = AppToRun::new_path(
+            "fixture.exe".into(),
+            vec![],
+            "fixture.exe".into(),
+            os_api::PriorityClass::Normal,
+            false,
+        );
+        let rules = RulesContext::from_storage(&saved);
+        let config = super::super::tweaks::background_workload::Config {
+            games: vec![super::super::tweaks::background_workload::GameRule {
+                group: rules.group_id_for_index(0).unwrap().0,
+                rule: rules.rule_id_for_index(0, 0).unwrap().0,
+            }],
+            ..Default::default()
+        };
+        let mut tuning = super::super::config::TuningConfig::default();
+        tuning.next_profile = 2;
+        tuning.profiles.push(super::super::config::Profile {
+            version: 1,
+            id: super::super::platform::contract::ProfileId::new(1).unwrap(),
+            name: "test".into(),
+            modules: vec![super::super::config::ModulePreference {
+                feature: super::super::platform::contract::FeatureId::new("background_workload")
+                    .unwrap(),
+                enabled: true,
+                mode: super::super::platform::contract::ActivationMode::Session,
+                config: config.envelope(),
+            }],
+        });
+        saved.tuning = super::super::config::TuningEnvelope::from_config(&tuning).unwrap();
+        drop(saved);
+        let mut named = Named(os, true);
+        let observation = observe(&running, &state, &mut named).unwrap();
+        assert!(
+            matches!(observation,ExecutionObservation::Complete{members,..} if members.len()==1 && members[0].instances[0].pid==42)
+        );
+        assert!(
+            running.try_read().unwrap().apps.is_empty(),
+            "discovery must not enforce affinity or change the classic roster"
+        );
+        named.1 = false;
+        let observation = observe(&running, &state, &mut named).unwrap();
+        assert!(
+            matches!(observation,ExecutionObservation::Complete{members,..} if members.is_empty()),
+            "another logon cannot become a game trigger"
+        );
+    }
     struct FakeOs {
         error: Option<UnknownReason>,
         focus: Vec<ForegroundSample>,

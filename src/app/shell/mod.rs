@@ -3,6 +3,8 @@ pub mod events;
 pub mod presenters;
 #[cfg(all(target_os = "windows", feature = "windows"))]
 mod render_preparation;
+#[cfg(target_os = "windows")]
+mod restore_focus;
 mod routes;
 pub mod sessions;
 
