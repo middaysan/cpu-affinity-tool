@@ -53,6 +53,86 @@ fn setup(user: bool) -> (Arc<Setting>, Registry, Arc<Mutex<Memory>>, Controller)
     .unwrap();
     (module, registry, memory, controller)
 }
+
+#[test]
+fn background_scheduling_fence_retires_only_after_durable_last_owner() {
+    let (module, _, _, mut controller) = setup(false);
+    for id in [1, 2] {
+        controller
+            .acquire(
+                owner(id),
+                module.clone(),
+                TargetIdentity::Machine,
+                module.config(12),
+            )
+            .unwrap();
+    }
+    controller.release(&owner(1)).unwrap();
+    assert_eq!(*module.retirements.lock().unwrap(), 0);
+    controller.release(&owner(2)).unwrap();
+    assert_eq!(*module.retirements.lock().unwrap(), 1);
+}
+
+#[test]
+fn background_scheduling_fence_survives_failed_retirement_publication_and_reload() {
+    let (module, registry, memory, mut controller) = setup(false);
+    controller
+        .acquire(
+            owner(1),
+            module.clone(),
+            TargetIdentity::Machine,
+            module.config(12),
+        )
+        .unwrap();
+    let final_retirement = memory.lock().unwrap().publications + 3;
+    memory.lock().unwrap().fail = Some(final_retirement);
+    assert!(controller.release(&owner(1)).is_err());
+    assert_eq!(*module.retirements.lock().unwrap(), 0);
+    drop(controller);
+    memory.lock().unwrap().fail = None;
+    let mut controller = Controller::restore(
+        Box::new(Store(memory.clone())),
+        "C:/owned/state.json".into(),
+        &registry,
+    )
+    .unwrap();
+    controller
+        .recover_owner(&owner(1), RecoveryIntent::Restore)
+        .unwrap();
+    assert_eq!(*module.retirements.lock().unwrap(), 1);
+}
+
+#[test]
+fn background_native_field_context_survives_shared_owner_withdrawal_and_reload() {
+    let (module, registry, memory, mut controller) = setup(false);
+    *module.context.lock().unwrap() = Some(vec![1, 2, 3]);
+    for id in [1, 2] {
+        controller
+            .acquire(
+                owner(id),
+                module.clone(),
+                TargetIdentity::Machine,
+                module.config(12),
+            )
+            .unwrap();
+    }
+    controller.release(&owner(1)).unwrap();
+    assert_eq!(
+        memory.lock().unwrap().document.as_ref().unwrap().fields[0].context,
+        Some(vec![1, 2, 3])
+    );
+    drop(controller);
+    let mut controller = Controller::restore(
+        Box::new(Store(memory)),
+        "C:/owned/state.json".into(),
+        &registry,
+    )
+    .unwrap();
+    controller
+        .recover_owner(&owner(2), RecoveryIntent::Restore)
+        .unwrap();
+    assert_eq!(module.value(), vec![7]);
+}
 #[test]
 fn matching_stored_bytes_do_not_hide_failed_runtime_refresh_on_reload_or_undo() {
     let (module, registry, memory, mut controller) = setup(false);

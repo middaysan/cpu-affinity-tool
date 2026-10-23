@@ -64,6 +64,8 @@ Right-click a graph to save the visible chart as **PNG** or export all retained 
 
 Manual changes remain applied after you close the app. **Undo** uses the recorded original values and preserves later changes made elsewhere. Display changes have a confirmation countdown. See the [System Tweaks guide](docs/system-tweaks.md) for what each control changes.
 
+**Development preview:** this branch also adds selected-game background-workload sessions and a ten-minute applicability preview. System roles remain unchanged while their controlled VM validation is pending; the native CPU mechanisms have been checked only on owned test processes. This is not part of the published 1.7.0 release. [Preview controls and limits](docs/background-workload.md).
+
 ### Connect a local agent
 
 The Windows EXE includes an optional **localhost Streamable HTTP MCP server**, disabled by default. Open **MCP**, enable it, then choose **Copy AI prompt** for setup instructions or **Copy connection** for manual configuration.

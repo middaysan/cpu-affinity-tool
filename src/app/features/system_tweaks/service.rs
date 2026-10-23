@@ -81,6 +81,7 @@ impl StatePersistence for SelectedStatePersistence {
     }
 }
 pub(crate) struct HeadlessTuning {
+    pub(super) background: super::background_policy::Runtime,
     pub(super) tweak_targets: std::collections::BTreeMap<FeatureId, TargetIdentity>,
     pub(super) pc_checks: Vec<super::pc_checks::PcCheck>,
     pub(super) display_confirmation: Option<std::time::Instant>,
@@ -103,6 +104,7 @@ impl HeadlessTuning {
     ) -> Self {
         let rules = RulesContext::from_storage(&state);
         Self {
+            background: Default::default(),
             tweak_targets: Default::default(),
             pc_checks: vec![],
             display_confirmation: None,
@@ -259,7 +261,7 @@ impl HeadlessTuning {
             }
         }
     }
-    fn configured(&self) -> Result<TuningConfig, SaveError> {
+    pub(super) fn configured(&self) -> Result<TuningConfig, SaveError> {
         if !self.modules_enabled {
             return Err(SaveError::Invalid);
         }
@@ -284,7 +286,7 @@ impl HeadlessTuning {
         self.start_selected_recovery();
         Ok(())
     }
-    fn save_config(&mut self, config: TuningConfig) -> Result<(), SaveError> {
+    pub(super) fn save_config(&mut self, config: TuningConfig) -> Result<(), SaveError> {
         let mut candidate = self.state.clone();
         candidate.tuning = TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
         self.publish(candidate, self.rules.clone())?;

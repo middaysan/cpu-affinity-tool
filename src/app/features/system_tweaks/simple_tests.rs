@@ -16,6 +16,8 @@ pub(crate) struct Setting {
     id: FeatureId,
     pub(crate) fields: Arc<Mutex<BTreeMap<ResourceId, Vec<u8>>>>,
     pub(super) writes: Arc<Mutex<usize>>,
+    pub(super) retirements: Arc<Mutex<usize>>,
+    pub(super) context: Mutex<Option<Vec<u8>>>,
     actions: Arc<Mutex<Vec<String>>>,
     pub(super) fail_at: Mutex<Option<ResourceId>>,
     pub(super) fail_confirmation: Mutex<bool>,
@@ -44,6 +46,8 @@ impl Setting {
                 (ResourceId::new("unrelated").unwrap(), vec![99]),
             ]))),
             writes: Arc::new(Mutex::new(0)),
+            retirements: Arc::new(Mutex::new(0)),
+            context: Mutex::new(None),
             actions: Arc::new(Mutex::new(vec![])),
             fail_at: Mutex::new(None),
             fail_confirmation: Mutex::new(false),
@@ -149,6 +153,34 @@ impl ModuleEditor for Setting {
     }
 }
 impl Module for Setting {
+    fn field_context(&self, _: &ResourceKey) -> Result<Option<Vec<u8>>, ModuleError> {
+        Ok(self.context.lock().unwrap().clone())
+    }
+    fn read_with_context(
+        &self,
+        key: &ResourceKey,
+        context: Option<&[u8]>,
+    ) -> Result<Vec<u8>, ModuleError> {
+        if context != self.context.lock().unwrap().as_deref() {
+            return Err(ModuleError::new(ErrorKind::Verification, "test context"));
+        }
+        self.read(key)
+    }
+    fn write_with_context(
+        &self,
+        key: &ResourceKey,
+        expected: &[u8],
+        desired: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<(), ModuleError> {
+        if context != self.context.lock().unwrap().as_deref() {
+            return Err(ModuleError::new(ErrorKind::Verification, "test context"));
+        }
+        self.write(key, expected, desired)
+    }
+    fn field_retired(&self, _: &ResourceKey) {
+        *self.retirements.lock().unwrap() += 1;
+    }
     fn descriptor(&self) -> ModuleDescriptor {
         ModuleDescriptor {
             id: self.id.clone(),

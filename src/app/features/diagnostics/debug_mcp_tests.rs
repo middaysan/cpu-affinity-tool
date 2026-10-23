@@ -338,6 +338,9 @@ fn system_tweaks_mcp_reads_snapshot_and_registers_actual_ui_controls() {
     }
     let value = state(&mut app, &ctx).unwrap();
     assert_eq!(value["tweaks"]["section"], "system");
+    assert_eq!(value["tweaks"]["background"]["enabled"], false);
+    assert_eq!(value["tweaks"]["background"]["changed_targets"], 0);
+    assert!(value["tweaks"]["background"].get("proof").is_none());
     assert!(value["tweaks"]["cards"].is_array());
     for id in [
         "tweaks.section.system",

@@ -1,3 +1,4 @@
+pub mod background;
 mod catalog;
 pub mod cpu_load;
 pub mod gaming;

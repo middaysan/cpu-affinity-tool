@@ -21,6 +21,8 @@ The System section contains the game and comfort settings below. **Game GPU** is
 
 Comfort settings are preference choices, without an FPS gain. Screen refresh rate is the desktop's nominal Hz, not measured game FPS.
 
+The development branch also contains **Reduce background impact**, a separate session-only local preview. It follows selected saved EXEs or a finite ten-minute preview instead of creating persistent Manual ownership. System-role mutation is currently not admitted pending controlled VM/function validation. See [background-workload controls, ownership and validation limits](background-workload.md).
+
 ## Undo and persistence
 
 Before applying a setting, the app reads and records the original value. **Manual changes remain after closing or restarting the app.** Use the setting's Undo action, or **Undo my changes** to review restoring the changes managed by this tool.

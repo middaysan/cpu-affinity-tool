@@ -6,6 +6,10 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+### Added
+
+- Local preview of selected-game background CPU sessions, finite ten-minute preview, bounded applicability/details and optional whole-physical-core CPU Set policy. Native mechanism checks use test-owned processes; the system-role mutation qualification set remains empty pending controlled VM/function validation. See `docs/background-workload.md` for scope and limits.
+
 ### Fixed
 
 - Tray Restore shows and unminimizes the native window on the GUI thread before requesting Windows foreground activation, with a short bounded retry that stops on success, hide or exit. Ordinary mouse movement no longer cancels the request.

@@ -1,4 +1,6 @@
 //! Saved profiles, one module registry and one application worker.
+pub(crate) mod background_policy;
+pub(crate) mod background_ui;
 pub(crate) mod config;
 pub(crate) mod execution_bridge;
 pub(crate) mod pc_checks;
