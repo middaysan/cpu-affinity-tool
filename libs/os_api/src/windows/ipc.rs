@@ -1370,12 +1370,9 @@ mod tests {
         let endpoint = unique_endpoint("no-extra-instance");
         let _server = OS::start_local_ipc_server(&endpoint).expect("server should start");
 
-        match create_raw_non_first_pipe(&endpoint) {
-            Ok(pipe) => {
-                drop(pipe);
-                panic!("additional non-first pipe server instance should be denied");
-            }
-            Err(_) => {}
+        if let Ok(pipe) = create_raw_non_first_pipe(&endpoint) {
+            drop(pipe);
+            panic!("additional non-first pipe server instance should be denied");
         }
     }
 
@@ -1434,10 +1431,12 @@ mod tests {
             0,
             "client SQOS should limit server impersonation to identification"
         );
-        assert!(
-            OPEN_CLIENT_TOKEN_AS_SELF,
-            "OpenThreadToken must use OpenAsSelf for SecurityIdentification clients"
-        );
+        const {
+            assert!(
+                OPEN_CLIENT_TOKEN_AS_SELF,
+                "OpenThreadToken must use OpenAsSelf for SecurityIdentification clients"
+            );
+        }
     }
 
     #[test]

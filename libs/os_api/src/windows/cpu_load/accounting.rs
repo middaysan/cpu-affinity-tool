@@ -680,7 +680,8 @@ mod tests {
     #[test]
     fn delivery_timing_does_not_change_original_frames_or_reused_pid_ownership() {
         use super::super::timeline::Target;
-        fn run(delayed: bool) -> Vec<(u64, Option<f32>, Vec<(u64, f32)>)> {
+        type FrameSnapshot = (u64, Option<f32>, Vec<(u64, f32)>);
+        fn run(delayed: bool) -> Vec<FrameSnapshot> {
             let mut state = SharedAccounting::new(1);
             state.enable_contributors();
             state.enable_timeline().unwrap();

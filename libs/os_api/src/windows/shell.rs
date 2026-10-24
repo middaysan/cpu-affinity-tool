@@ -64,14 +64,18 @@ pub(super) fn parse_url_file(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
     let content = if bytes.starts_with(&[0xFF, 0xFE]) && bytes.len() >= 2 {
         let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         String::from_utf16_lossy(&u16s)
     } else if bytes.starts_with(&[0xFE, 0xFF]) && bytes.len() >= 2 {
         let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
             .collect();
         String::from_utf16_lossy(&u16s)
     } else {
@@ -1075,7 +1079,7 @@ mod tests {
         }
     }
 
-    fn write_shortcut(path: &PathBuf, target: &PathBuf, args: &str) -> Result<(), String> {
+    fn write_shortcut(path: &Path, target: &Path, args: &str) -> Result<(), String> {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED)
                 .ok()

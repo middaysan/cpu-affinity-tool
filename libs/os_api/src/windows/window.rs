@@ -178,7 +178,7 @@ impl OS {
             let ctx_ptr = ctx.as_mut() as *mut Ctx;
             let _ = EnumWindows(Some(enum_windows_proc), LPARAM(ctx_ptr as isize));
 
-            if ctx.found.0 == null_mut() {
+            if ctx.found.0.is_null() {
                 return false;
             }
 

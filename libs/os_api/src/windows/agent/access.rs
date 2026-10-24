@@ -260,7 +260,7 @@ mod tests {
         let expected = descriptor_sddl();
         assert!(equivalent_descriptor(
             &expected.replace("S:(", "S:AI("),
-            &expected
+            expected
         ));
         for changed in [
             expected.replace("D:P", "D:"),
@@ -268,7 +268,7 @@ mod tests {
             expected.replace("NWNR", "NW"),
             expected.replace("O:BA", "O:WD"),
         ] {
-            assert!(!equivalent_descriptor(&changed, &expected));
+            assert!(!equivalent_descriptor(&changed, expected));
         }
     }
     #[test]

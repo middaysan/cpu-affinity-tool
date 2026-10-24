@@ -213,7 +213,7 @@ mod tests {
         let mut encoded = serde_json::to_value(&request).unwrap();
         encoded["future_option"] = true.into();
         assert!(serde_json::from_value::<CpuPowerRequest>(encoded).is_err());
-        let mut encoded = serde_json::to_value(&request.key).unwrap();
+        let mut encoded = serde_json::to_value(request.key).unwrap();
         encoded["future_identity"] = true.into();
         assert!(serde_json::from_value::<CpuPowerKey>(encoded).is_err());
     }

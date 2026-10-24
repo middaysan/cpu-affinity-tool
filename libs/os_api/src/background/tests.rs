@@ -144,7 +144,7 @@ fn service_membership_requires_one_stable_running_expected_role() {
     assert!(!single_service_role(
         Role::DiagnosticsTelemetry,
         43,
-        &[expected.clone()]
+        std::slice::from_ref(&expected)
     ));
     assert!(!single_service_role(
         Role::DiagnosticsTelemetry,

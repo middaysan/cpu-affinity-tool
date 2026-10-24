@@ -42,9 +42,21 @@ fn joined_topology_refuses_split_missing_duplicate_or_disagreeing_core_evidence(
         masks: vec![(0, 3)],
         efficiency_class: 0,
     };
-    assert!(join(&[set(10, 0, 0, 0, 0)], &[core.clone()]).is_err());
-    assert!(join(&[set(10, 0, 0, 0, 0), set(11, 0, 1, 1, 0)], &[core.clone()]).is_err());
-    assert!(join(&[set(10, 0, 0, 0, 0), set(11, 0, 1, 0, 8)], &[core.clone()]).is_err());
+    assert!(join(&[set(10, 0, 0, 0, 0)], std::slice::from_ref(&core)).is_err());
+    assert!(
+        join(
+            &[set(10, 0, 0, 0, 0), set(11, 0, 1, 1, 0)],
+            std::slice::from_ref(&core)
+        )
+        .is_err()
+    );
+    assert!(
+        join(
+            &[set(10, 0, 0, 0, 0), set(11, 0, 1, 0, 8)],
+            std::slice::from_ref(&core)
+        )
+        .is_err()
+    );
     assert!(
         join(
             &[set(10, 0, 0, 0, 0), set(11, 0, 1, 0, 0)],

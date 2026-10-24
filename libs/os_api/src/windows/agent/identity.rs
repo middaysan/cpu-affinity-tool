@@ -83,7 +83,7 @@ pub(super) fn inspect(token: HANDLE) -> Result<Identity, String> {
         )
         .map_err(|e| e.to_string())?;
         Ok(Identity {
-            sid: sid_text?.into(),
+            sid: sid_text?,
             session,
             logon: ((stats.AuthenticationId.HighPart as u32 as u64) << 32)
                 | stats.AuthenticationId.LowPart as u64,

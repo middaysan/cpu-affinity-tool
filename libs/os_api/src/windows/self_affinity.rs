@@ -199,7 +199,7 @@ mod tests {
             (
                 crate::gaming::ProcessSettingsFields::default(),
                 vec![original.trailing_zeros() as usize],
-                original & original.wrapping_neg(),
+                1usize.checked_shl(original.trailing_zeros()).unwrap_or(0),
             ),
             (
                 crate::gaming::ProcessSettingsFields {
