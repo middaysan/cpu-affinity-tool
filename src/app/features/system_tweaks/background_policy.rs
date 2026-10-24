@@ -91,9 +91,50 @@ pub(crate) struct Runtime {
     // Only current-process acquisitions enter this map. Retained owners from a
     // previous process are restored rather than silently reactivated.
     acquired: BTreeMap<OwnerKey, super::platform::codec::ModuleEnvelope>,
+    #[cfg(test)]
+    source_exit: BTreeMap<(u32, u64), bool>,
     pub snapshot: Snapshot,
 }
 impl Runtime {
+    fn matches_policy(&self, owner: &OwnerKey, config: &Config) -> bool {
+        let Some(previous) = self.acquired.get(owner) else {
+            return false;
+        };
+        let Ok(mut previous) = configured(previous) else {
+            return false;
+        };
+        let mut current = config.clone();
+        if let OwnerKey::SessionTarget {
+            source: SessionSource::Game { rule, .. },
+            ..
+        } = owner
+        {
+            // Editing a legacy shared selection must not invalidate an unchanged
+            // peer. Every setting and this rule's original metadata still match.
+            previous.games.retain(|game| &game.rule == rule);
+            current.games.retain(|game| &game.rule == rule);
+            if previous.games.len() != 1 || current.games.len() != 1 {
+                return false;
+            }
+        }
+        previous == current
+    }
+    fn source_has_exited(&self, source: &SessionSource) -> bool {
+        #[cfg(test)]
+        if let Some(exited) = self.source_exit.get(&source.instance()) {
+            return *exited;
+        }
+        #[cfg(windows)]
+        {
+            let (pid, token) = source.instance();
+            os_api::agent::process_instance_exited(pid, token)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = source;
+            false
+        }
+    }
     #[cfg(any(windows, test))]
     pub(crate) fn start_preview(
         &mut self,
@@ -502,6 +543,24 @@ pub(crate) fn game_choices(
         .collect()
 }
 
+fn game_rule_exists(service: &HeadlessTuning, rule: &str) -> bool {
+    let rule = crate::app::shared::ids::RuleId(rule.into());
+    service
+        .state()
+        .groups
+        .iter()
+        .enumerate()
+        .any(|(index, group)| {
+            service
+                .rules()
+                .rule_index_for_id(index, &rule)
+                .and_then(|index| group.programs.get(index))
+                .and_then(|app| app.bin_path())
+                .and_then(|path| path.extension())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+        })
+}
+
 pub(crate) fn tick(service: &mut HeadlessTuning, observation: &ExecutionObservation, now: Instant) {
     let mut runtime = std::mem::take(&mut service.background);
     tick_inner(&mut runtime, service, observation, now);
@@ -573,9 +632,7 @@ fn tick_inner(
             continue;
         };
         let configured = sources.iter().any(|(id, expected, _, config)| {
-            id == profile
-                && expected == source
-                && runtime.acquired.get(&owner) == Some(&config.envelope())
+            id == profile && expected == source && runtime.matches_policy(&owner, config)
         });
         // Losing a focus/enumeration sample is not proof that a game exited.
         let lifetime =
@@ -586,29 +643,26 @@ fn tick_inner(
             {
                 LifetimeEvidence::Unknown
             } else {
-                #[cfg(windows)]
-                {
-                    let (pid, token) = source.instance();
-                    if os_api::agent::process_instance_exited(pid, token) {
-                        LifetimeEvidence::Exited
-                    } else {
-                        LifetimeEvidence::Unknown
-                    }
-                }
-                #[cfg(not(windows))]
-                {
+                if runtime.source_has_exited(source) {
+                    LifetimeEvidence::Exited
+                } else {
                     LifetimeEvidence::Unknown
                 }
             };
         let enabled = runtime.acquired.contains_key(&owner)
             && match source {
                 SessionSource::Preview { .. } => runtime.preview.is_some(),
-                SessionSource::Game { rule, .. } => policies.iter().any(|(id, on, config)| {
-                    id == profile
-                        && *on
-                        && config.games.iter().any(|game| &game.rule == rule)
-                        && runtime.acquired.get(&owner) == Some(&config.envelope())
-                }),
+                SessionSource::Game { rule, .. } => {
+                    // Saved metadata can outlive a deleted rule for recovery.
+                    // Only current logical membership can keep its game session.
+                    game_rule_exists(service, rule)
+                        && policies.iter().any(|(id, on, config)| {
+                            id == profile
+                                && *on
+                                && config.games.iter().any(|game| &game.rule == rule)
+                                && runtime.matches_policy(&owner, config)
+                        })
+                }
             };
         let intent = retention_intent(
             enabled,
@@ -712,7 +766,7 @@ fn tick_inner(
                     target_pid: process.pid,
                     target_token: process.creation_token,
                 };
-                if runtime.acquired.get(&owner) == Some(&config.envelope()) {
+                if runtime.matches_policy(&owner, config) {
                     continue;
                 }
                 let Some(module) = service.registry().get(&feature()).cloned() else {

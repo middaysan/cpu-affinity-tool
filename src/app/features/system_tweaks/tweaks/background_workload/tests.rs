@@ -240,6 +240,225 @@ fn background_suitable_values_keep_equal_owner_intents_for_the_controller() {
     assert_eq!(plan.changes[0].desired, cpu_bytes(&[102, 103]));
 }
 
+// This adapter reuses the production planner and the existing in-memory setting
+// backend. It grants no native role authority and performs no Windows queries.
+struct PlannedFixture {
+    role: Role,
+    values: Arc<crate::app::features::system_tweaks::simple_tests::Setting>,
+}
+impl PlannedFixture {
+    fn new(role: Role, priority: Option<u32>, qos: Option<OwnedPolicy>) -> Arc<Self> {
+        let values = crate::app::features::system_tweaks::simple_tests::Setting::new(ID, false);
+        {
+            let mut fields = values.fields.lock().unwrap();
+            fields.clear();
+            if let Some(priority) = priority {
+                fields.insert(
+                    ResourceId::new(PRIORITY).unwrap(),
+                    priority.to_le_bytes().to_vec(),
+                );
+            }
+            if let Some(qos) = qos {
+                fields.insert(ResourceId::new(QOS).unwrap(), policy_bytes(qos));
+            }
+        }
+        Arc::new(Self { role, values })
+    }
+}
+impl ModuleEditor for PlannedFixture {
+    fn availability(&self) -> crate::app::features::system_tweaks::platforms::TweakAvailability {
+        self.values.availability()
+    }
+    fn feature(&self) -> FeatureId {
+        feature(ID)
+    }
+    fn default_config(&self) -> ModuleEnvelope {
+        Config::default().envelope()
+    }
+    fn accepts_config(&self, value: &ModuleEnvelope) -> bool {
+        configured(value).is_ok()
+    }
+    fn show(&self, _: &mut eframe::egui::Ui, _: &mut ModuleEnvelope) -> Result<bool, ()> {
+        Ok(false)
+    }
+}
+impl Module for PlannedFixture {
+    fn requires_session_target(&self) -> bool {
+        true
+    }
+    fn descriptor(&self) -> ModuleDescriptor {
+        let mut descriptor = self.values.descriptor();
+        descriptor.target_scopes = vec![TargetScope::Process];
+        descriptor.activation_modes = vec![ActivationMode::Session];
+        descriptor
+    }
+    fn editor(&self) -> &dyn ModuleEditor {
+        self
+    }
+    fn targets(&self) -> Vec<TargetIdentity> {
+        vec![]
+    }
+    fn observe(&self, target: &TargetIdentity) -> ModuleObservation {
+        self.values.observe(target)
+    }
+    fn fields(
+        &self,
+        target: &TargetIdentity,
+        config: &ModuleEnvelope,
+    ) -> Result<Vec<FieldChange>, ModuleError> {
+        let fields = self.values.fields.lock().unwrap();
+        let priority = fields
+            .get(&ResourceId::new(PRIORITY).unwrap())
+            .and_then(|value| value.as_slice().try_into().ok())
+            .map(u32::from_le_bytes);
+        let qos = fields
+            .get(&ResourceId::new(QOS).unwrap())
+            .map(|value| OwnedPolicy {
+                control: u32::from_le_bytes(value[..4].try_into().unwrap()),
+                state: u32::from_le_bytes(value[4..].try_into().unwrap()),
+            });
+        Ok(plan_fields(target, self.role, priority, qos, &configured(config)?).changes)
+    }
+    fn read(&self, key: &ResourceKey) -> Result<Vec<u8>, ModuleError> {
+        self.values.read(key)
+    }
+    fn write(&self, key: &ResourceKey, expected: &[u8], desired: &[u8]) -> Result<(), ModuleError> {
+        self.values.write(key, expected, desired)
+    }
+}
+fn acquire_planned(controller: &mut Controller, module: Arc<PlannedFixture>, id: u64) -> OwnerKey {
+    use crate::app::features::system_tweaks::{
+        persistence::ActivationFacts, platform::controller::SessionSource,
+    };
+    let owner = OwnerKey::SessionTarget {
+        profile: ProfileId::new(id).unwrap(),
+        feature: feature(ID),
+        source: SessionSource::Game {
+            group: "games".into(),
+            rule: format!("game-{id}"),
+            pid: 10 + id as u32,
+            token: 100 + id,
+        },
+        target_pid: 99,
+        target_token: 900,
+    };
+    controller
+        .acquire_session(
+            owner.clone(),
+            module,
+            TargetIdentity::Process {
+                pid: 99,
+                creation_token: 900,
+                image_path: "fixture.exe".into(),
+            },
+            Config::default().envelope(),
+            ActivationFacts {
+                pid: 10 + id as u32,
+                token: 100 + id,
+                image: "game.exe".into(),
+                trigger: ActivationEligibility::Running,
+            },
+        )
+        .unwrap();
+    owner
+}
+
+#[test]
+fn background_original_role_plans_share_controller_fields_until_last_game_undo() {
+    use crate::app::features::system_tweaks::platform::controller::RecoveryIntent;
+    for role in [
+        Role::Appraiser,
+        Role::DeviceCensus,
+        Role::FrameworkOptimizer,
+        Role::DiagnosticsTelemetry,
+    ] {
+        let module = PlannedFixture::new(
+            role,
+            Some(0x20),
+            Some(OwnedPolicy {
+                control: 0,
+                state: 0,
+            }),
+        );
+        let baseline = module.values.fields.lock().unwrap().clone();
+        let mut controller = Controller::default();
+        let first = acquire_planned(&mut controller, module.clone(), 1);
+        let writes = *module.values.writes.lock().unwrap();
+        assert_eq!(
+            writes,
+            if role == Role::FrameworkOptimizer {
+                1
+            } else {
+                2
+            }
+        );
+        let active = module.values.fields.lock().unwrap().clone();
+        let second = acquire_planned(&mut controller, module.clone(), 2);
+        assert_eq!(*module.values.writes.lock().unwrap(), writes);
+        assert!(controller
+            .fields()
+            .iter()
+            .all(|field| field.owners.len() == 2));
+        assert!(!controller
+            .fields()
+            .iter()
+            .any(|field| field.key.field.as_str() == SETS));
+        controller
+            .recover_owner(&first, RecoveryIntent::Restore)
+            .unwrap();
+        assert_eq!(controller.owners(), [second.clone()].into());
+        assert_eq!(*module.values.writes.lock().unwrap(), writes);
+        assert_eq!(*module.values.fields.lock().unwrap(), active);
+        controller
+            .recover_owner(&second, RecoveryIntent::Restore)
+            .unwrap();
+        assert_eq!(*module.values.fields.lock().unwrap(), baseline);
+        assert_eq!(*module.values.writes.lock().unwrap(), writes * 2);
+        assert!(controller.owners().is_empty());
+    }
+}
+
+#[test]
+fn background_controller_never_owns_a_suitable_baseline_and_restores_only_readable_fields() {
+    use crate::app::features::system_tweaks::platform::controller::RecoveryIntent;
+    for priority in [0x40, 0x4000] {
+        let module = PlannedFixture::new(
+            Role::DiagnosticsTelemetry,
+            Some(priority),
+            Some(OwnedPolicy {
+                control: EXECUTION_SPEED,
+                state: EXECUTION_SPEED,
+            }),
+        );
+        let mut controller = Controller::default();
+        acquire_planned(&mut controller, module.clone(), 1);
+        assert!(controller.owners().is_empty());
+        assert_eq!(*module.values.writes.lock().unwrap(), 0);
+    }
+    for (priority, qos) in [
+        (Some(0x20), None),
+        (
+            None,
+            Some(OwnedPolicy {
+                control: 0,
+                state: 0,
+            }),
+        ),
+    ] {
+        let module = PlannedFixture::new(Role::DiagnosticsTelemetry, priority, qos);
+        let baseline = module.values.fields.lock().unwrap().clone();
+        let mut controller = Controller::default();
+        let owner = acquire_planned(&mut controller, module.clone(), 1);
+        assert_eq!(controller.fields().len(), 1);
+        assert_eq!(*module.values.writes.lock().unwrap(), 1);
+        controller
+            .recover_owner(&owner, RecoveryIntent::Restore)
+            .unwrap();
+        assert_eq!(*module.values.fields.lock().unwrap(), baseline);
+        assert_eq!(*module.values.writes.lock().unwrap(), 2);
+    }
+}
+
 #[test]
 fn background_module_rejects_manual_ownership_before_native_preflight() {
     let module = std::sync::Arc::new(BackgroundWorkload::default());

@@ -1,4 +1,7 @@
 //! Opt-in mechanism checks on a child created and terminated by this test only.
+#[path = "native_function_tests.rs"]
+mod function_progress;
+
 use super::{super::gaming, writes::*};
 use crate::{gaming::*, windows::OS};
 use std::{

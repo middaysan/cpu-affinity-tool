@@ -129,13 +129,392 @@ impl super::super::StatePersistence for Save {
     }
 }
 fn service() -> (HeadlessTuning, Arc<AtomicBool>) {
+    service_with_registry(Registry::default())
+}
+fn service_with_registry(registry: Registry) -> (HeadlessTuning, Arc<AtomicBool>) {
     let fail = Arc::new(AtomicBool::new(false));
-    let mut service = super::super::Tuning::from_registry(Registry::default()).headless(
+    let mut service = super::super::Tuning::from_registry(registry).headless(
         crate::app::models::AppStateStorage::test_fixture(|_| {}),
         Box::new(Save(fail.clone())),
     );
     service.admit_test_modules();
     (service, fail)
+}
+
+struct GamesFixture {
+    service: HeadlessTuning,
+    module: Arc<Fixture>,
+    now: Instant,
+    group: crate::app::shared::ids::GroupId,
+    destination: crate::app::shared::ids::GroupId,
+    rules: Vec<crate::app::shared::ids::RuleId>,
+    owners: Vec<OwnerKey>,
+}
+impl GamesFixture {
+    fn new() -> Self {
+        use crate::app::models::{AppToRun, CoreGroup, LaunchTarget};
+        let module = Arc::new(Fixture {
+            value: Mutex::new(vec![7]),
+            exited: AtomicBool::new(false),
+        });
+        let mut registry = Registry::default();
+        registry.register(module.clone()).unwrap();
+        let (mut service, _) = service_with_registry(registry);
+        service
+            .save_base(|state| {
+                state.groups = vec![
+                    CoreGroup {
+                        name: "Games".into(),
+                        cores: vec![0],
+                        is_hidden: false,
+                        run_all_button: false,
+                        programs: ["first", "second"]
+                            .into_iter()
+                            .map(|name| AppToRun {
+                                name: name.into(),
+                                launch_target: LaunchTarget::Path {
+                                    dropped_path: format!("C:\\{name}.exe").into(),
+                                    bin_path: format!("C:\\{name}.exe").into(),
+                                },
+                                args: vec![],
+                                additional_processes: vec![],
+                                manage_descendants: false,
+                                autorun: false,
+                                priority: os_api::PriorityClass::Normal,
+                            })
+                            .collect(),
+                    },
+                    CoreGroup {
+                        name: "Moved".into(),
+                        cores: vec![1],
+                        is_hidden: false,
+                        run_all_button: false,
+                        programs: vec![],
+                    },
+                ];
+                Ok(())
+            })
+            .unwrap();
+        let group = service.rules().group_id_for_index(0).unwrap();
+        let destination = service.rules().group_id_for_index(1).unwrap();
+        let rules: Vec<_> = (0..2)
+            .map(|index| service.rules().rule_id_for_index(0, index).unwrap())
+            .collect();
+        for (index, rule) in rules.iter().enumerate() {
+            let app = service.state().groups[0].programs[index].clone();
+            service
+                .edit_rule_background(
+                    &group,
+                    rule,
+                    app,
+                    Some(RulePolicy {
+                        enabled: true,
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+        }
+        let now = Instant::now();
+        let mut owners = vec![];
+        for (index, rule) in rules.iter().enumerate() {
+            let (profile, _, config) = policies(&service)
+                .into_iter()
+                .find(|(_, _, config)| config.games.iter().any(|game| game.rule == rule.0))
+                .unwrap();
+            let source = facts(30 + index as u32);
+            let owner = OwnerKey::SessionTarget {
+                profile,
+                feature: feature(),
+                source: SessionSource::Game {
+                    group: group.0.clone(),
+                    rule: rule.0.clone(),
+                    pid: source.pid,
+                    token: source.token,
+                },
+                target_pid: 20,
+                target_token: 120,
+            };
+            service
+                .controller
+                .acquire_session(
+                    owner.clone(),
+                    module.clone(),
+                    TargetIdentity::Process {
+                        pid: 20,
+                        creation_token: 120,
+                        image_path: "C:\\fixture.exe".into(),
+                    },
+                    config.envelope(),
+                    ActivationFacts {
+                        pid: source.pid,
+                        token: source.token,
+                        image: source.image.to_string(),
+                        trigger: ActivationEligibility::Running,
+                    },
+                )
+                .unwrap();
+            service
+                .background
+                .source_exit
+                .insert((source.pid, source.token), false);
+            service
+                .background
+                .acquired
+                .insert(owner.clone(), config.envelope());
+            owners.push(owner);
+        }
+        service.background.next_scan = Some(now + Duration::from_secs(1000));
+        Self {
+            service,
+            module,
+            now,
+            group,
+            destination,
+            rules,
+            owners,
+        }
+    }
+    fn legacy_shared() -> Self {
+        let mut fixture = Self::new();
+        let mut saved = fixture.service.configured().unwrap();
+        let config = Config {
+            games: fixture
+                .rules
+                .iter()
+                .map(|rule| GameRule {
+                    group: fixture.group.0.clone(),
+                    rule: rule.0.clone(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        saved.profiles.truncate(1);
+        saved.profiles[0].modules[0].config = config.envelope();
+        fixture.service.undo_background().unwrap();
+        fixture.service.save_config(saved).unwrap();
+        for owner in &mut fixture.owners {
+            let OwnerKey::SessionTarget {
+                profile, source, ..
+            } = owner
+            else {
+                unreachable!()
+            };
+            *profile = ProfileId::new(1).unwrap();
+            let (pid, token) = source.instance();
+            fixture
+                .service
+                .controller
+                .acquire_session(
+                    owner.clone(),
+                    fixture.module.clone(),
+                    TargetIdentity::Process {
+                        pid: 20,
+                        creation_token: 120,
+                        image_path: "C:\\fixture.exe".into(),
+                    },
+                    config.envelope(),
+                    ActivationFacts {
+                        pid,
+                        token,
+                        image: facts(pid).image.to_string(),
+                        trigger: ActivationEligibility::Running,
+                    },
+                )
+                .unwrap();
+            fixture
+                .service
+                .background
+                .acquired
+                .insert(owner.clone(), config.envelope());
+        }
+        fixture.service.background.next_scan = Some(fixture.now + Duration::from_secs(1000));
+        fixture
+    }
+    fn tick_unknown(&mut self) {
+        tick(
+            &mut self.service,
+            &ExecutionObservation::Unknown(
+                super::super::execution_bridge::UnknownReason::Unavailable,
+            ),
+            self.now,
+        );
+    }
+}
+
+#[test]
+fn background_removing_live_game_rule_releases_only_its_owner_before_last_undo() {
+    let mut fixture = GamesFixture::new();
+    fixture
+        .service
+        .remove_rule(&fixture.group, &fixture.rules[0])
+        .unwrap();
+    fixture.tick_unknown();
+    assert_eq!(
+        fixture.service.controller.owners(),
+        [fixture.owners[1].clone()].into(),
+        "Removing a saved trigger must withdraw its background ownership even while the process is live"
+    );
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![12]);
+    fixture.service.undo_background().unwrap();
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![7]);
+    assert!(fixture.service.controller.owners().is_empty());
+}
+
+#[test]
+fn background_removing_group_restores_live_targets_without_waiting_for_game_exit() {
+    let mut fixture = GamesFixture::new();
+    fixture.service.remove_group(&fixture.group).unwrap();
+    fixture.tick_unknown();
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![7]);
+    assert!(fixture.service.controller.owners().is_empty());
+}
+
+#[test]
+fn background_moving_rule_and_unknown_observation_preserve_shared_original_baseline() {
+    let mut fixture = GamesFixture::new();
+    fixture
+        .service
+        .move_rule_at(&fixture.group, &fixture.rules[0], &fixture.destination, 0)
+        .unwrap();
+    fixture.tick_unknown();
+    assert_eq!(fixture.service.controller.owners().len(), 2);
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![12]);
+    assert_eq!(fixture.service.controller.fields()[0].baseline, vec![7]);
+    fixture
+        .service
+        .background
+        .source_exit
+        .insert((30, facts(30).token), true);
+    fixture.tick_unknown();
+    assert_eq!(
+        fixture.service.controller.owners(),
+        [fixture.owners[1].clone()].into()
+    );
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![12]);
+    fixture.service.undo_background().unwrap();
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![7]);
+}
+
+#[test]
+fn background_checkbox_off_releases_one_shared_owner_and_preserves_other_game() {
+    let mut fixture = GamesFixture::new();
+    let app = fixture.service.state().groups[0].programs[0].clone();
+    fixture
+        .service
+        .edit_rule_background(
+            &fixture.group,
+            &fixture.rules[0],
+            app,
+            Some(RulePolicy::default()),
+        )
+        .unwrap();
+    fixture.tick_unknown();
+    assert_eq!(
+        fixture.service.controller.owners(),
+        [fixture.owners[1].clone()].into()
+    );
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![12]);
+    assert!(
+        rule_policy(&fixture.service.configured().unwrap(), &fixture.rules[1].0)
+            .unwrap()
+            .enabled
+    );
+    fixture.service.undo_background().unwrap();
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![7]);
+}
+
+#[test]
+fn background_legacy_checkbox_split_keeps_the_unedited_running_games_owner() {
+    let mut fixture = GamesFixture::legacy_shared();
+    let app = fixture.service.state().groups[0].programs[0].clone();
+    fixture
+        .service
+        .edit_rule_background(
+            &fixture.group,
+            &fixture.rules[0],
+            app,
+            Some(RulePolicy::default()),
+        )
+        .unwrap();
+    fixture.tick_unknown();
+    assert_eq!(
+        fixture.service.controller.owners(),
+        [fixture.owners[1].clone()].into(),
+        "Splitting one legacy checkbox must retain its unedited peer's original owner and baseline"
+    );
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![12]);
+    assert_eq!(fixture.service.controller.fields()[0].baseline, vec![7]);
+    fixture.service.undo_background().unwrap();
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![7]);
+}
+
+#[test]
+fn background_changed_policy_withdraws_its_owner_without_resetting_peer() {
+    let mut fixture = GamesFixture::new();
+    let mut draft =
+        rule_policy(&fixture.service.configured().unwrap(), &fixture.rules[0].0).unwrap();
+    draft
+        .config
+        .excluded_roles
+        .push(os_api::background::Role::DeviceCensus);
+    let app = fixture.service.state().groups[0].programs[0].clone();
+    fixture
+        .service
+        .edit_rule_background(&fixture.group, &fixture.rules[0], app, Some(draft))
+        .unwrap();
+    fixture.tick_unknown();
+    assert_eq!(
+        fixture.service.controller.owners(),
+        [fixture.owners[1].clone()].into(),
+        "The selector projection must not hide a real module policy change"
+    );
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![12]);
+    fixture.service.undo_background().unwrap();
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![7]);
+}
+
+#[test]
+fn background_selected_rule_beyond_choice_limit_keeps_ownership_after_reorder() {
+    let mut fixture = GamesFixture::new();
+    let template = fixture.service.state().groups[0].programs[0].clone();
+    fixture
+        .service
+        .save_base(|state| {
+            state.groups[1].programs = (0..257)
+                .map(|index| {
+                    let mut app = template.clone();
+                    app.name = format!("Filler {index}");
+                    app.launch_target = crate::app::models::LaunchTarget::Path {
+                        dropped_path: format!("C:\\filler-{index}.exe").into(),
+                        bin_path: format!("C:\\filler-{index}.exe").into(),
+                    };
+                    app
+                })
+                .collect();
+            Ok(())
+        })
+        .unwrap();
+    fixture
+        .service
+        .move_rule_at(&fixture.group, &fixture.rules[0], &fixture.destination, 257)
+        .unwrap();
+    assert!(
+        !game_choices(fixture.service.state(), fixture.service.rules())
+            .iter()
+            .any(|game| game.rule == fixture.rules[0].0)
+    );
+    fixture.tick_unknown();
+    assert_eq!(fixture.service.controller.owners().len(), 2);
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![12]);
+    assert_eq!(fixture.service.controller.fields()[0].baseline, vec![7]);
+    fixture
+        .service
+        .move_rule_at(&fixture.destination, &fixture.rules[0], &fixture.group, 0)
+        .unwrap();
+    fixture.tick_unknown();
+    assert_eq!(fixture.service.controller.owners().len(), 2);
+    fixture.service.undo_background().unwrap();
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![7]);
 }
 
 #[test]
@@ -336,6 +715,10 @@ fn owned_preview() -> (HeadlessTuning, Arc<Fixture>, Instant, OwnerKey) {
         exited: AtomicBool::new(false),
     });
     let now = Instant::now();
+    let owner = acquire_preview(&mut service, module.clone(), now);
+    (service, module, now, owner)
+}
+fn acquire_preview(service: &mut HeadlessTuning, module: Arc<Fixture>, now: Instant) -> OwnerKey {
     let source = facts(1);
     let owner = OwnerKey::SessionTarget {
         profile: ProfileId::new(1).unwrap(),
@@ -373,7 +756,228 @@ fn owned_preview() -> (HeadlessTuning, Arc<Fixture>, Instant, OwnerKey) {
         .background
         .acquired
         .insert(owner.clone(), Config::default().envelope());
-    (service, module, now, owner)
+    owner
+}
+
+#[derive(Default)]
+struct RecoveryMemory {
+    bytes: Option<Vec<u8>>,
+    fail_after_restore: bool,
+}
+struct Store(Arc<Mutex<RecoveryMemory>>);
+impl super::super::persistence::RecoveryStore for Store {
+    fn load(&mut self) -> Result<Option<super::super::persistence::RecoveryDocument>, ModuleError> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .bytes
+            .as_ref()
+            .map(|bytes| serde_json::from_slice(bytes).unwrap()))
+    }
+    fn publish(
+        &mut self,
+        document: &super::super::persistence::RecoveryDocument,
+    ) -> Result<(), ModuleError> {
+        let mut memory = self.0.lock().unwrap();
+        if memory.fail_after_restore
+            && document
+                .fields
+                .iter()
+                .any(|field| field.current == field.baseline && field.attempted.is_none())
+        {
+            memory.fail_after_restore = false;
+            return Err(ModuleError::new(
+                ErrorKind::Write,
+                "fixture recovery publication",
+            ));
+        }
+        memory.bytes = Some(serde_json::to_vec(document).unwrap());
+        Ok(())
+    }
+}
+struct DurablePreview {
+    service: HeadlessTuning,
+    module: Arc<Fixture>,
+    memory: Arc<Mutex<RecoveryMemory>>,
+    now: Instant,
+    owner: OwnerKey,
+}
+impl DurablePreview {
+    fn new() -> Self {
+        let module = Arc::new(Fixture {
+            value: Mutex::new(vec![7]),
+            exited: AtomicBool::new(false),
+        });
+        let mut registry = Registry::default();
+        registry.register(module.clone()).unwrap();
+        let memory = Arc::new(Mutex::new(RecoveryMemory::default()));
+        let (mut service, _) = service_with_registry(registry.clone());
+        service.controller = super::super::platform::controller::Controller::restore(
+            Box::new(Store(memory.clone())),
+            "C:/fixture/state.json".into(),
+            &registry,
+        )
+        .unwrap();
+        service
+            .configure_background(false, Config::default())
+            .unwrap();
+        let now = Instant::now();
+        let owner = acquire_preview(&mut service, module.clone(), now);
+        Self {
+            service,
+            module,
+            memory,
+            now,
+            owner,
+        }
+    }
+    fn reload(mut self) -> Self {
+        let registry = self.service.registry().clone();
+        let state = self.service.state().clone();
+        drop(self.service);
+        self.service = super::super::Tuning::from_registry(registry.clone())
+            .headless(state, Box::new(Save(Arc::new(AtomicBool::new(false)))));
+        self.service.admit_test_modules();
+        self.service.controller = super::super::platform::controller::Controller::restore(
+            Box::new(Store(self.memory.clone())),
+            "C:/fixture/state.json".into(),
+            &registry,
+        )
+        .unwrap();
+        self
+    }
+    fn tick(&mut self, elapsed: u64) {
+        tick(
+            &mut self.service,
+            &ExecutionObservation::Unknown(
+                super::super::execution_bridge::UnknownReason::Unavailable,
+            ),
+            self.now + Duration::from_secs(elapsed),
+        );
+    }
+    fn document(&self) -> super::super::persistence::RecoveryDocument {
+        serde_json::from_slice(self.memory.lock().unwrap().bytes.as_ref().unwrap()).unwrap()
+    }
+}
+
+#[test]
+fn background_durable_preview_reload_restores_without_resuming_or_scanning() {
+    let fixture = DurablePreview::new();
+    let original = fixture.document();
+    assert_eq!(original.fields[0].baseline, vec![7]);
+    assert!(matches!(
+        original.owners[0].owner,
+        OwnerKey::SessionTarget {
+            source: SessionSource::Preview { .. },
+            ..
+        }
+    ));
+    let mut fixture = fixture.reload();
+    assert!(fixture.service.controller.needs_recovery(&fixture.owner));
+    fixture.tick(0);
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![7]);
+    assert!(fixture.document().fields.is_empty());
+    assert!(fixture.document().owners.is_empty());
+    assert!(fixture.service.background.preview.is_none());
+    assert!(!fixture.service.background.snapshot.inspected);
+    assert!(fixture.service.background.next_scan.is_none());
+}
+
+#[test]
+fn background_durable_external_drift_survives_restart_and_repeated_undo() {
+    let fixture = DurablePreview::new();
+    *fixture.module.value.lock().unwrap() = vec![99];
+    let mut fixture = fixture.reload();
+    fixture.tick(0);
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![99]);
+    assert_eq!(
+        fixture.service.controller.status(&fixture.owner),
+        Some(ModuleStatus::ExternalChange)
+    );
+    assert_eq!(fixture.document().fields[0].baseline, vec![7]);
+    assert_eq!(fixture.document().fields[0].current, vec![12]);
+    assert!(fixture.service.undo_background().is_err());
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![99]);
+    let mut fixture = fixture.reload();
+    fixture.tick(0);
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![99]);
+    assert!(fixture.service.controller.owners().contains(&fixture.owner));
+    assert!(fixture
+        .service
+        .background
+        .snapshot
+        .status
+        .contains("Recovery needs attention"));
+}
+
+#[test]
+fn background_restore_publication_fault_reloads_attempted_original_without_recapture() {
+    let mut fixture = DurablePreview::new();
+    fixture.memory.lock().unwrap().fail_after_restore = true;
+    fixture.tick(600);
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![7]);
+    assert!(!fixture.service.controller.can_admit());
+    assert!(fixture.service.controller.owners().contains(&fixture.owner));
+    let retained = fixture.document();
+    assert_eq!(retained.fields[0].baseline, vec![7]);
+    assert_eq!(retained.fields[0].current, vec![12]);
+    assert_eq!(retained.fields[0].attempted, Some(vec![7]));
+    let mut fixture = fixture.reload();
+    fixture.tick(0);
+    assert_eq!(*fixture.module.value.lock().unwrap(), vec![7]);
+    assert!(fixture.document().fields.is_empty());
+    assert!(fixture.document().owners.is_empty());
+    assert!(fixture.service.controller.can_admit());
+}
+
+#[test]
+fn background_off_and_armed_without_game_never_start_inventory_or_topology_reads() {
+    let mut fixture = GamesFixture::new();
+    fixture.service.undo_background().unwrap();
+    fixture.service.background = Runtime::default();
+    for elapsed in [0, 1, 5, 60, 600] {
+        tick(
+            &mut fixture.service,
+            &ExecutionObservation::Unknown(
+                super::super::execution_bridge::UnknownReason::Unavailable,
+            ),
+            fixture.now + Duration::from_secs(elapsed),
+        );
+    }
+    assert!(!fixture.service.background.snapshot.inspected);
+    assert!(fixture.service.background.topology_read.is_none());
+    assert!(fixture.service.background.next_scan.is_none());
+    let app = fixture.service.state().groups[0].programs[0].clone();
+    fixture
+        .service
+        .edit_rule_background(
+            &fixture.group,
+            &fixture.rules[0],
+            app,
+            Some(RulePolicy {
+                enabled: true,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    let observation = ExecutionObservation::fixture(fixture.service.state(), 1, vec![], facts(99));
+    for elapsed in [601, 605, 660, 1200] {
+        tick(
+            &mut fixture.service,
+            &observation,
+            fixture.now + Duration::from_secs(elapsed),
+        );
+    }
+    assert!(!fixture.service.background.snapshot.inspected);
+    assert!(fixture.service.background.topology_read.is_none());
+    assert!(fixture.service.background.next_scan.is_none());
+    assert!(fixture
+        .service
+        .background
+        .snapshot
+        .status
+        .starts_with("Armed"));
 }
 
 #[test]
