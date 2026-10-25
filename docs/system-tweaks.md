@@ -11,6 +11,7 @@ The System section contains the game and comfort settings below. **Game GPU** is
 | Setting | What its action does |
 | --- | --- |
 | **Performance on AC power** | Asks Windows to prefer performance while plugged in. Battery preferences stay unchanged. This does not lock CPU frequency; power use and heat may increase. |
+| **Core parking** | Opens a scope chooser, then disables parking in the captured AC plan/mode policy for all cores. Separate classes are detected but shown as unavailable. Undo restores exact prior values. |
 | **Game Mode** | Enables the stored Windows Game Mode preference. Restart the game after changing it. |
 | **Background clips** | Turns off the **Record what happened** background buffer. Game Bar, screenshots and manual recording remain available. |
 | **Windowed games** | Enables Windows optimizations for compatible DX10/11 windowed and borderless games. Restart the game. Auto HDR, VRR and per-app exceptions are preserved. |
@@ -20,6 +21,18 @@ The System section contains the game and comfort settings below. **Game GPU** is
 | **Mouse acceleration** | Turns off Windows pointer acceleration. Games using raw mouse input usually ignore this setting. |
 
 Comfort settings are preference choices, without an FPS gain. Screen refresh rate is the desktop's nominal Hz, not measured game FPS.
+
+### Core parking
+
+On Windows 11, choose **Core parking → Choose…**, select **All cores** and press **Apply**. Nothing changes when opening the card or chooser. Counts come from the current physical-core/SMT topology; CPU model names are not a lookup table. When Windows reports a separate performance-core class, the chooser shows its count with a disabled option and an explanation.
+
+Separate-class activation is unavailable in this build, including through MCP. On the tested Windows 11 system, `CPMINCORES1=100` was stored and read back correctly, but Windows subsequently parked those cores again. This also occurred on disposable Balanced/Atlas plans with heterogeneous policy variants. The all-core minimum kept all 20 logical CPUs unparked. These are host-specific functional observations, not a claim that every Windows/CPU combination behaves the same. The app does not advertise an ineffective class-only control or alter extra scheduler policies to force it.
+
+The base `CPMINCORES` setting is a shared minimum, so there is no separate **E-cores only**, chiplet, socket or arbitrary CPU-number control. Other policy values can already keep additional cores available. Unsupported or uncertain mappings remain unavailable instead of guessing a control. The selected minimum and, when needed, maximum unparked percentages are set to 100; frequency, boost, EPP, affinity and DC/battery settings are unchanged.
+
+The setting captures exact plan and AC-mode keys when applied. It does not follow a later plan/mode change or continuously enforce policy. Undo restores the captured values, including an originally absent override, and preserves external changes. Use Undo before choosing another scope. **Stored parking policy verified** confirms settings readback, not permanent physical activity, disabled C-states or a measured performance gain. Power use and heat may increase.
+
+References: [Microsoft CPMinCores](https://learn.microsoft.com/en-us/windows-hardware/customize/power-settings/options-for-core-parking-cpmincores), [processor classes and power settings](https://learn.microsoft.com/en-us/windows-hardware/customize/power-settings/configure-processor-power-management-options).
 
 The development branch also contains a session-only background-load preview in each **Application rule**, with one default-Off checkbox and a fixed priority/EcoQoS policy. There is no Advanced/core-placement UI. It follows that saved EXE instead of creating persistent Manual ownership. It has no separate System Tweaks card. System-role mutation is currently not admitted pending controlled VM/function validation. See [background-workload controls, ownership and validation limits](background-workload.md).
 

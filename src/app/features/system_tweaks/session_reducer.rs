@@ -227,6 +227,7 @@ pub(crate) struct TweakCard {
     pub owned: bool,
     pub baseline: Option<String>,
     pub config: Option<ModuleEnvelope>,
+    pub options: Option<ModuleEnvelope>,
     pub capability: Capability,
     pub availability: super::platforms::TweakAvailability,
 }
@@ -1277,16 +1278,17 @@ fn tweak_cards(
                     })
             })
             .map(|p| p.modules[0].config.clone());
-        let (observed, ready) = if observe && availability.is_available() {
+        let (observed, ready, options) = if observe && availability.is_available() {
             target
                 .as_ref()
                 .map(|target| {
-                    let (value, ready) = module.observe_tweak(target, saved_config.as_ref());
-                    (Some(value), ready.ok())
+                    let (value, ready, options) =
+                        module.observe_tweak(target, saved_config.as_ref());
+                    (Some(value), ready.ok(), options)
                 })
-                .unwrap_or((None, None))
+                .unwrap_or((None, None, None))
         } else {
-            (None, None)
+            (None, None, None)
         };
         // Target discovery may fail while the diagnostic read still explains why.
         // Retain that explanation, without treating it as authority to write.
@@ -1351,6 +1353,7 @@ fn tweak_cards(
             Some(ModuleStatus::Unmanaged)
         };
         cards.push(TweakCard {
+            options,
             config: saved_config,
             availability,
             feature: descriptor.id.clone(),
@@ -1628,11 +1631,16 @@ mod card_tests {
                 &self,
                 target: &TargetIdentity,
                 saved: Option<&ModuleEnvelope>,
-            ) -> (ModuleObservation, Result<bool, ModuleError>) {
+            ) -> (
+                ModuleObservation,
+                Result<bool, ModuleError>,
+                Option<ModuleEnvelope>,
+            ) {
                 self.1.fetch_add(1, Ordering::SeqCst);
                 (
                     self.0.observe(target),
                     self.0.editor().tweak_ready_for_config(target, saved),
+                    Some(self.0.editor().default_config()),
                 )
             }
             fn fields(
@@ -1682,6 +1690,14 @@ mod card_tests {
             calls.load(Ordering::SeqCst),
             1,
             "one combined observation on open"
+        );
+        assert!(
+            runtime
+                .snapshot()
+                .tweak_cards
+                .iter()
+                .all(|card| card.options.is_some()),
+            "The worker publishes immutable options with the combined observation"
         );
         runtime.set_cards_visible(false);
         thread::sleep(Duration::from_millis(1100));

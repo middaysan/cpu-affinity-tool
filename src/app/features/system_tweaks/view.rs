@@ -517,29 +517,6 @@ fn draw_tweak(app: &mut AppState, ui: &mut egui::Ui, card: &TweakCard, pending: 
                     title.weak()
                 });
                 help_button(app, ui, card.spec.title, &tweak_help_text(card));
-                let draft = app
-                    .tuning_editors()
-                    .editor(&card.feature)
-                    .and_then(|editor| editor.tweak_options(card.config.as_ref()));
-                if let Some(draft) = draft {
-                    let available = platform_available
-                        && !pending
-                        && !card.owned
-                        && card.target.is_some()
-                        && matches!(card.capability, Capability::Available);
-                    if ui
-                        .add_enabled(available, egui::Button::new("Settings…").small())
-                        .on_hover_text(if card.owned {
-                            "Undo this tweak before changing its settings."
-                        } else {
-                            "Choose a CPU frequency ceiling and high-clock preference."
-                        })
-                        .clicked()
-                    {
-                        app.ui.tuning.tweak_options =
-                            Some((card.feature.clone(), card.target.clone().unwrap(), draft));
-                    }
-                }
             });
             ui.label(
                 egui::RichText::new(card.spec.scope)
@@ -667,28 +644,18 @@ fn draw_tweak(app: &mut AppState, ui: &mut egui::Ui, card: &TweakCard, pending: 
                                 match controls.action {
                                     CompactAction::Apply => {
                                         if let Some(target) = card.target.clone() {
-                                            let options = app
-                                                .tuning_editors()
-                                                .editor(&card.feature)
-                                                .and_then(|editor| {
-                                                    editor.tweak_options(card.config.as_ref())
-                                                });
-                                            submit(
-                                                app,
-                                                match options {
-                                                    Some(config) => {
-                                                        TuningRequest::ApplyConfiguredTweak {
-                                                            feature: card.feature.clone(),
-                                                            target,
-                                                            config,
-                                                        }
-                                                    }
-                                                    None => TuningRequest::ApplyTweak {
+                                            if let Some(config) = card.options.clone() {
+                                                app.ui.tuning.tweak_options =
+                                                    Some((card.feature.clone(), target, config));
+                                            } else {
+                                                submit(
+                                                    app,
+                                                    TuningRequest::ApplyTweak {
                                                         feature: card.feature.clone(),
                                                         target,
                                                     },
-                                                },
-                                            );
+                                                );
+                                            }
                                         }
                                     }
                                     CompactAction::Settings => {
@@ -1024,18 +991,20 @@ fn draw_dialogs(app: &mut AppState, context: &egui::Context) {
             crate::app::shell::presenters::shared_elements::modal(egui::Id::new("tweak-options"))
                 .show(context, |ui| {
                     ui.set_width(width);
-                    ui.heading("AC power settings");
                     if let Some(editor) = app.tuning_editors().editor(&feature) {
+                        ui.heading(editor.tweak().map_or("Tweak settings", |spec| spec.title));
                         editor.show_tweak_options(ui, &mut config);
                         ui.separator();
                         ui.horizontal(|ui| {
-                            cancel = ui.button("Cancel").clicked();
-                            apply = ui
-                                .add_enabled(
-                                    available && editor.accepts_config(&config),
-                                    egui::Button::new("Apply"),
-                                )
-                                .clicked();
+                            let cancel_response = ui.button("Cancel");
+                            cancel = cancel_response.clicked();
+                            crate::debug_mcp_control!("tweaks.options.cancel", cancel_response);
+                            let response = ui.add_enabled(
+                                available && editor.accepts_config(&config),
+                                egui::Button::new("Apply"),
+                            );
+                            apply = response.clicked();
+                            crate::debug_mcp_control!("tweaks.options.apply", response);
                         });
                     }
                 });
@@ -1148,6 +1117,7 @@ mod tests {
             empty_modules_app(Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))));
         let card = TweakCard {
             config: None,
+            options: None,
             feature: FeatureId::new("layout_setting").unwrap(),
             spec: TweakSpec {
                 order: 0,

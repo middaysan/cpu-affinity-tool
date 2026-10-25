@@ -1,4 +1,5 @@
 //! Conditional AC-only processor power overrides, including explicit parking policy.
+pub(crate) mod parking;
 use super::{active_scheme, admit_account, code, guid, success, verify_user, with_account};
 use crate::{
     gaming::{GamingError, GuidValue, POWER_MODE_PERFORMANCE, PowerSource, UserIdentity},
@@ -492,7 +493,9 @@ enum RefreshTarget {
 fn refresh_target(scheme: GuidValue, base: GuidValue, overlay: GuidValue) -> Option<RefreshTarget> {
     if scheme == base {
         Some(RefreshTarget::Base)
-    } else if scheme == POWER_MODE_PERFORMANCE && scheme == overlay {
+    } else if [POWER_MODE_PERFORMANCE, crate::gaming::POWER_MODE_EFFICIENCY].contains(&scheme)
+        && scheme == overlay
+    {
         Some(RefreshTarget::Overlay)
     } else {
         None
@@ -501,7 +504,10 @@ fn refresh_target(scheme: GuidValue, base: GuidValue, overlay: GuidValue) -> Opt
 
 fn refresh_scheme(user: &UserIdentity, scheme: GuidValue) -> Result<(), GamingError> {
     let base = active_scheme()?;
-    let overlay = if scheme == POWER_MODE_PERFORMANCE && scheme != base {
+    let overlay = if [POWER_MODE_PERFORMANCE, crate::gaming::POWER_MODE_EFFICIENCY]
+        .contains(&scheme)
+        && scheme != base
+    {
         super::read_power_mode(user, PowerSource::Ac)?
     } else {
         GuidValue([0; 16])
@@ -664,6 +670,20 @@ mod tests {
     use super::*;
     use crate::gaming::GamingError;
     use std::cell::Cell;
+
+    #[test]
+    fn parking_refreshes_only_the_captured_current_efficiency_overlay() {
+        let base = GuidValue([5; 16]);
+        let efficiency = crate::gaming::POWER_MODE_EFFICIENCY;
+        assert_eq!(
+            refresh_target(efficiency, base, efficiency),
+            Some(RefreshTarget::Overlay)
+        );
+        assert_eq!(
+            refresh_target(efficiency, base, POWER_MODE_PERFORMANCE),
+            None
+        );
+    }
 
     #[test]
     fn separate_hybrid_limits_use_p_class_one_and_e_class_zero() {

@@ -56,7 +56,7 @@ Right-click a graph to save the visible chart as **PNG** or export all retained 
 
 ### Change individual Windows settings
 
-**System Tweaks** brings together selected Windows controls: AC power mode, Game Mode, background clips, windowed-game settings, display refresh rate, per-app GPU preference, accessibility shortcuts, and mouse acceleration. Hardware and network guidance and an optional read-only PC check are alongside them.
+**System Tweaks** brings together selected Windows controls: AC power mode, all-core parking on Windows 11, Game Mode, background clips, windowed-game settings, display refresh rate, per-app GPU preference, accessibility shortcuts, and mouse acceleration. Hardware and network guidance and an optional read-only PC check are alongside them.
 
 ![System Tweaks with current Windows settings and explicit actions](assets/screenshots/system-tweaks.png)
 

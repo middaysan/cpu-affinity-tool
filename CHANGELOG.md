@@ -8,6 +8,7 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Added
 
+- A manual Windows 11 Core parking tweak for all cores, with captured AC plan/mode keys and exact conditional Undo. Detected separate classes are shown as unavailable: native checks found their stored class-1 policy did not keep those cores unparked. Per-chiplet or arbitrary CPU-number controls are not implied; battery and frequency settings are unchanged.
 - Local preview of per-app background CPU sessions: one default-Off checkbox in Application rule, priority/EcoQoS-only sessions, no Advanced/manual core selection and no separate System Tweaks card. Old placement recovery data remains readable. Native mechanism checks use test-owned processes; the system-role mutation qualification set remains empty pending controlled VM/function validation. See `docs/background-workload.md` for scope and limits.
 
 ### Fixed

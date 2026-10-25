@@ -1,5 +1,6 @@
 pub mod background;
 mod catalog;
+pub mod core_parking;
 pub mod cpu_load;
 pub mod gaming;
 pub mod gaming_cpu_power;

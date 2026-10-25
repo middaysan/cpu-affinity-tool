@@ -49,10 +49,15 @@ pub trait Module: Send + Sync {
         &self,
         target: &TargetIdentity,
         saved: Option<&ModuleEnvelope>,
-    ) -> (ModuleObservation, Result<bool, ModuleError>) {
+    ) -> (
+        ModuleObservation,
+        Result<bool, ModuleError>,
+        Option<ModuleEnvelope>,
+    ) {
         (
             self.observe(target),
             self.editor().tweak_ready_for_config(target, saved),
+            self.editor().tweak_options(saved),
         )
     }
     fn fields(
