@@ -111,6 +111,9 @@ trait ObservationOs {
         Ok(true)
     }
     fn inspect(&mut self, pid: u32) -> Result<ProcessFacts, UnknownReason>;
+    fn inspect_candidate(&mut self, pid: u32) -> Result<ProcessFacts, UnknownReason> {
+        self.inspect(pid)
+    }
     fn foreground(&mut self) -> Result<ForegroundSample, UnknownReason>;
     fn recheck(&mut self) -> Result<(), UnknownReason> {
         Ok(())
@@ -314,6 +317,7 @@ fn observe(
         return Err(UnknownReason::Overflow);
     }
     let mut members = Vec::new();
+    let mut inspected = std::collections::BTreeMap::new();
     let mut bytes = config.byte_len;
     let names = os.names();
     for (key, group, rule, instances) in copied {
@@ -336,6 +340,7 @@ fn observe(
                 return Err(UnknownReason::Overflow);
             }
             facts.push(actual);
+            inspected.insert(pid, Ok(facts.last().unwrap().clone()));
         }
         members.push(Member {
             key,
@@ -365,24 +370,34 @@ fn observe(
             {
                 continue;
             }
-            let facts = os.inspect(pid)?;
-            if !facts.image.eq_ignore_ascii_case(image) || !os.game_candidate(&facts)? {
+            let result = inspected
+                .entry(pid)
+                .or_insert_with(|| os.inspect_candidate(pid));
+            // Optional discovery is not evidence that an unrelated tracked
+            // member or foreground fact became uncertain. Runtime admission
+            // still revalidates each exact source before using it.
+            let Ok(facts) = result else {
+                continue;
+            };
+            if !facts.image.eq_ignore_ascii_case(image)
+                || !os.game_candidate(facts).unwrap_or(false)
+            {
                 continue;
             }
             bytes = bytes
-                .checked_add(fact_bytes(&facts))
+                .checked_add(fact_bytes(facts))
                 .ok_or(UnknownReason::Overflow)?;
             if bytes > MAX_BYTES {
                 return Err(UnknownReason::Overflow);
             }
             if let Some(member) = members.iter_mut().find(|member| member.rule == rule.rule) {
-                member.instances.push(facts);
+                member.instances.push(facts.clone());
             } else {
                 members.push(Member {
                     key: rule.key.clone(),
                     group: rule.group.clone(),
                     rule: rule.rule.clone(),
-                    instances: vec![facts],
+                    instances: vec![facts.clone()],
                 });
             }
         }
@@ -430,7 +445,23 @@ struct NativeOs {
     #[cfg(windows)]
     own: Option<os_api::tuning::TuningProcessIdentity>,
     #[cfg(windows)]
+    desktop: Option<os_api::gaming::UserIdentity>,
+    #[cfg(windows)]
     guards: Vec<os_api::tuning::TuningProcessLifetimeGuard>,
+}
+#[cfg(any(windows, test))]
+fn game_logon_matches(
+    candidate: (&str, u32, u64),
+    own: (&str, u32, u64),
+    desktop: (&str, u64),
+) -> bool {
+    desktop.0 == own.0
+        && own.2 != 0
+        && desktop.1 != 0
+        && candidate.1 != 0
+        && candidate.1 == own.1
+        && candidate.0 == own.0
+        && (candidate.2 == own.2 || candidate.2 == desktop.1)
 }
 impl ObservationOs for NativeOs {
     fn game_candidate(&mut self, facts: &ProcessFacts) -> Result<bool, UnknownReason> {
@@ -443,14 +474,22 @@ impl ObservationOs for NativeOs {
                 );
             }
             let own = self.own.as_ref().unwrap().token();
+            if self.desktop.is_none() {
+                // Native helper verifies the actual Explorer and OS-linked
+                // caller token; matching only a SID would admit another logon.
+                self.desktop =
+                    Some(os_api::gaming::interactive_user().map_err(|_| UnknownReason::Denied)?);
+            }
+            let desktop = self.desktop.as_ref().unwrap();
             let Some(native) = &facts.native else {
                 return Ok(false);
             };
             let token = native.token();
-            Ok(token.session_id() != 0
-                && token.session_id() == own.session_id()
-                && token.sid() == own.sid()
-                && token.authentication_id() == own.authentication_id())
+            Ok(game_logon_matches(
+                (token.sid(), token.session_id(), token.authentication_id()),
+                (own.sid(), own.session_id(), own.authentication_id()),
+                (&desktop.sid, desktop.logon),
+            ))
         }
         #[cfg(not(windows))]
         {
@@ -497,6 +536,21 @@ impl ObservationOs for NativeOs {
             .map(|(window, pid)| ForegroundSample { window, pid })
             .map_err(|_| UnknownReason::ForegroundRace)
     }
+    fn inspect_candidate(&mut self, pid: u32) -> Result<ProcessFacts, UnknownReason> {
+        // Optional candidates retain no global observation guard: their exit
+        // cannot invalidate reliable facts about other saved applications.
+        let facts = self.inspect(pid)?;
+        #[cfg(windows)]
+        {
+            let mut guard = self.guards.pop().ok_or(UnknownReason::InstanceChanged)?;
+            if guard.poll().map_err(|_| UnknownReason::Denied)?
+                != os_api::tuning::TuningProcessLifetime::VerifiedLive
+            {
+                return Err(UnknownReason::InstanceChanged);
+            }
+        }
+        Ok(facts)
+    }
     fn recheck(&mut self) -> Result<(), UnknownReason> {
         #[cfg(windows)]
         for guard in &mut self.guards {
@@ -504,6 +558,12 @@ impl ObservationOs for NativeOs {
                 != os_api::tuning::TuningProcessLifetime::VerifiedLive
             {
                 return Err(UnknownReason::ObservedExit);
+            }
+        }
+        #[cfg(windows)]
+        if let Some(desktop) = &self.desktop {
+            if os_api::gaming::interactive_user().as_ref() != Ok(desktop) {
+                return Err(UnknownReason::RevisionChanged);
             }
         }
         Ok(())
@@ -514,6 +574,110 @@ impl ObservationOs for NativeOs {
 mod tests {
     use super::*;
     use crate::app::models::{AppToRun, CoreGroup};
+    #[cfg(windows)]
+    #[test]
+    fn s92_optional_native_lifetime_is_not_a_global_observation_guard() {
+        let mut os = NativeOs::default();
+        let optional = os.inspect_candidate(std::process::id()).unwrap();
+        assert_eq!(optional.pid, std::process::id());
+        assert!(os.guards.is_empty());
+        os.inspect(std::process::id()).unwrap();
+        assert_eq!(os.guards.len(), 1);
+        os.recheck().unwrap();
+    }
+    #[test]
+    fn s92_game_discovery_accepts_only_the_verified_linked_desktop_logon() {
+        let own = ("same-user", 2, 11);
+        let desktop = ("same-user", 10);
+        assert!(game_logon_matches(("same-user", 2, 10), own, desktop));
+        assert!(game_logon_matches(own, own, desktop));
+        for candidate in [
+            ("other-user", 2, 10),
+            ("same-user", 3, 10),
+            ("same-user", 0, 10),
+            ("same-user", 2, 12),
+        ] {
+            assert!(!game_logon_matches(candidate, own, desktop));
+        }
+        assert!(!game_logon_matches(own, own, ("foreign-shell", 10)));
+    }
+
+    #[test]
+    fn s92_optional_discovery_failure_does_not_poison_other_sessions_or_repeat_pid_reads() {
+        struct OptionalOs {
+            base: FakeOs,
+            reads: std::collections::BTreeMap<u32, usize>,
+        }
+        impl ObservationOs for OptionalOs {
+            fn enumerate(&mut self) -> Result<BTreeSet<u32>, UnknownReason> {
+                Ok([42, 77, 99].into())
+            }
+            fn names(&self) -> std::collections::BTreeMap<u32, String> {
+                [
+                    (42, "fixture.exe".into()),
+                    (77, "fixture.exe".into()),
+                    (99, "other.exe".into()),
+                ]
+                .into()
+            }
+            fn inspect(&mut self, pid: u32) -> Result<ProcessFacts, UnknownReason> {
+                *self.reads.entry(pid).or_default() += 1;
+                if pid == 77 {
+                    Err(UnknownReason::Denied)
+                } else {
+                    self.base.inspect(pid)
+                }
+            }
+            fn foreground(&mut self) -> Result<ForegroundSample, UnknownReason> {
+                self.base.foreground()
+            }
+        }
+        let (running, state, base) = fixture();
+        running
+            .try_write()
+            .unwrap()
+            .mutate_membership(|running| running.apps.clear());
+        let mut saved = state.write().unwrap();
+        let app = AppToRun::new_path(
+            "fixture.exe".into(),
+            vec![],
+            "fixture.exe".into(),
+            os_api::PriorityClass::Normal,
+            false,
+        );
+        saved.groups[0].programs = vec![app.clone(), app];
+        saved.rule_identities = None;
+        let rules = RulesContext::from_storage(&saved);
+        let mut tuning = super::super::config::TuningConfig::default();
+        for index in 0..2 {
+            super::super::background_policy::put_rule_policy(
+                &mut tuning,
+                super::super::tweaks::background_workload::GameRule {
+                    group: rules.group_id_for_index(0).unwrap().0,
+                    rule: rules.rule_id_for_index(0, index).unwrap().0,
+                },
+                &super::super::background_policy::RulePolicy {
+                    enabled: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        saved.tuning = super::super::config::TuningEnvelope::from_config(&tuning).unwrap();
+        drop(saved);
+        let mut os = OptionalOs {
+            base,
+            reads: Default::default(),
+        };
+        let observation =
+            observe(&running, &state, &mut os).expect("optional denial is not global uncertainty");
+        assert!(
+            matches!(observation, ExecutionObservation::Complete { members, foreground, .. }
+            if members.len() == 2 && members.iter().all(|member| member.instances[0].pid == 42) && foreground.pid == 99)
+        );
+        assert_eq!(os.reads[&42], 1);
+        assert_eq!(os.reads[&77], 1);
+    }
     #[test]
     fn background_selected_saved_exe_is_discovered_without_classic_monitor_membership() {
         struct Named(FakeOs, bool);

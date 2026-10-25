@@ -594,6 +594,23 @@ fn membership_matches(running: &Arc<TokioRwLock<RunningApps>>, generation: u64) 
         .try_read()
         .is_ok_and(|current| current.membership_generation() == Some(generation))
 }
+fn history_tick_targets<'a>(
+    all: &'a [(u32, u64)],
+    tracked_valid: bool,
+    runs: &HashMap<String, (u32, u64)>,
+    fallback: &'a mut Vec<(u32, u64)>,
+) -> &'a [(u32, u64)] {
+    if tracked_valid {
+        return all;
+    }
+    // A transient membership race may omit tracked work for this cut only.
+    // The canonical sampler inventory must survive for the next valid tick.
+    fallback.clear();
+    fallback.extend(runs.values().copied());
+    fallback.sort_unstable();
+    fallback.dedup();
+    fallback
+}
 fn saved_targets(
     source: &Arc<RwLock<AppStateStorage>>,
     targets: &mut Vec<RuleTarget>,
@@ -719,6 +736,7 @@ fn run(
     let mut targets = Vec::new();
     let mut run_targets = HashMap::new();
     let mut all = Vec::new();
+    let mut history_fallback = Vec::new();
     let mut snapshot = Snapshot::default();
     let mut configured_cpus = 0;
     let mut configuration_error = None;
@@ -1036,15 +1054,12 @@ fn run(
                     tracked.filter(|tracked| membership_matches(&running, tracked.generation));
                 let tick = {
                     crate::render_profile_scope!(TraceTick);
-                    active.history_tick(if valid.is_some() {
-                        &all
-                    } else {
-                        all.clear();
-                        all.extend(run_targets.values().copied());
-                        all.sort_unstable();
-                        all.dedup();
-                        &all
-                    })
+                    active.history_tick(history_tick_targets(
+                        &all,
+                        valid.is_some(),
+                        &run_targets,
+                        &mut history_fallback,
+                    ))
                 };
                 match tick {
                     Ok(tick) => {
@@ -1071,6 +1086,8 @@ fn run(
             }
             (snapshot.bookkeeping_bytes, snapshot.threads) = active.memory_usage();
             snapshot.bookkeeping_bytes += event_history.bookkeeping_bytes();
+            snapshot.bookkeeping_bytes +=
+                history_fallback.capacity() * std::mem::size_of::<(u32, u64)>();
         }
         if let Some(error) = trace_error {
             let gap_reason = super::history::GapReason::from_error(&error);

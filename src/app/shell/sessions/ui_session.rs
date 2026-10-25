@@ -94,6 +94,8 @@ impl UiSession {
                 process_names: Default::default(),
                 current_edit: None,
                 background: None,
+                #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+                background_baseline: None,
                 background_error: None,
                 target: None,
                 shortcut_result: None,

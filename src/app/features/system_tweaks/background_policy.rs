@@ -19,6 +19,7 @@ use std::{
 
 pub(crate) const PROFILE_NAME: &str = "Background workload [session v1]";
 mod rule_settings;
+pub(super) use rule_settings::prune_deleted_rule_profiles;
 #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
 pub(crate) use rule_settings::rule_policy;
 pub(crate) use rule_settings::{put_rule_policy, RulePolicy};
@@ -543,7 +544,7 @@ pub(crate) fn game_choices(
         .collect()
 }
 
-fn game_rule_exists(service: &HeadlessTuning, rule: &str) -> bool {
+pub(super) fn game_rule_exists(service: &HeadlessTuning, rule: &str) -> bool {
     let rule = crate::app::shared::ids::RuleId(rule.into());
     service
         .state()
@@ -574,7 +575,8 @@ fn tick_inner(
 ) {
     let policies = policies(service);
     runtime.snapshot.enabled = policies.iter().any(|(_, enabled, _)| *enabled);
-    let own_policy=policies.iter().find(|(id,_,_)| matches!(service.state().tuning.decode(),TuningLoad::Known(ref saved) if saved.profiles.iter().any(|p|p.id==*id && p.name==PROFILE_NAME)));
+    let own_id = legacy_profile(&policies, || service.state().tuning.decode());
+    let own_policy = policies.iter().find(|(id, _, _)| Some(*id) == own_id);
     if let Some((_, _, config)) = own_policy {
         runtime.snapshot.config = config.clone();
     }
@@ -905,6 +907,24 @@ fn tick_inner(
         ));
         runtime.snapshot.status = status;
     }
+}
+
+fn legacy_profile(
+    policies: &[(ProfileId, bool, Config)],
+    load: impl FnOnce() -> TuningLoad,
+) -> Option<ProfileId> {
+    let TuningLoad::Known(saved) = load() else {
+        return None;
+    };
+    policies
+        .iter()
+        .find(|(id, _, _)| {
+            saved
+                .profiles
+                .iter()
+                .any(|profile| profile.id == *id && profile.name == PROFILE_NAME)
+        })
+        .map(|(id, _, _)| *id)
 }
 
 #[cfg(test)]

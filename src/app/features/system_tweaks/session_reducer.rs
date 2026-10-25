@@ -997,7 +997,12 @@ fn session_work_needed(service: &HeadlessTuning, actors: &BTreeMap<OwnerKey, Act
     if service.background.needs_work()
         || super::background_policy::policies(service)
             .iter()
-            .any(|(_, on, config)| *on && !config.games.is_empty())
+            .any(|(_, on, config)| {
+                *on && config
+                    .games
+                    .iter()
+                    .any(|game| super::background_policy::game_rule_exists(service, &game.rule))
+            })
     {
         return true;
     }
@@ -2344,6 +2349,32 @@ mod card_tests {
         *setting.fail_at.lock().unwrap() = None;
         service.undo_tweak(&feature).unwrap();
         service.apply_tweak(feature, next).unwrap();
+    }
+
+    #[test]
+    fn s92_orphan_background_intent_does_not_keep_session_observation_running() {
+        let mut service = super::super::Tuning::from_registry(Registry::default())
+            .headless(AppStateStorage::test_fixture(|_| {}), Box::new(NoSave));
+        service.admit_test_modules();
+        let config = super::super::tweaks::background_workload::Config {
+            games: vec![super::super::tweaks::background_workload::GameRule {
+                group: "deleted".into(),
+                rule: "deleted".into(),
+            }],
+            ..Default::default()
+        };
+        service
+            .create_profile(
+                "Legacy custom intent".into(),
+                vec![ModulePreference {
+                    feature: FeatureId::new("background_workload").unwrap(),
+                    enabled: true,
+                    mode: ActivationMode::Session,
+                    config: config.envelope(),
+                }],
+            )
+            .unwrap();
+        assert!(!session_work_needed(&service, &BTreeMap::new()));
     }
 
     #[test]

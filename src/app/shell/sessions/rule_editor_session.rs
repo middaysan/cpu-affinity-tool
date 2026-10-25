@@ -23,10 +23,49 @@ pub struct RuleEditorSession {
     pub(crate) background:
         Option<crate::app::features::system_tweaks::background_policy::RulePolicy>,
     pub(crate) background_error: Option<String>,
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    pub(crate) background_baseline: Option<(
+        RuleId,
+        crate::app::features::system_tweaks::config::TuningEnvelope,
+        Option<crate::app::features::system_tweaks::background_policy::RulePolicy>,
+    )>,
     /// Transient logical identity of the rule being edited.
     pub target: Option<RuleEditorTarget>,
     /// Transient result from desktop shortcut creation.
     pub shortcut_result: Option<RuleShortcutResult>,
+}
+
+#[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+impl RuleEditorSession {
+    pub(crate) fn background_is_dirty(
+        &mut self,
+        saved: &crate::app::features::system_tweaks::config::TuningEnvelope,
+    ) -> bool {
+        use crate::app::features::system_tweaks::{background_policy, config::TuningLoad};
+        let (Some(target), Some(draft)) = (&self.target, &self.background) else {
+            return false;
+        };
+        if self
+            .background_baseline
+            .as_ref()
+            .is_none_or(|(rule, previous, _)| {
+                rule != &target.rule_id || !previous.same_document(saved)
+            })
+        {
+            let baseline = match saved.decode() {
+                TuningLoad::Off => Some(background_policy::RulePolicy::default()),
+                TuningLoad::Known(config) => {
+                    background_policy::rule_policy(&config, &target.rule_id.0).ok()
+                }
+                _ => None,
+            };
+            self.background_baseline = Some((target.rule_id.clone(), saved.clone(), baseline));
+        }
+        self.background_baseline
+            .as_ref()
+            .and_then(|(_, _, policy)| policy.as_ref())
+            != Some(draft)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -13,6 +13,10 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Fixed
 
+- Keep the CPU sampler's exact PID cache across transient membership races, so adding a tracked process cannot leave application/group load unavailable while system graphs keep recording.
+- Reclaim deleted rules' internal background profiles after recovery releases them, and stop orphaned intent from retaining process-observation work.
+- Discover ordinary applications across verified UAC-linked desktop tokens, and isolate unavailable optional candidates from other session/foreground observations.
+- Include unsaved background-checkbox edits in the rule editor's shortcut guard.
 - The Windows window and taskbar use the same bundled application icon as the tray and EXE resource instead of eframe's default icon.
 - Tray Restore shows and unminimizes the native window on the GUI thread before requesting Windows foreground activation, with a short bounded retry that stops on success, hide or exit. Ordinary mouse movement no longer cancels the request.
 - Tray double-click Restore waits for the final left-button release so that release cannot invalidate its own activation request. Single clicks and other mouse buttons do not restore the window.
@@ -21,6 +25,7 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Changed
 
+- Avoid a full tuning-document decode per background policy and repeat native identity reads only for unique candidate PIDs within an observation. Windows CI and release verification now run the pure background protocol/closed-admission checks and strict test-code Clippy; real Windows roles remain unqualified.
 - Windows no longer includes the unused Glow/OpenGL renderer; Linux keeps its existing Glow backend.
 - Updated the README lead screenshot to the supplied side-by-side groups and CPU selection view.
 

@@ -1255,6 +1255,15 @@ impl AppState {
             return false;
         };
 
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        {
+            let Ok(saved) = self.persistent_state.try_read() else {
+                return true;
+            };
+            if self.ui.app_edit_state.background_is_dirty(&saved.tuning) {
+                return true;
+            }
+        }
         rules::load_rule(&self.persistent_state, group_idx, prog_idx)
             .is_none_or(|saved| saved != current_edit)
     }
@@ -1866,6 +1875,10 @@ impl AppState {
         self.ui.app_edit_state.process_names.request_refresh();
         self.ui.app_edit_state.current_edit = None;
         self.ui.app_edit_state.background = None;
+        #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+        {
+            self.ui.app_edit_state.background_baseline = None;
+        }
         self.ui.app_edit_state.background_error = None;
         self.ui.app_edit_state.target =
             Some(crate::app::shell::sessions::RuleEditorTarget { group_id, rule_id });
@@ -2253,6 +2266,10 @@ impl AppState {
     fn reset_app_run_settings_session(&mut self) {
         self.ui.app_edit_state.current_edit = None;
         self.ui.app_edit_state.background = None;
+        #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+        {
+            self.ui.app_edit_state.background_baseline = None;
+        }
         self.ui.app_edit_state.background_error = None;
         self.ui.app_edit_state.target = None;
         self.ui.app_edit_state.shortcut_result = None;
@@ -2786,6 +2803,73 @@ mod tests {
                 filename: "Sample - Games.lnk".to_string()
             })
         );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn s92_background_only_draft_blocks_shortcut_until_saved() {
+        let mut app = sample_state();
+        let group = group_id(&app, 0);
+        let rule = rule_id(&app, 0, 0);
+        app.open_app_run_settings(group, rule);
+        assert!(app.ensure_current_edit_loaded());
+        app.ui.app_edit_state.background.as_mut().unwrap().enabled = true;
+        assert!(app.is_current_app_edit_dirty());
+        assert!(!app.current_app_edit_shortcut_status().enabled);
+        let mut platform = FakeShortcutPlatform::supported();
+        assert_eq!(
+            app.create_shortcut_for_current_rule_with_platform(&mut platform),
+            Err(CreateRuleShortcutError::SaveChangesFirst)
+        );
+        assert!(platform.create_calls.is_empty());
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn s92_background_dirty_cache_refreshes_on_saved_document_and_rule_changes() {
+        use crate::app::features::system_tweaks::{
+            background_policy::{put_rule_policy, RulePolicy},
+            config::{TuningConfig, TuningEnvelope},
+            tweaks::background_workload::GameRule,
+        };
+        let mut app = sample_state();
+        let group = group_id(&app, 0);
+        let rule = rule_id(&app, 0, 0);
+        app.open_app_run_settings(group.clone(), rule.clone());
+        assert!(app.ensure_current_edit_loaded());
+        assert!(!app.is_current_app_edit_dirty());
+        app.ui.app_edit_state.background.as_mut().unwrap().enabled = true;
+        assert!(app.is_current_app_edit_dirty());
+        let mut saved = TuningConfig::default();
+        put_rule_policy(
+            &mut saved,
+            GameRule {
+                group: group.0,
+                rule: rule.0,
+            },
+            &RulePolicy {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let envelope = TuningEnvelope::from_config(&saved).unwrap();
+        assert!(envelope.same_document(&envelope.clone()));
+        assert!(!envelope.same_document(&TuningEnvelope::from_config(&saved).unwrap()));
+        let policy = super::super::super::features::system_tweaks::background_policy::rule_policy(
+            &saved,
+            &app.ui.app_edit_state.target.as_ref().unwrap().rule_id.0,
+        )
+        .unwrap();
+        app.ui.app_edit_state.background = Some(policy);
+        app.persistent_state.write().unwrap().tuning = envelope;
+        assert!(!app.is_current_app_edit_dirty());
+        app.ui.app_edit_state.target.as_mut().unwrap().rule_id =
+            crate::app::shared::ids::RuleId("another-rule".into());
+        let document = app.persistent_state.read().unwrap().tuning.clone();
+        assert!(app.ui.app_edit_state.background_is_dirty(&document));
+        app.close_app_run_settings();
+        assert!(app.ui.app_edit_state.background_baseline.is_none());
     }
 
     #[cfg(all(target_os = "windows", feature = "windows"))]

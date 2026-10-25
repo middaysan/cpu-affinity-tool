@@ -13,6 +13,44 @@ pub(crate) struct RulePolicy {
     pub config: Config,
 }
 
+/// Only the internal per-rule shape is disposable; arbitrary/legacy profiles
+/// and any profile still referenced by recovery retain their exact payload.
+pub(crate) fn prune_deleted_rule_profiles(
+    saved: &mut TuningConfig,
+    live_rules: &std::collections::BTreeSet<String>,
+    retained: impl Fn(ProfileId) -> bool,
+) -> bool {
+    let before = saved.profiles.len();
+    saved.profiles.retain(|profile| {
+        if retained(profile.id)
+            || profile.modules.len() != 1
+            || saved
+                .associations
+                .iter()
+                .any(|association| association.profile == profile.id)
+            || saved
+                .manual_targets
+                .iter()
+                .any(|target| target.profile == profile.id)
+        {
+            return true;
+        }
+        let preference = &profile.modules[0];
+        if preference.feature.as_str() != ID || preference.mode != ActivationMode::Session {
+            return true;
+        }
+        let Ok(config) = configured(&preference.config) else {
+            return true;
+        };
+        let [game] = config.games.as_slice() else {
+            return true;
+        };
+        profile.name != format!("Background workload [rule {}]", game.rule)
+            || live_rules.contains(&game.rule)
+    });
+    before != saved.profiles.len()
+}
+
 pub(crate) fn rule_policy(saved: &TuningConfig, rule: &str) -> Result<RulePolicy, SaveError> {
     let mut result = None;
     for profile in &saved.profiles {

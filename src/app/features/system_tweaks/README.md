@@ -48,8 +48,14 @@ missing policy fields remain unavailable. Recovery uses captured keys rather
 than rediscovering a new active plan. The original absent/explicit distinction
 and conditional restoration are unchanged.
 
-Session observations run only for enabled non-manual associations or retained
-Session owners, once per second and after accepted requests. Manual-only and
+Session observations run only for enabled non-manual associations, enabled
+background policies selecting a current saved EXE, or retained session owners,
+once per second and after accepted requests. Deleted internal per-rule profiles
+are reclaimed on explicit saves after recovery releases them; custom and legacy
+profiles remain intact. Optional saved-EXE candidates reuse exact PID facts and
+cannot invalidate reliable tracked/foreground observations through an access or
+exit race. Their desktop logon is verified through the existing Explorer/UAC
+boundary. Manual-only and
 undone configurations perform no session enumeration or repeated saved-state
 verification on queue timeouts. Inspection, confirmation expiry and shutdown
 keep their independent safety checks.

@@ -271,6 +271,37 @@ impl HeadlessTuning {
             _ => Err(SaveError::Invalid),
         }
     }
+    fn configured_for_edit(&self) -> Result<TuningConfig, SaveError> {
+        let mut config = self.configured()?;
+        self.prune_background_profiles(&mut config, &self.state, &self.rules);
+        Ok(config)
+    }
+    fn prune_background_profiles(
+        &self,
+        config: &mut TuningConfig,
+        state: &AppStateStorage,
+        rules: &RulesContext,
+    ) -> bool {
+        // An unrestored/uncertain journal is not proof that a profile is unused.
+        if !self.native_admitted || self.legacy_recovery || !self.controller.can_admit() {
+            return false;
+        }
+        let live = state
+            .groups
+            .iter()
+            .enumerate()
+            .flat_map(|(g, group)| {
+                group
+                    .programs
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(r, _)| rules.rule_id_for_index(g, r).map(|id| id.0))
+            })
+            .collect();
+        super::background_policy::prune_deleted_rule_profiles(config, &live, |id| {
+            self.controller.retains_profile(id)
+        })
+    }
     fn publish(
         &mut self,
         mut candidate: AppStateStorage,
@@ -278,6 +309,14 @@ impl HeadlessTuning {
     ) -> Result<(), SaveError> {
         let revision = self.revision.checked_add(1).ok_or(SaveError::Invalid)?;
         rules.reconcile_with_storage(&candidate);
+        if self.modules_enabled {
+            if let TuningLoad::Known(mut config) = candidate.tuning.decode() {
+                if self.prune_background_profiles(&mut config, &candidate, &rules) {
+                    candidate.tuning =
+                        TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
+                }
+            }
+        }
         candidate.mark_ready_for_current_schema_save(rules.to_persisted_identities());
         self.persistence.save(&mut candidate)?;
         self.state = candidate;
@@ -297,7 +336,7 @@ impl HeadlessTuning {
         name: String,
         modules: Vec<ModulePreference>,
     ) -> Result<ProfileId, SaveError> {
-        let mut config = self.configured()?;
+        let mut config = self.configured_for_edit()?;
         if name.trim().is_empty()
             || name.len() > 128
             || name.chars().any(char::is_control)
@@ -545,7 +584,7 @@ impl HeadlessTuning {
         if background.enabled && !is_exe {
             return Err(SaveError::Invalid);
         }
-        let mut config = self.configured()?;
+        let mut config = self.configured_for_edit()?;
         super::background_policy::put_rule_policy(
             &mut config,
             super::tweaks::background_workload::GameRule {
@@ -1061,7 +1100,7 @@ impl HeadlessTuning {
                 .editor()
                 .tweak_ready_for_config(&target, Some(&desired))
                 .map_err(|e| self.native_failure(e))?;
-        let mut config = self.configured()?;
+        let mut config = self.configured_for_edit()?;
         let existing = config
             .profiles
             .iter()

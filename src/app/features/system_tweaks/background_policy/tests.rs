@@ -342,6 +342,118 @@ impl GamesFixture {
 }
 
 #[test]
+fn s92_profile_cleanup_waits_for_recovery_admission() {
+    let mut fixture = GamesFixture::new();
+    fixture.service.undo_background().unwrap();
+    fixture.service.native_admitted = false;
+    fixture.service.remove_group(&fixture.group).unwrap();
+    assert_eq!(fixture.service.configured().unwrap().profiles.len(), 2);
+    fixture.service.admit_test_modules();
+    fixture.service.save_base(|_| Ok(())).unwrap();
+    assert!(fixture.service.configured().unwrap().profiles.is_empty());
+}
+
+#[test]
+fn s92_profile_cleanup_reuses_the_cap_and_keeps_live_recovery_and_custom_profiles() {
+    use super::super::config::TuningConfig;
+    let mut saved = TuningConfig::default();
+    let draft = RulePolicy {
+        enabled: true,
+        ..Default::default()
+    };
+    for index in 0..64 {
+        put_rule_policy(
+            &mut saved,
+            GameRule {
+                group: "g".into(),
+                rule: format!("r{index}"),
+            },
+            &draft,
+        )
+        .unwrap();
+    }
+    assert!(put_rule_policy(
+        &mut saved,
+        GameRule {
+            group: "g".into(),
+            rule: "new".into()
+        },
+        &draft
+    )
+    .is_err());
+    // Custom profile names are not authority to discard user data.
+    saved.profiles[4].name = "Custom background policy".into();
+    let original_live = saved.profiles[3].clone();
+    let original_recovery = saved.profiles[6].clone();
+    let live = ["r3".into()].into();
+    let retained = original_recovery.id;
+    assert!(prune_deleted_rule_profiles(&mut saved, &live, |id| id == retained));
+    assert_eq!(saved.profiles.len(), 3);
+    assert!(saved.profiles.contains(&original_live));
+    assert!(saved.profiles.contains(&original_recovery));
+    assert!(!prune_deleted_rule_profiles(&mut saved, &live, |id| id == retained));
+    put_rule_policy(
+        &mut saved,
+        GameRule {
+            group: "g".into(),
+            rule: "new".into(),
+        },
+        &draft,
+    )
+    .unwrap();
+    assert_eq!(saved.profiles.len(), 4);
+}
+
+#[test]
+fn s92_legacy_profile_lookup_decodes_the_document_once() {
+    let fixture = GamesFixture::new();
+    let policies = policies(&fixture.service);
+    let saved = fixture.service.configured().unwrap();
+    let mut reads = 0;
+    assert_eq!(
+        legacy_profile(&policies, || {
+            reads += 1;
+            TuningLoad::Known(Box::new(saved.clone()))
+        }),
+        None
+    );
+    assert_eq!(
+        reads, 1,
+        "normal per-rule profiles must not trigger full JSON decode per policy"
+    );
+}
+
+#[test]
+fn s92_deleted_background_profiles_release_capacity_after_recovery_retires() {
+    let mut fixture = GamesFixture::new();
+    fixture.service.remove_group(&fixture.group).unwrap();
+    assert_eq!(
+        fixture.service.configured().unwrap().profiles.len(),
+        2,
+        "pending owners must retain the original recovery profiles"
+    );
+    fixture.tick_unknown();
+    fixture.service.save_base(|_| Ok(())).unwrap();
+    assert!(
+        fixture.service.configured().unwrap().profiles.is_empty(),
+        "deleted rules must not permanently consume the shared profile capacity"
+    );
+}
+
+#[test]
+fn s92_deleted_background_profiles_are_pruned_without_an_owner() {
+    let mut fixture = GamesFixture::new();
+    fixture.service.undo_background().unwrap();
+    fixture
+        .service
+        .remove_rule(&fixture.group, &fixture.rules[0])
+        .unwrap();
+    assert_eq!(fixture.service.configured().unwrap().profiles.len(), 1);
+    fixture.service.remove_group(&fixture.group).unwrap();
+    assert!(fixture.service.configured().unwrap().profiles.is_empty());
+}
+
+#[test]
 fn background_removing_live_game_rule_releases_only_its_owner_before_last_undo() {
     let mut fixture = GamesFixture::new();
     fixture

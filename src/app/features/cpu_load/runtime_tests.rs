@@ -29,6 +29,159 @@ fn debug_disabled_acknowledgement_requires_the_worker_release_revision() {
 use crate::app::shared::ids::{GroupId, RuleId};
 
 #[test]
+fn transient_membership_race_does_not_erase_the_next_valid_cpu_target_set() {
+    let expected = vec![(10, 100), (20, 200), (30, 300)];
+    let all = expected.clone();
+    let mut fallback = Vec::new();
+    let runs = HashMap::from([("run".into(), (30, 300))]);
+    assert_eq!(
+        history_tick_targets(&all, false, &runs, &mut fallback),
+        &[(30, 300)]
+    );
+    assert_eq!(
+        history_tick_targets(&all, true, &runs, &mut fallback),
+        expected,
+        "a one-tick lock/generation race must not permanently remove saved app PIDs"
+    );
+}
+
+#[test]
+fn s92_membership_race_recovers_app_group_history_contributors_and_current_api() {
+    use super::super::worker_history::{EventHistory, OwnerInput};
+    use os_api::cpu_load::{CpuHistoryFrame, CpuHistoryTarget, CpuHistoryTick, CpuHistoryValue};
+    let runtime = runtime();
+    let target = target();
+    let all = vec![(10, 100), (20, 200)];
+    let targets = HashMap::from([(target.clone(), all.clone())]);
+    let names: HashMap<_, _> = all
+        .iter()
+        .map(|&(pid, token)| {
+            (
+                (pid, token),
+                Arc::new(os_api::cpu_load::CpuProcess {
+                    pid,
+                    instance: token,
+                    name: if pid == 10 {
+                        "launcher.exe"
+                    } else {
+                        "added-game.exe"
+                    }
+                    .into(),
+                }),
+            )
+        })
+        .collect();
+    let rules = HashMap::from([(target.clone(), Arc::new(target.rule.clone()))]);
+    let runs = HashMap::new();
+    let mut scratch = Vec::new();
+    let mut previous = Vec::new();
+    let mut events = EventHistory::default();
+    let mut store = runtime.history.write().unwrap();
+    store
+        .configure(2, 30, std::slice::from_ref(&target))
+        .unwrap();
+    for id in 0..=4 {
+        let valid = id != 2;
+        let selected = history_tick_targets(&all, valid, &runs, &mut scratch);
+        events
+            .enqueue(
+                CpuHistoryTick {
+                    id,
+                    seconds: id as f64,
+                    timestamp: SystemTime::UNIX_EPOCH + Duration::from_secs(id),
+                },
+                OwnerInput {
+                    generation: valid.then_some(1),
+                    targets: valid.then_some(&targets),
+                    names: &names,
+                    rules: &rules,
+                    runs: &runs,
+                    changed: false,
+                },
+                &[],
+                &mut store,
+            )
+            .unwrap();
+        let mut frame = CpuHistoryFrame::new(2).unwrap();
+        frame.id = id;
+        frame.available = id != 0;
+        frame.cpus = vec![Some(10.0), Some(80.0)];
+        for (index, &(pid, token)) in previous.iter().enumerate() {
+            frame.targets.push(CpuHistoryTarget { pid, token });
+            frame.coverage.push(3);
+            frame.tracked.push(CpuHistoryValue {
+                target: index as u16,
+                cpu: if pid == 10 { 0 } else { 1 },
+                load: if pid == 10 { 10.0 } else { 80.0 },
+            });
+        }
+        events.apply(&frame, &mut store);
+        previous = selected.to_vec();
+    }
+    let mut snapshot = Snapshot {
+        cpus: vec![Some(10.0), Some(80.0)],
+        ..Default::default()
+    };
+    events.publish(&mut snapshot);
+    let totals = HashMap::from([((10, 100), Some(5.0)), ((20, 200), Some(40.0))]);
+    snapshot.processes = process_totals(&targets, |pid, token| totals[&(pid, token)]);
+    let mut current =
+        super::super::process_list::ProcessList::from_tracking(&targets, &totals, &names);
+    current.record_cores(2, events.samples());
+    snapshot.live_processes = Arc::new(current);
+    assert_eq!(snapshot.processes[&target], Some(45.0));
+    assert_eq!(snapshot.process_cpus[&target], [Some(10.0), Some(80.0)]);
+    let recovered = SampleTime {
+        seconds: 4.0,
+        wall: SystemTime::UNIX_EPOCH + Duration::from_secs(4),
+    };
+    assert_eq!(
+        store.group_mean_at(LoadSource::Tracked, recovered, &[0, 1]),
+        (Some(45.0), false)
+    );
+    assert_eq!(
+        store.value_at(LoadSource::Rule(&target), recovered, 1),
+        Some(80.0)
+    );
+    let mut contributors = super::super::contributors::ContributorView::default();
+    store
+        .contributors
+        .copy(recovered, 1, Some(&target.rule), &mut contributors);
+    assert_eq!(contributors.rows.len(), 1);
+    assert_eq!(contributors.rows[0].process.pid, 20);
+    assert_eq!(contributors.rows[0].load, 80.0);
+    assert_eq!(
+        store.value_at(
+            LoadSource::Tracked,
+            SampleTime {
+                seconds: 3.0,
+                wall: SystemTime::UNIX_EPOCH + Duration::from_secs(3)
+            },
+            1
+        ),
+        None,
+        "the uncertain original interval must remain a gap"
+    );
+    drop(store);
+    *runtime.published.write().unwrap() = Arc::new(snapshot);
+    let api = runtime
+        .read_handle()
+        .read("read_cpu_current", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(
+        api["tracked_etw_residency_percent"],
+        serde_json::json!([10.0, 80.0])
+    );
+    assert!(api["current_processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["pid"] == 20
+            && row["whole_host_cpu_percent"] == 40.0
+            && row["active_cpus"] == serde_json::json!([[1, 80.0]])));
+}
+
+#[test]
 fn group_meter_uses_latest_finalized_tracked_interval_and_keeps_missing_data_unknown() {
     let runtime = runtime();
     {
