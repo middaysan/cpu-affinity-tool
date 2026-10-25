@@ -13,6 +13,7 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Fixed
 
+- The Windows window and taskbar use the same bundled application icon as the tray and EXE resource instead of eframe's default icon.
 - Tray Restore shows and unminimizes the native window on the GUI thread before requesting Windows foreground activation, with a short bounded retry that stops on success, hide or exit. Ordinary mouse movement no longer cancels the request.
 - Tray double-click Restore waits for the final left-button release so that release cannot invalidate its own activation request. Single clicks and other mouse buttons do not restore the window.
 - Group CPU lists use the available header width instead of stopping after eight entries; the hover text retains the full list.

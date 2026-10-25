@@ -67,6 +67,7 @@ Current platform reality:
 ## Repository map
 Key directories:
 - `src/` - application runtime code and entrypoints
+- `src/app_icon.rs` - shared Windows ICO decoder for the root viewport/taskbar and tray; the EXE resource embeds the same `assets/icon.ico`
 - `src/app/shell/` - the top-level `eframe::App` shell, route enums, transient UI sessions, typed shell events, and presenter module ownership
 - `src/app/views/service_controls.rs` - compact header service controls and Process monitor modal; the shell dispatches dialogs without a bottom panel
 - `src/app/shell/render_preparation.rs` - bounded Windows font preparation and the nonblocking 60 Hz CPU-modal scroll paint budget; the existing native event loop retains queued input until the deadline
@@ -532,7 +533,7 @@ Primary runtime and build dependencies:
 - `regex` - CPU preset matching and related helpers
 - `once_cell` - lazy initialization
 - `num_cpus` - logical thread-count detection
-- `image` - Windows ICO tray decoding and explicit PNG graph export; only `ico` and `png` features are selected. The tray RGBA buffer is moved into the icon; PNG work runs only after a user save request.
+- `image` - Windows window/taskbar/tray ICO decoding and explicit PNG graph export; only `ico` and `png` features are selected. Startup uses the same bundled ICO for native icons and the EXE resource, moving each decoded RGBA buffer into its owner; PNG work runs only after a user save request.
 - `raw-window-handle` - direct Windows native-window handle access
 - `winit` - the same locked GUI dependency, also explicitly selected on Windows for its existing taskbar policy API and test-thread event-loop extension. The local 0.30.13 Cargo patch accepts Windows 11's `WM_DPICHANGED` rectangle directly to avoid monitor-nudge feedback and runaway growth; known pre-22000 builds retain the old adjustment. No new event loop or input layer is added.
 - `winres` - Windows resource embedding at build time

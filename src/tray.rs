@@ -155,11 +155,8 @@ mod sys {
         menu.append(&show).map_err(|e| e.to_string())?;
         menu.append(&quit).map_err(|e| e.to_string())?;
 
-        // Decode the bundled ICO (including BMP/DIB payload support).
-        let icon_rgba = include_bytes!("../assets/icon.ico");
-        let (rgba, width, height) =
-            decode_ico_rgba(icon_rgba).map_err(|e| format!("Failed to decode tray icon: {e}"))?;
-        let icon = Icon::from_rgba(rgba, width, height)
+        let image = crate::app_icon::load()?;
+        let icon = Icon::from_rgba(image.rgba, image.width, image.height)
             .map_err(|e| format!("Failed to create tray icon: {e}"))?;
 
         // Create tray
@@ -225,26 +222,6 @@ mod sys {
             rx,
             _tray_icon: tray_icon,
         })
-    }
-
-    #[cfg(test)]
-    mod icon_tests {
-        #[test]
-        fn bundled_ico_decodes_with_visible_alpha() {
-            let (rgba, width, height) =
-                super::decode_ico_rgba(include_bytes!("../assets/icon.ico")).unwrap();
-            assert_eq!((width, height), (64, 64));
-            assert_eq!(rgba.len(), 64 * 64 * 4);
-            assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] != 0));
-        }
-    }
-
-    fn decode_ico_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
-        let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Ico)
-            .map_err(|e| format!("ICO decoding failed: {e}"))?
-            .to_rgba8();
-        let (w, h) = (img.width(), img.height());
-        Ok((img.into_raw(), w, h))
     }
 }
 

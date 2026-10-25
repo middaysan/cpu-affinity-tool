@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod app_icon;
 #[cfg(all(debug_assertions, feature = "render-profiling"))]
 mod native_frame_probe;
 mod tray;
@@ -195,6 +196,7 @@ fn stop_async_runtime(runtime: Runtime) {
 
 fn windows_viewport(start_hidden: bool) -> eframe::egui::ViewportBuilder {
     eframe::egui::ViewportBuilder::default()
+        .with_icon(app_icon::load().expect("bundled application icon must decode"))
         .with_drag_and_drop(false)
         .with_visible(!start_hidden)
         .with_active(!start_hidden)
@@ -218,6 +220,22 @@ fn windows_window_limits(
 
 #[cfg(test)]
 mod viewport_tests {
+    #[test]
+    fn window_and_taskbar_use_the_bundled_tray_icon() {
+        let expected = image::load_from_memory_with_format(
+            include_bytes!("../assets/icon.ico"),
+            image::ImageFormat::Ico,
+        )
+        .unwrap()
+        .to_rgba8();
+        for hidden in [false, true] {
+            let viewport = super::windows_viewport(hidden);
+            let icon = viewport.icon.expect("window/taskbar icon must be explicit");
+            assert_eq!((icon.width, icon.height), expected.dimensions());
+            assert_eq!(icon.rgba, expected.as_raw().as_slice());
+        }
+    }
+
     #[test]
     fn shell_file_drops_replace_the_elevated_ole_drop_target() {
         for hidden in [false, true] {
