@@ -2,6 +2,8 @@
 
 Status: MVP implementation is complete in code and docs; release readiness still requires the manual smoke matrix before publishing.
 
+Repeated-launch validation (2026-10-26): protocol, guarded startup and hidden/visible/shutdown state regressions pass in the Windows application suite. An isolated exact release copy passed repeated visible restoration, four tray cycles, simultaneous cold starts and restart after primary exit, retaining the same root window and rectangle. This probe used RunAsInvoker with monitoring/tweaks Off. Its background launcher could not acquire foreground permission, so it verifies restoration and exclusion, not an Explorer/UAC launch gesture's foreground transfer or visible taskbar flashing. Those interactive checks remain in the release smoke matrix. The bounded native transport also tests activation requests when Windows refuses the foreground grant.
+
 Implemented so far:
 
 - CLI startup parsing for `--run-rule <group-id> <rule-id>`
@@ -65,7 +67,7 @@ Important blocker: saved rule IDs must be non-reusable before this feature is ex
 - No Linux desktop launcher parity in the first Windows release path.
 - No auto-close-after-target-exits behavior in the first version.
 - No attempt to avoid UAC while the binary itself still requires administrator privileges.
-- No global single-instance behavior for normal no-intent launches in the first version. Single-instance forwarding is required only for `--run-rule`.
+- Normal no-intent launches now share the primary guard: a second launch restores the existing window. Saved-rule commands still forward only the selected rule without requesting window activation. The endpoint remains scoped to user/session/executable path.
 
 ## User Flow
 

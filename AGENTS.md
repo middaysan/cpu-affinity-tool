@@ -270,7 +270,9 @@ Current runtime split:
 Windows runtime flow:
 1. Entry point parses startup arguments into a narrow startup intent; normal GUI startup remains the default, while `--run-rule <group-id> <rule-id>` is accepted as a saved-rule startup intent.
 2. Windows entry point prepares the local shortcut-forwarding endpoint before creating `tokio` or `eframe`:
-   - normal GUI startup may claim the primary guard before GUI startup, but it never forwards, exits, blocks on an IPC lock, or becomes a global single-instance launch
+   - normal GUI startup claims the primary guard; a repeated launch forwards ShowWindow and exits before loading state, autorun, Tokio, GUI or monitors. The endpoint remains scoped to the Windows user, session and executable path, keeping separate portable/test copies independent.
+   - ShowWindow uses the existing tray visibility/taskbar/unminimize and bounded foreground activation path plus informational taskbar attention. The launcher grants foreground permission only to the actual connected same-session pipe-server PID before sending this command; saved-rule commands do not request activation. Windows retains the final focus decision; no topmost state, geometry change, input attachment, listener or idle poll is added.
+   - endpoint/guard/runtime initialization and forwarding failures fail closed. Failure to install the primary command server aborts app creation before startup intent/autorun dispatch.
    - `RunRule` startup first tries to claim the primary guard; if another primary owns it, the process forwards a typed `RunRule` command over the local IPC pipe and exits with the typed forwarding result code
    - if `RunRule` claims the primary guard, it cold-starts the GUI, starts the forwarding server after the shell owns the command receiver and GUI wake path, then skips normal autorun and dispatches only the requested saved rule
    - if the primary guard exists but the pipe is not ready, forwarding retries briefly and then exits non-zero instead of becoming a second primary
@@ -450,7 +452,7 @@ Data source separation:
 ## Platform boundary
 `libs/os_api` is the main boundary between the app and the OS. It covers:
 - tuning boundaries: exact current interactive-user/process identity, retained same-instance process lifetime guard, typed conditional gaming-setting writes and read-only legacy recovery detection; no continuity or receipt framework
-- Windows local named-pipe and mutex transport for saved-rule shortcut forwarding
+- Windows local named-pipe and mutex transport for single-instance restoration and saved-rule shortcut forwarding
 - process launch
 - installed-app discovery and activation on Windows
 - installed package metadata lookup on Windows

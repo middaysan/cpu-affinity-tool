@@ -43,7 +43,12 @@ fn main() {
     } = prepare_startup_forwarding(startup_intent);
     let startup_intent = match action {
         EntryAction::RunGui(intent) => intent,
-        EntryAction::Exit(code) => std::process::exit(code),
+        EntryAction::Exit(code) => {
+            if let Some(warning) = forwarding_warning {
+                eprintln!("Single-instance startup failed: {warning}");
+            }
+            std::process::exit(code)
+        }
     };
     let crash_report_context = Arc::new(CrashReportContext::new(crash_report_directory()));
     if let Err(error) = install_panic_hook(crash_report_context.clone()) {
@@ -144,9 +149,7 @@ fn main() {
                         info.backend, info.name, info.driver
                     ));
                 }
-                let startup_requires_forwarding =
-                    matches!(&startup_intent, StartupIntent::RunRule { .. })
-                        && forwarding_runtime.is_some();
+                let startup_requires_forwarding = forwarding_runtime.is_some();
                 let mut app = App::new_with_storage(cc, storage);
                 for message in scheduling_messages {
                     app.state.log_manager.add_sticky_once(message);
@@ -156,6 +159,12 @@ fn main() {
                     forwarding_warning,
                     &cc.egui_ctx,
                 );
+                if startup_requires_forwarding && !forwarding_ready {
+                    return Err(std::io::Error::other(
+                        "Could not start the single-instance command channel",
+                    )
+                    .into());
+                }
                 app.handle_startup_intent_after_forwarding(
                     startup_intent,
                     startup_requires_forwarding && !forwarding_ready,
@@ -415,7 +424,10 @@ fn requested_diagnostics_test_fault() -> Option<DiagnosticsTestFault> {
 fn prepare_startup_forwarding(
     startup_intent: StartupIntent,
 ) -> PreparedStartupForwarding<AppForwardingRuntime> {
-    let mut platform = WindowsStartupForwardingPlatform::default();
+    let mut platform = WindowsStartupForwardingPlatform {
+        activate_primary: matches!(startup_intent, StartupIntent::NormalGui),
+        ..Default::default()
+    };
     let mut clock = RealStartupForwardingClock::new();
     prepare_startup_forwarding_with(
         startup_intent,
@@ -458,6 +470,7 @@ impl StartupForwardingClock for RealStartupForwardingClock {
 #[derive(Default)]
 struct WindowsStartupForwardingPlatform {
     endpoint: Option<LocalIpcEndpoint>,
+    activate_primary: bool,
 }
 
 impl WindowsStartupForwardingPlatform {
@@ -498,7 +511,12 @@ impl StartupForwardingPlatform for WindowsStartupForwardingPlatform {
         timeout: Duration,
     ) -> Result<Vec<u8>, ForwardingClientError> {
         let endpoint = self.endpoint().map_err(ForwardingClientError::Io)?;
-        OS::send_local_ipc_request(endpoint, request, timeout).map_err(|err| match err {
+        let response = if self.activate_primary {
+            OS::send_local_ipc_activation_request(endpoint, request, timeout)
+        } else {
+            OS::send_local_ipc_request(endpoint, request, timeout)
+        };
+        response.map_err(|err| match err {
             LocalIpcClientError::NoServer => ForwardingClientError::NoServer,
             LocalIpcClientError::ServerNotReady => ForwardingClientError::ServerNotReady,
             LocalIpcClientError::Timeout => ForwardingClientError::Timeout,

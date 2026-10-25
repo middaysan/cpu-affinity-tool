@@ -1383,10 +1383,13 @@ mod tests {
     fn p5_forwarded_rule_is_rejected_after_quit_latches() {
         let mut app = App::new_for_test(sample_state());
         app.closing_requested = true;
-        let response = app.handle_ipc_command(IpcCommand::RunRule {
-            group_id: crate::app::shared::ids::GroupId("missing-group".into()),
-            rule_id: crate::app::shared::ids::RuleId("missing-rule".into()),
-        });
+        let response = app.handle_ipc_command(
+            &egui::Context::default(),
+            IpcCommand::RunRule {
+                group_id: crate::app::shared::ids::GroupId("missing-group".into()),
+                rule_id: crate::app::shared::ids::RuleId("missing-rule".into()),
+            },
+        );
         assert_eq!(response.code, IpcResponseCode::LaunchRejected);
     }
 
@@ -1831,7 +1834,8 @@ mod tests {
         let request =
             serialize_ipc_command_frame(&IpcCommand::RunRule { group_id, rule_id }).unwrap();
 
-        let response_frame = app.handle_local_ipc_request_frame(&request);
+        let response_frame =
+            app.handle_local_ipc_request_frame(&egui::Context::default(), &request);
 
         let response = parse_ipc_response_frame(&response_frame).unwrap();
         assert_eq!(response.code, IpcResponseCode::LaunchRejected);
@@ -1841,10 +1845,62 @@ mod tests {
     fn test_local_ipc_frame_returns_protocol_error_for_invalid_frame() {
         let mut app = App::new_for_test(sample_state());
 
-        let response_frame = app.handle_local_ipc_request_frame(b"not-json");
+        let response_frame =
+            app.handle_local_ipc_request_frame(&egui::Context::default(), b"not-json");
 
         let response = parse_ipc_response_frame(&response_frame).unwrap();
         assert_eq!(response.code, IpcResponseCode::ProtocolError);
+    }
+
+    #[test]
+    fn second_launch_restores_hidden_or_visible_primary_without_moving_or_launching() {
+        for hidden in [false, true] {
+            let mut app = App::new_for_test(sample_state());
+            app.is_hidden = hidden;
+            app.startup_visibility_pending = true;
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                let frame = serialize_ipc_command_frame(&IpcCommand::ShowWindow).unwrap();
+                let response = app.handle_local_ipc_request_frame(ui.ctx(), &frame);
+                assert_eq!(
+                    parse_ipc_response_frame(&response).unwrap().code,
+                    IpcResponseCode::Accepted
+                );
+            });
+            assert!(!app.is_hidden);
+            assert!(!app.startup_visibility_pending);
+            assert!(app.restore_pending);
+            let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+            assert!(commands.contains(&egui::ViewportCommand::Visible(true)));
+            assert!(commands.contains(&egui::ViewportCommand::Minimized(false)));
+            assert!(commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::RequestUserAttention(_))));
+            assert!(!commands.iter().any(|command| matches!(
+                command,
+                egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+            )));
+            assert!(app.state.persistent_state.read().unwrap().groups.is_empty());
+            output.textures_delta.clear();
+        }
+
+        let mut app = App::new_for_test(sample_state());
+        app.is_hidden = true;
+        app.closing_requested = true;
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            assert_eq!(
+                app.handle_ipc_command(ui.ctx(), IpcCommand::ShowWindow)
+                    .code,
+                IpcResponseCode::LaunchRejected
+            );
+        });
+        assert!(app.is_hidden);
+        assert!(!output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .iter()
+            .any(|command| matches!(command, egui::ViewportCommand::Visible(true))));
+        output.textures_delta.clear();
     }
 }
 
@@ -1957,7 +2013,7 @@ impl App {
         }
 
         for command in commands {
-            let response = self.handle_ipc_command(command.command);
+            let response = self.handle_ipc_command(ctx, command.command);
             let _ = command.response_tx.send(response);
         }
 
@@ -1980,7 +2036,7 @@ impl App {
         }
 
         for request in requests {
-            let response = self.handle_local_ipc_request_frame(&request.request);
+            let response = self.handle_local_ipc_request_frame(ctx, &request.request);
             let _ = request.response_tx.send(response);
         }
 
@@ -1988,9 +2044,9 @@ impl App {
     }
 
     #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
-    fn handle_local_ipc_request_frame(&mut self, request: &[u8]) -> Vec<u8> {
+    fn handle_local_ipc_request_frame(&mut self, ctx: &egui::Context, request: &[u8]) -> Vec<u8> {
         let response = match parse_ipc_command_frame(request) {
-            Ok(command) => self.handle_ipc_command(command),
+            Ok(command) => self.handle_ipc_command(ctx, command),
             Err(_) => IpcResponse {
                 code: IpcResponseCode::ProtocolError,
                 detail: None,
@@ -2002,7 +2058,7 @@ impl App {
     }
 
     #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
-    fn handle_ipc_command(&mut self, command: IpcCommand) -> IpcResponse {
+    fn handle_ipc_command(&mut self, ctx: &egui::Context, command: IpcCommand) -> IpcResponse {
         if self.closing_requested {
             return IpcResponse {
                 code: IpcResponseCode::LaunchRejected,
@@ -2010,6 +2066,16 @@ impl App {
             };
         }
         match command {
+            IpcCommand::ShowWindow => {
+                self.show_from_tray(ctx, RestoreRequest::now());
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Informational,
+                ));
+                IpcResponse {
+                    code: IpcResponseCode::Accepted,
+                    detail: None,
+                }
+            }
             IpcCommand::RunRule { group_id, rule_id } => {
                 run_rule_outcome_to_response(self.state.run_group_program(group_id, rule_id))
             }
