@@ -8,7 +8,9 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Added
 
-- Current private RAM in each application row while CPU load monitoring is on. Includes all tracked process names and enabled descendants, counts each exact process once, excludes shared pages and marks incomplete totals. Uses the existing one-second worker; unsupported Windows counters remain unavailable.
+- Current group RAM in the existing CPU summary button. Includes running apps and their tracked helpers, counts shared process instances once per group, marks incomplete sums and reuses the same one-second memory reads.
+
+- Current private RAM in each application row while CPU load monitoring is on, sharing one compact two-line button with CPU load to preserve application-name space. Includes all tracked process names and enabled descendants, counts each exact process once, excludes shared pages and marks incomplete totals. Uses the existing one-second worker; unsupported Windows counters remain unavailable.
 
 - Repeated Windows launches restore the existing window from the tray instead of starting another instance. The existing local command channel handles startup races and foreground handoff; the taskbar signals the window when activation is restricted.
 
@@ -16,6 +18,10 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 - Local preview of per-app background CPU sessions: one default-Off checkbox in Application rule, priority/EcoQoS-only sessions, no Advanced/manual core selection and no separate System Tweaks card. Old placement recovery data remains readable. Native mechanism checks use test-owned processes; the system-role mutation qualification set remains empty pending controlled VM/function validation. See `docs/background-workload.md` for scope and limits.
 
 ### Fixed
+
+- Correct MCP process CPU-mapping quality: missing, incomplete or invalidated per-CPU evidence is marked incomplete, while complete idle mappings remain complete and independent process CPU totals are preserved.
+
+- Keep measured application CPU visible as a marked subtotal when another tracked process is inaccessible or waiting for its first sample. Hover help reports measured process coverage; a wholly unavailable reading stays unknown.
 
 - Keep the CPU sampler's exact PID cache across transient membership races, so adding a tracked process cannot leave application/group load unavailable while system graphs keep recording.
 - Reclaim deleted rules' internal background profiles after recovery releases them, and stop orphaned intent from retaining process-observation work.

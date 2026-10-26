@@ -247,3 +247,27 @@ A finite ordinary-rights debug-MCP scenario used only owned 64/96 MiB workloads 
 A separate 500-query direct native check including lifetime reads averaged 2.69 microseconds per process on this host. This is short-run request latency including the Python call boundary, not a full UI/collector CPU measurement, performance soak or other-host guarantee.
 
 Production EXE SHA256: `C7A2AD5B49430489FEEEAA62FEB72C08430D79F3AF32E38BC9C756126A4A6E5A`, 27,060,736 bytes. Matching PDB: `962f2151-6c2d-464f-8174-66fa69faeea2`, age 1. PDB identity, administrator manifest and absence of debug-MCP/diagnostic RAM-control markers passed. The same EXE/PDB pair was delivered locally. Real-role admission remains empty.
+
+### 2026-10-26 — compact CPU/RAM and unavailable app siblings
+
+CPU and RAM now share one 52-by-21 logical-pixel application button. The full current CPU aggregate remains unknown if any tracked instance is unavailable; the row separately shows its readable process-time subtotal with an asterisk and measured/total hover coverage. Those sums are cached once in the existing current-process worker, invalidated together and included in its memory estimate. No native access, ETW history or production MCP response contract changed. Completely unavailable data is still unknown, not zero.
+
+Local validation passed 879 application tests and strict shipping Clippy/format checks. Bundled-font regressions cover the supported scales and both themes; the longest partial CPU label has an 8.5-pixel minimum measured-width fallback. A finite isolated debug-MCP scenario used only two owned child processes: one temporarily refused sampler/settings access while retaining discovery access. The app displayed the positive measured subtotal, kept the inaccessible row unknown, recovered complete CPU/RAM after restoring the child's original security, and recovered again after Off/On. Actual 100% dark/light captures were inspected. All own children and the test app closed; working apps, system policy and real-role admission were unchanged. This is acceptance of current app-row accounting, not a game/performance or elevated ETW qualification.
+
+The matching ordinary local build is EXE SHA256 `39FF8095E40EDEB24866E70753D590266FC4BFCB238588F98C33CC003F00145E`, 27,026,944 bytes; PDB `bfa50d33-ccbf-4d5f-9c63-22e23353ef35`, age 1. EXE/PDB identity, administrator manifest and Desktop-copy hash passed. No release was published for this checkpoint.
+
+### 2026-10-26 — current group RAM
+
+The existing group CPU button now includes a current RAM line within its unchanged 78-by-30 logical-pixel footprint. The same one-second memory pass sums the exact tracked-process union per group, including additional names/descendants, instead of summing overlapping app labels. Native reads remain once per exact instance across all rules/groups. Fresh empty groups show zero; invalid/stale membership stays unavailable, and partial sums retain coverage and an asterisk. CPU/history/API semantics are unchanged.
+
+883 application tests, strict shipping Clippy and formatting passed. Regressions cover shared instances across rules/groups, query count, unavailable values, overflow, identity/freshness/Off and both-theme glyph bounds at supported scales. Finite isolated native MCP showed a 160 MB group for overlapping 160 MB and 96 MB app rows; stopping children reduced it to 64 MB and zero, a new instance and Off/On recovered it. Actual dark/light 100% and 175% captures were inspected; RAM-half activation retained group CPU graph scope. All owned children/test apps closed. No real services, working settings, performance gains or elevated ETW qualification are implied.
+
+Local ordinary EXE SHA256 `7020791CD168A7C78ABD964A4F830420DB1344D54D3D689BCA9E7E2DF13DE16E`, 27,044,864 bytes; matching PDB `ae9286a6-10ac-4025-88b1-597210e743e3`, age 1. PDB identity, administrator manifest and Desktop-copy hash passed. This checkpoint did not publish a release.
+
+### 2026-10-26 — whole-MR telemetry review
+
+Two independent Astra reviewers completed first and second source-review passes over the complete MR and local CPU/RAM changes. No new arithmetic/deduplication defect was verified. One pre-existing MCP quality defect was reproduced and fixed: tracked rows with absent/incomplete ETW mapping must not serialize a false completeness claim. The shared predicate now reports incomplete mapping while preserving independently measured process CPU; a schema-backed encoder regression covers unknown/partial/complete idle and positive mappings, invalidation and recovery. CPU/RAM values, histories, native queries and wire shape are unchanged.
+
+Parent validation passed 884 application tests, 208 default os_api tests plus one documentation test, strict shipping and os_api test-code Clippy, safe background protocol/admission checks, both renderer dependency-partition tests and formatting. The reviewers did not run separate native experiments. The existing group CPU scope (tracked work on the chosen CPUs) and group RAM scope (that group's member-instance union), discovery admission and real-role VM limits remain explicit; this review does not redefine those semantics or claim a fresh performance soak.
+
+The reviewed local ordinary EXE is SHA256 `1D2A46E66E96FCF2315D2179E1629BBA521F92D146A1D2EC07E40CA47670FE56`, 27,046,912 bytes; PDB `f050ecec-d0a1-48a9-8ab1-ce0fbca41ead`, age 1. EXE/PDB identity, administrator manifest and copied-byte hash passed. This local validation precedes remote CI; no CI result or published release is implied.

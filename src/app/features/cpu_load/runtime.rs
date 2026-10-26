@@ -441,6 +441,14 @@ impl CpuLoadRuntime {
         let bookkeeping = ESTIMATED_COLLECTOR_RUNTIME_BYTES
             + snapshot.process_memory.capacity()
                 * std::mem::size_of::<(RuleTarget, super::memory::MemoryUsage)>()
+            + snapshot.group_memory.as_ref().map_or(0, |groups| {
+                groups.capacity()
+                    * std::mem::size_of::<(
+                        crate::app::shared::ids::GroupId,
+                        super::memory::MemoryUsage,
+                    )>()
+                    + groups.keys().map(|id| id.0.capacity()).sum::<usize>()
+            })
             + snapshot.live_processes.reserved_bytes()
             + self.group_process_cache.reserved_bytes()
             + snapshot
@@ -860,6 +868,7 @@ fn run(
             snapshot.cpus.clear();
             snapshot.processes.clear();
             snapshot.process_memory.clear();
+            snapshot.group_memory = None;
             snapshot.process_cpus.clear();
             snapshot.process_partial_cpus.clear();
             snapshot.run_cpus.clear();
@@ -968,6 +977,7 @@ fn run(
         }
         snapshot.processes.clear();
         snapshot.process_memory.clear();
+        snapshot.group_memory = None;
         pid_totals.clear();
         let tracked = tracking
             .as_ref()
@@ -998,12 +1008,13 @@ fn run(
                 snapshot.processes = process_totals(&tracked.targets, |pid, token| {
                     pid_totals.get(&(pid, token)).copied().flatten()
                 });
-                snapshot.process_memory =
-                    super::memory::rule_memory(&tracked.targets, |pid, token| {
-                        processes
-                            .get(&(pid, token))
-                            .and_then(|sample| sample.private_working_set().ok())
-                    });
+                let memory = super::memory::tracked_memory(&tracked.targets, |pid, token| {
+                    processes
+                        .get(&(pid, token))
+                        .and_then(|sample| sample.private_working_set().ok())
+                });
+                snapshot.process_memory = memory.rules;
+                snapshot.group_memory = Some(memory.groups);
             }
             snapshot.run_totals = run_targets
                 .iter()
@@ -1131,6 +1142,7 @@ fn run(
         if tracked.is_none_or(|tracked| !membership_matches(&running, tracked.generation)) {
             snapshot.processes.clear();
             snapshot.process_memory.clear();
+            snapshot.group_memory = None;
             live_processes.invalidate();
             snapshot.detail_error.get_or_insert_with(|| {
                 "Tracked processes changed; waiting for the next interval".into()

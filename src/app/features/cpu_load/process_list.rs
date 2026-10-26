@@ -28,10 +28,13 @@ impl ProcessRow {
     pub fn cores_text(&self) -> &str {
         &self.cores_text
     }
+    pub fn mapping_partial(&self) -> bool {
+        self.cpu_count == 0 || self.known_cores != self.cpu_count || self.partial
+    }
     fn update_cores_text(&mut self) {
         use std::fmt::Write;
         self.cores_text.clear();
-        let complete = self.cpu_count > 0 && self.known_cores == self.cpu_count && !self.partial;
+        let complete = !self.mapping_partial();
         if self.known_cores == 0 && self.cores.is_empty() {
             self.cores_text.push_str("Unavailable");
         } else if self.cores.is_empty() {
@@ -60,12 +63,26 @@ impl ProcessRow {
 #[derive(Default)]
 pub(super) struct ProcessList {
     pub rows: Vec<ProcessRow>,
+    pub rule_totals: HashMap<RuleTarget, RuleCpuTotal>,
     pub ready: bool,
     pub time: Option<SystemTime>,
     pub group: bool,
     pub partial: bool,
     pub cpu_count: usize,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct RuleCpuTotal {
+    pub value: Option<f32>,
+    pub measured: usize,
+    pub instances: usize,
+}
+impl RuleCpuTotal {
+    pub fn partial(self) -> bool {
+        self.measured < self.instances
+    }
+}
+
 impl ProcessList {
     pub fn from_tracking(
         targets: &HashMap<RuleTarget, Vec<(u32, u64)>>,
@@ -103,8 +120,24 @@ impl ProcessList {
             })
         });
         rows.dedup_by(|a, b| a.pid == b.pid && a.token == b.token && a.target == b.target);
+        let mut rule_totals = HashMap::<RuleTarget, RuleCpuTotal>::new();
+        for row in &rows {
+            let Some(target) = row.target.as_ref() else {
+                continue;
+            };
+            let total = rule_totals.entry(target.clone()).or_default();
+            total.instances += 1;
+            if let Some(value) = row
+                .total
+                .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+            {
+                total.measured += 1;
+                total.value = Some((total.value.unwrap_or(0.0) + value).min(100.0));
+            }
+        }
         Self {
             rows,
+            rule_totals,
             ready: true,
             time: None,
             ..Default::default()
@@ -188,6 +221,7 @@ impl ProcessList {
     }
     pub fn invalidate(&mut self) {
         self.ready = false;
+        self.rule_totals.clear();
         for row in &mut self.rows {
             row.total = None;
             row.known_cores = 0;
@@ -198,6 +232,12 @@ impl ProcessList {
     }
     pub fn reserved_bytes(&self) -> usize {
         self.rows.capacity() * std::mem::size_of::<ProcessRow>()
+            + self.rule_totals.capacity() * std::mem::size_of::<(RuleTarget, RuleCpuTotal)>()
+            + self
+                .rule_totals
+                .keys()
+                .map(|target| target.group.0.capacity() + target.rule.0.capacity())
+                .sum::<usize>()
             + self
                 .rows
                 .iter()
@@ -211,6 +251,14 @@ impl ProcessList {
                         + row.cores_text.capacity()
                 })
                 .sum::<usize>()
+    }
+
+    /// Current process-time coverage, independent of per-CPU ETW mapping.
+    pub fn rule_cpu_total(&self, target: &RuleTarget) -> RuleCpuTotal {
+        if !self.ready || self.group {
+            return RuleCpuTotal::default();
+        }
+        self.rule_totals.get(target).copied().unwrap_or_default()
     }
 }
 
@@ -242,9 +290,7 @@ pub(super) fn draw(
             .filter(|row| target.is_none_or(|target| row.target.as_ref() == Some(target)))
     };
     let count = rows().count();
-    let mapped = rows()
-        .filter(|r| r.cpu_count > 0 && r.known_cores == r.cpu_count)
-        .count();
+    let mapped = rows().filter(|r| !r.mapping_partial()).count();
     let clock = list
         .time
         .map(os_api::cpu_load::sample_clock_label)
@@ -277,7 +323,7 @@ pub(super) fn draw(
         "Updating tracked processes…".into()
     };
     ui.label(RichText::new(status).small().color(if !list.ready||list.partial||mapped<count {colors.warning.fg}else{colors.text_secondary}))
-        .on_hover_text(if list.group {"Measured work on the displayed CPUs in the latest completed graph interval. Idle processes have no measured CPU location. Partial means some data is missing; an empty list is not a complete process roster."} else {"The Process monitor roster and this table use tracked exact PID/creation-token instances. Refresh times can differ. This current table includes idle and unavailable instances; graph contributors include only measured work on the selected CPU/time. An unknown sibling can make the app's complete aggregate unavailable."});
+        .on_hover_text(if list.group {"Measured work on the displayed CPUs in the latest completed graph interval. Idle processes have no measured CPU location. Partial means some data is missing; an empty list is not a complete process roster."} else {"The Process monitor roster and this table use tracked exact PID/creation-token instances. Refresh times can differ. This current table includes idle and unavailable instances; graph contributors include only measured work on the selected CPU/time. The app-row CPU value shows a measured subtotal with * when a sibling is unavailable; its complete aggregate remains unknown."});
     let widths = [(ui.available_width() - 202.0).max(46.0), 46.0, 46.0, 86.0];
     use crate::app::shell::presenters::process_table::{self as table, Column, Sort};
     let cell = |ui: &mut egui::Ui, text: RichText, width: f32, right: bool| {
@@ -345,6 +391,74 @@ pub(super) fn draw(
 mod tests {
     use super::*;
     use crate::app::shared::ids::{GroupId, RuleId};
+
+    #[test]
+    fn cached_cpu_subtotals_deduplicate_exact_owners_and_expire_with_the_snapshot() {
+        let one = RuleTarget {
+            group: GroupId("g".into()),
+            rule: RuleId("one".into()),
+        };
+        let two = RuleTarget {
+            rule: RuleId("two".into()),
+            ..one.clone()
+        };
+        let targets = HashMap::from([
+            (
+                one.clone(),
+                vec![(1, 10), (1, 10), (2, 20), (3, 30), (4, 40)],
+            ),
+            (two.clone(), vec![(1, 10), (1, 11)]),
+        ]);
+        let mut totals = HashMap::from([
+            ((1, 10), Some(5.0)),
+            ((2, 20), Some(0.0)),
+            ((3, 30), Some(f32::NAN)),
+            ((4, 40), Some(-1.0)),
+        ]);
+        let mut list = ProcessList::from_tracking(&targets, &totals, &Default::default());
+        assert_eq!(
+            list.rule_cpu_total(&one),
+            RuleCpuTotal {
+                value: Some(5.0),
+                measured: 2,
+                instances: 4
+            }
+        );
+        assert!(list.rule_cpu_total(&one).partial());
+        assert_eq!(
+            list.rule_cpu_total(&two),
+            RuleCpuTotal {
+                value: Some(5.0),
+                measured: 1,
+                instances: 2
+            }
+        );
+        list.record_cores(20, &[]);
+        assert_eq!(
+            list.rule_cpu_total(&one).value,
+            Some(5.0),
+            "missing ETW mapping must not erase process-time coverage"
+        );
+        list.invalidate();
+        assert_eq!(list.rule_cpu_total(&one), RuleCpuTotal::default());
+        totals.insert((3, 30), Some(2.0));
+        totals.insert((4, 40), Some(3.0));
+        let recovered = ProcessList::from_tracking(&targets, &totals, &Default::default());
+        assert_eq!(
+            recovered.rule_cpu_total(&one),
+            RuleCpuTotal {
+                value: Some(10.0),
+                measured: 4,
+                instances: 4
+            }
+        );
+        assert!(!recovered.rule_cpu_total(&one).partial());
+        assert_eq!(
+            ProcessList::from_tracking(&Default::default(), &totals, &Default::default())
+                .rule_cpu_total(&one),
+            RuleCpuTotal::default()
+        );
+    }
 
     #[test]
     fn compact_current_table_paints_dense_rows_and_separators() {

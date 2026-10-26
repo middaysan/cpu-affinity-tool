@@ -587,24 +587,45 @@ fn memory_snapshot_rejects_stale_control_revisions_and_monitoring_off() {
     *runtime.published.write().unwrap() = Arc::new(Snapshot {
         revision: 7,
         process_memory: HashMap::from([(rule.clone(), usage)]),
+        group_memory: Some(HashMap::from([(rule.group.clone(), usage)])),
         ..Default::default()
     });
     assert_eq!(runtime.snapshot().process_memory.get(&rule), Some(&usage));
+    assert_eq!(
+        runtime
+            .snapshot()
+            .group_memory
+            .as_ref()
+            .unwrap()
+            .get(&rule.group),
+        Some(&usage)
+    );
     *runtime.published.write().unwrap() = Arc::new(Snapshot {
         revision: 7,
         at: Instant::now() - Duration::from_secs(5),
         process_memory: HashMap::from([(rule.clone(), usage)]),
+        group_memory: Some(HashMap::from([(rule.group.clone(), usage)])),
         ..Default::default()
     });
     assert!(runtime.snapshot().process_memory.is_empty());
+    assert!(runtime.snapshot().group_memory.is_none());
     *runtime.published.write().unwrap() = Arc::new(Snapshot {
         revision: 6,
-        process_memory: HashMap::from([(rule, usage)]),
+        process_memory: HashMap::from([(rule.clone(), usage)]),
+        group_memory: Some(HashMap::from([(rule.group.clone(), usage)])),
         ..Default::default()
     });
     assert!(runtime.snapshot().process_memory.is_empty());
+    assert!(runtime.snapshot().group_memory.is_none());
+    *runtime.published.write().unwrap() = Arc::new(Snapshot {
+        revision: 7,
+        group_memory: Some(HashMap::from([(rule.group, usage)])),
+        ..Default::default()
+    });
+    assert!(runtime.snapshot().group_memory.is_some());
     runtime.configure(false, false);
     assert!(runtime.snapshot().process_memory.is_empty());
+    assert!(runtime.snapshot().group_memory.is_none());
 }
 #[test]
 fn graph_contributors_follow_exact_hover_cpu_and_never_fall_back_to_live_rows() {

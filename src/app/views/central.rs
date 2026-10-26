@@ -575,8 +575,8 @@ fn render_groups(
                                 };
                                 #[cfg(all(target_os = "windows", feature = "windows"))]
                                 let meter_width = if app.cpu_load_enabled() {
-                                    44.0 + crate::app::features::cpu_load::view::APP_MEMORY_WIDTH
-                                        + 2.0 * ui.spacing().item_spacing.x
+                                    crate::app::features::cpu_load::view::APP_METRICS_WIDTH
+                                        + ui.spacing().item_spacing.x
                                 } else {
                                     0.0
                                 };
@@ -1993,7 +1993,7 @@ mod tests {
                     .shapes
                     .iter()
                     .find_map(|shape| match &shape.shape {
-                        egui::Shape::Rect(shape) if shape.rect.size() == egui::vec2(44.0, 18.0) => {
+                        egui::Shape::Rect(shape) if shape.rect.size() == egui::vec2(52.0, 21.0) => {
                             Some(shape.rect)
                         }
                         _ => None,
@@ -2002,7 +2002,7 @@ mod tests {
                 assert!((3.0..=7.0).contains(&(meter.left() - status.right())));
             }
         }
-        assert!((name_widths[0] - name_widths[1] - 100.0).abs() < 1.0);
+        assert!((name_widths[0] - name_widths[1] - 56.0).abs() < 1.0);
     }
 
     #[test]
