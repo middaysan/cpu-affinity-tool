@@ -439,6 +439,8 @@ impl CpuLoadRuntime {
             .unwrap_or(usize::MAX);
         let snapshot = self.snapshot();
         let bookkeeping = ESTIMATED_COLLECTOR_RUNTIME_BYTES
+            + snapshot.process_memory.capacity()
+                * std::mem::size_of::<(RuleTarget, super::memory::MemoryUsage)>()
             + snapshot.live_processes.reserved_bytes()
             + self.group_process_cache.reserved_bytes()
             + snapshot
@@ -857,6 +859,7 @@ fn run(
             snapshot.error = Some(error.clone());
             snapshot.cpus.clear();
             snapshot.processes.clear();
+            snapshot.process_memory.clear();
             snapshot.process_cpus.clear();
             snapshot.process_partial_cpus.clear();
             snapshot.run_cpus.clear();
@@ -964,6 +967,7 @@ fn run(
             values.fill(None);
         }
         snapshot.processes.clear();
+        snapshot.process_memory.clear();
         pid_totals.clear();
         let tracked = tracking
             .as_ref()
@@ -994,6 +998,12 @@ fn run(
                 snapshot.processes = process_totals(&tracked.targets, |pid, token| {
                     pid_totals.get(&(pid, token)).copied().flatten()
                 });
+                snapshot.process_memory =
+                    super::memory::rule_memory(&tracked.targets, |pid, token| {
+                        processes
+                            .get(&(pid, token))
+                            .and_then(|sample| sample.private_working_set().ok())
+                    });
             }
             snapshot.run_totals = run_targets
                 .iter()
@@ -1120,6 +1130,7 @@ fn run(
         live_processes.record_cores(count, event_history.samples());
         if tracked.is_none_or(|tracked| !membership_matches(&running, tracked.generation)) {
             snapshot.processes.clear();
+            snapshot.process_memory.clear();
             live_processes.invalidate();
             snapshot.detail_error.get_or_insert_with(|| {
                 "Tracked processes changed; waiting for the next interval".into()

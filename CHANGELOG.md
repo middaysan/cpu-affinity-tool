@@ -8,6 +8,8 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Added
 
+- Current private RAM in each application row while CPU load monitoring is on. Includes all tracked process names and enabled descendants, counts each exact process once, excludes shared pages and marks incomplete totals. Uses the existing one-second worker; unsupported Windows counters remain unavailable.
+
 - Repeated Windows launches restore the existing window from the tray instead of starting another instance. The existing local command channel handles startup races and foreground handoff; the taskbar signals the window when activation is restricted.
 
 - A manual Windows 11 Core parking tweak for all cores, with captured AC plan/mode keys and exact conditional Undo. Detected separate classes are shown as unavailable: native checks found their stored class-1 policy did not keep those cores unparked. Per-chiplet or arbitrary CPU-number controls are not implied; battery and frequency settings are unchanged.

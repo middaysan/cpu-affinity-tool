@@ -429,6 +429,8 @@ pub(crate) fn group_indicator(
     }
 }
 
+pub(crate) const APP_MEMORY_WIDTH: f32 = 48.0;
+
 pub(crate) fn process_indicator(
     app: &mut AppState,
     ui: &mut egui::Ui,
@@ -455,6 +457,47 @@ pub(crate) fn process_indicator(
     let response = load_meter(ui, value.into(), color, running, MeterKind::Application)
         .on_hover_text(explanation);
     crate::debug_mcp_control!(format!("meter.rule.{}", target.rule.0), response);
+    let memory = if running {
+        snapshot
+            .process_memory
+            .get(&target)
+            .copied()
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    let (rect, memory_response) =
+        ui.allocate_exact_size(egui::vec2(APP_MEMORY_WIDTH, 21.0), egui::Sense::hover());
+    let memory_label = memory.label();
+    ui.painter().text(
+        rect.right_center(),
+        egui::Align2::RIGHT_CENTER,
+        &memory_label,
+        egui::FontId::proportional(9.0),
+        palette(ui).text_muted,
+    );
+    memory_response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Label,
+            true,
+            format!("App RAM: {memory_label}"),
+        )
+    });
+    #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+    crate::app::features::diagnostics::debug_mcp::rect_control(
+        ui.ctx(),
+        format!("memory.rule.{}", target.rule.0),
+        rect,
+        true,
+        serde_json::json!({"label":memory_label,"private_bytes":memory.bytes,"measured":memory.measured,"instances":memory.instances}),
+    );
+    memory_response.on_hover_ui(|ui| {
+        crate::app::shell::presenters::shared_elements::tooltip_layout(ui);
+        ui.add(egui::Label::new(format!(
+        "RAM across this app's tracked processes, including added names and enabled descendants.\nPrivate resident memory; shared pages are excluded. MB/GB use 1024-based units.\nMeasured {} of {} processes. * means an incomplete subtotal; — means waiting, unavailable or unsupported by Windows.\nUpdated once per second while CPU monitoring is on.",
+        memory.measured, memory.instances,
+        )).wrap());
+    });
     if response.clicked() {
         app.cpu_load.open(GraphTarget::Process {
             target,
@@ -1632,6 +1675,83 @@ mod tests {
         });
         output.textures_delta.clear();
         assert_eq!(gap, 0.0, "disabled CPU meter must reserve no space");
+    }
+
+    #[test]
+    fn app_row_ram_is_muted_compact_and_never_shows_stale_memory_for_a_stopped_app() {
+        use super::super::{memory::MemoryUsage, model::Snapshot};
+        for light in [false, true] {
+            for running in [false, true] {
+                let ctx = egui::Context::default();
+                ctx.set_visuals(if light {
+                    egui::Visuals::light()
+                } else {
+                    egui::Visuals::dark()
+                });
+                let mut app = AppState::new_for_test(
+                    Arc::new(RwLock::new(AppStateStorage::test_fixture(|s| {
+                        s.cpu_load_monitoring_enabled = true
+                    }))),
+                    20,
+                );
+                let target = RuleTarget {
+                    group: GroupId("g".into()),
+                    rule: crate::app::shared::ids::RuleId("r".into()),
+                };
+                *app.cpu_load.published.write().unwrap() = Arc::new(Snapshot {
+                    process_memory: std::collections::HashMap::from([(
+                        target.clone(),
+                        MemoryUsage {
+                            bytes: Some(1536 * 1024 * 1024),
+                            measured: 2,
+                            instances: 3,
+                        },
+                    )]),
+                    ..Default::default()
+                });
+                let mut expected_color = egui::Color32::TRANSPARENT;
+                let mut occupied = egui::Rect::NOTHING;
+                let mut output = ctx.run_ui(Default::default(), |ui| {
+                    expected_color = palette(ui).text_muted;
+                    occupied = ui
+                        .horizontal(|ui| {
+                            process_indicator(
+                                &mut app,
+                                ui,
+                                target.clone(),
+                                "App",
+                                running,
+                                egui::Color32::GRAY,
+                                "Status",
+                            )
+                        })
+                        .response
+                        .rect;
+                });
+                let label = if running { "1.5 GB*" } else { "—" };
+                let text = output
+                    .shapes
+                    .iter()
+                    .filter_map(|s| match &s.shape {
+                        egui::Shape::Text(t) if t.galley.text() == label => Some(t),
+                        _ => None,
+                    })
+                    .last()
+                    .unwrap();
+                assert_eq!(text.galley.job.sections[0].format.color, expected_color);
+                assert!(text.galley.size().x <= APP_MEMORY_WIDTH);
+                assert!(
+                    occupied.height() <= 21.1,
+                    "RAM must not add row height: {occupied:?}"
+                );
+                if !running {
+                    assert!(!output.shapes.iter().any(
+                        |s| matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="1.5 GB*")
+                    ));
+                }
+                output.textures_delta.clear();
+            }
+        }
     }
 
     #[test]

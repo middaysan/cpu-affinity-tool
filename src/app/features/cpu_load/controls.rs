@@ -81,7 +81,7 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
     let mut graphs = false;
     let response = modal(egui::Id::new("cpu-monitor-modal")).show(ctx, |ui| {
         service_modal_layout(ui, 75.0);
-        let button = service_modal_header(ui, "CPU monitoring", "Records CPU load for your apps and the whole computer.");
+        let button = service_modal_header(ui, "CPU monitoring", "Records CPU load and shows current app RAM.");
         crate::debug_mcp_control!("cpu.monitor.close", button);
         close = button.clicked();
         let colors = *palette(ui);

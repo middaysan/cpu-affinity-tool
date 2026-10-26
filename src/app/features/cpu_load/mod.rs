@@ -9,6 +9,7 @@ pub(crate) mod debug_api;
 mod export;
 mod export_ui;
 mod history;
+mod memory;
 mod meter;
 mod mini_chart;
 mod model;

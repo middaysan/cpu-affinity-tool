@@ -569,6 +569,43 @@ fn runtime() -> CpuLoadRuntime {
         Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
     )
 }
+
+#[test]
+fn memory_snapshot_rejects_stale_control_revisions_and_monitoring_off() {
+    let mut runtime = runtime();
+    let rule = target();
+    let usage = super::super::memory::MemoryUsage {
+        bytes: Some(256 * 1024 * 1024),
+        measured: 2,
+        instances: 2,
+    };
+    {
+        let mut control = runtime.control.0.lock().unwrap();
+        control.enabled = true;
+        control.revision = 7;
+    }
+    *runtime.published.write().unwrap() = Arc::new(Snapshot {
+        revision: 7,
+        process_memory: HashMap::from([(rule.clone(), usage)]),
+        ..Default::default()
+    });
+    assert_eq!(runtime.snapshot().process_memory.get(&rule), Some(&usage));
+    *runtime.published.write().unwrap() = Arc::new(Snapshot {
+        revision: 7,
+        at: Instant::now() - Duration::from_secs(5),
+        process_memory: HashMap::from([(rule.clone(), usage)]),
+        ..Default::default()
+    });
+    assert!(runtime.snapshot().process_memory.is_empty());
+    *runtime.published.write().unwrap() = Arc::new(Snapshot {
+        revision: 6,
+        process_memory: HashMap::from([(rule, usage)]),
+        ..Default::default()
+    });
+    assert!(runtime.snapshot().process_memory.is_empty());
+    runtime.configure(false, false);
+    assert!(runtime.snapshot().process_memory.is_empty());
+}
 #[test]
 fn graph_contributors_follow_exact_hover_cpu_and_never_fall_back_to_live_rows() {
     let mut runtime = runtime();
