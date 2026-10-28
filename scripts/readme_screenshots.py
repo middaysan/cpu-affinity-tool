@@ -166,18 +166,19 @@ def capture(exe, workload, output):
         fixture.call('select_cpu', cpu=target_cpu)
         wait_until('visible original graph data', fixture.state,
                    lambda s: (s.get('rendered_graph') or {}).get('series_points', 0) >= 18)
-        snapshot('cpu-history', 'graph.body')
+        snapshot('cpu-history', 'graph.close')
         fixture.click('view.processes')
         wait_until('demo process table', lambda: fixture.call('table', kind='processes'),
                    lambda table: table.get('total', 0) >= 2)
-        snapshot('processes', 'graph.body')
+        snapshot('processes', 'graph.close')
         fixture.click('view.graphs')
         fixture.call('input', target='chart.plot', kind='right_click', x=0.7, y=0.45)
         snapshot('history-export', 'graph.export.png')
         fixture.call('close_graph')
         fixture.click('nav.tweaks')
         wait_until('read-only tweak cards', fixture.state,
-                   lambda s: bool(s['tweaks']['cards']) and not s['tweaks']['operation_error'])
+                   lambda s: 'tweaks.body' in controls(s) and bool(s['tweaks']['cards'])
+                   and not s['tweaks']['operation_error'])
         assert not fixture.state()['tweaks']['has_changes']
         snapshot('system-tweaks', 'nav.tweaks')
         fixture.click('nav.groups')
