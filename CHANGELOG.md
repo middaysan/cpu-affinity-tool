@@ -6,6 +6,16 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-10-28
+
+### Fixed
+
+- System Tweaks now offers **Update saved settings** for compatible older configurations. The explicit update preserves groups, apps, process-name lists and Undo information, with separate save/check progress and retry feedback.
+
+### Changed
+
+- Give Windows CI and stable release builds 60 minutes for cold compilation and final cache compression; all validation steps remain enabled.
+
 ## [1.7.1] - 2026-10-28
 
 ### Added

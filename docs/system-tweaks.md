@@ -38,6 +38,8 @@ The development branch also contains a session-only background-load preview in e
 
 ## Undo and persistence
 
+When compatible settings from an earlier app version need updating, System Tweaks shows **Update saved settings**. Opening the page keeps the file unchanged. The button explicitly saves the compatible configuration through the normal writer, preserving apps, groups, process-name lists and Undo information, then checks the previous tweak setup. A failed write leaves the previous settings in place; a failed follow-up check offers **Check again** and **Details**. Older app versions may not read the updated format. Unknown, damaged or externally changed files are not silently replaced by this action.
+
 Before applying a setting, the app reads and records the original value. **Manual changes remain after closing or restarting the app.** Use the setting's Undo action, or **Undo my changes** to review restoring the changes managed by this tool.
 
 Undo restores a field only when its current value still matches the tool's verified change. Later changes by Windows or another program are preserved, and skipped or uncertain restoration is shown. Some restored preferences need a game or Windows restart; follow the result shown in the app. Older applied settings can remain available for recovery and Undo even when they are no longer offered as new tweaks.

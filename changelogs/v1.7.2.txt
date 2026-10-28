@@ -1,0 +1,12 @@
+## 1.7.2 - 2026-10-28
+
+### Fixed
+- Fixed System Tweaks being unavailable after upgrading with older saved settings.
+- Added **Update saved settings**, with clear progress, error details and retry actions.
+- Preserved apps, groups, tracked process names and Undo information during the update.
+
+### Notes
+If prompted, open **System Tweaks** and click **Update saved settings**. Opening the page does not change the file. Older app versions may not read updated settings.
+
+### Download
+Use **cpu-affinity-tool.exe** below. The matching **cpu_affinity_tool.pdb** is optional for troubleshooting. Windows x64; administrator approval required.

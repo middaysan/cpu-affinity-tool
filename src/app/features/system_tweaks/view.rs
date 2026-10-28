@@ -6,8 +6,8 @@ use crate::app::{
     features::system_tweaks::{
         platform::contract::{Capability, Effect, ModuleStatus, TargetScope},
         presentation::{status_label, ModuleAction, TuningPageSection, TweakSection},
-        PcCheck, SaveError, TuningConfigurationState, TuningOperationState, TuningRequest,
-        TweakCard,
+        PcCheck, SaveError, SettingsUpdate, TuningConfigurationState, TuningOperationState,
+        TuningRequest, TweakCard,
     },
     runtime::AppState,
     shell::presenters::shared_elements::{
@@ -393,6 +393,9 @@ fn draw_memory_integrity_guide(app: &mut AppState, ui: &mut egui::Ui, pending: b
 }
 fn draw_operation_state(app: &mut AppState, ui: &mut egui::Ui) {
     let snapshot = app.tuning_snapshot();
+    if draw_settings_update(app, ui, &snapshot) {
+        return;
+    }
     match snapshot.operation {
         TuningOperationState::Pending { .. } => {
             ui.horizontal(|ui| {
@@ -423,6 +426,70 @@ fn draw_operation_state(app: &mut AppState, ui: &mut egui::Ui) {
         );
         egui::CollapsingHeader::new("Error details").show(ui, |ui| draw_operation_error(ui, error));
     }
+}
+fn draw_settings_update(
+    app: &mut AppState,
+    ui: &mut egui::Ui,
+    snapshot: &crate::app::features::system_tweaks::TuningSnapshot,
+) -> bool {
+    let progress = snapshot.settings_update;
+    if progress == SettingsUpdate::None
+        || (matches!(
+            progress,
+            SettingsUpdate::Updating | SettingsUpdate::Checking
+        ) && !busy(&snapshot.operation))
+    {
+        return false;
+    }
+    let tone = palette(ui).warning;
+    glass_frame(ui)
+        .fill(tone.fill)
+        .stroke(egui::Stroke::new(1.0, tone.border))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            let message = match progress {
+                SettingsUpdate::Required { .. } => "Your saved settings need an update to use System Tweaks.",
+                SettingsUpdate::Updating => "Updating saved settings…",
+                SettingsUpdate::Checking => "Checking System Tweaks…",
+                SettingsUpdate::NeedsAttention => "Settings updated. System Tweaks still needs attention.",
+                SettingsUpdate::None => unreachable!(),
+            };
+            ui.add(egui::Label::new(egui::RichText::new(message).color(tone.fg).strong()).wrap());
+            ui.add(egui::Label::new("Your apps and groups will be kept. Your previous settings and Undo information are retained.").wrap());
+            if !matches!(progress, SettingsUpdate::NeedsAttention) {
+                ui.add(egui::Label::new(egui::RichText::new("Older app versions may not read updated settings. Previously selected tweaks will be checked and resumed.").small().color(palette(ui).text_secondary)).wrap());
+            }
+            if matches!(snapshot.operation, TuningOperationState::Refused { error: SaveError::Storage, .. }) {
+                ui.add(egui::Label::new(egui::RichText::new("Couldn’t update saved settings. Your original settings are retained. Try again.").color(palette(ui).danger.fg)).wrap());
+            }
+            if let Some(error) = app.ui.tuning.error {
+                ui.add(egui::Label::new(egui::RichText::new(error).color(palette(ui).danger.fg)).wrap());
+            }
+            if matches!(progress, SettingsUpdate::Updating | SettingsUpdate::Checking) {
+                ui.spinner();
+            } else {
+                let (label, request) = if progress == SettingsUpdate::NeedsAttention {
+                    ("Check again", TuningRequest::CheckSavedSettings)
+                } else {
+                    ("Update saved settings", TuningRequest::UpdateSavedSettings)
+                };
+                let response = ui.add_enabled_ui(!busy(&snapshot.operation), |ui| {
+                    toned_sized_button(ui, [154.0, 24.0], egui::Button::new(label), ToneRole::Primary)
+                }).inner;
+                crate::debug_mcp_control!("tweaks.settings_update", response);
+                if response.clicked() {
+                    submit(app, request);
+                }
+            }
+            egui::CollapsingHeader::new("Details").show(ui, |ui| {
+                if let SettingsUpdate::Required { from_version } = progress {
+                    ui.add(egui::Label::new(format!("Saved settings format: {from_version}. This version uses format {}. Updating uses the normal settings save and keeps your existing setup.", crate::app::models::CURRENT_APP_STATE_VERSION)).wrap());
+                } else if let Some(error) = &snapshot.operation_error {
+                    draw_operation_error(ui, error);
+                }
+            });
+        });
+    true
 }
 fn section_heading(ui: &mut egui::Ui, title: &str, note: Option<&str>) {
     ui.horizontal_wrapped(|ui| {
@@ -1087,6 +1154,69 @@ fn draw_operation_error(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn s121_compatible_old_settings_offer_an_explicit_update_without_rewriting() {
+        use crate::app::features::system_tweaks::{
+            platform::registry::Registry, service::SavedState, simple_tests::Setting,
+            StatePersistence, Tuning, TuningRuntime,
+        };
+        struct SavedFile(PathBuf);
+        impl StatePersistence for SavedFile {
+            fn save(&mut self, state: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                state
+                    .try_save_to_path(&self.0)
+                    .map_err(|_| SaveError::Storage)?;
+                Ok(SavedState::Unavailable)
+            }
+            fn source_path(&self) -> Option<PathBuf> {
+                Some(self.0.clone())
+            }
+            fn recovery_directory(&self) -> Option<PathBuf> {
+                self.0.parent().map(PathBuf::from)
+            }
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "cat-update-ui-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("state.json");
+        let state = AppStateStorage::test_fixture(|state| state.version = 13);
+        let original = serde_json::to_vec(&state).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let loaded = AppStateStorage::load_from_path(&path);
+        let mut registry = Registry::default();
+        registry.register(Setting::new("scalar", false)).unwrap();
+        let mut service = Tuning::from_registry(registry.clone())
+            .headless(loaded.clone(), Box::new(SavedFile(path.clone())));
+        service.admit_test_modules();
+        let runtime = TuningRuntime::start(
+            service,
+            Arc::new(tokio::sync::RwLock::new(Default::default())),
+        );
+        let mut app = AppState::new_for_test(Arc::new(RwLock::new(loaded)), 4);
+        app.replace_tuning_for_test(runtime, registry);
+        let until = Instant::now() + Duration::from_secs(2);
+        while app.tuning_snapshot().operation_error.is_none() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            app.poll_tuning();
+        }
+        let text = rendered_text(&mut app);
+        finish(&mut app);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "opening the page must not upgrade the file"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(text.contains("Update saved settings"), "{text}");
+        assert!(text.contains("Your apps and groups will be kept"), "{text}");
+        assert!(!text.contains("Could not complete this action"), "{text}");
+    }
     #[test]
     fn background_policy_is_not_a_separate_system_tweaks_card() {
         let state = std::sync::Arc::new(std::sync::RwLock::new(

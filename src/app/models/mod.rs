@@ -18,6 +18,7 @@ mod meta;
 mod running_app;
 
 // Public re-exports of key structures for use in other modules
+pub(crate) use app_state_storage::CURRENT_APP_STATE_VERSION;
 pub use app_state_storage::{AppStateStorage, StateStorageMode};
 pub use app_to_run::{normalize_process_name, AppRuntimeKey, AppToRun, LaunchTarget};
 pub use core_group::{AddAppsOutcome, CoreGroup};

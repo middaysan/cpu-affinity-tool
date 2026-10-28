@@ -1,4 +1,7 @@
 //! Candidate-state saves and the small field controller. Called only by the application worker.
+#[path = "settings_update.rs"]
+mod settings_update;
+pub(crate) use settings_update::SettingsUpdate;
 #[path = "config_commands.rs"]
 #[cfg(all(target_os = "windows", feature = "windows"))]
 mod config_commands;
@@ -96,6 +99,7 @@ pub(crate) struct HeadlessTuning {
     pub(super) native_admitted: bool,
     pub(super) legacy_recovery: bool,
     pub(super) operation_error: Option<ModuleError>,
+    pub(super) settings_update: SettingsUpdate,
 }
 impl HeadlessTuning {
     pub(super) fn new(
@@ -120,6 +124,7 @@ impl HeadlessTuning {
             native_admitted: false,
             legacy_recovery: false,
             operation_error: None,
+            settings_update: SettingsUpdate::None,
         }
     }
     pub(crate) fn state(&self) -> &AppStateStorage {
@@ -174,6 +179,7 @@ impl HeadlessTuning {
                 Err(SaveError::Recovering)
             };
         };
+        self.settings_update = SettingsUpdate::None;
         let result = (|| {
             let saved = AppStateStorage::read_saved_for_tuning(&path)
                 .map_err(|e| persistence::failure("saved configuration", e))?;
@@ -204,6 +210,9 @@ impl HeadlessTuning {
             })
         {
             self.operation_error = None;
+        }
+        if result.is_err() {
+            self.detect_settings_update();
         }
         result.map_err(|e| self.native_failure(e))
     }
@@ -314,6 +323,15 @@ impl HeadlessTuning {
     }
     fn publish(
         &mut self,
+        candidate: AppStateStorage,
+        rules: RulesContext,
+    ) -> Result<(), SaveError> {
+        self.publish_candidate(candidate, rules)?;
+        self.start_selected_recovery();
+        Ok(())
+    }
+    fn publish_candidate(
+        &mut self,
         mut candidate: AppStateStorage,
         mut rules: RulesContext,
     ) -> Result<(), SaveError> {
@@ -356,7 +374,6 @@ impl HeadlessTuning {
         self.state = candidate;
         self.rules = rules;
         self.revision = revision;
-        self.start_selected_recovery();
         Ok(())
     }
     pub(super) fn save_config(&mut self, config: TuningConfig) -> Result<(), SaveError> {

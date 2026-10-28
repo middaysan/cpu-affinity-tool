@@ -6,6 +6,8 @@ This file records reviewed RustSec findings that remain in the lockfile so relea
 
 Both lockfiles pass without advisory ignores against RustSec database commit `40f5be6fb12ed93fc591bf4ab23b7d793b3f2239` (2026-10-28), with zero vulnerabilities. The five informational findings in the 2026-10-21 table below remain unchanged; the separate OS API lockfile has no warnings.
 
+The 1.7.2 lockfiles were rechecked against the same revision with the same results. No dependency versions changed for that patch release.
+
 The release check found two new items and resolved them with targeted patch updates:
 
 - `tokio 1.53.2` was reported by [RUSTSEC-2026-0386](https://rustsec.org/advisories/RUSTSEC-2026-0386.html). The affected `AsyncFd` constructors are Unix-only, so this is not a Windows-path exposure. The manifest minimum and lockfile now select patched `1.53.3`, retaining the existing feature set; see the [upstream I/O-safety change](https://github.com/tokio-rs/tokio/pull/8587).

@@ -86,6 +86,7 @@ Key directories:
 - `src/app/features/system_tweaks/platform/` - small typed contracts/codecs, the module registry and owned-field controller
 - `src/app/features/system_tweaks/config.rs` - bounded profile/configuration persistence shapes and exact forward-data retention; parsing supplies no module execution or native source authority
 - `src/app/features/system_tweaks/service.rs` - candidate-state saves with logical identities and manual module requests
+- `src/app/features/system_tweaks/settings_update.rs` - explicit compatible-file upgrade and recovery checks on the existing writer. The cached typed snapshot drives an inline Update saved settings notice; the shared read-only loader guards never repair or publish merely observed input. Unknown/blocked/stale files remain refused, and a completed save is distinct from native recovery readiness.
 - `src/app/features/system_tweaks/execution_bridge.rs` - bounded execution/foreground observations with copy/inspect/recheck publication, scheduled refresh and coalesced refresh requests
 - `src/app/features/system_tweaks/session_reducer.rs` - one bounded application worker, existing execution observations and immutable profile/card/shutdown snapshots
 - `src/app/features/system_tweaks/background_policy.rs` and `background_ui.rs` - optional per-app background sessions and cached topology/diagnostics, advanced by the existing tuning worker. background_policy/rule_settings.rs maps app-rule drafts onto existing session profiles and preserves earlier shared selections. background_ui.rs renders only the Application rule checkbox; no Advanced/core picker or separate System Tweaks card remains. The module adapter lives in `tweaks/background_workload/`; native role/SCM/task/signature verification and conditional process mechanisms live in `libs/os_api/src/windows/background/` behind `libs/os_api/src/background.rs`.
@@ -591,7 +592,7 @@ Do not invent dependency purpose just because a crate appears in `Cargo.toml`.
 
 The root package requires Rust 1.95 or newer, matching the `eframe` / `egui` 0.36 desktop stack. CI and release workflows use the stable toolchain.
 
-The Windows CI verification job has a 45-minute budget, matching the stable Windows release build job, so cold optimized application/test builds can finish the existing gates. Linux CI retains its 30-minute budget.
+The Windows CI verification job has a 60-minute budget, matching the stable Windows release build job, so cold optimized application/test builds and final cache compression can finish the existing gates. Linux CI retains its 30-minute budget.
 
 Local verification commands:
 - `cargo test --manifest-path libs/os_api/Cargo.toml`
