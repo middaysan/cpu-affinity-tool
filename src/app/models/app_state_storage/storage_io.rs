@@ -544,6 +544,75 @@ mod tests {
         }
     }
     #[test]
+    fn s104_older_foreign_and_malformed_tuning_still_refuse_writes() {
+        for (version, tuning) in [
+            ("10", p1_config()),
+            ("12", "null".into()),
+            ("12", "{}".into()),
+            ("15", p1_config()),
+        ] {
+            assert_blocked_original_without_mutation(&p1_state(version, Some(&tuning), None));
+        }
+    }
+
+    #[test]
+    fn s104_current_schema_storage_reload_allows_import_and_preserves_tuning_evidence() {
+        for tuning in [
+            None,
+            Some(p1_config()),
+            Some(r#"{"version":99,"future":"retained"}"#.into()),
+        ] {
+            let path = state_path();
+            let original = p1_state(
+                &super::super::CURRENT_APP_STATE_VERSION.to_string(),
+                tuning.as_deref(),
+                None,
+            );
+            let mut fs = FakeFilesystem::default();
+            fs.write_file(&path, &original);
+            let mut state =
+                super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+            assert!(
+                !state.save_blocked(),
+                "A supported current state with retained tuning must stay writable after restart"
+            );
+            let before = state.tuning.raw().map(str::to_owned);
+            let mut game = crate::app::models::AppToRun::new_path(
+                "Game.url".into(),
+                vec![],
+                "game.exe".into(),
+                os_api::PriorityClass::Normal,
+                false,
+            );
+            game.launch_target = crate::app::models::LaunchTarget::Steam {
+                app_id: 570,
+                executable: None,
+            };
+            state.groups.push(crate::app::models::CoreGroup {
+                name: "Added game".into(),
+                cores: vec![0],
+                programs: vec![game],
+                is_hidden: false,
+                run_all_button: false,
+            });
+            state.mark_ready_for_current_schema_save(
+                crate::app::features::rules::RulesContext::from_storage(&state)
+                    .to_persisted_identities(),
+            );
+            state
+                .try_save_to_path_with_filesystem(&path, &mut fs)
+                .unwrap();
+            let reloaded =
+                super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+            assert!(!reloaded.save_blocked());
+            assert_eq!(reloaded.tuning.raw(), before.as_deref());
+            assert!(reloaded.groups.last().unwrap().programs[0]
+                .steam_game()
+                .is_some());
+        }
+    }
+
+    #[test]
     fn p1_storage_v11_round_trip_uses_real_save_seam_and_old_missing_tuning_stays_off() {
         use crate::app::features::system_tweaks::config::TuningLoad;
         let path = state_path();
@@ -620,7 +689,7 @@ mod tests {
     fn p1_storage_future_and_malformed_explicit_version_never_recover_or_publish() {
         let path = state_path();
         for version in [
-            "12",
+            "15",
             "4294967296",
             "18446744073709551615",
             "null",
@@ -907,5 +976,77 @@ mod tests {
             filesystem.read_file(&path.with_file_name("state.json.pre-v6")),
             "legacy state"
         );
+    }
+
+    #[test]
+    fn s107_schema13_read_save_reload_preserves_binding_and_tuning() {
+        let path = state_path();
+        let mut fs = FakeFilesystem::default();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&p1_state("13", Some(&p1_config()), None)).unwrap();
+        value["groups"] = json!([{"name":"Fixture","cores":[0],"is_hidden":false,"run_all_button":false,"programs":[{
+            "name":"Steam","launch_target":{"Path":{"dropped_path":"C:\\Steam\\steam.exe","bin_path":"C:\\Steam\\steam.exe"}},"args":[],"additional_processes":["steam.exe"],"manage_descendants":false,"autorun":false,"priority":"Normal",
+            "builtin_process_binding":{"catalog_id":"steam","definition_version":1,"generated_names":["steamwebhelper.exe"]}
+        }]}]);
+        fs.write_file(&path, &serde_json::to_string(&value).unwrap());
+        let mut state =
+            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(!state.save_blocked());
+        assert_eq!(
+            state.groups[0].programs[0].additional_processes,
+            ["steam.exe"]
+        );
+        let before = state.groups[0].programs[0].clone();
+        let tuning = state.tuning.raw().map(str::to_owned);
+        state.mark_ready_for_current_schema_save(
+            crate::app::features::rules::RulesContext::from_storage(&state)
+                .to_persisted_identities(),
+        );
+        state
+            .try_save_to_path_with_filesystem(&path, &mut fs)
+            .unwrap();
+        let loaded = super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(!loaded.save_blocked());
+        assert_eq!(loaded.groups[0].programs[0], before);
+        assert_eq!(loaded.tuning.raw(), tuning.as_deref());
+    }
+
+    #[test]
+    fn s107_old_rules_upgrade_without_catalog_defaults_and_legacy_binding_cannot_activate() {
+        let path = state_path();
+        let mut fs = FakeFilesystem::default();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&p1_state("12", Some(&p1_config()), None)).unwrap();
+        let mut app = crate::app::models::AppToRun::new_path(
+            r"C:\Steam\steam.exe".into(),
+            vec!["-silent".into()],
+            r"C:\Steam\steam.exe".into(),
+            os_api::PriorityClass::BelowNormal,
+            true,
+        );
+        app.additional_processes = vec!["steam.exe".into(), "manual.exe".into()];
+        app.manage_descendants = true;
+        value["groups"] = json!([{"name":"Old","cores":[0],"programs":[app],"is_hidden":false,"run_all_button":true}]);
+        let original = serde_json::to_string(&value).unwrap();
+        fs.write_file(&path, &original);
+        let mut state =
+            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(!state.save_blocked());
+        let before = state.groups[0].programs[0].clone();
+        state.mark_ready_for_current_schema_save(
+            crate::app::features::rules::RulesContext::from_storage(&state)
+                .to_persisted_identities(),
+        );
+        state
+            .try_save_to_path_with_filesystem(&path, &mut fs)
+            .unwrap();
+        let reloaded =
+            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert_eq!(reloaded.groups[0].programs[0], before);
+        assert!(reloaded.groups[0].programs[0]
+            .builtin_process_binding
+            .is_none());
+        value["groups"][0]["programs"][0]["builtin_process_binding"] = json!({"catalog_id":"steam","definition_version":1,"generated_names":["steamwebhelper.exe"]});
+        assert_blocked_original_without_mutation(&serde_json::to_string(&value).unwrap());
     }
 }

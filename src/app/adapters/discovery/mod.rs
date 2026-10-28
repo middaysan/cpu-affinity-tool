@@ -7,6 +7,25 @@ pub struct DiscoveredApps {
     pub first_error: Option<String>,
 }
 
+fn resolved_app(path: PathBuf, args: Vec<String>, target: PathBuf) -> Result<AppToRun, String> {
+    if cfg!(target_os = "windows")
+        && target
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("steam.exe"))
+        && os_api::steam::is_game_launch_args(&args)
+        && os_api::steam::parse_launch_args(&args).is_none()
+    {
+        return Err("This Steam shortcut uses an unsupported game ID or extra URL arguments. Add a standard Steam game shortcut (steam://rungameid/AppID). Steam itself was not added as the game.".into());
+    }
+    Ok(AppToRun::new_path(
+        path,
+        args,
+        target,
+        PriorityClass::Normal,
+        false,
+    ))
+}
+
 pub fn apps_from_dropped_paths(dropped_paths: Vec<PathBuf>) -> DiscoveredApps {
     let mut discovered = DiscoveredApps {
         apps: Vec::new(),
@@ -15,15 +34,13 @@ pub fn apps_from_dropped_paths(dropped_paths: Vec<PathBuf>) -> DiscoveredApps {
 
     for path in dropped_paths {
         match OS::parse_dropped_file(path.clone()) {
-            Ok((target, args)) => {
-                discovered.apps.push(AppToRun::new_path(
-                    path,
-                    args,
-                    target,
-                    PriorityClass::Normal,
-                    false,
-                ));
-            }
+            Ok((target, args)) => match resolved_app(path, args, target) {
+                Ok(app) => discovered.apps.push(app),
+                Err(error) => {
+                    discovered.first_error = Some(error);
+                    break;
+                }
+            },
             Err(err) => {
                 discovered.first_error = Some(err);
                 break;
@@ -44,7 +61,7 @@ pub fn app_from_installed_entry(entry: InstalledAppCatalogEntry) -> Result<AppTo
         )),
         InstalledAppCatalogTarget::Path(path) => {
             let (target, args) = OS::parse_dropped_file(path.clone())?;
-            let mut app = AppToRun::new_path(path, args, target, PriorityClass::Normal, false);
+            let mut app = resolved_app(path, args, target)?;
             app.name = entry.name;
             Ok(app)
         }
@@ -63,6 +80,46 @@ pub fn supports_installed_app_picker() -> bool {
 mod tests {
     use super::*;
     use os_api::{InstalledAppCatalogSource, InstalledAppCatalogTarget};
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn s103_applaunch_shortcut_is_a_game_or_an_explicit_import_error() {
+        let make = |args: Vec<String>| {
+            resolved_app(r"C:\game.lnk".into(), args, r"C:\Steam\steam.exe".into())
+        };
+        assert_eq!(
+            make(vec!["-applaunch".into(), "570".into()])
+                .unwrap()
+                .steam_game(),
+            Some((570, None))
+        );
+        assert!(make(vec!["-applaunch".into(), "570".into(), "-windowed".into()]).is_err());
+        assert!(make(vec!["-applaunch".into(), "invalid".into()]).is_err());
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn unsupported_steam_game_shortcuts_never_become_launcher_rules() {
+        for uri in [
+            "steam://rungameid/18446744073709551615",
+            "steam://run/0",
+            "steam://run/570//extra",
+        ] {
+            assert!(resolved_app(
+                PathBuf::from(r"C:\Game.url"),
+                vec![uri.into()],
+                PathBuf::from(r"C:\Steam\steam.exe")
+            )
+            .is_err());
+        }
+        let app = resolved_app(
+            PathBuf::from(r"C:\Game.url"),
+            vec!["steam://rungameid/570".into()],
+            PathBuf::from(r"C:\Steam\steam.exe"),
+        )
+        .unwrap();
+        assert!(app.steam_game().is_some());
+        assert!(app.additional_processes.is_empty());
+    }
 
     #[test]
     fn test_installed_aumid_entry_converts_to_installed_app() {

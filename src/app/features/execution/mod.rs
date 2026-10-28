@@ -1,4 +1,5 @@
-mod launch;
+pub(crate) mod control;
+pub(crate) mod launch;
 #[cfg(all(target_os = "windows", feature = "windows"))]
 pub(crate) mod managed_runs;
 mod monitor_events;
@@ -27,6 +28,8 @@ pub(crate) use store::{
     resolve_installed_package_runtime_info_cached, InstalledPackageTrackingState,
     RunningAppStatusCache,
 };
+#[cfg(test)]
+pub(crate) use tracking::known_tracking_fixture;
 pub use tracking::run_running_app_monitor;
 
 pub(crate) fn is_excluded_installed_auto_process(process_name: &str) -> bool {
@@ -59,4 +62,18 @@ pub(crate) fn spawn_monitors_with_wake(
     ));
 
     monitor_rx
+}
+
+mod steam_pending;
+
+#[cfg(test)]
+pub(crate) fn native_known_refresh(
+    runtime: &RuntimeRegistry,
+    state: &AppStateStorage,
+) -> Result<(), String> {
+    let running = runtime.running_apps_handle();
+    let mut apps = running.blocking_write();
+    tracking::native_known_iteration(&mut apps, state)?;
+    reconcile::native_known_iteration(&mut apps, state, false);
+    Ok(())
 }

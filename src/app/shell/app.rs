@@ -592,7 +592,9 @@ impl eframe::App for App {
     #[cfg(all(target_os = "windows", feature = "windows"))]
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         self.state.cpu_load.export_input(ctx, input);
-        if !self.closing_requested && self.state.ui.dropped_files.is_none() {
+        if !self.closing_requested
+            && (self.state.ui.dropped_files.is_none() || self.state.ui.file_import_error.is_some())
+        {
             if let Some(drop) = self
                 .file_drop_guard
                 .as_ref()
@@ -1623,6 +1625,9 @@ mod tests {
         let mut app = App::new_for_test(state);
         tx.try_send(ShellEvent::Warning("WARNING: monitor warning".to_string()));
         tx.try_send(ShellEvent::Monitor("MONITOR: corrected".to_string()));
+        tx.try_send(ShellEvent::MonitorError(
+            "MONITOR: game (PID 89): Access is denied".to_string(),
+        ));
 
         app.handle_monitor_events(&ctx);
 
@@ -1638,6 +1643,11 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.message == "MONITOR: corrected"));
+        assert!(app
+            .state
+            .log_manager
+            .monitor_entries()
+            .any(|entry| { entry.message == "MONITOR: game (PID 89): Access is denied" }));
         assert!(app
             .state
             .runtime
@@ -1974,6 +1984,12 @@ impl App {
                         .add_monitor_entry(message.to_string(), sticky);
                     self.state.ui.tracked_processes.last_activity = Some(std::time::Instant::now());
                 }
+                if let crate::app::shell::events::ShellEvent::MonitorError(message) = &event {
+                    self.state
+                        .log_manager
+                        .add_monitor_important_entry(message.clone());
+                    self.state.ui.tracked_processes.last_activity = Some(std::time::Instant::now());
+                }
                 if let Some(message) = event.tuning_log_message() {
                     self.state.log_manager.add_important_entry(message);
                 }
@@ -2256,6 +2272,7 @@ impl App {
         });
 
         if !files.is_empty() {
+            self.state.ui.file_import_error = None;
             self.state.ui.dropped_files = Some(files);
             self.state.ui.file_drop_position =
                 ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()));

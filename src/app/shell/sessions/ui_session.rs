@@ -47,6 +47,7 @@ pub struct UiSession {
     pub group_form: GroupFormSession,
     pub app_edit_state: RuleEditorSession,
     pub dropped_files: Option<Vec<PathBuf>>,
+    pub(crate) file_import_error: Option<crate::app::features::system_tweaks::SaveError>,
     pub file_drop_position: Option<eframe::egui::Pos2>,
     pub file_drop_hover_target: Option<GroupId>,
     pub installed_app_picker: InstalledAppPickerSession,
@@ -92,7 +93,9 @@ impl UiSession {
             },
             app_edit_state: RuleEditorSession {
                 process_names: Default::default(),
+                steam_picker: Default::default(),
                 current_edit: None,
+                control_choices: vec![],
                 background: None,
                 #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
                 background_baseline: None,
@@ -101,6 +104,7 @@ impl UiSession {
                 shortcut_result: None,
             },
             dropped_files: None,
+            file_import_error: None,
             file_drop_position: None,
             file_drop_hover_target: None,
             installed_app_picker: InstalledAppPickerSession::default(),

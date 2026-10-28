@@ -882,3 +882,77 @@ fn test_invalid_state_file_is_backed_up_and_replaced_with_default() {
         assert!(persisted.groups.is_empty());
     });
 }
+
+#[test]
+fn steam_schema_roundtrip_preserves_groups_and_v11_legacy_rules() {
+    let mut state = AppStateStorage::test_fixture(|_| {});
+    let app = crate::app::models::AppToRun::new_path(
+        PathBuf::from(r"C:\Game.url"),
+        vec!["steam://rungameid/570".into()],
+        PathBuf::from(r"C:\Steam\steam.exe"),
+        os_api::PriorityClass::Normal,
+        false,
+    );
+    state.groups.push(crate::app::models::CoreGroup {
+        name: "Games".into(),
+        cores: vec![0],
+        programs: vec![app],
+        is_hidden: false,
+        run_all_button: true,
+    });
+    state.version = CURRENT_APP_STATE_VERSION;
+    let text = serde_json::to_string(&state).unwrap();
+    let reloaded = super::migrations::load_from_data(&text, Path::new("state.json")).unwrap();
+    assert_eq!(
+        serde_json::to_value(&reloaded.groups).unwrap(),
+        serde_json::to_value(&state.groups).unwrap()
+    );
+    assert_eq!(reloaded.loaded_version, CURRENT_APP_STATE_VERSION);
+    let mut old = serde_json::to_value(&state).unwrap();
+    old["version"] = json!(11);
+    old["groups"][0]["programs"][0]["launch_target"] =
+        json!({"Path":{"dropped_path":"C:\\old.url","bin_path":"C:\\Steam\\steam.exe"}});
+    old["groups"][0]["programs"][0]["args"] = json!(["steam://rungameid/570"]);
+    old["groups"][0]["programs"][0]["additional_processes"] = json!(["steam.exe"]);
+    let old = super::migrations::load_from_data(&old.to_string(), Path::new("state.json")).unwrap();
+    assert!(old.groups[0].programs[0].is_path_target());
+    assert_eq!(
+        old.groups[0].programs[0].additional_processes,
+        vec!["steam.exe"]
+    );
+}
+
+#[test]
+fn s110_control_metadata_roundtrip_and_old_schema_evidence_are_preserved() {
+    use crate::app::features::execution::control::policy::{Choice, Policy};
+    let before = crate::app::features::execution::control::tests::fixture();
+    let groups = serde_json::to_value(&before.groups).unwrap();
+    let mut next = before.clone();
+    Policy::prepare_save(&before, &mut next).unwrap();
+    let id = RulesContext::from_storage(&next)
+        .rule_id_for_index(0, 0)
+        .unwrap();
+    Policy::choose(
+        &mut next,
+        Choice {
+            image: r"C:\Shared\helper.exe".into(),
+            owner: id.clone(),
+        },
+    )
+    .unwrap();
+    next.version = CURRENT_APP_STATE_VERSION;
+    let raw = serde_json::to_string(&next).unwrap();
+    let loaded: AppStateStorage = serde_json::from_str(&raw).unwrap();
+    assert_eq!(Policy::read(&loaded).unwrap().choices[0].owner, id);
+    assert_eq!(serde_json::to_value(&loaded.groups).unwrap(), groups);
+    with_temp_state_path("s110-control-old", |path| {
+        let mut old: Value = serde_json::from_str(&raw).unwrap();
+        old["version"] = json!(13);
+        let original = old.to_string();
+        fs::write(path, &original).unwrap();
+        let mut blocked = AppStateStorage::load_from_path(path);
+        assert!(blocked.save_blocked());
+        assert!(blocked.try_save_to_path(path).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    });
+}

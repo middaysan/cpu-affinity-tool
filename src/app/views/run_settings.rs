@@ -81,6 +81,83 @@ fn binary_path_field(ui: &mut egui::Ui, path: &mut String) -> egui::Response {
     edit.response.response
 }
 
+fn stage_process_owner(
+    choices: &mut Vec<crate::app::features::execution::control::policy::Choice>,
+    image: &str,
+    owner: crate::app::shared::ids::RuleId,
+) {
+    let image = crate::app::features::execution::control::policy::image_key(image);
+    choices.retain(|choice| {
+        crate::app::features::execution::control::policy::image_key(&choice.image) != image
+            || choice.owner != owner
+    });
+    choices.push(crate::app::features::execution::control::policy::Choice { image, owner });
+}
+
+fn process_control_editor(
+    ui: &mut egui::Ui,
+    view: &crate::app::features::execution::control::View,
+    rule: &crate::app::shared::ids::RuleId,
+    draft: &crate::app::models::AppToRun,
+    choices: &mut Vec<crate::app::features::execution::control::policy::Choice>,
+) -> bool {
+    let mut changed = false;
+    if let Some(error) = &view.error {
+        ui.add(
+            Label::new(
+                RichText::new(error)
+                    .color(crate::app::shell::presenters::shared_elements::warning_color(ui)),
+            )
+            .wrap(),
+        );
+    }
+    let duplicates = view.duplicate_labels(rule, draft);
+    if !duplicates.is_empty() {
+        ui.add(
+            Label::new(
+                RichText::new(format!(
+                    "Process names also listed in: {}",
+                    duplicates.join(", ")
+                ))
+                .small()
+                .weak(),
+            )
+            .wrap(),
+        );
+        ui.add(Label::new(RichText::new("A shared name alone does not mean the same process. CPU and RAM can appear in both apps; only one rule controls a shared process.").small().weak()).wrap());
+    }
+    for notice in view
+        .notices
+        .iter()
+        .filter(|notice| notice.different && notice.claimants.contains(rule))
+    {
+        ui.add_space(5.0);
+        crate::app::shell::presenters::shared_elements::inset_frame(ui).show(ui,|ui| {
+            ui.label(RichText::new(format!("Shared process: {}",notice.name)).strong()).on_hover_text(&notice.image);
+            let mut owner=choices.iter().rev().find(|choice|crate::app::features::execution::control::policy::image_key(&choice.image)==notice.image&&notice.claimants.contains(&choice.owner)).map(|choice|choice.owner.clone()).or_else(||notice.owner.clone());
+            let before=owner.clone();
+            if let Some(owner_id)=&owner {
+                ui.add(Label::new(RichText::new(format!("Managed by {}",view.label(owner_id))).small()).wrap());
+                if owner_id!=rule&&ui.button("Take control here").on_hover_text("Use this app's affinity and priority for this shared executable. Process lists and CPU/RAM tracking stay unchanged. Saved with Save Changes.").clicked(){owner=Some(rule.clone());}
+            }else{
+                ui.add(Label::new(RichText::new("These existing rules request different settings. Choose one app to control this process.").small().color(crate::app::shell::presenters::shared_elements::warning_color(ui))).wrap());
+                ComboBox::from_id_salt(("process-owner",&notice.image,&notice.claimants)).selected_text("Choose controlling app…").width(ui.available_width().min(360.0)).show_ui(ui,|ui|{for id in &notice.claimants{ui.selectable_value(&mut owner,Some(id.clone()),view.label(id));}});
+            }
+            if owner!=before {if let Some(owner)=owner {
+                stage_process_owner(choices,&notice.image,owner);changed=true;
+            }}
+        });
+    }
+    if !choices.is_empty() {
+        ui.label(
+            RichText::new("Control changes will be applied when you save.")
+                .small()
+                .weak(),
+        );
+    }
+    changed
+}
+
 pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     if app.ui.app_edit_state.target.is_none() {
         app.set_current_window(WindowRoute::Groups(GroupRoute::List));
@@ -96,6 +173,16 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
         .prepare(root_ui.ctx(), !cfg!(test));
     let process_names = app.ui.app_edit_state.process_names.names.clone();
 
+    let control_view = app.runtime.control_handle().view();
+    let control_rule = app
+        .ui
+        .app_edit_state
+        .target
+        .as_ref()
+        .unwrap()
+        .rule_id
+        .clone();
+    let mut control_choices = app.ui.app_edit_state.control_choices.clone();
     let mut is_close = false;
     let mut save_clicked = false;
     let mut delete_clicked = false;
@@ -145,6 +232,17 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                     draft_changed = true;
                 }
                 ui.add_space(6.0);
+
+                if selected_app.steam_shortcut_id().is_some() {
+                    ui.label(RichText::new("This shortcut starts a Steam game. Switch tracking from Steam to the game itself.").weak());
+                    if ui.button("Use Steam game tracking").clicked() { draft_changed |= selected_app.convert_steam_shortcut(); }
+                }
+                if let crate::app::models::LaunchTarget::Steam { app_id, executable } = &mut selected_app.launch_target {
+                    ui.label(RichText::new(format!("Steam game · App ID {app_id}")).strong());
+                    ui.label(RichText::new("Launches through Steam. CPU, RAM, affinity and Focus follow the game, not the Steam client.").small().weak());
+                    draft_changed |= app.ui.app_edit_state.steam_picker.show(ui, executable);
+                    ui.add_space(6.0);
+                }
 
                 if selected_app.is_path_target() {
                     ui.horizontal(|ui| {
@@ -317,7 +415,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
 
                 ui.add_space(3.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Tracked process names").strong());
+                    ui.label(RichText::new(if selected_app.steam_game().is_some() {"Optional helper process names"} else {"Tracked process names"}).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("Add Process Name").clicked() {
                             selected_app.additional_processes.push(String::new());
@@ -331,6 +429,8 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                 if selected_app.additional_processes.is_empty() {
                     let empty_text = if selected_app.is_path_target() {
                         "Process-name rediscovery is off for this path app. Add a name so active monitoring can find it later."
+                    } else if selected_app.steam_game().is_some() {
+                        "The main game process is tracked separately. Optional names add helpers inside this game's folder."
                     } else {
                         "No tracked process names defined."
                     };
@@ -348,6 +448,8 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                         });
                     }
                 }
+
+                draft_changed |= process_control_editor(ui,&control_view,&control_rule,selected_app,&mut control_choices);
 
                 if let Some(idx) = proc_to_remove {
                     selected_app.additional_processes.remove(idx);
@@ -454,6 +556,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
     {
         app.ui.app_edit_state.background = background;
     }
+    app.ui.app_edit_state.control_choices = control_choices;
     if draft_changed {
         app.clear_current_app_shortcut_result();
     }
@@ -533,5 +636,81 @@ mod tests {
             let bounds = preview.galley.rect.translate(preview.pos.to_vec2());
             assert!(bounds.right() <= field.right() + 1.0);
         }
+    }
+    #[test]
+    fn s110_control_warning_and_take_control_fit_at_100_percent() {
+        use crate::app::features::execution::control::{
+            policy::{Choice, Policy},
+            tests::{fixture, observe},
+            Authority,
+        };
+        let mut state = fixture();
+        let control = Authority::default();
+        control.configure(&state);
+        observe(&control, &state, &[0, 1], 1, r"C:\Shared\helper.exe");
+        let owner = control.view().rules[0].rule.clone();
+        Policy::choose(
+            &mut state,
+            Choice {
+                image: r"C:\Shared\helper.exe".into(),
+                owner,
+            },
+        )
+        .unwrap();
+        control.configure(&state);
+        observe(&control, &state, &[0, 1], 1, r"C:\Shared\helper.exe");
+        let view = control.view();
+        let rule = view.rules[1].rule.clone();
+        let ctx = eframe::egui::Context::default();
+        let mut choices = vec![];
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            ui.set_width(380.0);
+            super::process_control_editor(
+                ui,
+                &view,
+                &rule,
+                &state.groups[1].programs[0],
+                &mut choices,
+            );
+        });
+        output.textures_delta.clear();
+        let labels: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                eframe::egui::Shape::Text(text) => Some(text.galley.text()),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.iter().any(|text| text.contains("Managed by")));
+        assert!(labels.contains(&"Take control here"));
+        assert!(
+            choices.is_empty(),
+            "rendering alone cannot change ownership"
+        );
+        for shape in &output.shapes {
+            if let eframe::egui::Shape::Text(text) = &shape.shape {
+                assert!(
+                    text.galley.rect.translate(text.pos.to_vec2()).right() <= 400.0,
+                    "{}",
+                    text.galley.text()
+                );
+            }
+        }
+    }
+    #[test]
+    fn s112_editor_preserves_preferences_for_overlapping_claimant_sets() {
+        use crate::app::shared::ids::RuleId;
+        let (b, c) = (RuleId("b".into()), RuleId("c".into()));
+        let mut staged = vec![];
+        super::stage_process_owner(&mut staged, "helper.exe", b.clone());
+        super::stage_process_owner(&mut staged, "helper.exe", c.clone());
+        assert_eq!(
+            staged
+                .iter()
+                .map(|choice| choice.owner.clone())
+                .collect::<Vec<_>>(),
+            [b, c]
+        );
     }
 }

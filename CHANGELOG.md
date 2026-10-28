@@ -8,6 +8,15 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Added
 
+- Shared-process control: duplicate-name hints, an explicit controlling-app choice for legacy conflicts and Take control here in the rule editor. Earlier rules retain new overlaps; process lists and CPU/RAM observation stay intact. Owner changes use the same durable path in GUI and MCP (state schema v14).
+
+- Expanded new-import process defaults to 20 application families with conditional app-owned helpers, ordinary launcher handoff and unchanged existing rules.
+
+- New Windows Steam-client and Discord Stable imports fill scoped helper names in the existing editor. Real application processes drive CPU/RAM and scheduling; Discord's updater stays an ordinary launcher. Focus can request normal activation for a hidden client. Schema v13 retains provenance without expanding old rules or explicit MCP lists.
+
+- Fixed current-format settings becoming read-only after restart when System Tweaks data was present. File imports now report save refusal once with explicit Retry/Dismiss; exact duplicate rules in the same group are skipped.
+- Windows Steam game shortcuts: launch through ordinary Steam while game-only processes drive CPU/RAM, affinity and Focus. Automatic installation/window discovery has an exact-process selection fallback; existing launcher rules convert explicitly. State schema v12 retains earlier groups and applications.
+
 - Current group RAM in the existing CPU summary button. Includes running apps and their tracked helpers, counts shared process instances once per group, marks incomplete sums and reuses the same one-second memory reads.
 
 - Current private RAM in each application row while CPU load monitoring is on, sharing one compact two-line button with CPU load to preserve application-name space. Includes all tracked process names and enabled descendants, counts each exact process once, excludes shared pages and marks incomplete totals. Uses the existing one-second worker; unsupported Windows counters remain unavailable.
@@ -18,6 +27,10 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 - Local preview of per-app background CPU sessions: one default-Off checkbox in Application rule, priority/EcoQoS-only sessions, no Advanced/manual core selection and no separate System Tweaks card. Old placement recovery data remains readable. Native mechanism checks use test-owned processes; the system-role mutation qualification set remains empty pending controlled VM/function validation. See `docs/background-workload.md` for scope and limits.
 
 ### Fixed
+
+- Automatic Process monitor correction failures now retain the application, PID and Windows error in both log views, with bounded repeat suppression. A denied member does not prevent correction of other processes.
+
+- Preserve the selected process controller across deferred launches with monitoring Off and read-only System Tweaks checks. Correct late package helpers through the guarded initial path, reject stale installed-app callbacks, retain running-app lookups through duplicate-key transitions, and avoid false conflicts between disjoint instances of one EXE. Existing process lists and CPU/RAM scopes are retained.
 
 - Correct MCP process CPU-mapping quality: missing, incomplete or invalidated per-CPU evidence is marked incomplete, while complete idle mappings remain complete and independent process CPU totals are preserved.
 

@@ -34,6 +34,7 @@ struct PostLaunchCorrectionOutcome {
 }
 
 struct PostLaunchCorrectionRequest {
+    source: AppToRun,
     wake: Option<MonitorWake>,
     running_apps: Arc<TokioRwLock<crate::app::models::RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
@@ -49,6 +50,7 @@ struct PostLaunchCorrectionRequest {
     manage_descendants: bool,
     fields: ProcessSettingsFields,
     scheduling: Arc<SchedulingHandoff>,
+    control: Arc<super::control::Authority>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +74,39 @@ pub(crate) struct AppRowActionRequest {
 }
 
 trait LaunchOs {
+    fn launch_known_launcher(&self, app: &AppToRun) -> Result<(), String> {
+        self.launch_ordinary(
+            app.bin_path().ok_or("Missing application executable")?,
+            &app.args,
+        )
+    }
+    fn activate_known_client(&self, _app: &AppToRun) -> Result<(), String> {
+        Err("Client activation unavailable".into())
+    }
+
+    fn launch_ordinary(&self, _path: &Path, _args: &[String]) -> Result<(), String> {
+        Err("Ordinary application launch unavailable".into())
+    }
+    fn known_launch_valid(
+        &self,
+        _app: &AppToRun,
+        _scope: &crate::app::features::rules::known_apps::Scope,
+    ) -> bool {
+        true
+    }
+    fn known_instance_role(
+        &self,
+        _pid: u32,
+        _token: u64,
+        scope: &crate::app::features::rules::known_apps::Scope,
+        image: &Path,
+    ) -> Option<crate::app::features::rules::known_apps::MemberRole> {
+        scope.witness_role_under_root(&scope.root, image)
+    }
+
+    fn launch_steam(&self, _app_id: u32) -> Result<(), String> {
+        Err("Steam launch unavailable".into())
+    }
     fn get_process_instance_token(&self, pid: u32) -> Result<ProcessInstanceToken, String>;
     fn apply_process_fields_if_instance(
         &self,
@@ -103,9 +138,47 @@ trait LaunchOs {
     ) -> Result<InstalledPackageRuntimeInfo, String>;
 }
 
+#[cfg(test)]
+use super::steam_pending::finish_steam_launch;
+pub(crate) use super::steam_pending::{
+    begin_launch, begin_steam_launch, cancel_launch, cancel_steam_launch, identity_for_app,
+    steam_launch_pending, SteamLaunchBegin,
+};
 struct RealLaunchOs;
 
 impl LaunchOs for RealLaunchOs {
+    fn launch_known_launcher(&self, app: &AppToRun) -> Result<(), String> {
+        crate::app::features::rules::known_apps::launch_ordinary(app)
+    }
+    fn activate_known_client(&self, app: &AppToRun) -> Result<(), String> {
+        crate::app::features::rules::known_apps::activate_client(app)
+    }
+
+    fn launch_ordinary(&self, path: &Path, args: &[String]) -> Result<(), String> {
+        os_api::app_identity::launch_ordinary(path, args)
+    }
+    fn known_launch_valid(
+        &self,
+        app: &AppToRun,
+        scope: &crate::app::features::rules::known_apps::Scope,
+    ) -> bool {
+        scope.qualify_launch(app)
+    }
+    fn known_instance_role(
+        &self,
+        pid: u32,
+        token: u64,
+        scope: &crate::app::features::rules::known_apps::Scope,
+        image: &Path,
+    ) -> Option<crate::app::features::rules::known_apps::MemberRole> {
+        let (root, image) = os_api::app_identity::canonical_scope(&scope.root, image)?;
+        let role = scope.witness_role_under_root(&root, &image)?;
+        os_api::app_identity::verify_current_instance(pid, token).then_some(role)
+    }
+
+    fn launch_steam(&self, app_id: u32) -> Result<(), String> {
+        os_api::steam::launch(app_id)
+    }
     fn get_process_instance_token(&self, pid: u32) -> Result<ProcessInstanceToken, String> {
         OS::get_process_instance_token(pid)
     }
@@ -260,6 +333,15 @@ fn run_app_row_action_with_os<O: LaunchOs>(
         action,
     } = request;
 
+    let selected_rule = {
+        let state = persistent_state.read().unwrap();
+        runtime.control_handle().initialize(&state);
+        RulesContext::from_storage(&state).rule_id_for_index(group_index, program_index)
+    };
+    let Some(selected_rule) = selected_rule else {
+        return LaunchDispatchOutcome::Rejected("Saved rule is unavailable".into());
+    };
+    let selected_key = runtime.control_key(&selected_rule, &app_to_run);
     match action {
         AppRowAction::Run => run_app_with_affinity_sync_with_os(
             persistent_state,
@@ -270,7 +352,9 @@ fn run_app_row_action_with_os<O: LaunchOs>(
             app_to_run,
             os,
         ),
-        AppRowAction::Focus => focus_existing_app(runtime, log_manager, app_to_run, os),
+        AppRowAction::Focus => {
+            focus_existing_app_with_key(runtime, log_manager, app_to_run, selected_key, os)
+        }
         AppRowAction::Fix => {
             let (group_cores, fields) = {
                 let state = persistent_state.read().unwrap();
@@ -295,6 +379,7 @@ fn run_app_row_action_with_os<O: LaunchOs>(
                 runtime,
                 log_manager,
                 app_to_run,
+                (selected_rule, selected_key),
                 &group_cores,
                 fields,
                 os,
@@ -324,11 +409,12 @@ fn reapply_existing_app_settings<O: LaunchOs>(
     runtime: &mut RuntimeRegistry,
     log_manager: &mut LogManager,
     app_to_run: AppToRun,
+    identity: (RuleId, AppRuntimeKey),
     group_cores: &[usize],
     fields: ProcessSettingsFields,
     os: &O,
 ) -> LaunchDispatchOutcome {
-    let app_key = app_to_run.get_key();
+    let (rule_id, app_key) = identity;
     let instances = match runtime.lookup_running_app_instances(&app_key) {
         RunningAppInstancesLookup::Found(instances) if !instances.is_empty() => instances,
         RunningAppInstancesLookup::Found(_) | RunningAppInstancesLookup::NotFound => {
@@ -360,13 +446,18 @@ fn reapply_existing_app_settings<O: LaunchOs>(
             return LaunchDispatchOutcome::Rejected(message);
         }
     };
-    let failures = apply_settings_for_instances(
+    let (failures, shared) = apply_settings_for_instances(
         os,
         &instances,
-        mask,
-        app_to_run.priority,
         &runtime.scheduling_handle(),
-        fields,
+        RuleWriteContext {
+            mask,
+            priority: app_to_run.priority,
+            requested: fields,
+            control: &runtime.control_handle(),
+            rule: &rule_id,
+            key: &app_key,
+        },
     );
 
     if !failures.is_empty() {
@@ -380,6 +471,13 @@ fn reapply_existing_app_settings<O: LaunchOs>(
         return LaunchDispatchOutcome::Rejected(message);
     }
 
+    if shared {
+        let _ = runtime.mark_running_app_settings_mismatched(&app_key);
+        log_manager.add_entry(
+            "Owned processes updated; shared processes retain their chosen controller".into(),
+        );
+        return LaunchDispatchOutcome::Accepted;
+    }
     match runtime.mark_running_app_settings_matched(&app_key) {
         RunningAppSettingsUpdate::Updated => {
             log_manager.add_entry(format!("App settings reapplied: {}", app_to_run.display()));
@@ -404,71 +502,177 @@ fn reapply_existing_app_settings<O: LaunchOs>(
     }
 }
 
+struct RuleWriteContext<'a> {
+    mask: usize,
+    priority: PriorityClass,
+    requested: ProcessSettingsFields,
+    control: &'a super::control::Authority,
+    rule: &'a RuleId,
+    key: &'a AppRuntimeKey,
+}
 fn apply_settings_for_instances<O: LaunchOs>(
     os: &O,
     instances: &[(u32, ProcessInstanceToken)],
-    mask: usize,
-    priority: PriorityClass,
     scheduling: &SchedulingHandoff,
-    requested: ProcessSettingsFields,
-) -> Vec<String> {
+    context: RuleWriteContext<'_>,
+) -> (Vec<String>, bool) {
+    let RuleWriteContext {
+        mask,
+        priority,
+        requested,
+        control,
+        rule,
+        key,
+    } = context;
     let mut failures = Vec::new();
+    let mut shared = false;
 
     for &(pid, instance_token) in instances {
-        let fields = match scheduling.select(pid, instance_token, requested, true) {
-            Ok(fields) => fields,
-            Err(error) => {
-                failures.push(format!(
-                    "PID {pid}: {}",
-                    error.detail().unwrap_or(error.operation)
-                ));
-                continue;
-            }
-        };
-        if let Err(error) =
-            os.apply_process_fields_if_instance(pid, instance_token, mask, priority, fields)
-        {
-            failures.push(format!("PID {pid}: {error}"));
+        let image = os.get_process_image_path(pid).ok();
+        let result = control.write(
+            super::control::WriteRequest {
+                rule,
+                key,
+                pid,
+                token: instance_token,
+                image: image.as_deref(),
+                mask,
+                priority,
+                fields: requested,
+                change: true,
+            },
+            |allowed| {
+                if !allowed {
+                    return Ok(());
+                }
+                let fields = scheduling
+                    .select(pid, instance_token, requested, true)
+                    .map_err(|error| format!("{error:?}"))?;
+                os.apply_process_fields_if_instance(pid, instance_token, mask, priority, fields)
+                    .map(|_| ())
+            },
+        );
+        match result {
+            Err(error) => failures.push(format!("PID {pid}: {error}")),
+            Ok((_, false)) => shared = true,
+            _ => {}
         }
     }
 
-    failures
+    (failures, shared)
 }
 
+fn known_focus_allowed<O: LaunchOs>(app: &AppToRun, os: &O, pid: u32, token: u64) -> bool {
+    if !app.is_path_target() || app.builtin_process_binding.is_none() {
+        return true;
+    }
+    let Ok(scope) = crate::app::features::rules::known_apps::project(app) else {
+        return false;
+    };
+    os.get_process_image_path(pid)
+        .ok()
+        .is_some_and(|image| os.known_instance_role(pid, token, &scope, &image).is_some())
+}
+
+fn activate_owned_client<O: LaunchOs>(
+    app: &AppToRun,
+    instances: &[(u32, u64)],
+    os: &O,
+) -> Result<bool, String> {
+    if app.builtin_process_binding.is_none() || !app.is_path_target() {
+        return Ok(false);
+    }
+    let scope = crate::app::features::rules::known_apps::project(app)?;
+    if !scope.can_activate_hidden() {
+        return Ok(false);
+    }
+    let eligible = instances.iter().any(|&(pid, token)| {
+        os.get_process_instance_token(pid).ok() == Some(token)
+            && known_focus_allowed(app, os, pid, token)
+    });
+    if !eligible || !os.known_launch_valid(app, &scope) {
+        return Ok(false);
+    }
+    os.activate_known_client(app).map(|()| true)
+}
+
+#[cfg(test)]
 fn focus_existing_app<O: LaunchOs>(
+    runtime: &RuntimeRegistry,
+    log: &mut LogManager,
+    app: AppToRun,
+    os: &O,
+) -> LaunchDispatchOutcome {
+    let key = app.get_key();
+    focus_existing_app_with_key(runtime, log, app, key, os)
+}
+fn focus_existing_app_with_key<O: LaunchOs>(
     runtime: &RuntimeRegistry,
     log_manager: &mut LogManager,
     app_to_run: AppToRun,
+    app_key: AppRuntimeKey,
     os: &O,
 ) -> LaunchDispatchOutcome {
-    let instances = match runtime.lookup_running_app_instances(&app_to_run.get_key()) {
-        RunningAppInstancesLookup::Found(instances) if !instances.is_empty() => instances,
-        RunningAppInstancesLookup::Found(_) | RunningAppInstancesLookup::NotFound => {
-            let message = format!(
-                "Cannot focus {}: the app is not running",
-                app_to_run.display()
-            );
-            log_manager.add_important_entry(message.clone());
-            return LaunchDispatchOutcome::Rejected(message);
-        }
-        RunningAppInstancesLookup::Busy => {
-            let message = format!(
-                "Cannot focus {}: running app state is temporarily busy; try again",
-                app_to_run.display()
-            );
-            log_manager.add_important_entry(message.clone());
-            return LaunchDispatchOutcome::Rejected(message);
-        }
-    };
+    let instances =
+        match runtime.lookup_focus_instances(&app_key, app_to_run.steam_game().is_some()) {
+            RunningAppInstancesLookup::Found(instances) if !instances.is_empty() => instances,
+            RunningAppInstancesLookup::Found(_) | RunningAppInstancesLookup::NotFound => {
+                let message = format!(
+                    "Cannot focus {}: the app is not running",
+                    app_to_run.display()
+                );
+                log_manager.add_important_entry(message.clone());
+                return LaunchDispatchOutcome::Rejected(message);
+            }
+            RunningAppInstancesLookup::Busy => {
+                let message = format!(
+                    "Cannot focus {}: running app state is temporarily busy; try again",
+                    app_to_run.display()
+                );
+                log_manager.add_important_entry(message.clone());
+                return LaunchDispatchOutcome::Rejected(message);
+            }
+        };
 
-    if instances.iter().any(|&(pid, expected_token)| {
-        os.get_process_instance_token(pid)
-            .is_ok_and(|current_token| current_token == expected_token)
-            && os.focus_window_by_pid(pid)
-    }) {
+    if instances
+        .iter()
+        .filter(|&&(pid, _)| {
+            app_to_run.steam_game().is_none_or(|(_, selected)| {
+                selected.is_none_or(|selected| {
+                    os.get_process_image_path(pid).is_ok_and(|image| {
+                        image
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(&selected.to_string_lossy())
+                            || image
+                                .canonicalize()
+                                .ok()
+                                .zip(selected.canonicalize().ok())
+                                .is_some_and(|(a, b)| a == b)
+                    })
+                })
+            })
+        })
+        .any(|&(pid, expected_token)| {
+            os.get_process_instance_token(pid)
+                .is_ok_and(|current_token| current_token == expected_token)
+                && known_focus_allowed(&app_to_run, os, pid, expected_token)
+                && os.focus_window_by_pid(pid)
+        })
+    {
         log_manager.add_entry(format!("App window focused: {}", app_to_run.display()));
         LaunchDispatchOutcome::Accepted
     } else {
+        match activate_owned_client(&app_to_run, &instances, os) {
+            Ok(true) => {
+                log_manager.add_entry(format!("Client activation requested: {}", app_to_run.name));
+                return LaunchDispatchOutcome::Accepted;
+            }
+            Err(error) => {
+                log_manager.add_important_entry(error.clone());
+                return LaunchDispatchOutcome::Rejected(error);
+            }
+            Ok(false) => {}
+        }
         let message = format!(
             "Cannot focus {}: no application window was found",
             app_to_run.display()
@@ -501,6 +705,7 @@ fn run_app_with_affinity_sync_with_os<O: LaunchOs>(
 
     let (group_id, rule_id, fields) = {
         let state = persistent_state.read().unwrap();
+        runtime.control_handle().initialize(&state);
         let rules = RulesContext::from_storage(&state);
         let Some(group_id) = rules.group_id_for_index(group_index) else {
             let message = format!("Error: Missing group id for group index {group_index}");
@@ -540,6 +745,24 @@ fn run_launch_decision<O: LaunchOs>(
     group_cores: Vec<usize>,
     os: &O,
 ) -> LaunchDispatchOutcome {
+    let fixture = AppStateStorage::test_fixture(|state| {
+        state.groups = vec![crate::app::models::CoreGroup {
+            name: "Fixture".into(),
+            cores: group_cores.clone(),
+            programs: vec![app_to_run.clone()],
+            is_hidden: false,
+            run_all_button: false,
+        }];
+        state.rule_identities = Some(crate::app::features::rules::PersistedRuleIdentities {
+            groups: vec![crate::app::features::rules::PersistedGroupIdentity {
+                id: group_id.clone(),
+                rule_ids: vec![rule_id.clone()],
+            }],
+            next_group_id: 0,
+            next_rule_id: 0,
+        });
+    });
+    runtime.control_handle().configure(&fixture);
     run_launch_decision_with_fields(
         runtime,
         log_manager,
@@ -562,7 +785,7 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
     fields: ProcessSettingsFields,
     os: &O,
 ) -> LaunchDispatchOutcome {
-    let app_key = app_to_run.get_key();
+    let app_key = runtime.control_key(&rule_id, &app_to_run);
     let mask = match if fields.affinity {
         affinity_mask_from_cores(&group_cores)
     } else {
@@ -576,15 +799,65 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
         }
     };
 
-    match runtime.lookup_running_app_instances(&app_key) {
+    let known_scope = if app_to_run.is_path_target() && app_to_run.builtin_process_binding.is_some()
+    {
+        match crate::app::features::rules::known_apps::project(&app_to_run) {
+            Ok(scope) if os.known_launch_valid(&app_to_run, &scope) => Some(scope),
+            _ => {
+                let error="Built-in application definition or installation is unavailable; re-add this application to refresh its defaults".to_string();
+                log_manager.add_important_entry(error.clone());
+                return LaunchDispatchOutcome::Rejected(error);
+            }
+        }
+    } else {
+        None
+    };
+    let mut existing = runtime.lookup_running_app_instances(&app_key);
+    if let (Some(scope), RunningAppInstancesLookup::Found(instances)) = (&known_scope, &existing) {
+        let mut evidence = instances.clone();
+        if let RunningAppInstancesLookup::Found(primary) =
+            runtime.lookup_focus_instances(&app_key, true)
+        {
+            evidence.extend(primary);
+        }
+        let mut main = false;
+        let mut uncertain = false;
+        for (pid, token) in evidence {
+            match (
+                os.get_process_instance_token(pid),
+                os.get_process_image_path(pid),
+            ) {
+                (Ok(current), Ok(image)) if current == token => {
+                    main |= os.known_instance_role(pid, token, scope, &image)
+                        == Some(crate::app::features::rules::known_apps::MemberRole::Main);
+                }
+                (Err(_), _) | (_, Err(_)) => uncertain = true,
+                _ => {}
+            }
+        }
+        if !main {
+            if uncertain {
+                return LaunchDispatchOutcome::Rejected(
+                    "Application identity is temporarily unavailable; try again".into(),
+                );
+            }
+            existing = RunningAppInstancesLookup::NotFound;
+        }
+    }
+    match existing {
         RunningAppInstancesLookup::Found(instances) if !instances.is_empty() => {
-            let failures = apply_settings_for_instances(
+            let (failures, _shared) = apply_settings_for_instances(
                 os,
                 &instances,
-                mask,
-                app_to_run.priority,
                 &runtime.scheduling_handle(),
-                fields,
+                RuleWriteContext {
+                    mask,
+                    priority: app_to_run.priority,
+                    requested: fields,
+                    control: &runtime.control_handle(),
+                    rule: &rule_id,
+                    key: &app_key,
+                },
             );
             if !failures.is_empty() {
                 match runtime.try_mark_running_app_settings_mismatched(&app_key) {
@@ -608,9 +881,16 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
                 return LaunchDispatchOutcome::Rejected(message);
             }
 
-            let was_focused = instances.iter().any(|&(pid, expected_token)| {
+            let focus_instances =
+                runtime.lookup_focus_instances(&app_key, app_to_run.steam_game().is_some());
+            let focus_instances = match focus_instances {
+                RunningAppInstancesLookup::Found(v) => v,
+                _ => Vec::new(),
+            };
+            let was_focused = focus_instances.iter().any(|&(pid, expected_token)| {
                 os.get_process_instance_token(pid)
                     .is_ok_and(|current_token| current_token == expected_token)
+                    && known_focus_allowed(&app_to_run, os, pid, expected_token)
                     && os.focus_window_by_pid(pid)
             });
             if was_focused {
@@ -621,6 +901,18 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
                 return LaunchDispatchOutcome::Accepted;
             }
 
+            match activate_owned_client(&app_to_run, &focus_instances, os) {
+                Ok(true) => {
+                    log_manager
+                        .add_entry(format!("Client activation requested: {}", app_to_run.name));
+                    return LaunchDispatchOutcome::Accepted;
+                }
+                Err(error) => {
+                    log_manager.add_important_entry(error.clone());
+                    return LaunchDispatchOutcome::Rejected(error);
+                }
+                Ok(false) => {}
+            }
             log_manager.add_entry(format!(
                 "App already running: {}, settings reapplied but no window found to focus",
                 app_to_run.display()
@@ -646,12 +938,71 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
         }
     }
 
+    if let Some((app_id, _)) = app_to_run.steam_game() {
+        let generation = match begin_steam_launch(&rule_id, app_id) {
+            SteamLaunchBegin::AlreadyPending => return LaunchDispatchOutcome::Accepted,
+            SteamLaunchBegin::Started(generation) => generation,
+            SteamLaunchBegin::Busy => {
+                return LaunchDispatchOutcome::Rejected(
+                    "Too many pending Steam launches; try again later".into(),
+                )
+            }
+        };
+        return match os.launch_steam(app_id) {
+            Ok(()) => {
+                log_manager.add_entry(format!("Steam launch requested for {}. Waiting for the game process; use Choose game process in its settings if detection is unavailable.",app_to_run.name));
+                LaunchDispatchOutcome::Accepted
+            }
+            Err(error) => {
+                cancel_steam_launch(&rule_id, app_id, generation);
+                log_manager.add_important_entry(format!("Steam launch failed: {error}"));
+                LaunchDispatchOutcome::Rejected(error)
+            }
+        };
+    }
+    let known_intent = if known_scope.is_some() && !app_to_run.additional_processes.is_empty() {
+        let identity =
+            super::steam_pending::identity_for_app(&app_to_run).expect("validated known scope");
+        match super::steam_pending::begin_launch(&rule_id, identity.clone()) {
+            SteamLaunchBegin::AlreadyPending => return LaunchDispatchOutcome::Accepted,
+            SteamLaunchBegin::Started(generation) => Some((identity, generation)),
+            SteamLaunchBegin::Busy => {
+                return LaunchDispatchOutcome::Rejected(
+                    "Too many pending application launches; try again later".into(),
+                )
+            }
+        }
+    } else {
+        None
+    };
+    if known_scope
+        .as_ref()
+        .is_some_and(|scope| scope.is_launcher())
+    {
+        let result = os.launch_known_launcher(&app_to_run);
+        return match result {
+            Ok(()) => {
+                log_manager.add_entry(format!(
+                    "{} launch requested. Waiting for its application processes.",
+                    app_to_run.name
+                ));
+                LaunchDispatchOutcome::Accepted
+            }
+            Err(error) => {
+                if let Some((identity, generation)) = known_intent {
+                    super::steam_pending::cancel_launch(&rule_id, identity, generation);
+                }
+                log_manager.add_important_entry(error.clone());
+                LaunchDispatchOutcome::Rejected(error)
+            }
+        };
+    }
     let label = match &app_to_run.launch_target {
         LaunchTarget::Path { bin_path, .. } => bin_path
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| bin_path.display().to_string()),
-        LaunchTarget::Installed { .. } => app_to_run.name.clone(),
+        LaunchTarget::Installed { .. } | LaunchTarget::Steam { .. } => app_to_run.name.clone(),
     };
     let display = app_to_run.display();
     let priority = app_to_run.priority;
@@ -676,19 +1027,32 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
 
     log_manager.add_entry(format!("Starting '{}', app: {}", label, display));
 
+    let mut launched_fields = fields;
     let launch_result = match &app_to_run.launch_target {
-        LaunchTarget::Path { bin_path, .. } => os
-            .run_with_fields(
-                bin_path.clone(),
-                app_to_run.args.clone(),
-                &group_cores,
-                priority,
-                fields,
-            )
+        LaunchTarget::Path { bin_path, .. } => runtime
+            .control_handle()
+            .launch(&rule_id, &app_key, bin_path, |owner| {
+                launched_fields = owner.fields;
+                let cores: Vec<_> = (0..usize::BITS as usize)
+                    .filter(|cpu| owner.mask & (1usize << cpu) != 0)
+                    .collect();
+                os.run_with_fields(
+                    bin_path.clone(),
+                    app_to_run.args.clone(),
+                    &cores,
+                    if owner.fields.priority {
+                        owner.app.priority
+                    } else {
+                        PriorityClass::Normal
+                    },
+                    owner.fields,
+                )
+            })
             .map(|launch| (launch.pid, Some(launch.creation_token))),
         // Successful activation is still accepted if its initial PID cannot be inspected.
         // The existing correction worker can discover a verified process later.
         LaunchTarget::Installed { aumid } => os.activate_application(aumid).map(|pid| (pid, None)),
+        LaunchTarget::Steam { .. } => unreachable!(),
     };
 
     match launch_result {
@@ -702,7 +1066,11 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
                 .filter(|token| created_token.is_none_or(|created| *token == created));
             if !is_installed {
                 if let Some(token) = launch_instance_token {
-                    if let Err(error) = runtime.scheduling_handle().started(pid, token, fields) {
+                    if let Err(error) =
+                        runtime
+                            .scheduling_handle()
+                            .started(pid, token, launched_fields)
+                    {
                         log_manager.add_important_entry(format!(
                             "Process scheduling baseline unavailable: {}",
                             error.detail().unwrap_or(error.operation)
@@ -713,19 +1081,18 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
 
             if is_installed && launch_pid_auto_managed {
                 if let Some(instance_token) = launch_instance_token {
-                    if let Ok(selected) =
-                        runtime
-                            .scheduling_handle()
-                            .select(pid, instance_token, fields, true)
-                    {
-                        let _ = os.apply_process_fields_if_instance(
-                            pid,
-                            instance_token,
-                            mask,
-                            priority,
-                            selected,
-                        );
-                    }
+                    let _ = apply_initial_process(
+                        os,
+                        &runtime.control_handle(),
+                        &runtime.scheduling_handle(),
+                        &rule_id,
+                        &app_key,
+                        pid,
+                        instance_token,
+                        mask,
+                        priority,
+                        fields,
+                    );
                 }
             }
 
@@ -753,6 +1120,7 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
 
             if let LaunchTarget::Installed { aumid } = &app_to_run.launch_target {
                 os.start_post_launch_correction(PostLaunchCorrectionRequest {
+                    source: app_to_run.clone(),
                     wake: runtime.wake_handle(),
                     running_apps: runtime.running_apps_handle(),
                     installed_package_tracking: runtime.installed_package_tracking_handle(),
@@ -768,11 +1136,15 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
                     manage_descendants: app_to_run.manage_descendants,
                     fields,
                     scheduling: runtime.scheduling_handle(),
+                    control: runtime.control_handle(),
                 });
             }
             LaunchDispatchOutcome::Accepted
         }
         Err(e) => {
+            if let Some((identity, generation)) = known_intent {
+                super::steam_pending::cancel_launch(&rule_id, identity, generation);
+            }
             log_manager.add_important_sticky_once(format!("ERROR: {e}"));
             LaunchDispatchOutcome::Rejected(e)
         }
@@ -808,6 +1180,115 @@ fn record_started_pid(
     }
 }
 
+struct PostLaunchPublication {
+    changed: bool,
+    helpers: Vec<u32>,
+}
+fn correction_source(
+    request: &PostLaunchCorrectionRequest,
+) -> Result<super::control::SourceRequest<'_>, String> {
+    Ok(super::control::SourceRequest {
+        group: &request.group_id,
+        rule: &request.rule_id,
+        key: &request.app_key,
+        app: &request.source,
+        mask: if request.fields.affinity {
+            affinity_mask_from_cores(&request.group_cores)?
+        } else {
+            0
+        },
+        fields: request.fields,
+    })
+}
+fn complete_post_launch_correction<O: LaunchOs>(
+    request: &PostLaunchCorrectionRequest,
+    outcome: &PostLaunchCorrectionOutcome,
+    os: &O,
+) -> Result<PostLaunchPublication, String> {
+    let mut apps = request
+        .running_apps
+        .try_write()
+        .map_err(|_| "Running app state is busy")?;
+    let publication = request
+        .control
+        .with_source(correction_source(request)?, |spec| {
+            let key = request
+                .control
+                .member(&apps, &spec.key)
+                .map(|(key, _)| key.clone())
+                .unwrap_or_else(|| spec.key.clone());
+            let mut changed = false;
+            let mut helpers = Vec::new();
+            apps.mutate_membership(|apps| {
+                if !outcome.managed_pids.is_empty() && !apps.apps.contains_key(&key) {
+                    apps.add_app(
+                        &key,
+                        outcome.managed_pids[0],
+                        spec.group.clone(),
+                        spec.rule.clone(),
+                    );
+                    changed = true;
+                }
+                if let Some(app) = apps.apps.get_mut(&key) {
+                    changed |= app.group_id != spec.group || app.rule_id != spec.rule;
+                    app.group_id = spec.group.clone();
+                    app.rule_id = spec.rule.clone();
+                    for &pid in &outcome.managed_pids {
+                        if let Some(&token) = outcome.instance_tokens.get(&pid) {
+                            if !app.pids.contains(&pid) {
+                                app.pids.push(pid);
+                                changed = true;
+                            }
+                            changed |= app.pid_instance_tokens.insert(pid, token) != Some(token);
+                        }
+                    }
+                }
+                if apps.apps.contains_key(&key) {
+                    if let Some(package) = &request.installed_package_info {
+                        if ensure_package_owner_claim(
+                            &mut request.installed_package_tracking.write().unwrap(),
+                            apps,
+                            &package.package_family_name,
+                            &key,
+                        ) {
+                            if let Some(app) = apps.apps.get_mut(&key) {
+                                for &pid in &outcome.no_identity_package_pids {
+                                    if !app.pids.contains(&pid) {
+                                        if let Some(&token) = outcome.instance_tokens.get(&pid) {
+                                            app.pids.push(pid);
+                                            app.pid_instance_tokens.insert(pid, token);
+                                            helpers.push(pid);
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            Ok(PostLaunchPublication { changed, helpers })
+        })?;
+    drop(apps);
+    for &pid in &publication.helpers {
+        if let Some(&token) = outcome.instance_tokens.get(&pid) {
+            let _ = apply_initial_process(
+                os,
+                &request.control,
+                &request.scheduling,
+                &request.rule_id,
+                &request.app_key,
+                pid,
+                token,
+                correction_source(request)?.mask,
+                request.priority,
+                request.fields,
+            );
+        }
+    }
+    Ok(publication)
+}
+
 fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
@@ -824,6 +1305,12 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
 
+            let Ok(source) = correction_source(&request) else {
+                break;
+            };
+            if request.control.with_source(source, |_| Ok(())).is_err() {
+                break;
+            }
             let outcome = post_launch_correction_poll_with_fields(
                 &os,
                 &request.expected_aumid,
@@ -835,6 +1322,7 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                 request.manage_descendants,
                 request.fields,
                 &request.scheduling,
+                Some((&request.control, &request.rule_id, &request.app_key)),
             );
 
             if let Ok(outcome) = outcome {
@@ -842,103 +1330,13 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                     saw_identity_seed = true;
                 }
 
-                let mut runtime_changed = false;
-                let mut attached_no_identity_pids = Vec::new();
-                let mut newly_attached_package_pids = 0usize;
-                if let Ok(mut apps) = request.running_apps.try_write() {
-                    apps.mutate_membership(|apps| {
-                        if !outcome.managed_pids.is_empty()
-                            && !apps.apps.contains_key(&request.app_key)
-                        {
-                            runtime_changed = true;
-                            apps.add_app(
-                                &request.app_key,
-                                outcome.managed_pids[0],
-                                request.group_id.clone(),
-                                request.rule_id.clone(),
-                            );
-                            if let Some(app) = apps.apps.get_mut(&request.app_key) {
-                                if let Some(&token) =
-                                    outcome.instance_tokens.get(&outcome.managed_pids[0])
-                                {
-                                    app.pid_instance_tokens
-                                        .insert(outcome.managed_pids[0], token);
-                                }
-                            }
-                        }
-
-                        if let Some(app) = apps.apps.get_mut(&request.app_key) {
-                            runtime_changed |=
-                                app.group_id != request.group_id || app.rule_id != request.rule_id;
-                            app.group_id = request.group_id.clone();
-                            app.rule_id = request.rule_id.clone();
-                        }
-
-                        for &pid in &outcome.managed_pids {
-                            if let Some(app) = apps.apps.get_mut(&request.app_key) {
-                                if !app.pids.contains(&pid) {
-                                    app.pids.push(pid);
-                                    runtime_changed = true;
-                                }
-                                if let Some(&token) = outcome.instance_tokens.get(&pid) {
-                                    runtime_changed |=
-                                        app.pid_instance_tokens.insert(pid, token) != Some(token);
-                                }
-                            }
-                        }
-
-                        if apps.apps.contains_key(&request.app_key) {
-                            if let Some(package_info) = &request.installed_package_info {
-                                let mut package_tracking =
-                                    request.installed_package_tracking.write().unwrap();
-                                let owns_package = ensure_package_owner_claim(
-                                    &mut package_tracking,
-                                    apps,
-                                    &package_info.package_family_name,
-                                    &request.app_key,
-                                );
-
-                                if owns_package {
-                                    for &pid in &outcome.no_identity_package_pids {
-                                        if let Some(app) = apps.apps.get_mut(&request.app_key) {
-                                            if !app.pids.contains(&pid) {
-                                                let Some(&instance_token) =
-                                                    outcome.instance_tokens.get(&pid)
-                                                else {
-                                                    continue;
-                                                };
-                                                app.pids.push(pid);
-                                                app.pid_instance_tokens.insert(pid, instance_token);
-                                                attached_no_identity_pids.push(pid);
-                                                runtime_changed = true;
-                                                if let Ok(mask) =
-                                                    affinity_mask_from_cores(&request.group_cores)
-                                                {
-                                                    if let Ok(fields) = request.scheduling.select(
-                                                        pid,
-                                                        instance_token,
-                                                        request.fields,
-                                                        true,
-                                                    ) {
-                                                        let _ = os
-                                                            .apply_process_fields_if_instance(
-                                                                pid,
-                                                                instance_token,
-                                                                mask,
-                                                                request.priority,
-                                                                fields,
-                                                            );
-                                                    }
-                                                    newly_attached_package_pids += 1;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
+                let Ok(publication) = complete_post_launch_correction(&request, &outcome, &os)
+                else {
+                    continue;
+                };
+                let runtime_changed = publication.changed;
+                let attached_no_identity_pids = publication.helpers;
+                let newly_attached_package_pids = attached_no_identity_pids.len();
 
                 // The writer guard is gone before the UI is woken.
                 if runtime_changed {
@@ -987,6 +1385,48 @@ fn post_launch_correction_poll_with_os<O: LaunchOs>(
         manage_descendants,
         ProcessSettingsFields::default(),
         &SchedulingHandoff::default(),
+        None,
+    )
+}
+#[allow(clippy::too_many_arguments)] // Mirrors one exact native correction and its existing scheduling boundary.
+fn apply_initial_process<O: LaunchOs>(
+    os: &O,
+    control: &super::control::Authority,
+    scheduling: &SchedulingHandoff,
+    rule: &RuleId,
+    key: &AppRuntimeKey,
+    pid: u32,
+    token: u64,
+    mask: usize,
+    priority: PriorityClass,
+    fields: ProcessSettingsFields,
+) -> Result<(), String> {
+    let image = os.get_process_image_path(pid).ok();
+    control.initial(
+        super::control::WriteRequest {
+            rule,
+            key,
+            pid,
+            token,
+            image: image.as_deref(),
+            mask,
+            priority,
+            fields,
+            change: true,
+        },
+        |owner| {
+            let selected = scheduling
+                .select(pid, token, owner.fields, true)
+                .map_err(|error| format!("{error:?}"))?;
+            os.apply_process_fields_if_instance(
+                pid,
+                token,
+                owner.mask,
+                owner.app.priority,
+                selected,
+            )
+            .map(|_| ())
+        },
     )
 }
 #[allow(clippy::too_many_arguments)] // Same bounded post-launch request plus field handoff metadata.
@@ -1001,6 +1441,7 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
     manage_descendants: bool,
     fields: ProcessSettingsFields,
     scheduling: &SchedulingHandoff,
+    authority: Option<(&super::control::Authority, &RuleId, &AppRuntimeKey)>,
 ) -> Result<PostLaunchCorrectionOutcome, String> {
     let snapshot = os.snapshot_process_tree()?;
     let before: HashSet<u32> = seed_pids.iter().copied().collect();
@@ -1043,13 +1484,42 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
         let Ok(instance_token) = os.get_process_instance_token(pid) else {
             return false;
         };
-        let Ok(selected) = scheduling.select(pid, instance_token, fields, true) else {
-            return false;
+        let result = if let Some((control, rule, key)) = authority {
+            apply_initial_process(
+                os,
+                control,
+                scheduling,
+                rule,
+                key,
+                pid,
+                instance_token,
+                mask,
+                priority,
+                fields,
+            )
+        } else {
+            #[cfg(test)]
+            {
+                let selected = scheduling
+                    .select(pid, instance_token, fields, true)
+                    .map_err(|error| format!("{error:?}"));
+                selected.and_then(|selected| {
+                    os.apply_process_fields_if_instance(
+                        pid,
+                        instance_token,
+                        mask,
+                        priority,
+                        selected,
+                    )
+                    .map(|_| ())
+                })
+            }
+            #[cfg(not(test))]
+            {
+                Err("Process authority unavailable".into())
+            }
         };
-        if os
-            .apply_process_fields_if_instance(pid, instance_token, mask, priority, selected)
-            .is_err()
-        {
+        if result.is_err() {
             return false;
         }
         instance_tokens.insert(pid, instance_token);
@@ -1200,6 +1670,7 @@ fn path_is_under_root_case_insensitive(path: &Path, install_root: &Path) -> bool
 
 #[cfg(test)]
 mod tests {
+    include!("launch_known_app_tests.rs");
     use super::{
         collect_autorun_items, post_launch_correction_poll_with_os, record_started_pid,
         run_app_row_action_with_os, run_app_with_affinity_sync_with_os, run_launch_decision,
@@ -1219,6 +1690,9 @@ mod tests {
     use std::sync::{Arc, RwLock};
 
     struct FakeLaunchOs {
+        steam_calls: RefCell<Vec<u32>>,
+        ordinary_calls: RefCell<Vec<(PathBuf, Vec<String>)>>,
+        client_activation_calls: RefCell<Vec<String>>,
         launch_field_calls: RefCell<Vec<os_api::gaming::ProcessSettingsFields>>,
         affinity_calls: RefCell<Vec<(u32, usize)>>,
         affinity_results: HashMap<u32, Result<(), String>>,
@@ -1242,6 +1716,9 @@ mod tests {
     impl Default for FakeLaunchOs {
         fn default() -> Self {
             Self {
+                steam_calls: Default::default(),
+                ordinary_calls: Default::default(),
+                client_activation_calls: Default::default(),
                 launch_field_calls: RefCell::new(Vec::new()),
                 affinity_calls: RefCell::new(Vec::new()),
                 affinity_results: HashMap::new(),
@@ -1265,6 +1742,24 @@ mod tests {
     }
 
     impl LaunchOs for FakeLaunchOs {
+        fn activate_known_client(&self, app: &AppToRun) -> Result<(), String> {
+            self.client_activation_calls
+                .borrow_mut()
+                .push(app.launch_target_label());
+            Ok(())
+        }
+
+        fn launch_ordinary(&self, path: &std::path::Path, args: &[String]) -> Result<(), String> {
+            self.ordinary_calls
+                .borrow_mut()
+                .push((path.into(), args.into()));
+            Ok(())
+        }
+
+        fn launch_steam(&self, app_id: u32) -> Result<(), String> {
+            self.steam_calls.borrow_mut().push(app_id);
+            Ok(())
+        }
         fn get_process_instance_token(&self, pid: u32) -> Result<ProcessInstanceToken, String> {
             if self.unavailable_tokens.contains(&pid) {
                 return Err("process token temporarily unavailable".into());
@@ -1362,6 +1857,228 @@ mod tests {
         }
     }
 
+    fn steam_rule(app_id: u32) -> AppToRun {
+        let mut app = AppToRun::new_path(
+            PathBuf::from(r"C:\game.url"),
+            vec![format!("steam://rungameid/{app_id}")],
+            PathBuf::from(r"C:\Steam\steam.exe"),
+            PriorityClass::Normal,
+            false,
+        );
+        app.launch_target = crate::app::models::LaunchTarget::Steam {
+            app_id,
+            executable: None,
+        };
+        app.args.clear();
+        app
+    }
+
+    fn s112_installed_request() -> PostLaunchCorrectionRequest {
+        let mut state = crate::app::features::execution::control::tests::fixture();
+        state.groups.truncate(1);
+        state.groups[0].programs[0] = AppToRun::new_installed(
+            "Example".into(),
+            "Example!Main".into(),
+            PriorityClass::Normal,
+            false,
+        );
+        let rules = crate::app::features::rules::RulesContext::from_storage(&state);
+        state.rule_identities = Some(rules.to_persisted_identities());
+        let runtime = RuntimeRegistry::new();
+        runtime.control_handle().configure(&state);
+        let group = rules.group_id_for_index(0).unwrap();
+        let rule = rules.rule_id_for_index(0, 0).unwrap();
+        let app = state.groups[0].programs[0].clone();
+        let key = rules.runtime_key(&app, &rule);
+        runtime.add_running_app_with_token(&key, 42, 1042, group.clone(), rule.clone());
+        PostLaunchCorrectionRequest {
+            source: app,
+            wake: None,
+            running_apps: runtime.running_apps_handle(),
+            installed_package_tracking: runtime.installed_package_tracking_handle(),
+            app_key: key,
+            initial_pid: 42,
+            group_id: group,
+            rule_id: rule,
+            group_cores: vec![0],
+            priority: PriorityClass::Normal,
+            expected_aumid: "Example!Main".into(),
+            installed_package_info: Some(InstalledPackageRuntimeInfo {
+                aumid: "Example!Main".into(),
+                package_family_name: "Example".into(),
+                install_root: r"C:\Package".into(),
+            }),
+            prelaunch_package_pids: HashSet::new(),
+            manage_descendants: false,
+            fields: os_api::gaming::ProcessSettingsFields::default(),
+            scheduling: runtime.scheduling_handle(),
+            control: runtime.control_handle(),
+        }
+    }
+    fn s112_late_helper_outcome() -> super::PostLaunchCorrectionOutcome {
+        super::PostLaunchCorrectionOutcome {
+            seed_pids: vec![42],
+            managed_pids: vec![42],
+            no_identity_package_pids: vec![43],
+            new_managed_pids_added: 0,
+            saw_identity_seed: true,
+            instance_tokens: HashMap::from([(42, 1042), (43, 1043)]),
+        }
+    }
+    #[test]
+    fn s112_last_stable_poll_applies_new_package_helper_immediately() {
+        let request = s112_installed_request();
+        let os = FakeLaunchOs::default();
+        let published =
+            super::complete_post_launch_correction(&request, &s112_late_helper_outcome(), &os)
+                .unwrap();
+        assert_eq!(published.helpers, [43]);
+        assert!(
+            os.affinity_calls.borrow().contains(&(43, 1)),
+            "a last-poll helper must receive a guarded initial correction with monitor Off"
+        );
+    }
+    #[test]
+    fn s112_stale_installed_callback_cannot_revert_current_group_membership() {
+        let request = s112_installed_request();
+        {
+            let mut apps = request.running_apps.try_write().unwrap();
+            apps.apps.get_mut(&request.app_key).unwrap().group_id = GroupId("new-group".into());
+        }
+        // The saved authority has also changed, as it does after the writer moves the rule.
+        let mut state = crate::app::features::execution::control::tests::fixture();
+        state.groups.truncate(1);
+        state.groups[0].programs[0] = request.source.clone();
+        state.groups[0].cores = vec![1];
+        state.rule_identities = Some(crate::app::features::rules::PersistedRuleIdentities {
+            groups: vec![crate::app::features::rules::PersistedGroupIdentity {
+                id: GroupId("new-group".into()),
+                rule_ids: vec![request.rule_id.clone()],
+            }],
+            next_group_id: 20,
+            next_rule_id: 20,
+        });
+        request.control.configure(&state);
+        let _ = super::complete_post_launch_correction(
+            &request,
+            &s112_late_helper_outcome(),
+            &FakeLaunchOs::default(),
+        );
+        let apps = request.running_apps.try_read().unwrap();
+        assert_eq!(
+            apps.apps[&request.app_key].group_id,
+            GroupId("new-group".into())
+        );
+    }
+    #[test]
+    fn s103_focus_refuses_helper_when_main_identity_is_missing_in_all_routes() {
+        let app = steam_rule(987654);
+        let runtime = RuntimeRegistry::new();
+        let mut log = LogManager::default();
+        assert!(runtime.add_running_app_with_token(
+            &app.get_key(),
+            10,
+            1010,
+            group_id(0),
+            rule_id(0)
+        ));
+        let os = FakeLaunchOs {
+            focus_results: HashMap::from([(10, true)]),
+            ..Default::default()
+        };
+        assert!(matches!(
+            super::focus_existing_app(&runtime, &mut log, app.clone(), &os),
+            super::LaunchDispatchOutcome::Rejected(_)
+        ));
+        run_launch_decision(
+            &runtime,
+            &mut log,
+            group_id(0),
+            rule_id(0),
+            app,
+            vec![0, 1],
+            &os,
+        );
+        assert!(os.focus_calls.borrow().is_empty());
+    }
+    #[test]
+    fn steam_dispatch_does_not_register_or_schedule_the_launcher_and_coalesces_retries() {
+        let app = steam_rule(1867241);
+        super::finish_steam_launch(&rule_id(0), 1867241);
+        let runtime = RuntimeRegistry::new();
+        let mut log = LogManager::default();
+        let os = FakeLaunchOs::default();
+        for _ in 0..2 {
+            assert_eq!(
+                run_launch_decision(
+                    &runtime,
+                    &mut log,
+                    group_id(0),
+                    rule_id(0),
+                    app.clone(),
+                    vec![0, 1],
+                    &os
+                ),
+                super::LaunchDispatchOutcome::Accepted
+            );
+        }
+        assert_eq!(*os.steam_calls.borrow(), vec![1867241]);
+        assert!(os.run_calls.borrow().is_empty());
+        assert!(os.affinity_calls.borrow().is_empty());
+        assert!(runtime
+            .running_apps_handle()
+            .blocking_read()
+            .apps
+            .is_empty());
+        super::finish_steam_launch(&rule_id(0), 1867241);
+    }
+    #[test]
+    fn steam_focus_uses_selected_game_not_an_extra_process() {
+        let mut app = steam_rule(1867242);
+        app.launch_target = crate::app::models::LaunchTarget::Steam {
+            app_id: 1867242,
+            executable: Some(PathBuf::from(r"C:\Game\game.exe")),
+        };
+        let runtime = RuntimeRegistry::new();
+        assert!(runtime.add_running_app_with_token(
+            &app.get_key(),
+            10,
+            1010,
+            group_id(0),
+            rule_id(0)
+        ));
+        assert!(runtime.add_running_app_with_token(
+            &app.get_key(),
+            20,
+            1020,
+            group_id(0),
+            rule_id(0)
+        ));
+        runtime
+            .running_apps_handle()
+            .blocking_write()
+            .apps
+            .get_mut(&app.get_key())
+            .unwrap()
+            .primary_instances
+            .insert(20, 1020);
+        let os = FakeLaunchOs {
+            image_paths: HashMap::from([
+                (10, PathBuf::from(r"C:\Game\helper.exe")),
+                (20, PathBuf::from(r"C:\Game\game.exe")),
+            ]),
+            focus_results: HashMap::from([(10, true), (20, true)]),
+            ..Default::default()
+        };
+        let mut log = LogManager::default();
+        assert_eq!(
+            super::focus_existing_app(&runtime, &mut log, app, &os),
+            super::LaunchDispatchOutcome::Accepted
+        );
+        assert_eq!(*os.focus_calls.borrow(), vec![20]);
+        assert!(os.steam_calls.borrow().is_empty());
+    }
+
     fn sample_state() -> Arc<RwLock<AppStateStorage>> {
         Arc::new(RwLock::new(AppStateStorage::test_fixture(|state| {
             state.version = 5;
@@ -1369,13 +2086,7 @@ mod tests {
                 name: "Games".to_string(),
                 cores: vec![0, 1],
                 programs: vec![
-                    AppToRun::new_path(
-                        PathBuf::from(r"C:\one.lnk"),
-                        vec![],
-                        PathBuf::from(r"C:\one.exe"),
-                        PriorityClass::Normal,
-                        false,
-                    ),
+                    sample_app(),
                     AppToRun::new_path(
                         PathBuf::from(r"C:\two.lnk"),
                         vec!["--autorun".to_string()],

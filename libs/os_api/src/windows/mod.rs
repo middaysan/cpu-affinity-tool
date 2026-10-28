@@ -1,4 +1,5 @@
 pub mod agent;
+pub(crate) mod app_identity;
 pub(crate) mod background;
 mod common;
 mod cpu;
@@ -14,6 +15,7 @@ mod processes;
 mod scheduling;
 mod self_affinity;
 mod shell;
+pub(crate) mod steam;
 pub(crate) mod tuning;
 mod window;
 pub use window::WindowActivation;

@@ -166,6 +166,23 @@ impl SchedulingHandoff {
         requested: ProcessSettingsFields,
         write: bool,
     ) -> Result<ProcessSettingsFields, ModuleError> {
+        if !write {
+            let instances = self
+                .instances
+                .lock()
+                .map_err(|_| ModuleError::new(ErrorKind::Verification, "scheduling metadata"))?;
+            let reserved = instances
+                .get(&(pid, token))
+                .map(|instance| instance.reserved)
+                .unwrap_or(ProcessSettingsFields {
+                    affinity: false,
+                    priority: false,
+                });
+            return Ok(ProcessSettingsFields {
+                affinity: requested.affinity && !reserved.affinity,
+                priority: requested.priority && !reserved.priority,
+            });
+        }
         self.prepare_instance(pid, token);
         let mut instances = self
             .instances
@@ -303,6 +320,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn s112_readonly_observer_does_not_create_field_reservations() {
+        for observed in [
+            ProcessSettingsFields {
+                affinity: false,
+                priority: true,
+            },
+            ProcessSettingsFields {
+                affinity: true,
+                priority: false,
+            },
+        ] {
+            let handoff = SchedulingHandoff::default();
+            handoff.select(42, 4200, observed, false).unwrap();
+            assert_eq!(
+                handoff
+                    .select(42, 4200, ProcessSettingsFields::default(), true)
+                    .unwrap(),
+                ProcessSettingsFields::default()
+            );
+        }
+    }
+
+    #[test]
     fn existing_background_priority_baseline_is_not_a_fake_fresh_launch() {
         let handoff = SchedulingHandoff::default();
         handoff.reserve_existing_priority(77, 700).unwrap();
@@ -346,15 +386,15 @@ mod tests {
     #[test]
     fn retiring_background_priority_cannot_release_another_modules_reservation() {
         let handoff = SchedulingHandoff::default();
+        // A verified fresh launch owns this reservation; a read-only observer does not.
         handoff
-            .select(
+            .started(
                 77,
                 700,
                 ProcessSettingsFields {
                     affinity: true,
                     priority: false,
                 },
-                false,
             )
             .unwrap();
         assert!(handoff.reserve_existing_priority(77, 700).is_err());

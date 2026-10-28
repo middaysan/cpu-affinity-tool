@@ -120,6 +120,7 @@ pub(crate) enum TuningRequest {
         target: TargetIdentity,
     },
     SaveBase {
+        gui_import: bool,
         candidate: Box<AppStateStorage>,
         expected_revision: u64,
     },
@@ -136,12 +137,14 @@ pub(crate) enum TuningRequest {
         target: GroupId,
         index: usize,
     },
-    EditRule {
+    EditOwnedRule {
         group: GroupId,
         rule: RuleId,
         app: Box<AppToRun>,
         background: Option<super::background_policy::RulePolicy>,
+        choices: Vec<crate::app::features::execution::control::policy::Choice>,
     },
+    ChooseProcessOwner(crate::app::features::execution::control::policy::Choice),
 }
 impl TuningRequest {
     fn is_base_change(&self) -> bool {
@@ -155,7 +158,8 @@ impl TuningRequest {
                 | Self::RemoveRule { .. }
                 | Self::RemoveGroup { .. }
                 | Self::MoveRule { .. }
-                | Self::EditRule { .. }
+                | Self::EditOwnedRule { .. }
+                | Self::ChooseProcessOwner(_)
         )
     }
 }
@@ -868,10 +872,11 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             feature,
             target,
         } => service.activate_manual(profile, feature, target),
-        TuningRequest::SaveBase { candidate, .. } => service.save_base(|saved| {
-            *saved = *candidate;
-            Ok(())
-        }),
+        TuningRequest::SaveBase {
+            candidate,
+            gui_import,
+            ..
+        } => service.save_gui_candidate(*candidate, gui_import),
         TuningRequest::RemoveRule { group, rule } => service.remove_rule(&group, &rule),
         TuningRequest::RemoveGroup { group } => service.remove_group(&group),
         TuningRequest::MoveRule {
@@ -880,12 +885,14 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             target,
             index,
         } => service.move_rule_at(&group, &rule, &target, index),
-        TuningRequest::EditRule {
+        TuningRequest::EditOwnedRule {
             group,
             rule,
             app,
             background,
-        } => service.edit_rule_background(&group, &rule, *app, background),
+            choices,
+        } => service.edit_rule_choices(&group, &rule, *app, background, choices),
+        TuningRequest::ChooseProcessOwner(choice) => service.choose_process_owner(choice),
     }
 }
 struct Actor {
@@ -1747,11 +1754,13 @@ mod card_tests {
         let mut candidate = state;
         candidate.theme_index = 1;
         let accepted = runtime.request(TuningRequest::SaveBase {
+            gui_import: false,
             candidate: Box::new(candidate.clone()),
             expected_revision: 0,
         });
         runtime.begin_shutdown();
         let late_request = runtime.request(TuningRequest::SaveBase {
+            gui_import: false,
             candidate: Box::new(candidate),
             expected_revision: 0,
         });
@@ -2498,6 +2507,7 @@ mod card_tests {
             );
             entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
             let accepted = runtime.request(TuningRequest::SaveBase {
+                gui_import: false,
                 candidate: Box::new(candidate),
                 expected_revision,
             });

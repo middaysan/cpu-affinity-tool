@@ -81,6 +81,7 @@ impl StatePersistence for SelectedStatePersistence {
     }
 }
 pub(crate) struct HeadlessTuning {
+    process_control: Option<std::sync::Arc<crate::app::features::execution::control::Authority>>,
     pub(super) background: super::background_policy::Runtime,
     pub(super) tweak_targets: std::collections::BTreeMap<FeatureId, TargetIdentity>,
     pub(super) pc_checks: Vec<super::pc_checks::PcCheck>,
@@ -104,6 +105,7 @@ impl HeadlessTuning {
     ) -> Self {
         let rules = RulesContext::from_storage(&state);
         Self {
+            process_control: None,
             background: Default::default(),
             tweak_targets: Default::default(),
             pc_checks: vec![],
@@ -122,6 +124,14 @@ impl HeadlessTuning {
     }
     pub(crate) fn state(&self) -> &AppStateStorage {
         &self.state
+    }
+    pub(crate) fn with_process_control(
+        mut self,
+        control: std::sync::Arc<crate::app::features::execution::control::Authority>,
+    ) -> Self {
+        control.configure(&self.state);
+        self.process_control = Some(control);
+        self
     }
     pub(crate) fn without_modules(mut self) -> Self {
         self.modules_enabled = false;
@@ -318,7 +328,25 @@ impl HeadlessTuning {
             }
         }
         candidate.mark_ready_for_current_schema_save(rules.to_persisted_identities());
+        crate::app::features::execution::control::policy::Policy::prepare_save(
+            &self.state,
+            &mut candidate,
+        )
+        .map_err(|_| SaveError::Invalid)?;
+        let control = self.process_control.clone();
+        let mut gate = control
+            .as_ref()
+            .map(|control| control.lock())
+            .transpose()
+            .map_err(|_| SaveError::Invalid)?;
         self.persistence.save(&mut candidate)?;
+        if let Some(gate) = gate.as_mut() {
+            gate.configure(&candidate);
+            if let Some(control) = &control {
+                control.publish_view(gate);
+            }
+        }
+        drop(gate);
         self.state = candidate;
         self.rules = rules;
         self.revision = revision;
@@ -482,12 +510,34 @@ impl HeadlessTuning {
             .retain(|a| &a.group != group || &a.rule != rule);
         self.save_config(config)
     }
+    pub(crate) fn save_gui_candidate(
+        &mut self,
+        mut candidate: AppStateStorage,
+        gui_import: bool,
+    ) -> Result<(), SaveError> {
+        if gui_import {
+            crate::app::features::rules::known_apps::prepare_new_gui_rules(
+                &self.rules,
+                &mut candidate,
+            );
+        }
+        self.save_base(|saved| {
+            *saved = candidate;
+            Ok(())
+        })
+    }
+
     pub(crate) fn save_base(
         &mut self,
         edit: impl FnOnce(&mut AppStateStorage) -> Result<(), SaveError>,
     ) -> Result<(), SaveError> {
         let mut candidate = self.state.clone();
         edit(&mut candidate)?;
+        if candidate.process_control_raw().map(|raw| raw.get())
+            != self.state.process_control_raw().map(|raw| raw.get())
+        {
+            return Err(SaveError::Invalid);
+        }
         if candidate.tuning.raw() != self.state.tuning.raw() {
             return Err(SaveError::Invalid);
         }
@@ -558,11 +608,9 @@ impl HeadlessTuning {
         rule: &RuleId,
         app: AppToRun,
     ) -> Result<(), SaveError> {
-        let (g, r) = self.rule_index(group, rule)?;
-        let mut candidate = self.state.clone();
-        candidate.groups[g].programs[r] = app;
-        self.publish(candidate, self.rules.clone())
+        self.edit_rule_choices(group, rule, app, None, vec![])
     }
+    #[cfg(test)]
     pub(crate) fn edit_rule_background(
         &mut self,
         group: &GroupId,
@@ -570,36 +618,79 @@ impl HeadlessTuning {
         app: AppToRun,
         background: Option<super::background_policy::RulePolicy>,
     ) -> Result<(), SaveError> {
-        let Some(background) = background else {
-            return self.edit_rule(group, rule, app);
-        };
-        if !self.modules_enabled && background == super::background_policy::RulePolicy::default() {
-            return self.edit_rule(group, rule, app);
-        }
+        self.edit_rule_choices(group, rule, app, background, vec![])
+    }
+    pub(crate) fn edit_rule_choices(
+        &mut self,
+        group: &GroupId,
+        rule: &RuleId,
+        mut app: AppToRun,
+        background: Option<super::background_policy::RulePolicy>,
+        choices: Vec<crate::app::features::execution::control::policy::Choice>,
+    ) -> Result<(), SaveError> {
         let (g, r) = self.rule_index(group, rule)?;
-        let is_exe = app.bin_path().is_some_and(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-        });
-        if background.enabled && !is_exe {
-            return Err(SaveError::Invalid);
-        }
-        let mut config = self.configured_for_edit()?;
-        super::background_policy::put_rule_policy(
-            &mut config,
-            super::tweaks::background_workload::GameRule {
-                group: group.0.clone(),
-                rule: rule.0.clone(),
-            },
-            &background,
-        )?;
+        app.builtin_process_binding = self.state.groups[g].programs[r]
+            .builtin_process_binding
+            .clone();
         let mut candidate = self.state.clone();
         candidate.groups[g].programs[r] = app;
-        // Both drafts publish atomically; a failed save must enable neither.
-        if config != self.configured()? {
-            candidate.tuning =
-                TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
+        if let Some(background) = background.filter(|policy| {
+            self.modules_enabled || *policy != super::background_policy::RulePolicy::default()
+        }) {
+            let is_exe = candidate.groups[g].programs[r]
+                .bin_path()
+                .is_some_and(|path| {
+                    path.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                });
+            if background.enabled && !is_exe {
+                return Err(SaveError::Invalid);
+            }
+            let mut config = self.configured_for_edit()?;
+            super::background_policy::put_rule_policy(
+                &mut config,
+                super::tweaks::background_workload::GameRule {
+                    group: group.0.clone(),
+                    rule: rule.0.clone(),
+                },
+                &background,
+            )?;
+            if config != self.configured()? {
+                candidate.tuning =
+                    TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
+            }
         }
+        self.apply_owner_choices(&mut candidate, &choices)?;
+        self.publish(candidate, self.rules.clone())
+    }
+    fn apply_owner_choices(
+        &self,
+        candidate: &mut AppStateStorage,
+        choices: &[crate::app::features::execution::control::policy::Choice],
+    ) -> Result<(), SaveError> {
+        if choices.is_empty() {
+            return Ok(());
+        }
+        self.process_control
+            .as_ref()
+            .ok_or(SaveError::Invalid)?
+            .validate_choices(candidate, choices)
+            .map_err(|_| SaveError::Invalid)?;
+        for choice in choices {
+            crate::app::features::execution::control::policy::Policy::choose(
+                candidate,
+                choice.clone(),
+            )
+            .map_err(|_| SaveError::Invalid)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn choose_process_owner(
+        &mut self,
+        choice: crate::app::features::execution::control::policy::Choice,
+    ) -> Result<(), SaveError> {
+        let mut candidate = self.state.clone();
+        self.apply_owner_choices(&mut candidate, &[choice])?;
         self.publish(candidate, self.rules.clone())
     }
     pub(crate) fn remove_rule(&mut self, group: &GroupId, rule: &RuleId) -> Result<(), SaveError> {

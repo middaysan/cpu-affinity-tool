@@ -76,7 +76,7 @@ pub(super) fn version_selection(data: &str) -> VersionSelection {
             version: VersionValue::Absent,
         }) => VersionSelection::Legacy,
         Ok(Header {
-            version: VersionValue::Integer(version @ 2..=11),
+            version: VersionValue::Integer(version @ 2..=14),
         }) => VersionSelection::Known(version as u32),
         Ok(_) => VersionSelection::Blocked,
         Err(_) if serde_json::from_str::<&serde_json::value::RawValue>(data).is_ok() => {
@@ -108,7 +108,7 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     let selected = version_selection(data);
     let normalized_data;
     let data = match selected {
-        VersionSelection::Known(10..=11) => data,
+        VersionSelection::Known(10..=14) => data,
         _ => {
             normalized_data = with_legacy_descendant_default(data)?;
             normalized_data.as_str()
@@ -116,6 +116,9 @@ pub(super) fn load_from_data(data: &str, path: &Path) -> Option<AppStateStorage>
     };
 
     match selected {
+        VersionSelection::Known(14) => load_v14(data, path),
+        VersionSelection::Known(13) => load_v13(data, path),
+        VersionSelection::Known(12) => load_v12(data, path),
         VersionSelection::Known(11) => load_v11(data, path),
         VersionSelection::Known(10) => load_v10(data, path),
         VersionSelection::Known(9) => load_v9(data, path),
@@ -159,6 +162,21 @@ fn load_v11(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
     let _ = schema_refresh::refresh_loaded_schema(&mut state);
     Some(state.finalize_load(11, false))
+}
+fn load_v14(data: &str, _path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    Some(state.finalize_load(14, false))
+}
+fn load_v13(data: &str, _path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    Some(state.finalize_load(13, false))
+}
+fn load_v12(data: &str, _path: &Path) -> Option<AppStateStorage> {
+    let mut state: AppStateStorage = serde_json::from_str(data).ok()?;
+    let _ = schema_refresh::refresh_loaded_schema(&mut state);
+    Some(state.finalize_load(12, false))
 }
 fn load_v10(data: &str, _path: &Path) -> Option<AppStateStorage> {
     let mut state: AppStateStorage = serde_json::from_str(data).ok()?;

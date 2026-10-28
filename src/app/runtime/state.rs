@@ -36,10 +36,12 @@ use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CentralProgramSnapshot {
+    pub steam_app_id: Option<u32>,
     pub rule_id: RuleId,
     pub name: String,
     pub launch_target_detail: String,
     pub app_key: AppRuntimeKey,
+    pub runtime_key: AppRuntimeKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +156,7 @@ enum LegacyCompletion {
         crate::app::shell::sessions::RuleEditorTarget,
         Option<AppToRun>,
         Option<crate::app::features::system_tweaks::background_policy::RulePolicy>,
+        Vec<crate::app::features::execution::control::policy::Choice>,
     ),
     Group(Option<GroupId>, String, Vec<bool>, bool),
     Import(ImportIntent, String),
@@ -248,7 +251,9 @@ impl AppState {
             ),
         );
         let tuning_editors = registered.registry().clone();
-        let service = registered.headless_selected(saved);
+        let service = registered
+            .headless_selected(saved)
+            .with_process_control(runtime.control_handle());
         let tuning = TuningRuntime::start(
             if crate::app::features::system_tweaks::MODULES_ENABLED {
                 service
@@ -313,7 +318,9 @@ impl AppState {
             .clone();
         let registered = Tuning::from_registry(Default::default());
         let tuning_editors = registered.registry().clone();
-        let service = registered.headless(saved, Box::new(TestStatePersistence));
+        let service = registered
+            .headless(saved, Box::new(TestStatePersistence))
+            .with_process_control(runtime.control_handle());
         let tuning = TuningRuntime::start(
             if crate::app::features::system_tweaks::MODULES_ENABLED {
                 service
@@ -441,7 +448,7 @@ impl AppState {
             let pending = self.pending_legacy.take().unwrap();
             if matches!(snapshot.operation, crate::app::features::system_tweaks::TuningOperationState::Idle) && snapshot.revision > pending.revision {
                 match pending.completion {
-                    Some(LegacyCompletion::Rule(target, draft, background)) if self.ui.app_edit_state.target.as_ref() == Some(&target) && self.ui.app_edit_state.current_edit == draft && self.ui.app_edit_state.background == background => self.close_app_run_settings(),
+                    Some(LegacyCompletion::Rule(target, draft, background, choices)) if self.ui.app_edit_state.target.as_ref() == Some(&target) && self.ui.app_edit_state.current_edit == draft && self.ui.app_edit_state.background == background && self.ui.app_edit_state.control_choices == choices => self.close_app_run_settings(),
                     Some(LegacyCompletion::Group(target, name, selection, run_all)) if self.ui.group_form.editing_group_id == target && self.ui.group_form.group_name == name && self.ui.group_form.core_selection == selection && self.ui.group_form.run_all_enabled == run_all => self.cancel_group_form_session(),
                     Some(LegacyCompletion::Import(intent, message)) => {
                         match intent {
@@ -457,9 +464,11 @@ impl AppState {
                     if self.ui.dropped_files.is_none() {
                         self.ui.dropped_files = Some(files);
                         self.ui.file_drop_hover_target = Some(group);
-                        self.log_manager.add_important_sticky_once("App targets were not saved. The files and target group were retained for retry.".into());
+                        let error=if let crate::app::features::system_tweaks::TuningOperationState::Refused{error,..}=snapshot.operation {error} else {SaveError::Recovering};
+                        self.ui.file_import_error=Some(error);
+                        self.log_manager.add_important_entry(format!("App targets were not saved ({error:?}). The files and target group were retained. Use Retry or Dismiss in Affinity groups."));
                     } else {
-                        self.log_manager.add_important_sticky_once(format!("App targets were not saved for group {}: {files:?}. A newer file selection was preserved; select these files again to retry.", group.0));
+                        self.log_manager.add_important_entry(format!("App targets were not saved for group {}: {files:?}. A newer file selection was preserved; select these files again to retry.", group.0));
                     }
                 } else {
                     self.log_manager.add_important_sticky_once("Settings were not saved. The draft and saved values were retained.".into());
@@ -533,6 +542,7 @@ impl AppState {
         };
         self.enqueue_legacy(
             TuningRequest::SaveBase {
+                gui_import: matches!(&completion, Some(LegacyCompletion::Import(..))),
                 candidate: Box::new(candidate),
                 expected_revision,
             },
@@ -548,7 +558,15 @@ impl AppState {
         let id = match self.tuning.request(request) {
             Ok(id) => id,
             Err(error) => {
-                self.log_manager.add_important_sticky_once(format!("Settings were not queued: {error:?}. Saved values and the draft were retained."));
+                if matches!(
+                    &completion,
+                    Some(LegacyCompletion::Import(ImportIntent::Files(_, _), _))
+                ) {
+                    self.ui.file_import_error = Some(error);
+                    self.log_manager.add_important_entry(format!("App targets were not queued ({error:?}). The files and target group were retained. Use Retry or Dismiss in Affinity groups."));
+                } else {
+                    self.log_manager.add_important_sticky_once(format!("Settings were not queued: {error:?}. Saved values and the draft were retained."));
+                }
                 return false;
             }
         };
@@ -635,6 +653,7 @@ impl AppState {
                             .iter()
                             .enumerate()
                             .map(|(rule_index, app)| CentralProgramSnapshot {
+                                steam_app_id: app.steam_game().map(|(id, _)| id),
                                 rule_id: self
                                     .rules
                                     .rule_id_for_index(group_index, rule_index)
@@ -642,6 +661,13 @@ impl AppState {
                                 name: app.name.clone(),
                                 launch_target_detail: app.launch_target_detail(),
                                 app_key: app.get_key(),
+                                runtime_key: self.rules.runtime_key(
+                                    app,
+                                    &self
+                                        .rules
+                                        .rule_id_for_index(group_index, rule_index)
+                                        .expect("rule identity"),
+                                ),
                             })
                             .collect(),
                     })
@@ -827,6 +853,7 @@ impl AppState {
             return;
         };
         self.ui.dropped_files = Some(paths.clone());
+        self.ui.file_import_error = None;
         self.ui.file_drop_hover_target = Some(group_id.clone());
         let intent = ImportIntent::Files(group_id, paths.clone());
         let outcome = rules::add_apps_to_group(&draft, group_index, paths);
@@ -876,6 +903,7 @@ impl AppState {
     pub fn consume_dropped_files_into_group(&mut self, group_id: GroupId) -> bool {
         let Some(files) = self.ui.dropped_files.clone() else {
             self.ui.file_drop_hover_target = None;
+            self.ui.file_import_error = None;
             return false;
         };
 
@@ -883,6 +911,7 @@ impl AppState {
             self.ui.dropped_files = None;
             self.ui.file_drop_position = None;
             self.ui.file_drop_hover_target = None;
+            self.ui.file_import_error = None;
             return false;
         }
 
@@ -890,8 +919,16 @@ impl AppState {
             self.ui.dropped_files = None;
             self.ui.file_drop_position = None;
             self.ui.file_drop_hover_target = None;
+            self.ui.file_import_error = None;
             return false;
         };
+        if matches!(
+            self.tuning_snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ) {
+            return false;
+        }
+        self.ui.file_import_error = None;
         self.ui.file_drop_hover_target = Some(group_id.clone());
 
         let group_name = self.get_group_name(group_index).unwrap_or_default();
@@ -1260,7 +1297,9 @@ impl AppState {
             let Ok(saved) = self.persistent_state.try_read() else {
                 return true;
             };
-            if self.ui.app_edit_state.background_is_dirty(&saved.tuning) {
+            if !self.ui.app_edit_state.control_choices.is_empty()
+                || self.ui.app_edit_state.background_is_dirty(&saved.tuning)
+            {
                 return true;
             }
         }
@@ -1874,6 +1913,7 @@ impl AppState {
     pub fn open_app_run_settings(&mut self, group_id: GroupId, rule_id: RuleId) {
         self.ui.app_edit_state.process_names.request_refresh();
         self.ui.app_edit_state.current_edit = None;
+        self.ui.app_edit_state.control_choices.clear();
         self.ui.app_edit_state.background = None;
         #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
         {
@@ -1954,13 +1994,15 @@ impl AppState {
                     target.clone(),
                     self.ui.app_edit_state.current_edit.clone(),
                     self.ui.app_edit_state.background.clone(),
+                    self.ui.app_edit_state.control_choices.clone(),
                 );
                 let _ = self.enqueue_legacy(
-                    TuningRequest::EditRule {
+                    TuningRequest::EditOwnedRule {
                         group: target.group_id,
                         rule: target.rule_id,
                         app: Box::new(updated_app),
                         background: self.ui.app_edit_state.background.clone(),
+                        choices: self.ui.app_edit_state.control_choices.clone(),
                     },
                     Some(completion),
                 );
@@ -1978,6 +2020,7 @@ impl AppState {
                 target.clone(),
                 self.ui.app_edit_state.current_edit.clone(),
                 self.ui.app_edit_state.background.clone(),
+                self.ui.app_edit_state.control_choices.clone(),
             );
             if self.enqueue_legacy(
                 TuningRequest::RemoveRule {
@@ -2264,7 +2307,9 @@ impl AppState {
     }
 
     fn reset_app_run_settings_session(&mut self) {
+        self.ui.app_edit_state.steam_picker.reset_view();
         self.ui.app_edit_state.current_edit = None;
+        self.ui.app_edit_state.control_choices.clear();
         self.ui.app_edit_state.background = None;
         #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
         {
@@ -2328,6 +2373,7 @@ mod tests {
             candidate.theme_index = 2;
             let accepted = app.enqueue_legacy(
                 super::TuningRequest::SaveBase {
+                    gui_import: false,
                     candidate: Box::new(candidate),
                     expected_revision: 0,
                 },
@@ -3980,6 +4026,7 @@ mod tests {
             candidate.mark_ready_for_current_schema_save(app.rules.to_persisted_identities());
             app.request_tuning(
                 crate::app::features::system_tweaks::TuningRequest::SaveBase {
+                    gui_import: false,
                     candidate: Box::new(candidate),
                     expected_revision: app.tuning_adopted_revision,
                 },
@@ -4044,6 +4091,82 @@ mod tests {
 
     #[cfg(all(target_os = "windows", feature = "windows"))]
     #[test]
+    #[ignore = "Explicit read-only local shortcut/state characterization; persistence is isolated"]
+    fn s104_local_steam_import_characterization() {
+        use crate::app::features::system_tweaks::{
+            service::SavedState, SaveError, StatePersistence,
+        };
+        struct Disk(std::path::PathBuf);
+        impl StatePersistence for Disk {
+            fn save(&mut self, state: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                state
+                    .try_save_to_path(&self.0)
+                    .map_err(|_| SaveError::Storage)?;
+                Ok(SavedState::Unavailable)
+            }
+        }
+        let source = std::env::var_os("CPU_AFFINITY_IMPORT_STATE").expect("explicit input state");
+        let shortcut = std::env::var_os("CPU_AFFINITY_IMPORT_SHORTCUT").expect("explicit shortcut");
+        let temp = std::env::temp_dir().join(format!(
+            "cpu-affinity-import-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp).unwrap();
+        let copy = temp.join("state.json");
+        std::fs::write(&copy, std::fs::read(&source).unwrap()).unwrap();
+        let state = AppStateStorage::load_from_path(&copy);
+        assert!(
+            !state.save_blocked(),
+            "Real file loader blocked current supported state"
+        );
+        let count = state.groups[0].programs.len();
+        let mut app = AppState::new_for_test(Arc::new(RwLock::new(state)), 20);
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(state, Box::new(Disk(copy.clone()))),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        let group = group_id(&app, 0);
+        app.add_selected_files_to_group(group.clone(), vec![shortcut.clone().into()]);
+        await_import_completion(&mut app);
+        assert!(
+            matches!(
+                app.tuning_snapshot().operation,
+                crate::app::features::system_tweaks::TuningOperationState::Idle
+            ),
+            "{:?}",
+            app.tuning_snapshot().operation
+        );
+        let saved = AppStateStorage::load_from_path(&copy);
+        assert!(!saved.save_blocked());
+        assert_eq!(saved.groups[0].programs.len(), count + 1);
+        assert!(saved.groups[0]
+            .programs
+            .last()
+            .unwrap()
+            .steam_game()
+            .is_some());
+        app.add_selected_files_to_group(group, vec![shortcut.into()]);
+        await_import_completion(&mut app);
+        assert_eq!(
+            app.persistent_state.read().unwrap().groups[0]
+                .programs
+                .len(),
+            count + 1
+        );
+        drop(app);
+        std::fs::remove_file(&copy).unwrap();
+        std::fs::remove_dir(&temp).unwrap();
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
     fn import_retention_dropped_pending_retry() {
         let mut app = sample_state();
         let (_fail, gate) = install_import_persistence(&mut app, true);
@@ -4096,6 +4219,32 @@ mod tests {
             WindowRoute::Groups(GroupRoute::List)
         ));
         assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn s104_failed_import_reports_the_actual_refusal_once() {
+        let mut app = sample_state();
+        let (fail, _) = install_import_persistence(&mut app, false);
+        let group = group_id(&app, 0);
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.add_selected_files_to_group(group, vec![r"C:\Import-test.exe".into()]);
+        await_import_completion(&mut app);
+        let failures: Vec<_> = app
+            .log_manager
+            .entries
+            .iter()
+            .filter(|e| e.message.contains("not saved"))
+            .collect();
+        assert_eq!(
+            failures.len(),
+            1,
+            "One failed operation produces one diagnostic"
+        );
+        assert!(
+            failures[0].message.contains("Storage"),
+            "The refusal kind must be visible"
+        );
     }
 
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -4481,5 +4630,48 @@ mod tests {
 
         assert!(!app.start_windows_event_log_scan_after_shell_gate());
         assert!(!app.windows_event_log_worker_is_active());
+    }
+    #[test]
+    fn s110_editor_cancel_and_save_keep_process_lists_and_owner_intent_separate() {
+        use crate::app::features::execution::control::{
+            policy::{Choice, Policy},
+            tests::{fixture, observe},
+        };
+        let state = fixture();
+        let original = serde_json::to_value(&state.groups).unwrap();
+        let mut app = AppState::new_for_test(Arc::new(RwLock::new(state.clone())), 4);
+        let view = app.runtime.control_handle().view();
+        let target = &view.rules[1];
+        app.open_app_run_settings(target.group.clone(), target.rule.clone());
+        app.ensure_current_edit_loaded();
+        observe(
+            &app.runtime.control_handle(),
+            &state,
+            &[0, 1],
+            1,
+            r"C:\Shared\helper.exe",
+        );
+        app.ui.app_edit_state.control_choices.push(Choice {
+            image: r"C:\Shared\helper.exe".into(),
+            owner: target.rule.clone(),
+        });
+        assert!(app.is_current_app_edit_dirty());
+        app.close_app_run_settings();
+        assert!(app.ui.app_edit_state.control_choices.is_empty());
+        assert!(Policy::read(&app.persistent_state.read().unwrap())
+            .unwrap()
+            .choices
+            .is_empty());
+        app.open_app_run_settings(target.group.clone(), target.rule.clone());
+        app.ensure_current_edit_loaded();
+        app.ui.app_edit_state.control_choices.push(Choice {
+            image: r"C:\Shared\helper.exe".into(),
+            owner: target.rule.clone(),
+        });
+        app.commit_current_app_edit_session();
+        app.wait_for_test_save();
+        let saved = app.persistent_state.read().unwrap();
+        assert_eq!(serde_json::to_value(&saved.groups).unwrap(), original);
+        assert_eq!(Policy::read(&saved).unwrap().choices[0].owner, target.rule);
     }
 }

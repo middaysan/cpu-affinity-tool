@@ -1599,6 +1599,7 @@ mod tests {
         let restored = app.tuning_snapshot();
         assert_eq!(restored.restoration_effect, Some(Effect::Immediate));
         app.request_tuning(TuningRequest::SaveBase {
+            gui_import: false,
             candidate: Box::new((*restored.state).clone()),
             expected_revision: 0,
         })

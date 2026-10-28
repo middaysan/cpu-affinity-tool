@@ -24,6 +24,10 @@ struct ProcessSnapshot {
 
 #[derive(Debug, Clone)]
 enum ConfiguredProgramMatcher {
+    Known {
+        app: Box<AppToRun>,
+        scope: Option<crate::app::features::rules::known_apps::Scope>,
+    },
     Path {
         primary_name: Option<String>,
         fallback_names: Vec<String>,
@@ -31,6 +35,10 @@ enum ConfiguredProgramMatcher {
     },
     Installed {
         aumid: String,
+    },
+    Steam {
+        app_id: u32,
+        executable: Option<PathBuf>,
     },
 }
 
@@ -48,6 +56,7 @@ struct BoundProcessInstance {
 
 #[derive(Debug, Clone)]
 struct ConfiguredProgramSnapshot {
+    control_generation: u64,
     key: AppRuntimeKey,
     display_name: String,
     additional_processes_normalized: Vec<String>,
@@ -64,6 +73,34 @@ struct RunningAppsIterationOutcome {
 }
 
 trait RunningAppsOs {
+    fn observed_image(&self, _pid: u32, _token: u64) -> Option<PathBuf> {
+        None
+    }
+    fn begin_observation(&self) {}
+    fn known_instance_role(
+        &self,
+        _pid: u32,
+        _token: u64,
+        _scope: &crate::app::features::rules::known_apps::Scope,
+        _image: &Path,
+    ) -> Option<crate::app::features::rules::known_apps::MemberRole> {
+        None
+    }
+    fn steam_instance_allowed(&self, _pid: u32, _token: u64) -> bool {
+        false
+    }
+
+    fn steam_game_processes(
+        &self,
+        _app_id: u32,
+        _selected: Option<&Path>,
+        _names: &HashMap<u32, String>,
+    ) -> Vec<os_api::steam::GameProcess> {
+        Vec::new()
+    }
+    fn steam_game_directory(&self, _app_id: u32) -> Option<PathBuf> {
+        None
+    }
     fn snapshot_process_tree(&self) -> Result<ProcessSnapshot, String>;
     fn get_process_image_path_and_instance_token(&self, pid: u32)
         -> Result<(PathBuf, u64), String>;
@@ -79,9 +116,58 @@ trait RunningAppsOs {
     ) -> Result<InstalledPackageRuntimeInfo, String>;
 }
 
-struct RealRunningAppsOs;
+#[derive(Default)]
+struct RealRunningAppsOs {
+    known_checks: std::cell::RefCell<HashMap<(u32, u64), bool>>,
+    images: std::cell::RefCell<HashMap<(u32, u64), PathBuf>>,
+    image_bytes: std::cell::Cell<usize>,
+}
 
 impl RunningAppsOs for RealRunningAppsOs {
+    fn observed_image(&self, pid: u32, token: u64) -> Option<PathBuf> {
+        self.images.borrow().get(&(pid, token)).cloned()
+    }
+    fn begin_observation(&self) {
+        self.known_checks.borrow_mut().clear();
+        self.images.borrow_mut().clear();
+        self.image_bytes.set(0);
+    }
+
+    fn known_instance_role(
+        &self,
+        pid: u32,
+        token: u64,
+        scope: &crate::app::features::rules::known_apps::Scope,
+        image: &Path,
+    ) -> Option<crate::app::features::rules::known_apps::MemberRole> {
+        let (root, image) = os_api::app_identity::canonical_scope(&scope.root, image)?;
+        let role = scope.witness_role_under_root(&root, &image)?;
+        let cached = self.known_checks.borrow().get(&(pid, token)).copied();
+        let allowed = cached.unwrap_or_else(|| {
+            let allowed = os_api::app_identity::verify_current_instance(pid, token);
+            let mut cache = self.known_checks.borrow_mut();
+            if cache.len() < 4096 {
+                cache.insert((pid, token), allowed);
+            }
+            allowed
+        });
+        allowed.then_some(role)
+    }
+    fn steam_instance_allowed(&self, pid: u32, token: u64) -> bool {
+        os_api::steam::verify_instance(pid, token)
+    }
+
+    fn steam_game_processes(
+        &self,
+        app_id: u32,
+        selected: Option<&Path>,
+        names: &HashMap<u32, String>,
+    ) -> Vec<os_api::steam::GameProcess> {
+        os_api::steam::game_processes(app_id, selected, names)
+    }
+    fn steam_game_directory(&self, app_id: u32) -> Option<PathBuf> {
+        os_api::steam::game_directory(app_id)
+    }
     fn snapshot_process_tree(&self) -> Result<ProcessSnapshot, String> {
         OS::snapshot_process_tree().map(|tree| ProcessSnapshot {
             children_of: tree.children_of,
@@ -93,7 +179,17 @@ impl RunningAppsOs for RealRunningAppsOs {
         &self,
         pid: u32,
     ) -> Result<(PathBuf, u64), String> {
-        OS::get_process_image_path_and_instance_token(pid)
+        let result = OS::get_process_image_path_and_instance_token(pid)?;
+        let bytes = result.0.as_os_str().len().saturating_mul(2);
+        let mut images = self.images.borrow_mut();
+        if images.len() < 4096
+            && !images.contains_key(&(pid, result.1))
+            && self.image_bytes.get().saturating_add(bytes) <= 2 * 1024 * 1024
+        {
+            images.insert((pid, result.1), result.0.clone());
+            self.image_bytes.set(self.image_bytes.get() + bytes);
+        }
+        Ok(result)
     }
 
     fn get_process_instance_token(&self, pid: u32) -> Result<u64, String> {
@@ -126,7 +222,7 @@ pub async fn run_running_app_monitor(
     monitor_tx: MonitorEventSender,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-    let os = RealRunningAppsOs;
+    let os = RealRunningAppsOs::default();
 
     loop {
         interval.tick().await;
@@ -163,13 +259,17 @@ pub async fn run_running_app_monitor(
             HashMap::new()
         };
 
+        let steam = observe_steam(&configured_programs, &snapshot, &os);
         if let Ok(mut apps) = running_apps.try_write() {
             let outcome = process_running_apps_iteration_with_os(
                 &mut apps,
                 configured_programs,
                 &snapshot,
-                &name_to_pids,
-                &aumid_to_seed_pids,
+                IterationLookups {
+                    names: &name_to_pids,
+                    aumids: &aumid_to_seed_pids,
+                    steam,
+                },
                 &installed_package_tracking,
                 &os,
             );
@@ -191,6 +291,7 @@ fn snapshot_for_configuration<O: RunningAppsOs>(
     configured: &[ConfiguredProgramSnapshot],
     os: &O,
 ) -> Result<ProcessSnapshot, String> {
+    os.begin_observation();
     if configured.is_empty() {
         // The normal reconciliation path must still remove stale tracking and owner claims.
         Ok(ProcessSnapshot::default())
@@ -201,6 +302,8 @@ fn snapshot_for_configuration<O: RunningAppsOs>(
 
 fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgramSnapshot> {
     let mut programs = Vec::new();
+    let control_generation =
+        super::control::policy::Policy::read(state).map_or(u64::MAX, |policy| policy.generation());
     let rules = RulesContext::from_storage(state);
     for (group_index, group) in state.groups.iter().enumerate() {
         let group_id = rules
@@ -211,32 +314,44 @@ fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgram
                 .rule_id_for_index(group_index, rule_index)
                 .expect("rule identity");
             let tracked_names = collect_tracked_process_names(app);
-            let matcher = match &app.launch_target {
-                LaunchTarget::Path { bin_path, .. } => {
-                    if tracked_names.is_empty() {
-                        continue;
-                    }
-                    let primary_name = app.primary_process_name_normalized();
-                    let fallback_names = tracked_names
-                        .iter()
-                        .filter(|name| Some(*name) != primary_name.as_ref())
-                        .cloned()
-                        .collect();
-
-                    ConfiguredProgramMatcher::Path {
-                        primary_name: primary_name
-                            .filter(|primary| tracked_names.iter().any(|name| name == primary)),
-                        fallback_names,
-                        bin_path: bin_path.clone(),
-                    }
+            let matcher = if app.is_path_target() && app.builtin_process_binding.is_some() {
+                ConfiguredProgramMatcher::Known {
+                    app: Box::new(app.clone()),
+                    scope: crate::app::features::rules::known_apps::project(app).ok(),
                 }
-                LaunchTarget::Installed { aumid } => ConfiguredProgramMatcher::Installed {
-                    aumid: aumid.to_lowercase(),
-                },
+            } else {
+                match &app.launch_target {
+                    LaunchTarget::Path { bin_path, .. } => {
+                        if tracked_names.is_empty() {
+                            continue;
+                        }
+                        let primary_name = app.primary_process_name_normalized();
+                        let fallback_names = tracked_names
+                            .iter()
+                            .filter(|name| Some(*name) != primary_name.as_ref())
+                            .cloned()
+                            .collect();
+
+                        ConfiguredProgramMatcher::Path {
+                            primary_name: primary_name
+                                .filter(|primary| tracked_names.iter().any(|name| name == primary)),
+                            fallback_names,
+                            bin_path: bin_path.clone(),
+                        }
+                    }
+                    LaunchTarget::Installed { aumid } => ConfiguredProgramMatcher::Installed {
+                        aumid: aumid.to_lowercase(),
+                    },
+                    LaunchTarget::Steam { app_id, executable } => ConfiguredProgramMatcher::Steam {
+                        app_id: *app_id,
+                        executable: executable.clone(),
+                    },
+                }
             };
 
             programs.push(ConfiguredProgramSnapshot {
-                key: app.get_key(),
+                control_generation,
+                key: rules.runtime_key(app, &rule_id),
                 display_name: app.name.clone(),
                 additional_processes_normalized: tracked_names,
                 matcher,
@@ -251,6 +366,10 @@ fn collect_configured_programs(state: &AppStateStorage) -> Vec<ConfiguredProgram
 }
 
 fn collect_tracked_process_names(program: &AppToRun) -> Vec<String> {
+    if program.builtin_process_binding.is_some() && !program.is_path_target() {
+        return crate::app::features::rules::known_apps::manual_names(program);
+    }
+
     let mut names = Vec::new();
 
     for process_name in &program.additional_processes {
@@ -559,29 +678,189 @@ fn replace_with_current_process_instances<O: RunningAppsOs>(
     app.pid_instance_tokens = pid_instance_tokens;
 }
 
+mod known_apps;
+use known_apps::update_known_rule;
+mod steam;
+use steam::{prepare_steam_observations, update_steam_rule};
+
+fn rekey_rule_membership(
+    apps: &mut RunningApps,
+    configured: &[ConfiguredProgramSnapshot],
+    packages: &Arc<RwLock<InstalledPackageTrackingState>>,
+) -> bool {
+    let moves: Vec<_> = apps
+        .apps
+        .iter()
+        .filter_map(|(old, app)| {
+            configured
+                .iter()
+                .find(|rule| {
+                    rule.rule_id == app.rule_id
+                        && &rule.key != old
+                        && (old.scoped_to_rule(&app.rule_id) == rule.key
+                            || rule.key.scoped_to_rule(&app.rule_id) == *old)
+                })
+                .map(|rule| (old.clone(), rule.key.clone()))
+        })
+        .collect();
+    if moves.is_empty() {
+        return false;
+    }
+    apps.mutate_membership(|apps| {
+        for (old, new) in &moves {
+            if !apps.apps.contains_key(new) {
+                if let Some(app) = apps.apps.remove(old) {
+                    apps.apps.insert(new.clone(), app);
+                }
+            }
+        }
+    });
+    if let Ok(mut packages) = packages.write() {
+        for (old, new) in &moves {
+            packages.rekey_owner(old, new);
+        }
+    }
+    true
+}
+
+type SteamObservations = HashMap<AppRuntimeKey, (Option<PathBuf>, Vec<os_api::steam::GameProcess>)>;
+fn observe_steam<O: RunningAppsOs>(
+    configured_programs: &[ConfiguredProgramSnapshot],
+    snapshot: &ProcessSnapshot,
+    os: &O,
+) -> SteamObservations {
+    let mut steam_detected = HashMap::new();
+    for configured in configured_programs {
+        if let ConfiguredProgramMatcher::Steam { app_id, executable } = &configured.matcher {
+            let candidates =
+                os.steam_game_processes(*app_id, executable.as_deref(), &snapshot.names);
+            steam_detected.insert(
+                configured.key.clone(),
+                (os.steam_game_directory(*app_id), candidates),
+            );
+        }
+    }
+    steam_detected
+}
+
+struct IterationLookups<'a> {
+    names: &'a HashMap<String, Vec<u32>>,
+    aumids: &'a HashMap<String, Vec<BoundProcessInstance>>,
+    steam: SteamObservations,
+}
 fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
     apps: &mut RunningApps,
     configured_programs: Vec<ConfiguredProgramSnapshot>,
     snapshot: &ProcessSnapshot,
-    name_to_pids: &HashMap<String, Vec<u32>>,
-    aumid_to_seed_pids: &HashMap<String, Vec<BoundProcessInstance>>,
+    lookups: IterationLookups<'_>,
     installed_package_tracking: &Arc<RwLock<InstalledPackageTrackingState>>,
     os: &O,
 ) -> RunningAppsIterationOutcome {
-    apps.mutate_membership(|apps| {
+    let IterationLookups {
+        names: name_to_pids,
+        aumids: aumid_to_seed_pids,
+        steam: mut steam_detected,
+    } = lookups;
+    let rekeyed = rekey_rule_membership(apps, &configured_programs, installed_package_tracking);
+    prepare_steam_observations(
+        apps,
+        &configured_programs,
+        &mut steam_detected,
+        snapshot,
+        os,
+    );
+    let mut steam_claims = HashMap::<(u32, u64), HashSet<u32>>::new();
+    for configured in &configured_programs {
+        if let ConfiguredProgramMatcher::Steam { app_id, .. } = &configured.matcher {
+            if let Some((_, members)) = steam_detected.get(&configured.key) {
+                for p in members {
+                    steam_claims
+                        .entry((p.pid, p.creation_token))
+                        .or_default()
+                        .insert(*app_id);
+                }
+            }
+            if let Some(previous) = apps.apps.get(&configured.key) {
+                for (&pid, &token) in &previous.primary_instances {
+                    if snapshot.names.contains_key(&pid)
+                        && os.get_process_instance_token(pid).ok() == Some(token)
+                    {
+                        steam_claims
+                            .entry((pid, token))
+                            .or_default()
+                            .insert(*app_id);
+                    }
+                }
+            }
+        }
+    }
+    let control_generation = configured_programs
+        .first()
+        .map_or(u64::MAX, |rule| rule.control_generation);
+    let control = apps.control.clone();
+    let outcome = apps.mutate_membership(|apps| {
         let mut processed_keys = HashSet::new();
-        let mut outcome = RunningAppsIterationOutcome::default();
+        let mut outcome = RunningAppsIterationOutcome {
+            changed: rekeyed,
+            ..Default::default()
+        };
 
+        let steam_rules: HashSet<_> = configured_programs
+            .iter()
+            .filter_map(|c| {
+                if let ConfiguredProgramMatcher::Steam { app_id, .. } = c.matcher {
+                    Some((c.rule_id.clone(), app_id))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        apps.steam_unresolved
+            .retain(|rule| steam_rules.iter().any(|(r, _)| r == rule));
         for configured in configured_programs {
             let key = configured.key.clone();
             processed_keys.insert(key.clone());
             let was_tracked = apps.apps.contains_key(&key);
 
+            if let ConfiguredProgramMatcher::Steam { app_id, executable } = &configured.matcher {
+                let (root, candidates) = steam_detected.remove(&key).unwrap_or_default();
+                update_steam_rule(
+                    apps,
+                    &configured,
+                    *app_id,
+                    executable.as_deref(),
+                    root,
+                    candidates,
+                    &steam_claims,
+                    snapshot,
+                    name_to_pids,
+                    os,
+                    &mut outcome,
+                );
+                continue;
+            }
+
+            if let ConfiguredProgramMatcher::Known { app, scope } = &configured.matcher {
+                update_known_rule(
+                    apps,
+                    &configured,
+                    app,
+                    scope.as_ref(),
+                    snapshot,
+                    name_to_pids,
+                    os,
+                    &mut outcome,
+                );
+                continue;
+            }
+
             let verified_path_roots = match &configured.matcher {
                 ConfiguredProgramMatcher::Path { .. } => {
                     collect_path_verified_pids(&configured.matcher, name_to_pids, os)
                 }
-                ConfiguredProgramMatcher::Installed { .. } => Vec::new(),
+                ConfiguredProgramMatcher::Installed { .. }
+                | ConfiguredProgramMatcher::Steam { .. }
+                | ConfiguredProgramMatcher::Known { .. } => Vec::new(),
             };
             let mut detected_pids = match &configured.matcher {
                 ConfiguredProgramMatcher::Path { fallback_names, .. } => {
@@ -591,6 +870,9 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                 }
                 ConfiguredProgramMatcher::Installed { aumid } => {
                     aumid_to_seed_pids.get(aumid).cloned().unwrap_or_default()
+                }
+                ConfiguredProgramMatcher::Steam { .. } | ConfiguredProgramMatcher::Known { .. } => {
+                    unreachable!()
                 }
             };
 
@@ -617,7 +899,9 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                             .any(|&pid| is_known_auto_managed_installed_pid(snapshot, pid))
                     })
                 }
-                ConfiguredProgramMatcher::Path { .. } => false,
+                ConfiguredProgramMatcher::Path { .. }
+                | ConfiguredProgramMatcher::Steam { .. }
+                | ConfiguredProgramMatcher::Known { .. } => false,
             };
             let owns_package = installed_package_info
                 .as_ref()
@@ -696,6 +980,8 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                         );
                         replace_with_current_process_instances(app, managed_pids, snapshot, os);
                     }
+                    ConfiguredProgramMatcher::Steam { .. }
+                    | ConfiguredProgramMatcher::Known { .. } => unreachable!(),
                 }
 
                 if app.pids != old_pids {
@@ -715,7 +1001,9 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
 
             let should_track = match &configured.matcher {
                 ConfiguredProgramMatcher::Path { .. } => !detected_pids.is_empty(),
-                ConfiguredProgramMatcher::Installed { .. } => !detected_pids.is_empty(),
+                ConfiguredProgramMatcher::Installed { .. }
+                | ConfiguredProgramMatcher::Steam { .. }
+                | ConfiguredProgramMatcher::Known { .. } => !detected_pids.is_empty(),
             };
 
             if !should_track {
@@ -782,6 +1070,9 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                         &explicit_pid_set,
                     );
                 }
+                ConfiguredProgramMatcher::Steam { .. } | ConfiguredProgramMatcher::Known { .. } => {
+                    unreachable!()
+                }
             }
 
             if detected_pids.is_empty() {
@@ -822,11 +1113,17 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
         cleanup_orphaned_package_owners(&mut installed_package_tracking.write().unwrap(), apps);
 
         outcome
-    })
+    });
+    control.observe(apps, control_generation, |pid, token| {
+        os.observed_image(pid, token)
+    });
+    outcome
 }
 
 #[cfg(test)]
 mod tests {
+    include!("tracking/known_app_tests.rs");
+    include!("tracking/steam_tests.rs");
     use super::{
         build_aumid_to_seed_pids, build_name_to_pids, collect_configured_programs,
         extend_with_descendants, process_running_apps_iteration_with_os, BoundProcessInstance,
@@ -842,6 +1139,10 @@ mod tests {
     use std::sync::{Arc, RwLock};
 
     struct FakeRunningAppsOs {
+        denied_tokens: HashSet<u32>,
+        denied_steam: HashSet<u32>,
+        steam: HashMap<u32, Vec<os_api::steam::GameProcess>>,
+        steam_root: Option<PathBuf>,
         snapshot: Result<ProcessSnapshot, String>,
         image_paths: HashMap<u32, PathBuf>,
         image_instance_tokens: HashMap<u32, u64>,
@@ -859,6 +1160,10 @@ mod tests {
     impl Default for FakeRunningAppsOs {
         fn default() -> Self {
             Self {
+                denied_tokens: HashSet::new(),
+                denied_steam: HashSet::new(),
+                steam: Default::default(),
+                steam_root: None,
                 snapshot: Ok(ProcessSnapshot::default()),
                 image_paths: HashMap::new(),
                 image_instance_tokens: HashMap::new(),
@@ -875,6 +1180,34 @@ mod tests {
     }
 
     impl RunningAppsOs for FakeRunningAppsOs {
+        fn known_instance_role(
+            &self,
+            pid: u32,
+            token: u64,
+            scope: &crate::app::features::rules::known_apps::Scope,
+            image: &std::path::Path,
+        ) -> Option<crate::app::features::rules::known_apps::MemberRole> {
+            if self.denied_steam.contains(&pid)
+                || self.get_process_instance_token(pid).ok() != Some(token)
+            {
+                return None;
+            }
+            scope.witness_role_under_root(&scope.root, image)
+        }
+        fn steam_instance_allowed(&self, pid: u32, _token: u64) -> bool {
+            !self.denied_steam.contains(&pid)
+        }
+        fn steam_game_processes(
+            &self,
+            id: u32,
+            _selected: Option<&std::path::Path>,
+            _names: &HashMap<u32, String>,
+        ) -> Vec<os_api::steam::GameProcess> {
+            self.steam.get(&id).cloned().unwrap_or_default()
+        }
+        fn steam_game_directory(&self, _id: u32) -> Option<PathBuf> {
+            self.steam_root.clone()
+        }
         fn snapshot_process_tree(&self) -> Result<ProcessSnapshot, String> {
             self.snapshot.clone()
         }
@@ -904,6 +1237,9 @@ mod tests {
         }
 
         fn get_process_instance_token(&self, pid: u32) -> Result<u64, String> {
+            if self.denied_tokens.contains(&pid) {
+                return Err("Access denied".into());
+            }
             self.instance_tokens
                 .get(&pid)
                 .copied()
@@ -952,6 +1288,146 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| Err(format!("missing package metadata for {aumid}")))
         }
+    }
+
+    fn steam_state(id: u32) -> AppStateStorage {
+        let mut state = sample_path_program_state();
+        state.groups[0].programs[0] = AppToRun::new_path(
+            PathBuf::from(r"C:\Game.url"),
+            vec![format!("steam://rungameid/{id}")],
+            PathBuf::from(r"C:\Steam\steam.exe"),
+            PriorityClass::Normal,
+            false,
+        );
+        state.groups[0].programs[0].launch_target = crate::app::models::LaunchTarget::Steam {
+            app_id: id,
+            executable: None,
+        };
+        state.groups[0].programs[0].args.clear();
+        state
+    }
+    #[test]
+    fn steam_alive_is_not_a_running_game_and_game_scope_includes_only_verified_helpers() {
+        let mut state = steam_state(570);
+        let mut apps = RunningApps::default();
+        let key = state.groups[0].programs[0].get_key();
+        let mut os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                names: HashMap::from([
+                    (1, "steam.exe".into()),
+                    (2, "game.exe".into()),
+                    (3, "helper.exe".into()),
+                    (4, "helper.exe".into()),
+                    (5, "EasyAntiCheat.exe".into()),
+                ]),
+                ..Default::default()
+            }),
+            steam_root: Some(PathBuf::from(r"C:\Games\Game")),
+            image_paths: HashMap::from([
+                (1, PathBuf::from(r"C:\Steam\steam.exe")),
+                (2, PathBuf::from(r"C:\Games\Game\game.exe")),
+                (3, PathBuf::from(r"C:\Games\Game\helper.exe")),
+                (4, PathBuf::from(r"C:\Other\helper.exe")),
+                (5, PathBuf::from(r"C:\Games\Game\EasyAntiCheat.exe")),
+            ]),
+            ..Default::default()
+        };
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert!(apps.apps.is_empty());
+        os.steam.insert(
+            570,
+            vec![os_api::steam::GameProcess {
+                pid: 2,
+                creation_token: 2,
+                path: PathBuf::from(r"C:\Games\Game\game.exe"),
+                has_window: true,
+            }],
+        );
+        state.groups[0].programs[0].additional_processes = vec![
+            "helper.exe".into(),
+            "EasyAntiCheat.exe".into(),
+            "steam.exe".into(),
+        ];
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert_eq!(
+            apps.apps[&key].pid_instance_tokens,
+            HashMap::from([(2, 2), (3, 3)])
+        );
+        os.steam.clear();
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert!(
+            apps.apps.contains_key(&key),
+            "minimized games keep their exact live instances"
+        );
+        os.image_instance_tokens.insert(2, 999);
+        os.instance_tokens.insert(2, 999);
+        os.image_instance_tokens.insert(3, 999);
+        os.instance_tokens.insert(3, 999);
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert!(
+            apps.apps.is_empty(),
+            "PID reuse cannot inherit a game membership"
+        );
+    }
+    #[test]
+    fn steam_helper_surviving_the_game_does_not_keep_the_rule_alive() {
+        let mut state = steam_state(572);
+        state.groups[0].programs[0].additional_processes = vec!["helper.exe".into()];
+        let candidate = os_api::steam::GameProcess {
+            pid: 2,
+            creation_token: 2,
+            path: PathBuf::from(r"C:\Games\Game\game.exe"),
+            has_window: true,
+        };
+        let mut os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                names: HashMap::from([(2, "game.exe".into()), (3, "helper.exe".into())]),
+                ..Default::default()
+            }),
+            steam_root: Some(PathBuf::from(r"C:\Games\Game")),
+            steam: HashMap::from([(572, vec![candidate])]),
+            image_paths: HashMap::from([
+                (2, PathBuf::from(r"C:\Games\Game\game.exe")),
+                (3, PathBuf::from(r"C:\Games\Game\helper.exe")),
+            ]),
+            ..Default::default()
+        };
+        let mut apps = RunningApps::default();
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert_eq!(apps.apps.values().next().unwrap().pids.len(), 2);
+        os.steam.clear();
+        os.snapshot.as_mut().unwrap().names.remove(&2);
+        os.image_paths.remove(&2);
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert!(
+            apps.apps.is_empty(),
+            "A helper cannot replace the main game lifetime"
+        );
+    }
+
+    #[test]
+    fn ambiguous_steam_roots_do_not_claim_the_same_game_for_two_app_ids() {
+        let mut state = steam_state(570);
+        state.groups[0]
+            .programs
+            .push(steam_state(571).groups[0].programs[0].clone());
+        let candidate = os_api::steam::GameProcess {
+            pid: 2,
+            creation_token: 2,
+            path: PathBuf::from(r"C:\Games\Game\game.exe"),
+            has_window: true,
+        };
+        let os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                names: HashMap::from([(2, "game.exe".into())]),
+                ..Default::default()
+            }),
+            steam: HashMap::from([(570, vec![candidate.clone()]), (571, vec![candidate])]),
+            ..Default::default()
+        };
+        let mut apps = RunningApps::default();
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert!(apps.apps.is_empty());
     }
 
     fn sample_path_program_state() -> AppStateStorage {
@@ -1076,12 +1552,16 @@ mod tests {
         } else {
             HashMap::new()
         };
+        let steam = super::observe_steam(&configured, &snapshot, os);
         process_running_apps_iteration_with_os(
             apps,
             configured,
             &snapshot,
-            &name_to_pids,
-            &aumid_to_seed_pids,
+            super::IterationLookups {
+                names: &name_to_pids,
+                aumids: &aumid_to_seed_pids,
+                steam,
+            },
             &installed_package_tracking,
             os,
         )
@@ -1553,6 +2033,10 @@ mod tests {
             }),
             image_paths: HashMap::new(),
             image_instance_tokens: HashMap::new(),
+            denied_tokens: HashSet::new(),
+            denied_steam: HashSet::new(),
+            steam: Default::default(),
+            steam_root: None,
             live_pids: HashSet::from([21]),
             instance_tokens: HashMap::new(),
             aumids: HashMap::new(),
@@ -1962,4 +2446,35 @@ mod tests {
             ]
         );
     }
+}
+
+#[cfg(test)]
+pub(crate) fn known_tracking_fixture() -> (AppStateStorage, RunningApps) {
+    tests::s107_fixture_membership()
+}
+
+#[cfg(test)]
+pub(super) fn native_known_iteration(
+    apps: &mut RunningApps,
+    state: &AppStateStorage,
+) -> Result<(), String> {
+    let os = RealRunningAppsOs::default();
+    let configured = collect_configured_programs(state);
+    let snapshot = snapshot_for_configuration(&configured, &os)?;
+    let names = build_name_to_pids(&snapshot);
+    let aumids = HashMap::new();
+    let steam = observe_steam(&configured, &snapshot, &os);
+    process_running_apps_iteration_with_os(
+        apps,
+        configured,
+        &snapshot,
+        IterationLookups {
+            names: &names,
+            aumids: &aumids,
+            steam,
+        },
+        &Arc::new(RwLock::new(Default::default())),
+        &os,
+    );
+    Ok(())
 }

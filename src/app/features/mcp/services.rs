@@ -30,6 +30,7 @@ pub(super) struct Services {
     pub runs: Arc<crate::app::features::execution::managed_runs::ManagedRuns>,
     pub running: Arc<tokio::sync::RwLock<crate::app::models::RunningApps>>,
     pub scheduling: Arc<crate::app::features::system_tweaks::tweaks::scheduling::SchedulingHandoff>,
+    pub control: Arc<crate::app::features::execution::control::Authority>,
     pub registry: crate::app::features::system_tweaks::platform::registry::Registry,
     pub api_epoch: String,
     pub storage_profile_id: String,
@@ -46,6 +47,8 @@ struct Page {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigArgs {
+    #[serde(default)]
+    image: Option<String>,
     expected_revision: String,
     request_key: String,
     #[serde(default)]
@@ -87,8 +90,16 @@ pub(super) fn validate_rule_replacement(arguments: &Value) -> Result<(), ApiErro
         .ok_or_else(|| {
             ApiError::invalid("update_rule requires a complete rule object; read list_rules first")
         })?;
-    if rule.contains_key("path") == rule.contains_key("aumid") {
+    if ["path", "aumid", "steam_app_id"]
+        .iter()
+        .filter(|key| rule.contains_key(**key))
+        .count()
+        != 1
+    {
         return Err(ApiError::invalid("update_rule requires a complete replacement with exactly one path or aumid; preserve the current target from list_rules"));
+    }
+    if rule.contains_key("steam_app_id") && !rule.contains_key("steam_executable") {
+        return Err(ApiError::invalid("A Steam replacement must preserve steam_executable (path or explicit null for automatic detection). Read list_rules first."));
     }
     for field in REPLACEMENT_RULE_FIELDS {
         if !rule.contains_key(*field) {
@@ -170,6 +181,7 @@ impl Services {
             runs: app.runtime.managed_runs.clone(),
             running: app.runtime.running_apps_handle(),
             scheduling: app.runtime.scheduling_handle(),
+            control: app.runtime.control_handle(),
             registry: app.tuning_editors().clone(),
             api_epoch,
             storage_profile_id: os_api::agent::profile_key(
@@ -195,7 +207,11 @@ impl Services {
         }
         if !matches!(
             name,
-            "get_app_state" | "get_topology" | "list_groups" | "list_rules"
+            "get_app_state"
+                | "get_topology"
+                | "list_groups"
+                | "list_rules"
+                | "read_process_control"
         ) {
             return None;
         }
@@ -222,6 +238,24 @@ impl Services {
                 ));
             }
             let limit = page.limit.unwrap_or(50);
+            if name == "read_process_control" {
+                let view = self.control.view();
+                let mut rows = Vec::new();
+                let mut bytes = 0;
+                for notice in view.notices.iter().skip(page.offset).take(limit) {
+                    let row = json!({"image":notice.image,"name":notice.name,"owner_rule_id":notice.owner,"different_settings":notice.different,"claimants":notice.claimants.iter().map(|id|json!({"rule_id":id,"group_id":view.rules.iter().find(|rule|&rule.rule==id).map(|rule|&rule.group),"label":view.label(id)})).collect::<Vec<_>>()});
+                    let size = row.to_string().len();
+                    if bytes + size > 48 * 1024 {
+                        break;
+                    }
+                    bytes += size;
+                    rows.push(row);
+                }
+                let next = page.offset + rows.len();
+                return Ok(
+                    json!({"configuration_revision":snapshot.revision.to_string(),"rows":rows,"total":view.notices.len(),"next_offset":(next<view.notices.len()).then_some(next),"error":view.error}),
+                );
+            }
             if name == "get_topology" {
                 let schema = &snapshot.state.cpu_schema;
                 let total = schema
@@ -325,73 +359,83 @@ impl Services {
         let group = args.group_id.map(GroupId);
         let rule = args.rule_id.map(RuleId);
         let mut created = json!({});
-        let command = match name {
-            "create_group" => {
-                created["group_id"] = json!(format!(
-                    "group-{}",
-                    snapshot.rules.to_persisted_identities().next_group_id
-                ));
-                BaseCommand::CreateGroup {
+        let request = if name == "choose_process_owner" {
+            TuningRequest::ChooseProcessOwner(
+                crate::app::features::execution::control::policy::Choice {
+                    image: required(args.image, "image")?,
+                    owner: required(rule.clone(), "rule_id")?,
+                },
+            )
+        } else {
+            let command = match name {
+                "create_group" => {
+                    created["group_id"] = json!(format!(
+                        "group-{}",
+                        snapshot.rules.to_persisted_identities().next_group_id
+                    ));
+                    BaseCommand::CreateGroup {
+                        name: required(args.name, "name")?,
+                        cpus: required(args.cpus, "cpus")?,
+                        run_all: args.run_all,
+                    }
+                }
+                "update_group" => BaseCommand::UpdateGroup {
+                    group: required(group, "group_id")?,
                     name: required(args.name, "name")?,
                     cpus: required(args.cpus, "cpus")?,
                     run_all: args.run_all,
-                }
-            }
-            "update_group" => BaseCommand::UpdateGroup {
-                group: required(group, "group_id")?,
-                name: required(args.name, "name")?,
-                cpus: required(args.cpus, "cpus")?,
-                run_all: args.run_all,
-                hidden: args.hidden,
-            },
-            "delete_group" => BaseCommand::RemoveGroup {
-                group: required(group, "group_id")?,
-            },
-            "move_group" => BaseCommand::MoveGroup {
-                group: required(group, "group_id")?,
-                index: required(args.index, "index")?,
-            },
-            "create_rule" | "update_rule" => {
-                let group = required(group, "group_id")?;
-                let app = required(args.rule, "rule")?
-                    .into_app()
-                    .map_err(ApiError::invalid)?;
-                if name == "create_rule" {
-                    created["rule_id"] = json!(format!(
-                        "rule-{}",
-                        snapshot.rules.to_persisted_identities().next_rule_id
-                    ));
-                    BaseCommand::CreateRule {
-                        group,
-                        app: Box::new(app),
-                    }
-                } else {
-                    BaseCommand::UpdateRule {
-                        group,
-                        rule: required(rule, "rule_id")?,
-                        app: Box::new(app),
+                    hidden: args.hidden,
+                },
+                "delete_group" => BaseCommand::RemoveGroup {
+                    group: required(group, "group_id")?,
+                },
+                "move_group" => BaseCommand::MoveGroup {
+                    group: required(group, "group_id")?,
+                    index: required(args.index, "index")?,
+                },
+                "create_rule" | "update_rule" => {
+                    let group = required(group, "group_id")?;
+                    let app = required(args.rule, "rule")?
+                        .into_app()
+                        .map_err(ApiError::invalid)?;
+                    if name == "create_rule" {
+                        created["rule_id"] = json!(format!(
+                            "rule-{}",
+                            snapshot.rules.to_persisted_identities().next_rule_id
+                        ));
+                        BaseCommand::CreateRule {
+                            group,
+                            app: Box::new(app),
+                        }
+                    } else {
+                        BaseCommand::UpdateRule {
+                            group,
+                            rule: required(rule, "rule_id")?,
+                            app: Box::new(app),
+                        }
                     }
                 }
-            }
-            "delete_rule" => BaseCommand::RemoveRule {
-                group: required(group, "group_id")?,
-                rule: required(rule, "rule_id")?,
-            },
-            "move_rule" => BaseCommand::MoveRule {
-                group: required(group, "group_id")?,
-                rule: required(rule, "rule_id")?,
-                target: GroupId(required(args.target_group_id, "target_group_id")?),
-                index: required(args.index, "index")?,
-            },
-            "update_preferences" => {
-                BaseCommand::Preferences(required(args.preferences, "preferences")?)
-            }
-            _ => {
-                return Err(ApiError::new(
-                    "unknown_tool",
-                    "Unsupported configuration command",
-                ))
-            }
+                "delete_rule" => BaseCommand::RemoveRule {
+                    group: required(group, "group_id")?,
+                    rule: required(rule, "rule_id")?,
+                },
+                "move_rule" => BaseCommand::MoveRule {
+                    group: required(group, "group_id")?,
+                    rule: required(rule, "rule_id")?,
+                    target: GroupId(required(args.target_group_id, "target_group_id")?),
+                    index: required(args.index, "index")?,
+                },
+                "update_preferences" => {
+                    BaseCommand::Preferences(required(args.preferences, "preferences")?)
+                }
+                _ => {
+                    return Err(ApiError::new(
+                        "unknown_tool",
+                        "Unsupported configuration command",
+                    ))
+                }
+            };
+            TuningRequest::ConfigureBase(command)
         };
         if !live.current(agent, generation) {
             return Err(ApiError::new(
@@ -402,7 +446,7 @@ impl Services {
         let id = self
             .tuning
             .request_guarded(
-                TuningRequest::ConfigureBase(command),
+                request,
                 Some(revision),
                 Some(RequestFence {
                     generation: live.generation.clone(),
@@ -517,5 +561,91 @@ mod tests {
             .unwrap();
             assert!(restarted.native_query(|| Ok(json!({}))).await.is_ok());
         });
+    }
+}
+
+#[cfg(test)]
+mod steam_rule_contract_tests {
+    #[test]
+    fn replacement_preserves_the_game_selection_including_explicit_automatic() {
+        let mut value = serde_json::json!({"rule":{"name":"Game","steam_app_id":570,"args":[],"tracked_process_names":[],"manage_descendants":false,"autorun":false,"priority":"Normal"}});
+        assert!(super::validate_rule_replacement(&value).is_err());
+        value["rule"]["steam_executable"] = serde_json::Value::Null;
+        assert!(super::validate_rule_replacement(&value).is_ok());
+        value["rule"]["path"] = serde_json::json!("C:\\Steam\\steam.exe");
+        assert!(super::validate_rule_replacement(&value).is_err());
+    }
+}
+
+#[cfg(test)]
+mod process_control_tests {
+    use super::*;
+    use crate::app::{
+        features::execution::control::{
+            policy::Choice,
+            tests::{fixture, observe},
+        },
+        models::AppStateStorage,
+        runtime::AppState,
+    };
+    use std::sync::RwLock;
+    use std::time::Duration;
+    #[test]
+    fn s110_mcp_reads_conflicts_and_uses_the_durable_owner_command() {
+        let state = fixture();
+        let app = AppState::new_for_test(Arc::new(RwLock::new(state.clone())), 4);
+        let services =
+            Services::from_app(&app, Default::default(), "test".into(), Default::default())
+                .unwrap();
+        observe(
+            &app.runtime.control_handle(),
+            &state,
+            &[0, 1],
+            1,
+            r"C:\Shared\helper.exe",
+        );
+        let response = services
+            .read("read_process_control", json!({}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(response["rows"][0]["owner_rule_id"], Value::Null);
+        assert_eq!(
+            response["rows"][0]["claimants"].as_array().unwrap().len(),
+            2
+        );
+        let owner = app.runtime.control_handle().view().rules[1].rule.clone();
+        let request = services
+            .tuning
+            .request_guarded(
+                TuningRequest::ChooseProcessOwner(Choice {
+                    image: response["rows"][0]["image"].as_str().unwrap().into(),
+                    owner: owner.clone(),
+                }),
+                Some(services.tuning.snapshot().revision),
+                None,
+            )
+            .unwrap();
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(receipt) = services.tuning.receipt(request) {
+                receipt.result.unwrap();
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let saved = services.tuning.snapshot();
+        assert_eq!(
+            serde_json::to_value(&saved.state.groups).unwrap(),
+            serde_json::to_value(&state.groups).unwrap()
+        );
+        assert_eq!(
+            crate::app::features::execution::control::policy::Policy::read(&saved.state)
+                .unwrap()
+                .choices[0]
+                .owner,
+            owner
+        );
+        let _: AppStateStorage = state;
     }
 }

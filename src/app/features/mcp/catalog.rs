@@ -3,7 +3,7 @@ use rmcp::model::Tool;
 use serde_json::{json, Value};
 pub(super) fn rule_schema() -> Value {
     let text = json!({"type":"string","minLength":1,"maxLength":256});
-    json!({"type":"object","additionalProperties":false,"required":["name"],"properties":{"name":text,"path":{"type":"string","maxLength":16000},"aumid":{"type":"string","maxLength":512},"args":{"type":"array","maxItems":128,"items":{"type":"string","maxLength":4096}},"tracked_process_names":{"type":"array","maxItems":64,"items":{"type":"string","maxLength":256}},"manage_descendants":{"type":"boolean"},"autorun":{"type":"boolean"},"priority":{"type":"string","enum":["Idle","BelowNormal","Normal","AboveNormal","High"]}}})
+    json!({"type":"object","additionalProperties":false,"required":["name"],"properties":{"name":text,"path":{"type":"string","maxLength":16000},"aumid":{"type":"string","maxLength":512},"steam_app_id":{"type":"integer","minimum":1,"maximum":4294967295u32},"steam_executable":{"type":["string","null"],"maxLength":16000},"args":{"type":"array","maxItems":128,"items":{"type":"string","maxLength":4096}},"tracked_process_names":{"type":"array","maxItems":64,"items":{"type":"string","maxLength":256}},"manage_descendants":{"type":"boolean"},"autorun":{"type":"boolean"},"priority":{"type":"string","enum":["Idle","BelowNormal","Normal","AboveNormal","High"]}}})
 }
 pub(super) fn definitions() -> Vec<Tool> {
     let text = json!({"type":"string","minLength":1,"maxLength":256});
@@ -14,6 +14,7 @@ pub(super) fn definitions() -> Vec<Tool> {
     let mut rules_page = page.clone();
     rules_page["group_id"] = id.clone();
     let mut tools = vec![
+        tool("read_process_control","Read bounded shared-process observations, controlling RuleIds and unresolved legacy conflicts. Names may overlap without a real conflict. CPU/RAM observation is independent of control.",page.clone(),&[],true),
         tool("get_app_state", "Read durable configuration revision, preferences and current save status without opening GUI panels.", json!({}), &[], true),
         tool("get_topology","Read the app's logical CPU topology, core types and CPU numbering without another native probe.",page.clone(),&[],true),
         tool("list_installed_apps","Discover the existing supported Windows launch-safe app catalog on demand; this is not a frequent polling endpoint.",json!({"query":{"type":"string","maxLength":256},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":256}}),&[],true),
@@ -31,6 +32,7 @@ pub(super) fn definitions() -> Vec<Tool> {
         required.extend(["request_key", "expected_revision"]);
         tools.push(tool(name, description, properties, &required, false));
     };
+    add("choose_process_owner","Choose one eligible saved RuleId from read_process_control for this exact executable. Keeps every tracked-name list and CPU/RAM membership intact. The preference only participates while this rule actually claims the process. Requires user intent; inspect before retrying.",json!({"image":{"type":"string","minLength":1,"maxLength":16000},"rule_id":id}),&["image","rule_id"]);
     add(
         "create_group",
         "Create and durably save an affinity group. Poll the returned operation receipt.",
@@ -53,7 +55,7 @@ pub(super) fn definitions() -> Vec<Tool> {
     add("create_rule", "Save an application rule. Specify exactly one absolute EXE path or AUMID. Empty tracked names remain empty; descendants default off.", json!({"group_id":id,"rule":rule}), &["group_id","rule"]);
     add(
         "update_rule",
-        "Complete replacement, not a patch. Read list_rules first and preserve all other editable values. All six settings plus exactly one path/aumid are required; tracked_process_names replaces its whole list. RuleId/associations remain.",
+        "Complete replacement, not a patch. Read list_rules first and preserve all other editable values. All six settings plus exactly one path/aumid/steam_app_id are required; tracked_process_names replaces its whole list. RuleId/associations remain.",
         json!({"group_id":id,"rule_id":id,"rule":rule}),
         &["group_id", "rule_id", "rule"],
     );
@@ -103,8 +105,8 @@ pub(super) fn definitions() -> Vec<Tool> {
         tools.push(tool(name, description, properties, &required, false));
     };
     add_action("launch_program","Launch an absolute executable with ordinary-user rights by default, explicit scheduling and optional bounded output. Administrator launch requires explicit elevated=true. No command shell is inserted.",json!({"path":{"type":"string","maxLength":16000},"args":{"type":"array","maxItems":128,"items":{"type":"string","maxLength":4096}},"cwd":{"type":"string"},"cpus":cpus,"priority":rule["properties"]["priority"],"elevated":{"type":"boolean"},"capture":{"type":"boolean"},"environment":{"type":"object","maxProperties":32,"additionalProperties":{"type":"string","maxLength":8192}},"name":text}),&["path"]);
-    add_action("launch_saved","Launch a saved app without changing its rule. Uses its current saved scheduling ownership; an existing tracked instance is reported without relaunching.",json!({"group_id":id,"rule_id":id,"expected_revision":key,"elevated":{"type":"boolean"},"capture":{"type":"boolean"}}),&["group_id","rule_id","expected_revision"]);
-    add_action("restart_saved","Relaunch a saved app only after old exact tracked instances are confirmed exited. Uses the current saved rule revision; never implicitly kills or duplicates an unresolved instance.",json!({"group_id":id,"rule_id":id,"expected_revision":key,"elevated":{"type":"boolean"},"capture":{"type":"boolean"}}),&["group_id","rule_id","expected_revision"]);
+    add_action("launch_saved","Launch a saved app without changing its rule. Uses its current saved scheduling ownership; an existing tracked instance is reported without relaunching. Steam games and built-in application clients use ordinary activation_requested acknowledgement, no inherited capture/elevation or invented launcher PID; inspect tracked identities and readback after discovery.",json!({"group_id":id,"rule_id":id,"expected_revision":key,"elevated":{"type":"boolean"},"capture":{"type":"boolean"}}),&["group_id","rule_id","expected_revision"]);
+    add_action("restart_saved","Relaunch a saved app only after old exact tracked instances are confirmed exited. Uses the current saved rule revision; never implicitly kills or duplicates an unresolved instance. Steam-game and built-in client activation has the same ordinary acknowledgement limits as launch_saved.",json!({"group_id":id,"rule_id":id,"expected_revision":key,"elevated":{"type":"boolean"},"capture":{"type":"boolean"}}),&["group_id","rule_id","expected_revision"]);
     add_action("stop_run","Request a managed root's normal window close. force=true explicitly requests forced termination. No implicit kill-tree is used.",json!({"run_id":key,"force":{"type":"boolean"}}),&["run_id"]);
     add_action("restart_run","Relaunch the agent's transient root using its retained invocation only after confirmed exit and completed output drain. Saved rules use restart_saved instead.",json!({"run_id":key}),&["run_id"]);
     let mut settings = process.clone();

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Current version of the application state schema.
-pub const CURRENT_APP_STATE_VERSION: u32 = 11;
+pub const CURRENT_APP_STATE_VERSION: u32 = 14;
 
 pub(crate) const fn default_windows_event_log_diagnostics_enabled() -> bool {
     true
@@ -228,6 +228,17 @@ impl Serialize for AppStateStorage {
 }
 
 impl AppStateStorage {
+    pub(crate) fn process_control_raw(&self) -> Option<&RawValue> {
+        self.extensions
+            .get("process_control")
+            .map(|value| value.as_ref())
+    }
+    pub(crate) fn set_process_control_raw(&mut self, raw: String) {
+        self.extensions.insert(
+            "process_control".into(),
+            Arc::from(RawValue::from_string(raw).expect("encoded process control")),
+        );
+    }
     pub(crate) const fn normalize_cpu_load_history_seconds(seconds: u32) -> u32 {
         match seconds {
             30 | 300 | 1800 => seconds,
@@ -301,9 +312,51 @@ impl AppStateStorage {
                             return blocked;
                         }
                     };
+                    let control_present = raw_fields.0.contains_key("process_control");
+                    if control_present
+                        && !matches!(
+                            selected,
+                            migrations::VersionSelection::Known(14..=CURRENT_APP_STATE_VERSION)
+                        )
+                    {
+                        let mut blocked = schema_refresh::build_default_state();
+                        blocked.block_save(Some(Arc::from(data.as_str())), data.len());
+                        return blocked;
+                    }
+                    let builtin_present = raw_fields
+                        .0
+                        .get("groups")
+                        .and_then(|groups| {
+                            serde_json::from_str::<serde_json::Value>(groups.get()).ok()
+                        })
+                        .and_then(|groups| groups.as_array().cloned())
+                        .is_some_and(|groups| {
+                            groups.iter().any(|group| {
+                                group
+                                    .get("programs")
+                                    .and_then(serde_json::Value::as_array)
+                                    .is_some_and(|apps| {
+                                        apps.iter()
+                                            .any(|app| app.get("builtin_process_binding").is_some())
+                                    })
+                            })
+                        });
+                    if builtin_present
+                        && !matches!(
+                            selected,
+                            migrations::VersionSelection::Known(13..=CURRENT_APP_STATE_VERSION)
+                        )
+                    {
+                        let mut blocked = schema_refresh::build_default_state();
+                        blocked.block_save(Some(Arc::from(data.as_str())), data.len());
+                        return blocked;
+                    }
                     let tuning_present = raw_fields.0.contains_key("tuning");
                     let old_tuning = tuning_present
-                        && !matches!(selected, migrations::VersionSelection::Known(11));
+                        && !matches!(
+                            selected,
+                            migrations::VersionSelection::Known(11..=CURRENT_APP_STATE_VERSION)
+                        );
                     if let Some(mut state) = migrations::load_from_data(data, path) {
                         if old_tuning
                             || matches!(
@@ -315,7 +368,7 @@ impl AppStateStorage {
                         }
                         return state;
                     }
-                    if tuning_present {
+                    if tuning_present || builtin_present || control_present {
                         // Invalid unrelated base fields cannot erase any tuning
                         // evidence merely because the full typed decode failed.
                         let mut blocked = schema_refresh::build_default_state();

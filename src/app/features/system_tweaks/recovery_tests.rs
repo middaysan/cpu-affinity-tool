@@ -1771,7 +1771,7 @@ fn first_saved_state_initializes_recovery(version: u32, staging: bool) {
         )
         .unwrap();
     let saved = AppStateStorage::read_saved_for_tuning(&path).unwrap();
-    assert_eq!(saved.version, 11);
+    assert_eq!(saved.version, AppStateStorage::test_fixture(|_| {}).version);
     assert!(saved.rule_identities.is_some());
     if staging {
         assert!(!service.controller.is_durable());

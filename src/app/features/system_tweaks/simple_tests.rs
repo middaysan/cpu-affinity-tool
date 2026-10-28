@@ -784,6 +784,7 @@ fn simple_disabled_modules_keep_only_state_saves_without_observation_or_recovery
     let changed = submit(
         &runtime,
         super::TuningRequest::SaveBase {
+            gui_import: false,
             candidate: Box::new(candidate),
             expected_revision: initial.revision,
         },
@@ -956,6 +957,7 @@ fn simple_public_stale_base_save_cannot_overwrite_newer_saved_profile() {
     let snapshot = submit(
         &runtime,
         super::TuningRequest::SaveBase {
+            gui_import: false,
             candidate: Box::new(candidate),
             expected_revision: 0,
         },
@@ -992,6 +994,7 @@ fn simple_public_failed_save_retains_candidate_source_and_rule_identities() {
     let snapshot = submit(
         &runtime,
         super::TuningRequest::SaveBase {
+            gui_import: false,
             candidate: Box::new(candidate),
             expected_revision: 0,
         },
@@ -1754,4 +1757,86 @@ fn simple_review_foreground_uses_current_saved_trigger_and_positive_foreground_f
         "missing membership is not positive foreground loss"
     );
     runtime.begin_shutdown();
+}
+
+#[test]
+fn s107_explicit_rule_replacement_preserves_provenance_without_refilling_names() {
+    let (state, _) = crate::app::features::execution::known_tracking_fixture();
+    let mut service = super::Tuning::from_registry(Registry::default()).headless(
+        state,
+        Box::new(MemorySave {
+            saved: Default::default(),
+            fail: false,
+        }),
+    );
+    let group = service.rules().group_id_for_index(0).unwrap();
+    let rule = service.rules().rule_id_for_index(0, 0).unwrap();
+    let before = service.state().groups[0].programs[0]
+        .builtin_process_binding
+        .clone();
+    let mut replacement = service.state().groups[0].programs[0].clone();
+    replacement.additional_processes.clear();
+    replacement.builtin_process_binding = None;
+    service.edit_rule(&group, &rule, replacement).unwrap();
+    assert_eq!(
+        service.state().groups[0].programs[0].builtin_process_binding,
+        before
+    );
+    assert!(service.state().groups[0].programs[0]
+        .additional_processes
+        .is_empty());
+}
+
+#[test]
+fn s110_owner_transfer_is_durable_atomic_and_failed_save_keeps_previous_owner() {
+    use crate::app::features::execution::control::{
+        policy::{Choice, Policy},
+        tests::{fixture, observe},
+        Authority,
+    };
+    for fail in [true, false] {
+        let state = fixture();
+        let original = serde_json::to_value(&state.groups).unwrap();
+        let control = Arc::new(Authority::default());
+        let saves = Arc::new(Mutex::new(vec![]));
+        let mut service = super::Tuning::from_registry(Registry::default())
+            .headless(
+                state.clone(),
+                Box::new(MemorySave {
+                    saved: saves.clone(),
+                    fail,
+                }),
+            )
+            .with_process_control(control.clone());
+        observe(&control, &state, &[0, 1], 1, r"C:\Shared\helper.exe");
+        let spec = control.view().rules[1].clone();
+        let choice = Choice {
+            image: r"C:\Shared\helper.exe".into(),
+            owner: spec.rule.clone(),
+        };
+        let result = service.edit_rule_choices(
+            &spec.group,
+            &spec.rule,
+            spec.app.clone(),
+            None,
+            vec![choice],
+        );
+        if fail {
+            assert_eq!(result, Err(super::SaveError::Storage));
+            assert!(Policy::read(service.state()).unwrap().choices.is_empty());
+            assert!(control.view().needs_choice(&spec.rule));
+            assert!(saves.lock().unwrap().is_empty());
+        } else {
+            result.unwrap();
+            assert_eq!(saves.lock().unwrap().len(), 1);
+            assert_eq!(
+                Policy::read(service.state()).unwrap().choices[0].owner,
+                spec.rule
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&service.state().groups).unwrap(),
+            original
+        );
+    }
 }

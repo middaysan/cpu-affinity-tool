@@ -5,6 +5,7 @@ mod activity_view;
 mod catalog;
 mod cpu_queries;
 mod discovery;
+mod known_app_actions;
 mod operations;
 mod policy;
 mod reports;

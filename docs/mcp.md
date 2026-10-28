@@ -120,3 +120,28 @@ Preparation fixes the retained time range first, then copies each original inter
 There is one current MCP artifact per app; a new export replaces the previous one. IDs expire after10minutes, with lazy cleanup on the next access or app exit. The temporary file is exclusive and deleted on close; no arbitrary agent-supplied file path is accepted. Artifact size is capped at512MiB. If an original interval changes or expires during preparation, the export fails explicitly and can be started again. Coordinate downloads when sharing the connection.
 
 In the GUI, right-click a CPU tile or the detail graph: **Save this graph (PNG)…** opens Save As for the visible graph image; **Save all CPU history (CSV)…** saves the complete retained data across recorded processes and CPUs. PNG captures are explicit and may perturb that frame; do not benchmark the capture frame.
+
+
+## Steam game rules
+
+A saved Steam game uses `launch_target.Steam.app_id` and optional `executable`. For create/update, send `steam_app_id` instead of `path`/`aumid`, and preserve `steam_executable` (an exact game EXE path or explicit null for automatic detection). Steam targets accept no extra arguments. Complete replacements still require all six editable settings; adding process names must preserve the rest of the list. Additional name-based/descendant members stay within the game installation root, or the selected image directory when its EXE is outside the resolved Steam installation. Steam, anti-cheat and support infrastructure are excluded. Automatic selection also excludes recognizable launcher/helper images; a generic launcher-named game can be selected explicitly.
+
+`launch_saved`/`restart_saved` dispatch through ordinary interactive Steam and return `activation_requested` with no invented PID. Elevated launch/output capture are unavailable for this route. Read actual tracked instances and CPU data after discovery; an alive Steam client does not establish that the game started. Automatic detection requires an unambiguous game-window image in the resolved local installation. For an unresolved/brokered game choose its exact running executable through the rule editor, or set `steam_executable`. This reuses the existing process monitor, collector and exact-instance scheduling boundary. Desired affinity from the game's first instruction is not guaranteed. Restart requires existing game instances to exit first.
+
+Steam launch intent follows the logical rule and matching AppID for at most five minutes, including a later exact-EXE selection. With Process monitor Off, initial settings are applied once per discovered exact instance and confirmed by subsequent native readback; late helpers can join during that window. After expiry, use Run/launch_saved again if the game is still unresolved. Off does not become continuous enforcement. Ambiguous/cross-game evidence withdraws automatic membership; choose the game process rather than treating the Steam client as the game.
+
+
+## Built-in application rules
+
+New GUI imports can include optional read-only `app.builtin_process_binding` metadata. Preserve the visible `additional_processes` list when replacing a rule; the service retains provenance internally, so do not submit the metadata as editable input. `[]` clears selected names and never refills defaults. MCP create and installed-discovery templates remain explicit, without hidden helper enrichment.
+
+For these entries, `launch_saved` / `restart_saved` use ordinary application activation and return `activation_requested`, with no invented launcher PID or managed Run ID. Inherited capture and elevated activation are unsupported for this route. The actual application processes receive the saved scheduling through bounded discovery/readback, including one-shot initial settings while continuous monitoring is Off. Inspect the tracked roster and its native creation tokens; the updater is not application membership. Old unbound EXE rules retain their existing managed-launch contract. See [built-in application process names](known-app-processes.md) for supported layouts and validation limits.
+
+
+## Shared-process control
+
+Use `read_process_control` for bounded current shared-process observations: executable image, eligible RuleIds, controlling RuleId and whether effective settings differ. A null owner on a conflicting legacy entry needs a user choice. This is current observation, not historical telemetry; a repeated basename alone is not a conflict. Page with `next_offset`; configuration revisions do not freeze the live process inventory.
+
+`choose_process_owner` accepts `image` from that response, an eligible `rule_id`, the current `expected_revision` and the usual `request_key`. Poll its operation receipt and verify the durable result. It preserves every process-name list and does not change CPU/RAM membership. The preference is executable-scoped and only participates while its selected rule claims an instance. `update_rule` preserves owner preferences; do not clear other tracking settings to solve a conflict. A saved rule's process cannot be rescheduled through `set_process_settings`; choose its controller or edit the owning rule/group instead. Saved and transient launches use the same arbitration before initial scheduling.
+
+Shared-process rows are resolved per actual claimant set; the same executable can have more than one row. Choosing an eligible owner retains earlier preferences for independent sets of that image. The latest eligible preference wins for a given exact instance; this does not merge CPU/RAM observations or edit tracking names.

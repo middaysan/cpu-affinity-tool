@@ -34,6 +34,8 @@ Performance depends on the application and workload. Compare CPU activity and re
 
 - Create groups of logical CPUs for foreground work, background apps, or a particular workload.
 - Add executables, supported launcher files, or installed apps. Drag and drop from Explorer also works.
+- Steam game shortcuts launch through Steam while CPU/RAM, affinity and Focus follow the game. If automatic detection is ambiguous, choose the running game process in its rule settings. Existing Steam shortcuts can switch using **Use Steam game tracking**.
+- New entries recognize 20 application families and fill supported app-owned helper names automatically. Helpers stay tied to the selected installation; shared services/runtimes are excluded. [Supported entries and limits](docs/known-app-processes.md).
 - Save priority, startup behavior, and extra process names, plus launch arguments for file-based targets. Name suggestions come from running processes.
 - Use **Process monitor** to find your saved apps and reapply their affinity and priority. Its **Processes** and **Logs** tabs show what it found and changed.
 - Reorder groups and apps, launch a group together, or create a Windows desktop shortcut for a saved rule.
@@ -81,7 +83,7 @@ An agent can manage groups and rules, change monitoring settings, launch program
 - **Windows x64** is the stable release platform. The current renderer uses DirectX 12, and the release requires administrator approval. Saved-rule shortcuts may show the same UAC prompt.
 - **Linux** has a separate desktop beta for x86_64 glibc, with X11/Wayland sessions and [beta prereleases](https://github.com/middaysan/cpu-affinity-tool/releases). CPU recording, System Tweaks and production MCP are Windows-only; Linux does not have full Windows feature parity. macOS is unsupported.
 - New Windows configurations use `%LOCALAPPDATA%\CpuAffinityTool\state.json`. An existing `state.json` beside the EXE keeps its legacy location. **Logs → Data folder** opens the active directory.
-- Version 1.7.0 saves configuration as schema v11. Keep a backup before upgrading; loading an older format alone does not rewrite it, but an explicit save upgrades it. Downgrading after a current-format save is unsupported.
+- Current development builds save configuration as schema v13 (Steam game targets and built-in helper provenance); released 1.7.0 used v11. Keep a backup before upgrading; loading an older format alone does not rewrite it, but an explicit save upgrades it. Downgrading after a current-format save is unsupported.
 - Logs and available crash reports stay local and are not uploaded automatically. Review them before sharing. CPU history is retained in memory and saved to a file only when you export it.
 
 ## Build from source

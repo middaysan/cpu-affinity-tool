@@ -17,9 +17,11 @@ pub struct RuleEditorTarget {
 
 /// State for editing an application that will be run with a specific CPU affinity.
 pub struct RuleEditorSession {
+    pub(crate) steam_picker: crate::app::features::rules::steam_picker::SteamProcessPicker,
     pub(crate) process_names: crate::app::features::rules::process_names::ProcessNames,
     /// The application currently being edited, if any.
     pub current_edit: Option<AppToRun>,
+    pub(crate) control_choices: Vec<crate::app::features::execution::control::policy::Choice>,
     pub(crate) background:
         Option<crate::app::features::system_tweaks::background_policy::RulePolicy>,
     pub(crate) background_error: Option<String>,

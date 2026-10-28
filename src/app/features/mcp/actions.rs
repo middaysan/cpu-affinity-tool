@@ -46,7 +46,10 @@ fn needed<T>(v: Option<T>, label: &str) -> Result<T, ApiError> {
 fn native(error: String) -> ApiError {
     ApiError::new("native", error)
 }
-fn launch_priority(priority: PriorityClass, classic: bool) -> Result<PriorityClass, ApiError> {
+pub(super) fn launch_priority(
+    priority: PriorityClass,
+    classic: bool,
+) -> Result<PriorityClass, ApiError> {
     let priority = if classic {
         priority
     } else {
@@ -166,6 +169,7 @@ impl Services {
                 | "delete_rule"
                 | "move_rule"
                 | "update_preferences"
+                | "choose_process_owner"
         ) {
             return self.configure(name, args, agent, live, generation).await;
         }
@@ -187,7 +191,7 @@ impl Services {
                 },
                 "restart_run"=>{
                     let id=needed(a.run_id,"run_id")?;let (label,spec)=services.runs.restart_spec(&agent.id,&id).map_err(native)?;
-                    let mut result=services.runs.launch(&agent.id,label,spec,false,|_|if live.current(&agent,generation){Ok(())}else{Err("Access revoked before resume".into())}).map_err(native)?;result["previous_run_id"]=json!(id);Ok(result)
+                    let path=spec.executable.clone();let mut result=services.control.launch_unowned(&path,|owner|{let mut spec=spec;if let Some(owner)=owner {spec.cpus=owner.fields.affinity.then(||(0..usize::BITS as usize).filter(|cpu|owner.mask&(1usize<<cpu)!=0).collect());spec.priority=launch_priority(owner.app.priority,owner.fields.priority).map_err(|error|error.message)?;}services.runs.launch(&agent.id,label,spec,false,|_|if live.current(&agent,generation){Ok(())}else{Err("Access revoked before resume".into())})}).map_err(native)?;result["previous_run_id"]=json!(id);Ok(result)
                 },
                 "launch_program"|"launch_saved"|"restart_saved"=>{
                     let mut owner=None;
@@ -196,15 +200,40 @@ impl Services {
                         let g=snapshot.rules.group_index_for_id(&group).ok_or_else(||ApiError::invalid("Unknown group"))?;
                         let r=snapshot.rules.rule_index_for_id(g,&rule).ok_or_else(||ApiError::invalid("Unknown rule"))?;
                         let app=&snapshot.state.groups[g].programs[r];
+                        let app_key=snapshot.rules.runtime_key(app,&rule);
                         let fields=crate::app::features::system_tweaks::tweaks::scheduling::fields_for_rule(&snapshot.state,&group,&rule);
                         let priority=launch_priority(app.priority,fields.priority)?;
+                        if let Some(scope)=super::known_app_actions::saved_scope(app,a.capture,a.elevated)? {
+                            return super::known_app_actions::launch(&services,super::known_app_actions::SavedRequest {
+                                app,group:&group,rule:&rule,
+                                restart:name=="restart_saved",agent:&agent,live:&live,generation,
+                            },scope);
+                        }
                         let path=match &app.launch_target{
                             LaunchTarget::Path{bin_path,..}=>bin_path.clone(),
+                            LaunchTarget::Steam{app_id,..}=>{
+                                if a.elevated||a.capture{return Err(ApiError::new("unsupported","Steam launch uses ordinary shell rights and cannot capture the game's inherited output"));}
+                                {
+                                    let running=services.running.blocking_read();
+                                    if let Some(existing)=services.control.member(&running,&app_key).map(|(_,app)|app) {
+                                        if name=="restart_saved"{ return Err(ApiError::new("still_running","Close the game's exact instances before requesting restart")); }
+                                        return Ok(json!({"status":"already_tracked","instances":existing.pid_instance_tokens.iter().map(|(pid,token)|json!({"pid":pid,"creation_token":token.to_string()})).collect::<Vec<_>>()}));
+                                    }
+                                }
+                                if !live.current(&agent,generation){return Err(ApiError::new("revoked","Access revoked before Steam activation"));}
+                                use crate::app::features::execution::launch::{begin_steam_launch,cancel_steam_launch,SteamLaunchBegin};
+                                match begin_steam_launch(&rule,*app_id) {
+                                    SteamLaunchBegin::AlreadyPending=>{},
+                                    SteamLaunchBegin::Busy=>return Err(ApiError::new("busy","Too many pending Steam launches")),
+                                    SteamLaunchBegin::Started(generation)=>if let Err(error)=os_api::steam::launch(*app_id) {cancel_steam_launch(&rule,*app_id,generation);return Err(native(error));},
+                                }
+                                return Ok(json!({"status":"activation_requested","group_id":group,"rule_id":rule,"pid":null,"creation_token":null,"capture_supported":false,"elevated":false,"settings":"Pending game discovery and native readback","note":"Steam acknowledgement does not prove that the game started. CPU/RAM and scheduling belong only to verified game instances."}));
+                            },
                             LaunchTarget::Installed{aumid}=>{
                                 if a.elevated||a.capture{return Err(ApiError::new("unsupported","Installed-app activation supports ordinary shell rights and no inherited stdout/stderr capture"));}
                                 {
                                     let running=services.running.blocking_read();
-                                    if let Some(existing)=running.apps.get(&app.get_key()){
+                                    if let Some(existing)=services.control.member(&running,&app_key).map(|(_,app)|app){
                                         if name=="restart_saved"{
                                             if existing.pid_instance_tokens.is_empty(){return Err(ApiError::new("not_ready","Previous installed-app process identities are unresolved"));}
                                             for (&pid,&token) in &existing.pid_instance_tokens{let old=ExactProcess::open(pid,token,false,false,false).map_err(native)?;if !old.state().map_err(native)?.exited{return Err(ApiError::new("still_running","Confirm the installed app's old exact instances have exited before restart"));}}
@@ -216,28 +245,33 @@ impl Services {
                                 return Ok(json!({"status":"activation_requested","group_id":group,"rule_id":rule,"pid":null,"creation_token":null,"capture_supported":false,"elevated":false,"settings":"Pending discovery and native readback by the existing saved-rule monitor","note":"Windows may reuse an existing app instance. Read tracked CPU/process data for verified PID and creation token; activation acknowledgement is not proof of process startup."}));
                             }
                         };
-                        owner=Some((group,rule,app.get_key(),fields));
+                        owner=Some((group,rule,app_key,fields));
                         (path,app.args.clone(),fields.affinity.then(||snapshot.state.groups[g].cores.clone()),priority,app.name.clone())
                     }else{(needed(a.path,"path")?,a.args,a.cpus,a.priority.unwrap_or(PriorityClass::Normal),a.name.unwrap_or_else(||"Agent program".into()))};
                     let priority=launch_priority(priority,true)?;
                     let mut running=services.running.blocking_write();
-                    if let Some((_,_,key,_))=&owner{if let Some(existing)=running.apps.get(key){
+                    if let Some((_,_,key,_))=&owner{if let Some((existing_key,existing))=services.control.member(&running,key){
                         if name=="restart_saved"{
                             if existing.pid_instance_tokens.is_empty(){return Err(ApiError::new("not_ready","Old process identities are unresolved"));}
                             for (&pid,&token) in &existing.pid_instance_tokens{let old=ExactProcess::open(pid,token,false,false,true).map_err(native)?;if !old.state().map_err(native)?.exited{return Err(ApiError::new("still_running","Stop the old exact instances and confirm exit before restarting"));}}
-                            running.remove_app(key);
+                            let old_key=existing_key.clone();running.remove_app(&old_key);
                         }else{let instances:Vec<_>=existing.pid_instance_tokens.iter().map(|(pid,token)|json!({"pid":pid,"creation_token":token.to_string()})).collect();return Ok(json!({"status":"already_tracked","instances":instances,"action":"No new process was launched"}));}
                     }}
                     let mut registered=None;
-                    let result=services.runs.launch(&agent.id,label,LaunchSpec{executable:path,args,cwd:a.cwd,cpus,priority,elevated:a.elevated,capture:a.capture,environment:a.environment},owner.is_some(),|child|{
+                    let launch_spec=LaunchSpec{executable:path.clone(),args,cwd:a.cwd,cpus,priority,elevated:a.elevated,capture:a.capture,environment:a.environment};
+                    let invoke=|selected:Option<&crate::app::features::execution::control::RuleInfo>| {
+                        let mut launch_spec=launch_spec;
+                        if let Some(selected)=selected {launch_spec.cpus=selected.fields.affinity.then(||(0..usize::BITS as usize).filter(|cpu|selected.mask&(1usize<<cpu)!=0).collect());launch_spec.priority=launch_priority(selected.app.priority,selected.fields.priority).map_err(|error|error.message)?;}
+                        services.runs.launch(&agent.id,label,launch_spec,owner.is_some(),|child|{
                         if !live.current(&agent,generation){return Err("Access revoked before resume".into());}
                         if let Some((group,rule,key,fields))=&owner{
-                            services.scheduling.started(child.pid,child.creation_token,*fields).map_err(|e|format!("{e:?}"))?;
+                            services.scheduling.started(child.pid,child.creation_token,selected.map_or(*fields,|selected|selected.fields)).map_err(|e|format!("{e:?}"))?;
                             running.add_app(key,child.pid,group.clone(),rule.clone());
                             running.mutate_membership(|apps|{apps.apps.get_mut(key).unwrap().pid_instance_tokens.insert(child.pid,child.creation_token);});
                             registered=Some((key.clone(),child.pid,child.creation_token));
                         }Ok(())
-                    });
+                    })};
+                    let result=if let Some((_,rule,key,_))=&owner {services.control.launch(rule,key,&path,|selected|invoke(Some(selected)))}else{services.control.launch_unowned(&path,invoke)};
                     if result.is_err(){if let Some((key,pid,token))=registered{rollback_registered_root(&mut running,&key,pid,token);}}
                     let result=result.map_err(native)?;services.wake.request_repaint();Ok(result)
                 },
@@ -250,9 +284,12 @@ impl Services {
                     if name=="close_process" {return Ok(json!({"pid":pid,"creation_token":token.to_string(),"window_close_requested":p.request_close().map_err(native)?,"forced":false}));}
                     if name=="stop_process"{p.terminate().map_err(native)?;return Ok(json!({"pid":pid,"creation_token":token.to_string(),"termination_requested":true,"exit_confirmed":p.state().ok().map(|s|s.exited)}));}
                     if a.cpus.is_none()&&a.priority.is_none(){return Err(ApiError::invalid("Supply cpus or priority"));}
-                    services.scheduling.external_write(pid,token,os_api::gaming::ProcessSettingsFields{affinity:a.cpus.is_some(),priority:a.priority.is_some()}).map_err(|error|ApiError::new("owner_conflict",format!("A System Tweaks scheduling field is reserved: {error:?}")))?;
+                    let image=OS::get_process_image_path(pid).map_err(native)?;
+                    services.control.external_write(pid,token,&image,|| {
+                    services.scheduling.external_write(pid,token,os_api::gaming::ProcessSettingsFields{affinity:a.cpus.is_some(),priority:a.priority.is_some()}).map_err(|error|format!("A System Tweaks scheduling field is reserved: {error:?}"))?;
                     let affinity=a.cpus.as_ref().map(|cpus|p.set_affinity(cpus));let priority=a.priority.map(|priority|p.set_priority(priority));
                     Ok(json!({"pid":pid,"creation_token":token.to_string(),"affinity_result":affinity,"priority_result":priority,"readback":p.state().ok().map(|s|json!({"affinity_mask":s.affinity.to_string(),"priority":s.priority}))}))
+                    }).map_err(|error|ApiError::new("owner_conflict",error))
                 },
                 "create_shortcut"=>{
                     let group=GroupId(needed(a.group_id,"group_id")?);let rule=RuleId(needed(a.rule_id,"rule_id")?);

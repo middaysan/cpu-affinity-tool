@@ -15,6 +15,10 @@ pub(crate) struct RuleInput {
     #[serde(default)]
     pub aumid: Option<String>,
     #[serde(default)]
+    pub steam_app_id: Option<u32>,
+    #[serde(default)]
+    pub steam_executable: Option<PathBuf>,
+    #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub tracked_process_names: Vec<String>,
@@ -33,15 +37,22 @@ impl RuleInput {
         if self.priority == PriorityClass::Realtime {
             return Err("Realtime priority is not supported for agent-managed rule changes".into());
         }
-        let launch_target = match (self.path, self.aumid) {
-            (Some(path), None) => LaunchTarget::Path {
+        let launch_target = match (self.path, self.aumid, self.steam_app_id) {
+            (Some(path), None, None) if self.steam_executable.is_none() => LaunchTarget::Path {
                 dropped_path: path.clone(),
                 bin_path: path,
             },
-            (None, Some(aumid)) => LaunchTarget::Installed { aumid },
+            (None, Some(aumid), None) if self.steam_executable.is_none() => {
+                LaunchTarget::Installed { aumid }
+            }
+            (None, None, Some(app_id)) => LaunchTarget::Steam {
+                app_id,
+                executable: self.steam_executable,
+            },
             _ => {
                 return Err(
-                    "Specify exactly one absolute executable path or installed app AUMID".into(),
+                    "Specify exactly one executable path, installed app AUMID or steam_app_id"
+                        .into(),
                 )
             }
         };
@@ -50,6 +61,7 @@ impl RuleInput {
             launch_target,
             args: self.args,
             additional_processes: self.tracked_process_names,
+            builtin_process_binding: None,
             manage_descendants: self.manage_descendants,
             autorun: self.autorun,
             priority: self.priority,
@@ -75,6 +87,11 @@ pub(crate) fn validate_app(app: &AppToRun) -> Result<(), String> {
         return Err("Arguments exceed the launch budget or contain NUL".into());
     }
     match &app.launch_target {
+        LaunchTarget::Steam { app_id, executable } => {
+            if *app_id == 0 || !app.args.is_empty() || executable.as_ref().is_some_and(|p| !p.is_absolute() || p.as_os_str().len()>16000 || p.to_string_lossy().contains('\0') || !os_api::steam::eligible_image(p)) {
+                return Err("Steam requires a nonzero AppID, no extra arguments, and an optional absolute game .exe path".into());
+            }
+        }
         LaunchTarget::Path { bin_path, .. } if !bin_path.is_absolute() || bin_path.to_string_lossy().contains('\0') || !bin_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe")) || bin_path.as_os_str().len() > 16000 => return Err("An absolute .exe path is required; shell command strings and shortcuts are not executable targets".into()),
         LaunchTarget::Installed { aumid } if aumid.trim().is_empty() || aumid.len() > 512 || aumid.contains('\0') || !app.args.is_empty() => return Err("A valid AUMID without command-line arguments is required".into()),
         _ => {}
@@ -193,6 +210,32 @@ mod tests {
             "Existing manual configurations remain supported"
         );
         assert!(input.into_app().is_err());
+    }
+    #[test]
+    fn steam_rule_input_preserves_exact_game_path_and_refuses_mixed_targets() {
+        let value = serde_json::json!({"name":"Game","steam_app_id":570,"steam_executable":"C:\\Games\\Game\\game.exe","tracked_process_names":["helper.exe"]});
+        let app = serde_json::from_value::<RuleInput>(value.clone())
+            .unwrap()
+            .into_app()
+            .unwrap();
+        assert_eq!(app.steam_game().unwrap().0, 570);
+        assert_eq!(app.additional_processes, vec!["helper.exe"]);
+        for extra in [
+            serde_json::json!({"path":"C:\\game.exe"}),
+            serde_json::json!({"aumid":"Package!App"}),
+            serde_json::json!({"args":["extra"]}),
+            serde_json::json!({"steam_executable":"C:\\Steam\\steam.exe"}),
+            serde_json::json!({"steam_app_id":0}),
+        ] {
+            let mut bad = value.clone();
+            bad.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert!(serde_json::from_value::<RuleInput>(bad)
+                .unwrap()
+                .into_app()
+                .is_err());
+        }
     }
     #[test]
     fn group_commands_validate_the_mask_and_trim_the_name() {

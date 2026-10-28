@@ -1192,3 +1192,7 @@ mod graph_tests;
 #[cfg(test)]
 #[path = "native_gui_probe.rs"]
 mod native_gui_probe;
+
+#[cfg(test)]
+#[path = "native_known_apps.rs"]
+mod native_known_apps;

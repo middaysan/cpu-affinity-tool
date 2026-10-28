@@ -32,6 +32,10 @@ fn template(app: &AppToRun) -> ApiResult {
     match &app.launch_target {
         LaunchTarget::Path { bin_path, .. } => rule["path"] = json!(bin_path),
         LaunchTarget::Installed { aumid } => rule["aumid"] = json!(aumid),
+        LaunchTarget::Steam { app_id, executable } => {
+            rule["steam_app_id"] = json!(app_id);
+            rule["steam_executable"] = json!(executable);
+        }
     };
     bounded_row(&rule)
 }

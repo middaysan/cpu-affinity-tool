@@ -865,6 +865,7 @@ fn native_continuous_history_cost_and_lifecycle() {
             RunningApp {
                 pids: vec![pid],
                 pid_instance_tokens: HashMap::from([(pid, token)]),
+                primary_instances: HashMap::new(),
                 group_id: group.clone(),
                 rule_id: rule.clone(),
                 created_at: SystemTime::now(),
@@ -1315,4 +1316,134 @@ fn preference_save_and_reopen_preserve_classic_monitoring() {
     let app = AppState::new_for_test(Arc::new(RwLock::new(restored)), 8);
     assert!(!app.cpu_load_enabled());
     assert!(app.is_process_monitoring_enabled());
+}
+
+#[test]
+fn s107_catalog_members_feed_app_group_and_system_cpu_and_unique_ram() {
+    use super::super::worker_history::{EventHistory, OwnerInput};
+    use os_api::cpu_load::{CpuHistoryFrame, CpuHistoryTarget, CpuHistoryTick, CpuHistoryValue};
+    let (_state, apps) = crate::app::features::execution::known_tracking_fixture();
+    let running = Arc::new(TokioRwLock::new(apps));
+    let tracking = tracked_instances(&running).unwrap();
+    let targets = tracking.targets;
+    assert_eq!(targets.len(), 2);
+    assert!(targets.values().all(|members| members == &[(1, 1), (2, 2)]));
+    let mut reads = 0;
+    let totals = process_totals(&targets, |pid, _| {
+        reads += 1;
+        Some(if pid == 1 { 10.0 } else { 20.0 })
+    });
+    assert!(totals.values().all(|total| *total == Some(30.0)));
+    assert_eq!(reads, 2);
+    let mut ram_reads = 0;
+    let ram = super::super::memory::tracked_memory(&targets, |pid, _| {
+        ram_reads += 1;
+        Some(u64::from(pid) * 1024 * 1024)
+    });
+    assert!(ram
+        .rules
+        .values()
+        .all(|usage| usage.bytes == Some(3 * 1024 * 1024)));
+    assert!(ram
+        .groups
+        .values()
+        .all(|usage| usage.bytes == Some(3 * 1024 * 1024)));
+    assert_eq!(ram_reads, 2);
+    let all = normalized_instances(targets.values().flatten().copied());
+    let names: HashMap<_, _> = all
+        .iter()
+        .map(|&(pid, token)| {
+            (
+                (pid, token),
+                Arc::new(os_api::cpu_load::CpuProcess {
+                    pid,
+                    instance: token,
+                    name: if pid == 1 {
+                        "steam.exe"
+                    } else {
+                        "steamwebhelper.exe"
+                    }
+                    .into(),
+                }),
+            )
+        })
+        .collect();
+    let rules = targets
+        .keys()
+        .map(|target| (target.clone(), Arc::new(target.rule.clone())))
+        .collect();
+    let mut history = super::super::history::HistoryStore::default();
+    history
+        .configure(2, 30, &targets.keys().cloned().collect::<Vec<_>>())
+        .unwrap();
+    let mut events = EventHistory::default();
+    let runs = HashMap::new();
+    for id in 0..=1 {
+        events
+            .enqueue(
+                CpuHistoryTick {
+                    id,
+                    seconds: id as f64,
+                    timestamp: SystemTime::UNIX_EPOCH + Duration::from_secs(id),
+                },
+                OwnerInput {
+                    generation: Some(tracking.generation),
+                    targets: Some(&targets),
+                    names: &names,
+                    rules: &rules,
+                    runs: &runs,
+                    changed: false,
+                },
+                &[],
+                &mut history,
+            )
+            .unwrap();
+        let mut frame = CpuHistoryFrame::new(2).unwrap();
+        frame.id = id;
+        frame.available = id != 0;
+        frame.cpus = vec![Some(70.0), Some(40.0)];
+        if id != 0 {
+            frame.targets = all
+                .iter()
+                .map(|&(pid, token)| CpuHistoryTarget { pid, token })
+                .collect();
+            frame.coverage = vec![3; all.len()];
+            frame.tracked = vec![
+                CpuHistoryValue {
+                    target: 0,
+                    cpu: 0,
+                    load: 20.0,
+                },
+                CpuHistoryValue {
+                    target: 1,
+                    cpu: 0,
+                    load: 10.0,
+                },
+                CpuHistoryValue {
+                    target: 1,
+                    cpu: 1,
+                    load: 30.0,
+                },
+            ];
+        }
+        events.apply(&frame, &mut history);
+    }
+    let time = SampleTime {
+        seconds: 1.0,
+        wall: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+    };
+    assert_eq!(
+        history.group_mean_at(LoadSource::Tracked, time, &[0, 1]),
+        (Some(30.0), false)
+    );
+    assert_eq!(
+        history.group_mean_at(LoadSource::System, time, &[0, 1]),
+        (Some(55.0), false)
+    );
+    for target in targets.keys() {
+        assert_eq!(
+            history.value_at(LoadSource::Rule(target), time, 0),
+            Some(30.0)
+        );
+    }
 }

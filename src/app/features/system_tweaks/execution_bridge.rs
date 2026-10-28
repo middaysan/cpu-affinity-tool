@@ -210,7 +210,7 @@ fn configuration(state: &AppStateStorage) -> Result<ConfigurationRevision, Unkno
             if !ids.insert(rule.0.clone()) {
                 return Err(UnknownReason::InvalidMembership);
             }
-            let key = app.get_key();
+            let key = rules.runtime_key(app, &rule);
             bytes = bytes
                 .checked_add(key.as_str().len() + group.0.len() + rule.0.len())
                 .ok_or(UnknownReason::Overflow)?;
