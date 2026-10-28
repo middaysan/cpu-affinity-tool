@@ -140,9 +140,10 @@ trait LaunchOs {
 
 #[cfg(test)]
 use super::steam_pending::finish_steam_launch;
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub(crate) use super::steam_pending::{begin_launch, cancel_launch, identity_for_app};
 pub(crate) use super::steam_pending::{
-    begin_launch, begin_steam_launch, cancel_launch, cancel_steam_launch, identity_for_app,
-    steam_launch_pending, SteamLaunchBegin,
+    begin_steam_launch, cancel_steam_launch, steam_launch_pending, SteamLaunchBegin,
 };
 struct RealLaunchOs;
 

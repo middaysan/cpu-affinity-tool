@@ -639,6 +639,7 @@ impl Authority {
             .ok_or("Process owner is unavailable")?;
         action(selected)
     }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
     pub fn launch_unowned<T>(
         &self,
         path: &Path,
@@ -667,6 +668,7 @@ impl Authority {
         };
         action(gate.rules.iter().find(|rule| rule.rule == owner))
     }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
     pub fn external_write<T>(
         &self,
         pid: u32,

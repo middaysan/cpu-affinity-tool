@@ -1,6 +1,8 @@
 pub(crate) mod policy;
 mod runtime;
-pub(crate) use runtime::{Authority, RuleInfo, SourceRequest, View, WriteRequest};
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub(crate) use runtime::RuleInfo;
+pub(crate) use runtime::{Authority, SourceRequest, View, WriteRequest};
 
 #[cfg(test)]
 pub(crate) mod tests;

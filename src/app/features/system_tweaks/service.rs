@@ -602,6 +602,7 @@ impl HeadlessTuning {
         candidate.tuning = TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
         Ok(())
     }
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
     pub(crate) fn edit_rule(
         &mut self,
         group: &GroupId,
@@ -685,6 +686,7 @@ impl HeadlessTuning {
         }
         Ok(())
     }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
     pub(crate) fn choose_process_owner(
         &mut self,
         choice: crate::app::features::execution::control::policy::Choice,

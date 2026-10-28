@@ -144,12 +144,13 @@ pub(crate) enum TuningRequest {
         background: Option<super::background_policy::RulePolicy>,
         choices: Vec<crate::app::features::execution::control::policy::Choice>,
     },
+    #[cfg(all(target_os = "windows", feature = "windows"))]
     ChooseProcessOwner(crate::app::features::execution::control::policy::Choice),
 }
 impl TuningRequest {
     fn is_base_change(&self) -> bool {
         #[cfg(all(target_os = "windows", feature = "windows"))]
-        if matches!(self, Self::ConfigureBase(_)) {
+        if matches!(self, Self::ConfigureBase(_) | Self::ChooseProcessOwner(_)) {
             return true;
         }
         matches!(
@@ -159,7 +160,6 @@ impl TuningRequest {
                 | Self::RemoveGroup { .. }
                 | Self::MoveRule { .. }
                 | Self::EditOwnedRule { .. }
-                | Self::ChooseProcessOwner(_)
         )
     }
 }
@@ -892,6 +892,7 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             background,
             choices,
         } => service.edit_rule_choices(&group, &rule, *app, background, choices),
+        #[cfg(all(target_os = "windows", feature = "windows"))]
         TuningRequest::ChooseProcessOwner(choice) => service.choose_process_owner(choice),
     }
 }
