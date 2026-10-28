@@ -14,7 +14,7 @@ The catalog uses finite layouts. Other channels, shared runtimes and services ha
 
 Generated helper names remain tied to the recognized installation and the current interactive logon. Exact PID/creation identity is rechecked before publication. Another installation's helper, a game under `steamapps`, or an unrelated process with the same basename is not automatically included. A detached generated helper cannot keep the Steam client running. The existing optional descendant setting remains an explicit user choice.
 
-CPU, private resident RAM and scheduling use the same tracked membership. Overlapping rules can show the same process in each application, while a group's RAM and tracked CPU union count it once. The existing collector and sampling cadence are unchanged. Whole-machine process CPU, per-CPU scheduler load and system load retain their different scopes and intervals.
+CPU, private resident RAM and scheduling use the same tracked membership. Overlapping rules can show the same process in each application, while each group's current CPU and RAM member unions count it once. The existing collector and sampling cadence are unchanged. Whole-machine process CPU, per-CPU scheduler load and system load retain their different scopes and intervals.
 
 Discord's root launcher or standard updater is launched as an ordinary desktop process without the application's affinity or priority. Discovery binds the actual application processes. A bounded five-minute launch intent permits initial scheduling/readback with Process monitor Off, including late members; it does not become continuous enforcement. Launch acknowledgement alone is not proof that the client started.
 
@@ -82,7 +82,7 @@ A repeated name is a hint, not proof that the same process is shared: two instal
 
 An earlier saved rule keeps control when a new rule overlaps it. Conflicts already present before this policy require a choice of controlling app; the main row offers **Resolve**. Rules requesting equal settings share one writer without a warning. The selected app supplies affinity and priority for that executable only while it actually tracks the process. If it no longer claims an instance, another eligible rule can control it. Removing the selected rule clears its preference.
 
-CPU and RAM remain visible in every app that tracks the instance. Group RAM and tracked CPU unions still count shared instances once within their respective scope; app rows should not be added together to estimate a unique total. Changing the controller does not move an application between groups or enable Process monitor. While automatic monitoring is Off, the choice governs subsequent explicit launches/Fix and existing bounded launch readback.
+CPU and RAM remain visible in every app that tracks the instance. Current group CPU and RAM count the group's shared instances once; per-CPU tracked history retains its separate scope; app rows should not be added together to estimate a unique total. Changing the controller does not move an application between groups or enable Process monitor. While automatic monitoring is Off, the choice governs subsequent explicit launches/Fix and existing bounded launch readback.
 
 
 Different instances of one executable do not imply a shared-process conflict. Ownership notices keep the exact overlapping rule sets separate. When two independent sets need different controllers, choosing one does not erase the other set's saved preference: the latest eligible owner is used for each instance. Process lists and telemetry membership remain unchanged.

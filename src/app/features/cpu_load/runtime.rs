@@ -59,6 +59,7 @@ pub(crate) struct CpuLoadRuntime {
     control: Arc<(Mutex<Control>, Condvar)>,
     pub(super) published: Arc<RwLock<Arc<Snapshot>>>,
     pub(super) history: Arc<RwLock<HistoryStore>>,
+    current_frame: Option<(u64, Arc<Snapshot>)>,
     series_cache: Series,
     series_key: Option<(Option<RuleTarget>, usize)>,
     overview_cache: Overview,
@@ -96,6 +97,7 @@ impl CpuLoadRuntime {
             control: Default::default(),
             published: Arc::new(RwLock::new(Arc::new(Snapshot::default()))),
             history: Default::default(),
+            current_frame: None,
             series_cache: Series::default(),
             series_key: None,
             overview_cache: Default::default(),
@@ -163,10 +165,12 @@ impl CpuLoadRuntime {
     }
     pub fn configure(&mut self, enabled: bool, _visible: bool) {
         if !enabled {
+            self.current_frame = None;
             self.close();
         }
         if let Ok(mut control) = self.control.0.lock() {
             if control.enabled != enabled {
+                self.current_frame = None;
                 control.enabled = enabled;
                 control.revision = control.revision.saturating_add(1);
                 self.control.1.notify_one();
@@ -227,17 +231,21 @@ impl CpuLoadRuntime {
             .map(|s| s.clone())
             .unwrap_or_else(|| Arc::new(Snapshot::default()))
     }
+    /// Keep current group and app summaries coherent through one GUI frame.
+    pub(super) fn frame_snapshot(&mut self, ctx: &eframe::egui::Context) -> Arc<Snapshot> {
+        let frame = ctx.cumulative_frame_nr();
+        if let Some((cached_frame, snapshot)) = &self.current_frame {
+            if *cached_frame == frame {
+                return snapshot.clone();
+            }
+        }
+        let snapshot = self.snapshot();
+        self.current_frame = Some((frame, snapshot.clone()));
+        snapshot
+    }
+
     pub fn tracked_only(&self) -> bool {
         self.group_tracked_only
-    }
-    pub(super) fn tracked_group_load(&self, cpus: &[usize]) -> (Option<f32>, bool) {
-        let Ok(history) = self.history.try_read() else {
-            return (None, false);
-        };
-        let Some(time) = history.latest_finalized() else {
-            return (None, false);
-        };
-        history.group_mean_at(LoadSource::Tracked, time, cpus)
     }
     pub fn set_tracked_only(&mut self, value: bool) {
         if self.group_tracked_only != value {

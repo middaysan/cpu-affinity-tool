@@ -1,5 +1,6 @@
 use super::model::RuleTarget;
-use std::collections::HashMap;
+use crate::app::shared::ids::GroupId;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -63,7 +64,8 @@ impl ProcessRow {
 #[derive(Default)]
 pub(super) struct ProcessList {
     pub rows: Vec<ProcessRow>,
-    pub rule_totals: HashMap<RuleTarget, RuleCpuTotal>,
+    pub rule_totals: HashMap<RuleTarget, CpuTotal>,
+    pub group_totals: HashMap<GroupId, CpuTotal>,
     pub ready: bool,
     pub time: Option<SystemTime>,
     pub group: bool,
@@ -72,12 +74,19 @@ pub(super) struct ProcessList {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) struct RuleCpuTotal {
+pub(super) struct CpuTotal {
     pub value: Option<f32>,
     pub measured: usize,
     pub instances: usize,
 }
-impl RuleCpuTotal {
+impl CpuTotal {
+    fn record(&mut self, value: Option<f32>) {
+        self.instances += 1;
+        if let Some(value) = value.filter(|v| v.is_finite() && (0.0..=100.0).contains(v)) {
+            self.measured += 1;
+            self.value = Some((self.value.unwrap_or(0.0) + value).min(100.0));
+        }
+    }
     pub fn partial(self) -> bool {
         self.measured < self.instances
     }
@@ -120,24 +129,32 @@ impl ProcessList {
             })
         });
         rows.dedup_by(|a, b| a.pid == b.pid && a.token == b.token && a.target == b.target);
-        let mut rule_totals = HashMap::<RuleTarget, RuleCpuTotal>::new();
+        let mut rule_totals = HashMap::<RuleTarget, CpuTotal>::new();
+        let mut group_totals = HashMap::<GroupId, CpuTotal>::new();
+        let mut group_instances = HashMap::<GroupId, HashSet<(u32, u64)>>::new();
         for row in &rows {
             let Some(target) = row.target.as_ref() else {
                 continue;
             };
-            let total = rule_totals.entry(target.clone()).or_default();
-            total.instances += 1;
-            if let Some(value) = row
-                .total
-                .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+            rule_totals
+                .entry(target.clone())
+                .or_default()
+                .record(row.total);
+            if group_instances
+                .entry(target.group.clone())
+                .or_default()
+                .insert((row.pid, row.token))
             {
-                total.measured += 1;
-                total.value = Some((total.value.unwrap_or(0.0) + value).min(100.0));
+                group_totals
+                    .entry(target.group.clone())
+                    .or_default()
+                    .record(row.total);
             }
         }
         Self {
             rows,
             rule_totals,
+            group_totals,
             ready: true,
             time: None,
             ..Default::default()
@@ -222,6 +239,7 @@ impl ProcessList {
     pub fn invalidate(&mut self) {
         self.ready = false;
         self.rule_totals.clear();
+        self.group_totals.clear();
         for row in &mut self.rows {
             row.total = None;
             row.known_cores = 0;
@@ -232,7 +250,13 @@ impl ProcessList {
     }
     pub fn reserved_bytes(&self) -> usize {
         self.rows.capacity() * std::mem::size_of::<ProcessRow>()
-            + self.rule_totals.capacity() * std::mem::size_of::<(RuleTarget, RuleCpuTotal)>()
+            + self.rule_totals.capacity() * std::mem::size_of::<(RuleTarget, CpuTotal)>()
+            + self.group_totals.capacity() * std::mem::size_of::<(GroupId, CpuTotal)>()
+            + self
+                .group_totals
+                .keys()
+                .map(|group| group.0.capacity())
+                .sum::<usize>()
             + self
                 .rule_totals
                 .keys()
@@ -253,10 +277,21 @@ impl ProcessList {
                 .sum::<usize>()
     }
 
-    /// Current process-time coverage, independent of per-CPU ETW mapping.
-    pub fn rule_cpu_total(&self, target: &RuleTarget) -> RuleCpuTotal {
+    /// The exact member union uses the same current counters as application rows.
+    pub fn group_cpu_total(&self, group: &GroupId) -> CpuTotal {
         if !self.ready || self.group {
-            return RuleCpuTotal::default();
+            return CpuTotal::default();
+        }
+        self.group_totals.get(group).copied().unwrap_or(CpuTotal {
+            value: Some(0.0),
+            ..Default::default()
+        })
+    }
+
+    /// Current process-time coverage, independent of per-CPU ETW mapping.
+    pub fn rule_cpu_total(&self, target: &RuleTarget) -> CpuTotal {
+        if !self.ready || self.group {
+            return CpuTotal::default();
         }
         self.rule_totals.get(target).copied().unwrap_or_default()
     }
@@ -418,7 +453,7 @@ mod tests {
         let mut list = ProcessList::from_tracking(&targets, &totals, &Default::default());
         assert_eq!(
             list.rule_cpu_total(&one),
-            RuleCpuTotal {
+            CpuTotal {
                 value: Some(5.0),
                 measured: 2,
                 instances: 4
@@ -427,7 +462,7 @@ mod tests {
         assert!(list.rule_cpu_total(&one).partial());
         assert_eq!(
             list.rule_cpu_total(&two),
-            RuleCpuTotal {
+            CpuTotal {
                 value: Some(5.0),
                 measured: 1,
                 instances: 2
@@ -440,13 +475,13 @@ mod tests {
             "missing ETW mapping must not erase process-time coverage"
         );
         list.invalidate();
-        assert_eq!(list.rule_cpu_total(&one), RuleCpuTotal::default());
+        assert_eq!(list.rule_cpu_total(&one), CpuTotal::default());
         totals.insert((3, 30), Some(2.0));
         totals.insert((4, 40), Some(3.0));
         let recovered = ProcessList::from_tracking(&targets, &totals, &Default::default());
         assert_eq!(
             recovered.rule_cpu_total(&one),
-            RuleCpuTotal {
+            CpuTotal {
                 value: Some(10.0),
                 measured: 4,
                 instances: 4
@@ -456,7 +491,70 @@ mod tests {
         assert_eq!(
             ProcessList::from_tracking(&Default::default(), &totals, &Default::default())
                 .rule_cpu_total(&one),
-            RuleCpuTotal::default()
+            CpuTotal::default()
+        );
+    }
+
+    #[test]
+    fn s118_group_cpu_counts_exact_members_once_and_keeps_coverage_current() {
+        let target = |group: &str, rule: &str| RuleTarget {
+            group: GroupId(group.into()),
+            rule: RuleId(rule.into()),
+        };
+        let g = GroupId("g".into());
+        let h = GroupId("h".into());
+        let targets = HashMap::from([
+            (
+                target("g", "main-and-extra"),
+                vec![(1, 10), (2, 20), (2, 20)],
+            ),
+            (target("g", "overlap"), vec![(2, 20)]),
+            (target("h", "shared-and-reused"), vec![(2, 20), (2, 21)]),
+        ]);
+        let mut totals = HashMap::from([((1, 10), Some(6.0)), ((2, 20), Some(4.0))]);
+        let mut list = ProcessList::from_tracking(&targets, &totals, &Default::default());
+        assert_eq!(
+            list.group_cpu_total(&g),
+            CpuTotal {
+                value: Some(10.0),
+                measured: 2,
+                instances: 2
+            }
+        );
+        assert_eq!(
+            list.group_cpu_total(&h),
+            CpuTotal {
+                value: Some(4.0),
+                measured: 1,
+                instances: 2
+            }
+        );
+        assert!(list.group_cpu_total(&h).partial());
+        assert_eq!(
+            list.group_cpu_total(&GroupId("empty".into())).value,
+            Some(0.0)
+        );
+        list.record_cores(20, &[]);
+        assert_eq!(
+            list.group_cpu_total(&g).value,
+            Some(10.0),
+            "ETW is independent of current totals"
+        );
+        list.invalidate();
+        assert_eq!(list.group_cpu_total(&g), CpuTotal::default());
+        assert_eq!(
+            list.group_cpu_total(&GroupId("empty".into())),
+            CpuTotal::default()
+        );
+        totals.insert((2, 21), Some(3.0));
+        let recovered = ProcessList::from_tracking(&targets, &totals, &Default::default());
+        assert_eq!(
+            recovered.group_cpu_total(&h),
+            CpuTotal {
+                value: Some(7.0),
+                measured: 2,
+                instances: 2
+            }
         );
     }
 

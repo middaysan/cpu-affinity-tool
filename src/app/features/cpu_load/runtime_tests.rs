@@ -182,7 +182,7 @@ fn s92_membership_race_recovers_app_group_history_contributors_and_current_api()
 }
 
 #[test]
-fn group_meter_uses_latest_finalized_tracked_interval_and_keeps_missing_data_unknown() {
+fn historical_group_mean_keeps_original_finalized_pending_and_lost_intervals() {
     let runtime = runtime();
     {
         let mut history = runtime.history.write().unwrap();
@@ -203,8 +203,18 @@ fn group_meter_uses_latest_finalized_tracked_interval_and_keeps_missing_data_unk
             &[],
         );
     }
-    assert_eq!(runtime.tracked_group_load(&[0, 1, 1]), (Some(30.0), false));
-    assert_eq!(runtime.tracked_group_load(&[]), (None, false));
+    {
+        let history = runtime.history.read().unwrap();
+        let time = history.latest_finalized().unwrap();
+        assert_eq!(
+            history.group_mean_at(LoadSource::Tracked, time, &[0, 1, 1]),
+            (Some(30.0), false)
+        );
+        assert_eq!(
+            history.group_mean_at(LoadSource::Tracked, time, &[]),
+            (None, false)
+        );
+    }
     {
         let mut history = runtime.history.write().unwrap();
         history.mark_lost_reason(
@@ -215,9 +225,15 @@ fn group_meter_uses_latest_finalized_tracked_interval_and_keeps_missing_data_unk
             super::super::history::GapReason::TraceUnavailable,
         );
     }
-    assert_eq!(runtime.tracked_group_load(&[0, 1]), (None, false));
-    let _writer = runtime.history.write().unwrap();
-    assert_eq!(runtime.tracked_group_load(&[0, 1]), (None, false));
+    let history = runtime.history.read().unwrap();
+    assert_eq!(
+        history.group_mean_at(
+            LoadSource::Tracked,
+            history.latest_finalized().unwrap(),
+            &[0, 1]
+        ),
+        (None, false)
+    );
 }
 
 #[test]

@@ -6,6 +6,8 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-10-28
+
 ### Added
 
 - Shared-process control: duplicate-name hints, an explicit controlling-app choice for legacy conflicts and Take control here in the rule editor. Earlier rules retain new overlaps; process lists and CPU/RAM observation stay intact. Owner changes use the same durable path in GUI and MCP (state schema v14).
@@ -27,6 +29,8 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 - Local preview of per-app background CPU sessions: one default-Off checkbox in Application rule, priority/EcoQoS-only sessions, no Advanced/manual core selection and no separate System Tweaks card. Old placement recovery data remains readable. Native mechanism checks use test-owned processes; the system-role mutation qualification set remains empty pending controlled VM/function validation. See `docs/background-workload.md` for scope and limits.
 
 ### Fixed
+
+- Group CPU now sums its own unique running processes from the same current counters and whole-host scale as app rows. Delayed ETW or a busy history lock no longer replaces fresh group usage with stale zero or a dash; one GUI-frame snapshot keeps all current CPU/RAM summaries coherent.
 
 - Preserve the original settings file when its recovery backup fails, and keep GUI drafts attached to the result of their own Save request.
 - Reject revoked queued MCP writes during shutdown and stale process observations after a saved rule change or Process monitor Off.
@@ -53,9 +57,15 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Changed
 
+- Update Tokio and the Windows clipboard dependency to patched releases after the release audit; keep existing features and platform boundaries.
 - Avoid a full tuning-document decode per background policy and repeat native identity reads only for unique candidate PIDs within an observation. Windows CI and release verification now run the pure background protocol/closed-admission checks and strict test-code Clippy; real Windows roles remain unqualified.
 - Windows no longer includes the unused Glow/OpenGL renderer; Linux keeps its existing Glow backend.
 - Updated the README lead screenshot to the supplied side-by-side groups and CPU selection view.
+
+### Compatibility
+
+- Saved groups and applications are preserved. Explicit saves upgrade compatible configurations to schema v14; older binaries cannot read the upgraded format. Existing process-name lists are not automatically expanded.
+- Windows background-task reduction remains an inactive preview pending controlled VM validation. The manual all-core parking control is a separate Windows 11 feature.
 
 ## [1.7.0] - 2026-10-22
 

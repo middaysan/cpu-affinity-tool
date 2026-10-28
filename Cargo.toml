@@ -1,6 +1,6 @@
 [package]
 name = "cpu-affinity-tool" 
-version = "1.7.0"
+version = "1.7.1"
 edition = "2021"
 rust-version = "1.95"
 default-run = "cpu-affinity-tool"
@@ -23,7 +23,7 @@ overflow-checks = false     # Disable integer overflow checks.
 debug = true
 
 [dependencies]
-tokio = { version = "1.53.2", default-features = false, features = ["rt-multi-thread", "time", "sync"] }
+tokio = { version = "1.53.3", default-features = false, features = ["rt-multi-thread", "time", "sync"] }
 os_api = { path = "libs/os_api" }
 eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts"] }
 num_cpus = "1.17.0"

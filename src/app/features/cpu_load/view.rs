@@ -400,8 +400,10 @@ pub(crate) fn group_indicator(
     if !app.cpu_load_enabled() {
         return;
     }
-    let snapshot = app.cpu_load.snapshot();
-    let (value, partial) = app.cpu_load.tracked_group_load(cpus);
+    let snapshot = app.cpu_load.frame_snapshot(ui.ctx());
+    let coverage = snapshot.live_processes.group_cpu_total(id);
+    let value = coverage.value;
+    let partial = coverage.partial();
     let memory = snapshot
         .group_memory
         .as_ref()
@@ -416,8 +418,8 @@ pub(crate) fn group_indicator(
     let response = load_meter(ui, MeterLoad { value, partial, memory_label: Some(&memory_label) }, color, true, MeterKind::Group).on_hover_ui(|ui| {
         crate::app::shell::presenters::shared_elements::tooltip_layout(ui);
         ui.add(egui::Label::new(format!(
-            "Open CPU graphs.\nTracked apps: {} of this group's CPU capacity (latest finalized graph interval).\nTracked scope covers unique processes across your saved groups on these CPUs. * means partial measured load; — means unavailable. Use All system processes in the graphs for other programs.",
-            measured_percent(value, partial),
+            "Group CPU: {} of the whole processor, across running apps in this group.\nUses the same current measurements as app rows, including added process names and enabled descendants. Shared processes count once per group.\nMeasured {} of {} processes. * means an incomplete subtotal; — means waiting or unavailable.\nOpen per-CPU history on this group's chosen CPUs. Graphs show original scheduler intervals and use a per-CPU scale.",
+            measured_percent(value, partial), coverage.measured, coverage.instances,
         )).wrap());
         ui.add(egui::Label::new(format!(
             "Group RAM: {memory_label}. Private resident memory of running apps assigned to this group, including added names and enabled descendants. Shared processes count once per group; shared memory pages are excluded.\nMeasured {} of {} processes, updated once per second. * marks an incomplete subtotal; — means unavailable; 0 MB means no active tracked processes in a current sample. MB/GB use 1024-based units.", memory.measured, memory.instances,
@@ -426,7 +428,15 @@ pub(crate) fn group_indicator(
             ui.add(egui::Label::new(error).wrap());
         }
     });
-    crate::debug_mcp_control!(format!("meter.group.{}", id.0), response);
+    #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+    crate::app::features::diagnostics::debug_mcp::rect_control(
+        ui.ctx(),
+        format!("meter.group.{}", id.0),
+        response.rect,
+        response.enabled(),
+        serde_json::json!({"cpu_percent":value,"partial":partial,"measured":coverage.measured,"instances":coverage.instances,
+            "sample_unix_ms":snapshot.live_processes.time.and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_millis().to_string())}),
+    );
     #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
     crate::app::features::diagnostics::debug_mcp::rect_control(
         ui.ctx(),
@@ -458,7 +468,7 @@ pub(crate) fn process_indicator(
     if !app.cpu_load_enabled() {
         return;
     }
-    let snapshot = app.cpu_load.snapshot();
+    let snapshot = app.cpu_load.frame_snapshot(ui.ctx());
     let value = if running {
         snapshot.processes.get(&target).copied().flatten()
     } else {
@@ -503,7 +513,8 @@ pub(crate) fn process_indicator(
         format!("meter.rule.{}", target.rule.0),
         response.rect,
         running,
-        serde_json::json!({"cpu_percent":value,"partial":partial,"measured":coverage.measured,"instances":coverage.instances}),
+        serde_json::json!({"cpu_percent":value,"partial":partial,"measured":coverage.measured,"instances":coverage.instances,
+            "sample_unix_ms":snapshot.live_processes.time.and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_millis().to_string())}),
     );
     #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
     crate::app::features::diagnostics::debug_mcp::rect_control(
@@ -2036,40 +2047,89 @@ mod tests {
     }
 
     #[test]
-    fn group_indicator_only_shows_tracked_interval_load() {
+    fn s118_group_indicator_uses_current_members_despite_stale_or_locked_history() {
+        use crate::app::shared::ids::RuleId;
         let ctx = egui::Context::default();
         let mut app = AppState::new_for_test(
             Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
             2,
         );
+        let target = |group: &str, rule: &str| RuleTarget {
+            group: GroupId(group.into()),
+            rule: RuleId(rule.into()),
+        };
         let mut snapshot = app.cpu_load.snapshot().as_ref().clone();
-        snapshot.cpus = vec![Some(70.0), Some(90.0)];
-        snapshot.tracked_cpus = vec![Some(99.0); 2];
-        *app.cpu_load.published.write().unwrap() = Arc::new(snapshot);
+        snapshot.cpus = vec![Some(90.0); 2];
+        snapshot.live_processes = Arc::new(super::super::process_list::ProcessList::from_tracking(
+            &std::collections::HashMap::from([
+                (target("g", "main-and-helper"), vec![(1, 10), (2, 20)]),
+                (target("g", "shared-helper"), vec![(2, 20)]),
+                (target("other", "unrelated"), vec![(3, 30)]),
+            ]),
+            &std::collections::HashMap::from([
+                ((1, 10), Some(6.0)),
+                ((2, 20), Some(4.0)),
+                ((3, 30), Some(80.0)),
+            ]),
+            &Default::default(),
+        ));
+        let current = Arc::new(snapshot);
+        let mut next = current.as_ref().clone();
+        let main = target("g", "main-and-helper");
+        next.processes.insert(main.clone(), Some(80.0));
+        next.live_processes = Arc::new(super::super::process_list::ProcessList::from_tracking(
+            &std::collections::HashMap::from([(main.clone(), vec![(1, 10)])]),
+            &std::collections::HashMap::from([((1, 10), Some(80.0))]),
+            &Default::default(),
+        ));
+        let next = Arc::new(next);
+        *app.cpu_load.published.write().unwrap() = current.clone();
+        let history = app.cpu_load.history.clone();
         {
-            let mut history = app.cpu_load.history.write().unwrap();
-            history.configure(2, 30, &[]).unwrap();
-            history.push(
+            let mut store = history.write().unwrap();
+            store.configure(2, 30, &[]).unwrap();
+            store.push(
                 1.0,
                 std::time::SystemTime::UNIX_EPOCH,
-                &[Some(90.0); 2],
+                &[Some(0.0); 2],
                 &[],
-                &std::collections::HashMap::new(),
+                &Default::default(),
             );
-            history.record_tracked(&[Some(20.0), Some(40.0)]);
+            store.record_tracked(&[Some(0.0); 2]);
+        }
+        for locked in [false, true] {
+            *app.cpu_load.published.write().unwrap() = current.clone();
+            let _writer = locked.then(|| history.write().unwrap());
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                group_indicator(&mut app, ui, &GroupId("g".into()), "Group", &[1]);
+                // A worker publication between controls must affect the next frame.
+                *app.cpu_load.published.write().unwrap() = next.clone();
+                process_indicator(
+                    &mut app,
+                    ui,
+                    main.clone(),
+                    "Main",
+                    true,
+                    egui::Color32::GRAY,
+                    "Running",
+                );
+            });
+            output.textures_delta.clear();
+            assert_eq!(output.shapes.iter().filter(|shape|
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "CPU 10%")
+            ).count(), 2, "group and app must share the current frame despite stale ETW, a history writer or mid-frame publication (locked={locked})");
+            assert!(output.shapes.iter().any(|shape|
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "RAM —")
+            ));
+            output.textures_delta.clear();
         }
         let mut output = ctx.run_ui(Default::default(), |ui| {
-            group_indicator(&mut app, ui, &GroupId("g".into()), "Group", &[0, 1]);
+            group_indicator(&mut app, ui, &GroupId("g".into()), "Group", &[1]);
         });
         output.textures_delta.clear();
-        assert!(output.shapes.iter().any(
-            |shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "CPU 30%")
-        ));
-        assert!(output.shapes.iter().any(
-            |shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "RAM —")
-        ));
-        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Tracked")));
-        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "All processes")));
+        assert!(output.shapes.iter().any(|shape|
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "CPU 80%")
+        ), "the next frame must adopt the newer sample");
     }
 
     #[test]

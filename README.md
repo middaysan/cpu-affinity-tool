@@ -6,7 +6,7 @@ Set up a game and its background apps once, instead of repeating the changes in 
 
 **[Download for Windows](https://github.com/middaysan/cpu-affinity-tool/releases/latest)** · [Getting started](#getting-started) · [MCP guide](docs/mcp.md) · [Documentation](#documentation)
 
-**New in [1.7.0](https://github.com/middaysan/cpu-affinity-tool/releases/tag/v1.7.0):** CPU/process history with PNG and CSV export, System Tweaks, and optional local AI-agent control through MCP.
+**New in [1.7.1](https://github.com/middaysan/cpu-affinity-tool/releases/tag/v1.7.1):** Steam game tracking, helper-process profiles for popular apps, shared-process control, and current CPU/RAM totals for apps and groups.
 
 ![Affinity groups and CPU topology selection shown side by side](assets/screenshot.png)
 
@@ -46,6 +46,8 @@ Child-process management is an explicit per-rule option and starts off for new r
 
 **CPU load** records CPU and process activity independently of Process monitor. Recording continues with graphs closed or the app in the tray. History stays in RAM: choose 30 seconds, 5 minutes (default), or 30 minutes.
 
+Application and group CPU meters show current usage as a percentage of the whole processor. Each group counts its running processes once, including configured helpers shared by several rules. Detailed graphs show scheduler time on individual logical CPUs, with their own scale and sample time.
+
 Open a system, group, or application graph to inspect individual logical CPUs, their sampled parking state, and the processes contributing at a selected time. Group graphs start with your tracked apps; **All system processes** expands the scope. The **Processes** tab has sortable columns.
 
 ![CPU history with a selected logical CPU and process contributions](assets/screenshots/cpu-history.png)
@@ -66,7 +68,7 @@ Right-click a graph to save the visible chart as **PNG** or export all retained 
 
 Manual changes remain applied after you close the app. **Undo** uses the recorded original values and preserves later changes made elsewhere. Display changes have a confirmation countdown. See the [System Tweaks guide](docs/system-tweaks.md) for what each control changes.
 
-**Development preview:** this branch adds one optional per-app background-load reduction checkbox in Application rule settings. It requests priority/EcoQoS only, with no manual core selection. System roles remain unchanged while their controlled VM validation is pending; the native CPU mechanisms have been checked only on owned test processes. This is not part of the published 1.7.0 release. [Preview controls and limits](docs/background-workload.md).
+**Background-load reduction preview:** Application rule includes an optional checkbox, off by default. It currently saves the preference without changing Windows system tasks; controlled VM validation is still pending. The underlying CPU mechanisms have been tested only on owned test processes. [Preview controls and limits](docs/background-workload.md).
 
 ### Connect a local agent
 
@@ -83,7 +85,7 @@ An agent can manage groups and rules, change monitoring settings, launch program
 - **Windows x64** is the stable release platform. The current renderer uses DirectX 12, and the release requires administrator approval. Saved-rule shortcuts may show the same UAC prompt.
 - **Linux** has a separate desktop beta for x86_64 glibc, with X11/Wayland sessions and [beta prereleases](https://github.com/middaysan/cpu-affinity-tool/releases). CPU recording, System Tweaks and production MCP are Windows-only; Linux does not have full Windows feature parity. macOS is unsupported.
 - New Windows configurations use `%LOCALAPPDATA%\CpuAffinityTool\state.json`. An existing `state.json` beside the EXE keeps its legacy location. **Logs → Data folder** opens the active directory.
-- Current development builds save configuration as schema v13 (Steam game targets and built-in helper provenance); released 1.7.0 used v11. Keep a backup before upgrading; loading an older format alone does not rewrite it, but an explicit save upgrades it. Downgrading after a current-format save is unsupported.
+- Version 1.7.1 saves configuration as schema v14 (Steam game targets, built-in helper provenance and process-control ownership); 1.7.0 used v11. Keep a backup before upgrading; loading an older format alone does not rewrite it, but an explicit save upgrades it. Downgrading after a current-format save is unsupported.
 - Logs and available crash reports stay local and are not uploaded automatically. Review them before sharing. CPU history is retained in memory and saved to a file only when you export it.
 
 ## Build from source
