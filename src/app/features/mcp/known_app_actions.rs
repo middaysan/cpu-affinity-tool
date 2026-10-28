@@ -7,10 +7,13 @@ use super::{
 };
 use crate::app::{
     features::{
-        execution::launch::{begin_launch, cancel_launch, identity_for_app, SteamLaunchBegin},
+        execution::{
+            control::{Authority, SourceRequest},
+            launch::{begin_launch, cancel_launch, identity_for_app, SteamLaunchBegin},
+        },
         rules::known_apps::{self, MemberRole, Scope},
     },
-    models::AppToRun,
+    models::{AppToRun, RunningApps},
     shared::ids::{GroupId, RuleId},
 };
 use os_api::{
@@ -39,6 +42,8 @@ pub(super) struct SavedRequest<'a> {
     pub app: &'a AppToRun,
     pub group: &'a GroupId,
     pub rule: &'a RuleId,
+    pub mask: usize,
+    pub fields: os_api::gaming::ProcessSettingsFields,
     pub restart: bool,
     pub agent: &'a AgentAccess,
     pub live: &'a LiveAccess,
@@ -50,6 +55,8 @@ pub(super) fn launch(services: &Services, request: SavedRequest<'_>, scope: Scop
         app,
         group,
         rule,
+        mask,
+        fields,
         restart,
         agent,
         live,
@@ -170,24 +177,20 @@ pub(super) fn launch(services: &Services, request: SavedRequest<'_>, scope: Scop
             Ok(child)
         })?;
         if scope.enabled(path) {
-            let mut running = services.running.blocking_write();
-            running.mutate_membership(|running| {
-                let key = app_key.clone();
-                if !running.apps.contains_key(&key) {
-                    running.add_app(&key, child.pid, group.clone(), rule.clone());
-                }
-                if let Some(tracked) = running.apps.get_mut(&key) {
-                    if !tracked.pids.contains(&child.pid) {
-                        tracked.pids.push(child.pid);
-                    }
-                    tracked
-                        .pid_instance_tokens
-                        .insert(child.pid, child.creation_token);
-                    tracked
-                        .primary_instances
-                        .insert(child.pid, child.creation_token);
-                }
-            });
+            publish_main(
+                &services.running,
+                &services.control,
+                SourceRequest {
+                    group,
+                    rule,
+                    key: &app_key,
+                    app,
+                    mask,
+                    fields,
+                },
+                child.pid,
+                child.creation_token,
+            )?;
         }
         Ok(())
     })();
@@ -201,6 +204,37 @@ pub(super) fn launch(services: &Services, request: SavedRequest<'_>, scope: Scop
     Ok(ack(group, rule))
 }
 
+fn publish_main(
+    running: &tokio::sync::RwLock<RunningApps>,
+    control: &Authority,
+    source: SourceRequest<'_>,
+    pid: u32,
+    token: u64,
+) -> Result<(), String> {
+    let mut running = running.blocking_write();
+    control.with_source(source, |spec| {
+        let key = control
+            .member(&running, &spec.key)
+            .map(|(key, _)| key.clone())
+            .unwrap_or_else(|| spec.key.clone());
+        running.mutate_membership(|running| {
+            if !running.apps.contains_key(&key) {
+                running.add_app(&key, pid, spec.group.clone(), spec.rule.clone());
+            }
+            if let Some(tracked) = running.apps.get_mut(&key) {
+                tracked.group_id = spec.group.clone();
+                tracked.rule_id = spec.rule.clone();
+                if !tracked.pids.contains(&pid) {
+                    tracked.pids.push(pid);
+                }
+                tracked.pid_instance_tokens.insert(pid, token);
+                tracked.primary_instances.insert(pid, token);
+            }
+        });
+        Ok(())
+    })
+}
+
 fn ack(group: &GroupId, rule: &RuleId) -> serde_json::Value {
     json!({"status":"activation_requested","group_id":group,"rule_id":rule,"pid":null,"creation_token":null,"capture_supported":false,"elevated":false,"settings":"Pending application discovery and native readback","note":"Activation acknowledgement does not prove startup. Read tracked CPU/RAM and exact process identities; the launcher is not a managed application process."})
 }
@@ -209,6 +243,74 @@ fn ack(group: &GroupId, rule: &RuleId) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::app::features::rules::known_apps::Entry;
+    #[test]
+    fn s116_known_app_publication_rechecks_saved_source_after_launch() {
+        use crate::app::features::execution::{control, RuntimeRegistry};
+        let state = control::tests::fixture();
+        let runtime = RuntimeRegistry::new();
+        let authority = runtime.control_handle();
+        authority.configure(&state);
+        let source = authority.view().rules[0].clone();
+        for change in ["moved", "removed", "changed"] {
+            let mut next = state.clone();
+            match change {
+                "moved" => {
+                    next.rule_identities.as_mut().unwrap().groups[0].id =
+                        GroupId("moved-group".into());
+                }
+                "removed" => next.groups[0].programs.clear(),
+                "changed" => next.groups[0].programs[0].manage_descendants = true,
+                _ => unreachable!(),
+            }
+            authority.configure(&next);
+            let running = runtime.running_apps_handle();
+            let result = publish_main(
+                &running,
+                &authority,
+                SourceRequest {
+                    group: &source.group,
+                    rule: &source.rule,
+                    key: &source.key,
+                    app: &source.app,
+                    mask: source.mask,
+                    fields: source.fields,
+                },
+                42,
+                1042,
+            );
+            assert!(
+                result.is_err(),
+                "{change} source must refuse late publication"
+            );
+            assert!(running.blocking_read().apps.is_empty());
+        }
+        authority.configure(&state);
+        let running = runtime.running_apps_handle();
+        publish_main(
+            &running,
+            &authority,
+            SourceRequest {
+                group: &source.group,
+                rule: &source.rule,
+                key: &source.key,
+                app: &source.app,
+                mask: source.mask,
+                fields: source.fields,
+            },
+            42,
+            1042,
+        )
+        .unwrap();
+        let running = running.blocking_read();
+        assert_eq!(
+            running.apps[&source.key].pid_instance_tokens.get(&42),
+            Some(&1042)
+        );
+        assert_eq!(
+            running.apps[&source.key].primary_instances.get(&42),
+            Some(&1042)
+        );
+    }
     #[test]
     fn s107_saved_agent_launch_uses_composite_activation_and_rejects_unknown_metadata() {
         let (state, _) = crate::app::features::execution::known_tracking_fixture();

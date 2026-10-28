@@ -86,3 +86,5 @@ CPU and RAM remain visible in every app that tracks the instance. Group RAM and 
 
 
 Different instances of one executable do not imply a shared-process conflict. Ownership notices keep the exact overlapping rule sets separate. When two independent sets need different controllers, choosing one does not erase the other set's saved preference: the latest eligible owner is used for each instance. Process lists and telemetry membership remain unchanged.
+
+Helper-only tracking still requires a live qualified main instance in the same installation. All finite main executable alternatives in the profile can supply that witness; selecting only helpers for CPU/RAM does not restrict the main-instance check to the first catalog filename.

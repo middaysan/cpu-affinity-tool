@@ -606,3 +606,39 @@ fn s112_disjoint_shared_sets_keep_independent_control_preferences() {
     assert_eq!(view.notices[0].owner, Some(view.rules[0].rule.clone()));
     assert_eq!(view.notices[1].owner, Some(view.rules[2].rule.clone()));
 }
+
+#[test]
+fn s116_initialized_gui_path_does_not_wait_for_an_observation() {
+    let state = fixture();
+    let control = std::sync::Arc::new(Authority::default());
+    control.configure(&state);
+    let lease = control
+        .observation(Policy::read(&state).unwrap().generation(), None)
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let cloned = control.clone();
+    let worker = std::thread::spawn(move || {
+        cloned.initialize(&state);
+        tx.send(()).unwrap();
+    });
+    let immediate = rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok();
+    drop(lease);
+    worker.join().unwrap();
+    assert!(
+        immediate,
+        "an already initialized GUI action waited behind inventory"
+    );
+}
+
+#[test]
+fn s116_unknown_control_policy_does_not_block_read_only_observation() {
+    let mut state = fixture();
+    state.set_process_control_raw(r#"{"version":99}"#.into());
+    let control = Authority::default();
+    control.configure(&state);
+    assert!(control.view().error.is_some());
+    assert!(
+        control.observation(u64::MAX, None).is_ok(),
+        "write refusal disabled CPU/RAM discovery"
+    );
+}

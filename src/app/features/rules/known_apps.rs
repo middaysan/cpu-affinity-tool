@@ -325,13 +325,16 @@ impl Scope {
         self.role_under_root(&self.root, image)
     }
 
-    pub fn primary_name(&self) -> String {
+    /// Main lifetime witnesses remain independent of the editable metric selection.
+    pub fn primary_names(&self) -> Vec<String> {
         match self.entry {
-            Entry::Steam => "steam".into(),
-            Entry::DiscordDirect | Entry::DiscordLauncher => "discord".into(),
-            Entry::Catalog(profile) => {
-                normalize_process_name(profile.mains[0].rsplit('/').next().unwrap())
-            }
+            Entry::Steam => vec!["steam".into()],
+            Entry::DiscordDirect | Entry::DiscordLauncher => vec!["discord".into()],
+            Entry::Catalog(profile) => profile
+                .mains
+                .iter()
+                .map(|path| normalize_process_name(path.rsplit('/').next().unwrap()))
+                .collect(),
         }
     }
     pub fn enabled(&self, image: &Path) -> bool {

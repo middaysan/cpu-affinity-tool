@@ -444,34 +444,74 @@ impl AppState {
                 self.tuning_shutdown_reported = Some(outcome);
             }
         }
-        if self.pending_legacy.as_ref().is_some_and(|pending| !matches!(snapshot.operation, crate::app::features::system_tweaks::TuningOperationState::Pending { id } if id == pending.id)) {
+        let completion = self.pending_legacy.as_ref().and_then(|pending| {
+            self.tuning
+                .take_gui_receipt(pending.id, self.tuning_adopted_revision)
+        });
+        if let Some(receipt) = completion {
             let pending = self.pending_legacy.take().unwrap();
-            if matches!(snapshot.operation, crate::app::features::system_tweaks::TuningOperationState::Idle) && snapshot.revision > pending.revision {
+            if receipt.result.is_ok() && receipt.revision >= pending.revision {
                 match pending.completion {
-                    Some(LegacyCompletion::Rule(target, draft, background, choices)) if self.ui.app_edit_state.target.as_ref() == Some(&target) && self.ui.app_edit_state.current_edit == draft && self.ui.app_edit_state.background == background && self.ui.app_edit_state.control_choices == choices => self.close_app_run_settings(),
-                    Some(LegacyCompletion::Group(target, name, selection, run_all)) if self.ui.group_form.editing_group_id == target && self.ui.group_form.group_name == name && self.ui.group_form.core_selection == selection && self.ui.group_form.run_all_enabled == run_all => self.cancel_group_form_session(),
+                    Some(LegacyCompletion::Rule(target, draft, background, choices))
+                        if self.ui.app_edit_state.target.as_ref() == Some(&target)
+                            && self.ui.app_edit_state.current_edit == draft
+                            && self.ui.app_edit_state.background == background
+                            && self.ui.app_edit_state.control_choices == choices =>
+                    {
+                        self.close_app_run_settings()
+                    }
+                    Some(LegacyCompletion::Group(target, name, selection, run_all))
+                        if self.ui.group_form.editing_group_id == target
+                            && self.ui.group_form.group_name == name
+                            && self.ui.group_form.core_selection == selection
+                            && self.ui.group_form.run_all_enabled == run_all =>
+                    {
+                        self.cancel_group_form_session()
+                    }
                     Some(LegacyCompletion::Import(intent, message)) => {
                         match intent {
-                            ImportIntent::Installed { group, entry, selected, query } if matches!(self.ui.current_window, WindowRoute::InstalledAppPicker) && self.ui.installed_app_picker.target_group_id.as_ref() == Some(&group) && self.ui.installed_app_picker.selected_entry_index == selected && self.ui.installed_app_picker.query == query && selected.and_then(|index| self.ui.installed_app_picker.entries.get(index)) == Some(&entry) => self.close_installed_app_picker(),
-                            _ => {},
+                            ImportIntent::Installed {
+                                group,
+                                entry,
+                                selected,
+                                query,
+                            } if matches!(
+                                self.ui.current_window,
+                                WindowRoute::InstalledAppPicker
+                            ) && self.ui.installed_app_picker.target_group_id.as_ref()
+                                == Some(&group)
+                                && self.ui.installed_app_picker.selected_entry_index
+                                    == selected
+                                && self.ui.installed_app_picker.query == query
+                                && selected.and_then(|index| {
+                                    self.ui.installed_app_picker.entries.get(index)
+                                }) == Some(&entry) =>
+                            {
+                                self.close_installed_app_picker()
+                            }
+                            _ => {}
                         }
                         self.log_manager.add_entry(message);
                     }
-                    _ => {},
+                    _ => {}
                 }
             } else {
-                if let Some(LegacyCompletion::Import(ImportIntent::Files(group, files), _)) = pending.completion {
+                if let Some(LegacyCompletion::Import(ImportIntent::Files(group, files), _)) =
+                    pending.completion
+                {
                     if self.ui.dropped_files.is_none() {
                         self.ui.dropped_files = Some(files);
                         self.ui.file_drop_hover_target = Some(group);
-                        let error=if let crate::app::features::system_tweaks::TuningOperationState::Refused{error,..}=snapshot.operation {error} else {SaveError::Recovering};
-                        self.ui.file_import_error=Some(error);
+                        let error = receipt.result.err().unwrap_or(SaveError::Recovering);
+                        self.ui.file_import_error = Some(error);
                         self.log_manager.add_important_entry(format!("App targets were not saved ({error:?}). The files and target group were retained. Use Retry or Dismiss in Affinity groups."));
                     } else {
                         self.log_manager.add_important_entry(format!("App targets were not saved for group {}: {files:?}. A newer file selection was preserved; select these files again to retry.", group.0));
                     }
                 } else {
-                    self.log_manager.add_important_sticky_once("Settings were not saved. The draft and saved values were retained.".into());
+                    self.log_manager.add_important_sticky_once(
+                        "Settings were not saved. The draft and saved values were retained.".into(),
+                    );
                 }
             }
         }
@@ -555,7 +595,7 @@ impl AppState {
         completion: Option<LegacyCompletion>,
     ) -> bool {
         let revision = self.tuning.snapshot().revision;
-        let id = match self.tuning.request(request) {
+        let id = match self.tuning.request_for_gui(request) {
             Ok(id) => id,
             Err(error) => {
                 if matches!(
@@ -2324,6 +2364,102 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn s116_gui_save_completion_survives_unrelated_request_churn() {
+        use crate::app::features::system_tweaks::{
+            service::{SavedState, StatePersistence},
+            SaveError, TuningOperationState, TuningRequest, TuningRuntime,
+        };
+        struct FirstSave {
+            fail: bool,
+        }
+        impl StatePersistence for FirstSave {
+            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                if std::mem::take(&mut self.fail) {
+                    Err(SaveError::Storage)
+                } else {
+                    Ok(SavedState::Unavailable)
+                }
+            }
+        }
+        let wait = |app: &AppState| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while matches!(
+                app.tuning_snapshot().operation,
+                TuningOperationState::Pending { .. }
+            ) {
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        for fail in [true, false] {
+            let mut app = sample_state();
+            let original = app.persistent_state.read().unwrap().clone();
+            let runtime = TuningRuntime::start(
+                crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                    .headless(original.clone(), Box::new(FirstSave { fail }))
+                    .without_modules(),
+                app.runtime.running_apps_handle(),
+            );
+            app.replace_tuning_for_test(runtime, Default::default());
+            let mut draft = original.groups[0].programs[0].clone();
+            draft.name = "GUI draft".into();
+            edit_first_rule(&mut app, draft);
+            app.commit_current_app_edit_session();
+            wait(&app);
+            // Keep the GUI unpolled while other clients exceed receipt retention.
+            for index in 0..65 {
+                let latest = app.tuning_snapshot();
+                let mut candidate = (*latest.state).clone();
+                candidate.theme_index = index % 3;
+                app.tuning
+                    .request(TuningRequest::SaveBase {
+                        gui_import: false,
+                        candidate: Box::new(candidate),
+                        expected_revision: latest.revision,
+                    })
+                    .unwrap();
+                wait(&app);
+            }
+            if !fail {
+                let latest = app.tuning_snapshot();
+                app.tuning
+                    .request(TuningRequest::SaveBase {
+                        gui_import: false,
+                        candidate: Box::new((*latest.state).clone()),
+                        expected_revision: latest.revision + 1,
+                    })
+                    .unwrap();
+                wait(&app);
+            }
+            let latest = app.tuning_snapshot();
+            assert_eq!(
+                app.tuning.request_for_gui(TuningRequest::SaveBase {
+                    gui_import: false,
+                    candidate: Box::new((*latest.state).clone()),
+                    expected_revision: latest.revision,
+                }),
+                Err(SaveError::Pending),
+                "An unconsumed GUI result cannot be replaced by another GUI request"
+            );
+            app.poll_tuning();
+            assert_eq!(
+                app.ui.app_edit_state.current_edit.is_some(),
+                fail,
+                "Only the GUI request's own result may close its draft"
+            );
+            assert_eq!(
+                app.get_group_program(0, 0).unwrap().name,
+                if fail {
+                    original.groups[0].programs[0].name.as_str()
+                } else {
+                    "GUI draft"
+                }
+            );
+            assert!(app.pending_legacy.is_none());
+        }
+    }
+
     #[test]
     fn followup_classic_save_reports_acceptance_before_gated_completion() {
         use crate::app::features::system_tweaks::{

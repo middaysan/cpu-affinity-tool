@@ -87,6 +87,8 @@ enum SaveAdmission {
     #[default]
     Writable,
 
+    RecoveryBackupRequired,
+
     Blocked {
         raw: Option<Arc<str>>,
         size: usize,
@@ -247,7 +249,7 @@ impl AppStateStorage {
     }
 
     pub(crate) fn save_blocked(&self) -> bool {
-        matches!(self.save_admission, SaveAdmission::Blocked { .. })
+        !matches!(self.save_admission, SaveAdmission::Writable)
             || self.version > CURRENT_APP_STATE_VERSION
             || matches!(
                 self.tuning.decode(),
@@ -379,13 +381,18 @@ impl AppStateStorage {
             }
         }
         let mut default_state = schema_refresh::build_default_state();
+        let mut backup_secured = false;
         let recovered = (|| -> Result<(), Box<dyn std::error::Error>> {
             let serialized = storage_io::serialize_state_bounded(&default_state)?;
             storage_io::backup_state_file_with_filesystem(path, filesystem)?;
+            backup_secured = true;
             storage_io::publish_state_bytes_with_filesystem(&serialized, path, filesystem)
         })();
         if let Err(error) = recovered {
             eprintln!("ERROR: Failed to recover unreadable state: {error}");
+            if !backup_secured {
+                default_state.save_admission = SaveAdmission::RecoveryBackupRequired;
+            }
         }
         default_state.loaded_version = default_state.version;
         default_state
@@ -408,6 +415,9 @@ impl AppStateStorage {
         path: &Path,
         filesystem: &mut impl storage_io::StateFilesystem,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if matches!(self.save_admission, SaveAdmission::RecoveryBackupRequired) {
+            return Err("Recovery backup could not be secured; original settings are retained. Resolve the storage error and restart before saving.".into());
+        }
         if let SaveAdmission::Blocked { raw, size } = &self.save_admission {
             let refusal = if raw.is_some() {
                 format!("state evidence is blocked ({size} bytes); save refused")

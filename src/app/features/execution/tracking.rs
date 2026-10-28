@@ -228,7 +228,7 @@ pub async fn run_running_app_monitor(
         interval.tick().await;
         crate::render_profile_scope!(Discovery);
 
-        let configured_programs = {
+        let (configured_programs, generation) = {
             let state = match app_state.read() {
                 Ok(guard) => guard,
                 Err(_) => {
@@ -240,7 +240,15 @@ pub async fn run_running_app_monitor(
                 }
             };
 
-            collect_configured_programs(&state)
+            let programs = collect_configured_programs(&state);
+            let generation = programs.first().map_or_else(
+                || {
+                    super::control::policy::Policy::read(&state)
+                        .map_or(u64::MAX, |policy| policy.generation())
+                },
+                |program| program.control_generation,
+            );
+            (programs, generation)
         };
 
         let snapshot = match snapshot_for_configuration(&configured_programs, &os) {
@@ -266,6 +274,7 @@ pub async fn run_running_app_monitor(
                 configured_programs,
                 &snapshot,
                 IterationLookups {
+                    generation,
                     names: &name_to_pids,
                     aumids: &aumid_to_seed_pids,
                     steam,
@@ -744,6 +753,7 @@ fn observe_steam<O: RunningAppsOs>(
 }
 
 struct IterationLookups<'a> {
+    generation: u64,
     names: &'a HashMap<String, Vec<u32>>,
     aumids: &'a HashMap<String, Vec<BoundProcessInstance>>,
     steam: SteamObservations,
@@ -757,10 +767,21 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
     os: &O,
 ) -> RunningAppsIterationOutcome {
     let IterationLookups {
+        generation: control_generation,
         names: name_to_pids,
         aumids: aumid_to_seed_pids,
         steam: mut steam_detected,
     } = lookups;
+    let control = apps.control.clone();
+    let Ok(_observation) = control.observation(control_generation, None) else {
+        return RunningAppsIterationOutcome::default();
+    };
+    if configured_programs
+        .iter()
+        .any(|program| program.control_generation != control_generation)
+    {
+        return RunningAppsIterationOutcome::default();
+    }
     let rekeyed = rekey_rule_membership(apps, &configured_programs, installed_package_tracking);
     prepare_steam_observations(
         apps,
@@ -794,10 +815,6 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
             }
         }
     }
-    let control_generation = configured_programs
-        .first()
-        .map_or(u64::MAX, |rule| rule.control_generation);
-    let control = apps.control.clone();
     let outcome = apps.mutate_membership(|apps| {
         let mut processed_keys = HashSet::new();
         let mut outcome = RunningAppsIterationOutcome {
@@ -1553,11 +1570,16 @@ mod tests {
             HashMap::new()
         };
         let steam = super::observe_steam(&configured, &snapshot, os);
+        let generation = configured.first().map_or_else(
+            || apps.control.generation(),
+            |program| program.control_generation,
+        );
         process_running_apps_iteration_with_os(
             apps,
             configured,
             &snapshot,
             super::IterationLookups {
+                generation,
                 names: &name_to_pids,
                 aumids: &aumid_to_seed_pids,
                 steam,
@@ -1565,6 +1587,39 @@ mod tests {
             &installed_package_tracking,
             os,
         )
+    }
+
+    #[test]
+    fn s116_stale_empty_discovery_cannot_erase_current_membership() {
+        use crate::app::features::{execution::control::policy::Policy, rules::RulesContext};
+        let mut before = sample_path_program_state();
+        before.groups.clear();
+        let mut current = sample_path_program_state();
+        Policy::prepare_save(&before, &mut current).unwrap();
+        let rules = RulesContext::from_storage(&current);
+        let rule = rules.rule_id_for_index(0, 0).unwrap();
+        let key = rules.runtime_key(&current.groups[0].programs[0], &rule);
+        let mut apps = RunningApps::default();
+        apps.add_app(&key, 7, rules.group_id_for_index(0).unwrap(), rule);
+        apps.control.configure(&current);
+        let empty = HashMap::new();
+        process_running_apps_iteration_with_os(
+            &mut apps,
+            vec![],
+            &ProcessSnapshot::default(),
+            super::IterationLookups {
+                generation: 0,
+                names: &empty,
+                aumids: &HashMap::new(),
+                steam: HashMap::new(),
+            },
+            &Arc::new(RwLock::new(Default::default())),
+            &FakeRunningAppsOs::default(),
+        );
+        assert!(
+            apps.apps.contains_key(&key),
+            "old empty observation erased a newly admitted app"
+        );
     }
 
     #[test]
@@ -2469,6 +2524,8 @@ pub(super) fn native_known_iteration(
         configured,
         &snapshot,
         IterationLookups {
+            generation: super::control::policy::Policy::read(state)
+                .map_or(u64::MAX, |policy| policy.generation()),
             names: &names,
             aumids: &aumids,
             steam,

@@ -29,6 +29,83 @@ fn s107_binding_roundtrips_without_expanding_saved_names() {
 }
 
 #[test]
+fn s116_catalog_alternate_mains_witness_helper_only_membership() {
+    for (catalog_id, imported, running, helper, main_names) in [
+        (
+            "obs-studio",
+            "bin/32bit/obs32.exe",
+            "bin/32bit/obs32.exe",
+            "obs-plugins/32bit/obs-browser-page.exe",
+            ["obs64.exe", "obs32.exe"],
+        ),
+        (
+            "obs-studio",
+            "bin/64bit/obs64.exe",
+            "bin/32bit/obs32.exe",
+            "obs-plugins/32bit/obs-browser-page.exe",
+            ["obs64.exe", "obs32.exe"],
+        ),
+        (
+            "ubisoft-connect",
+            "upc.exe",
+            "UbisoftConnect.exe",
+            "UbisoftWebCore.exe",
+            ["upc.exe", "UbisoftConnect.exe"],
+        ),
+        (
+            "logitech-g-hub",
+            "lghub.exe",
+            "system_tray/lghub_system_tray.exe",
+            "lghub_agent.exe",
+            ["lghub.exe", "lghub_system_tray.exe"],
+        ),
+    ] {
+        let mut state = sample_path_program_state();
+        let root = std::path::Path::new("C:/OwnedInstall");
+        let mut app = AppToRun::new_path(
+            root.join(imported),
+            vec![],
+            root.join(imported),
+            PriorityClass::Normal,
+            false,
+        );
+        let helper_name = helper.rsplit('/').next().unwrap();
+        app.additional_processes = vec![helper_name.into()];
+        app.builtin_process_binding = Some(serde_json::json!({
+            "catalog_id": catalog_id,
+            "definition_version": 1,
+            "generated_names": [main_names[0], main_names[1], helper_name]
+        }));
+        let key = app.get_key();
+        state.groups[0].programs[0] = app;
+        let mut os = FakeRunningAppsOs {
+            snapshot: Ok(ProcessSnapshot {
+                names: HashMap::from([
+                    (1, running.rsplit('/').next().unwrap().into()),
+                    (2, helper_name.into()),
+                ]),
+                ..Default::default()
+            }),
+            image_paths: HashMap::from([(1, root.join(running)), (2, root.join(helper))]),
+            ..Default::default()
+        };
+        let mut apps = RunningApps::default();
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        let tracked = apps
+            .apps
+            .get(&key)
+            .expect("a live qualified main admits its helper");
+        assert_eq!(tracked.pid_instance_tokens, HashMap::from([(2, 2)]));
+        assert_eq!(tracked.primary_instances, HashMap::from([(1, 1)]));
+        assert_eq!(state.groups[0].programs[0].additional_processes, [helper_name]);
+
+        os.snapshot.as_mut().unwrap().names.remove(&1);
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert!(!apps.apps.contains_key(&key), "an orphan helper must retire");
+    }
+}
+
+#[test]
 fn s110_identical_app_rules_in_distinct_groups_keep_independent_membership() {
     let mut state = s107_bound_steam();
     let mut duplicate = state.groups[0].clone();

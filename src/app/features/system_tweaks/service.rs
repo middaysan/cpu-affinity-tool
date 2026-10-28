@@ -334,6 +334,11 @@ impl HeadlessTuning {
         )
         .map_err(|_| SaveError::Invalid)?;
         let control = self.process_control.clone();
+        let configuration = control
+            .as_ref()
+            .map(|control| control.configuration_write())
+            .transpose()
+            .map_err(|_| SaveError::Invalid)?;
         let mut gate = control
             .as_ref()
             .map(|control| control.lock())
@@ -347,6 +352,7 @@ impl HeadlessTuning {
             }
         }
         drop(gate);
+        drop(configuration);
         self.state = candidate;
         self.rules = rules;
         self.revision = revision;

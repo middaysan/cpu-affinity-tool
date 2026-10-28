@@ -28,6 +28,11 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ### Fixed
 
+- Preserve the original settings file when its recovery backup fails, and keep GUI drafts attached to the result of their own Save request.
+- Reject revoked queued MCP writes during shutdown and stale process observations after a saved rule change or Process monitor Off.
+- Apply initial saved settings after ordinary MCP Installed activation, recheck the complete source and exact process lifetime before correction, refuse stale known-app launch publication and recognize alternate main executables for helper-only tracking.
+- Bound Internet shortcut reads before decoding and validate installed-app IDs without inserting package names into PowerShell source.
+
 - Automatic Process monitor correction failures now retain the application, PID and Windows error in both log views, with bounded repeat suppression. A denied member does not prevent correction of other processes.
 
 - Preserve the selected process controller across deferred launches with monitoring Off and read-only System Tweaks checks. Correct late package helpers through the guarded initial path, reject stale installed-app callbacks, retain running-app lookups through duplicate-key transitions, and avoid false conflicts between disjoint instances of one EXE. Existing process lists and CPU/RAM scopes are retained.

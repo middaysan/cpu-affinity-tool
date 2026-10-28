@@ -206,6 +206,7 @@ impl Services {
                         if let Some(scope)=super::known_app_actions::saved_scope(app,a.capture,a.elevated)? {
                             return super::known_app_actions::launch(&services,super::known_app_actions::SavedRequest {
                                 app,group:&group,rule:&rule,
+                                mask:if fields.affinity {crate::app::features::execution::launch::affinity_mask_from_cores(&snapshot.state.groups[g].cores).map_err(native)?}else{0},fields,
                                 restart:name=="restart_saved",agent:&agent,live:&live,generation,
                             },scope);
                         }
@@ -229,7 +230,7 @@ impl Services {
                                 }
                                 return Ok(json!({"status":"activation_requested","group_id":group,"rule_id":rule,"pid":null,"creation_token":null,"capture_supported":false,"elevated":false,"settings":"Pending game discovery and native readback","note":"Steam acknowledgement does not prove that the game started. CPU/RAM and scheduling belong only to verified game instances."}));
                             },
-                            LaunchTarget::Installed{aumid}=>{
+                            LaunchTarget::Installed{..}=>{
                                 if a.elevated||a.capture{return Err(ApiError::new("unsupported","Installed-app activation supports ordinary shell rights and no inherited stdout/stderr capture"));}
                                 {
                                     let running=services.running.blocking_read();
@@ -241,8 +242,22 @@ impl Services {
                                     }
                                 }
                                 if !live.current(&agent,generation){return Err(ApiError::new("revoked","Access revoked before installed-app activation"));}
-                                os_api::agent::activate_registered_aumid(aumid).map_err(native)?;
-                                return Ok(json!({"status":"activation_requested","group_id":group,"rule_id":rule,"pid":null,"creation_token":null,"capture_supported":false,"elevated":false,"settings":"Pending discovery and native readback by the existing saved-rule monitor","note":"Windows may reuse an existing app instance. Read tracked CPU/process data for verified PID and creation token; activation acknowledgement is not proof of process startup."}));
+                                use crate::app::features::execution::launch::{activate_installed_with_correction,InstalledActivationRequest,affinity_mask_from_cores};
+                                let wake=services.wake.clone();
+                                activate_installed_with_correction(InstalledActivationRequest {
+                                    source:crate::app::features::execution::control::SourceRequest {
+                                        group:&group,rule:&rule,key:&app_key,app,
+                                        mask:if fields.affinity {affinity_mask_from_cores(&snapshot.state.groups[g].cores).map_err(native)?}else{0},fields,
+                                    },
+                                    wake:Some(Arc::new(move||wake.request_repaint())),
+                                    running_apps:services.running.clone(),
+                                    installed_package_tracking:services.installed_package_tracking.clone(),
+                                    scheduling:services.scheduling.clone(),control:services.control.clone(),
+                                },|id| {
+                                    if !live.current(&agent,generation){return Err("Access revoked before installed-app activation".into());}
+                                    os_api::agent::activate_registered_aumid(id)
+                                }).map_err(native)?;
+                                return Ok(json!({"status":"activation_requested","group_id":group,"rule_id":rule,"pid":null,"creation_token":null,"capture_supported":false,"elevated":false,"settings":"Pending bounded discovery and native readback","note":"Windows may reuse an existing app instance. Read tracked CPU/process data for verified PID and creation token; activation acknowledgement is not proof of process startup."}));
                             }
                         };
                         owner=Some((group,rule,app_key,fields));

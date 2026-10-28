@@ -18,7 +18,7 @@ pub(super) fn update_known_rule<O: RunningAppsOs>(
     let mut scoped = Vec::new();
     if let Some(scope) = scope {
         let mut wanted = configured.additional_processes_normalized.clone();
-        wanted.push(scope.primary_name());
+        wanted.extend(scope.primary_names());
         wanted.sort();
         wanted.dedup();
         for candidate in collect_named_process_pids(&wanted, names, os) {

@@ -39,7 +39,8 @@ struct PostLaunchCorrectionRequest {
     running_apps: Arc<TokioRwLock<crate::app::models::RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     app_key: AppRuntimeKey,
-    initial_pid: u32,
+    initial_pid: Option<u32>,
+    initial_token: Option<ProcessInstanceToken>,
     group_id: GroupId,
     rule_id: RuleId,
     group_cores: Vec<usize>,
@@ -108,6 +109,7 @@ trait LaunchOs {
         Err("Steam launch unavailable".into())
     }
     fn get_process_instance_token(&self, pid: u32) -> Result<ProcessInstanceToken, String>;
+    fn current_logon_instance(&self, pid: u32, token: ProcessInstanceToken) -> bool;
     fn apply_process_fields_if_instance(
         &self,
         pid: u32,
@@ -147,6 +149,84 @@ pub(crate) use super::steam_pending::{
 };
 struct RealLaunchOs;
 
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub(crate) struct InstalledActivationRequest<'a> {
+    pub source: super::control::SourceRequest<'a>,
+    pub wake: Option<MonitorWake>,
+    pub running_apps: Arc<TokioRwLock<crate::app::models::RunningApps>>,
+    pub installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
+    pub scheduling: Arc<SchedulingHandoff>,
+    pub control: Arc<super::control::Authority>,
+}
+
+#[cfg(all(target_os = "windows", feature = "windows"))]
+pub(crate) fn activate_installed_with_correction(
+    request: InstalledActivationRequest<'_>,
+    activate: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    activate_installed_with_os(request, activate, &RealLaunchOs)
+}
+
+#[cfg(all(target_os = "windows", feature = "windows"))]
+fn activate_installed_with_os(
+    request: InstalledActivationRequest<'_>,
+    activate: impl FnOnce(&str) -> Result<(), String>,
+    os: &impl LaunchOs,
+) -> Result<(), String> {
+    let source = request.source;
+    let aumid = source
+        .app
+        .installed_aumid()
+        .ok_or("Expected an installed application")?
+        .to_owned();
+    let mut correction = PostLaunchCorrectionRequest {
+        source: source.app.clone(),
+        wake: request.wake,
+        running_apps: request.running_apps,
+        installed_package_tracking: request.installed_package_tracking,
+        app_key: source.key.clone(),
+        initial_pid: None,
+        initial_token: None,
+        group_id: source.group.clone(),
+        rule_id: source.rule.clone(),
+        group_cores: (0..usize::BITS as usize)
+            .filter(|cpu| source.mask & (1usize << cpu) != 0)
+            .collect(),
+        priority: source.app.priority,
+        expected_aumid: aumid,
+        installed_package_info: None,
+        prelaunch_package_pids: HashSet::new(),
+        manage_descendants: source.app.manage_descendants,
+        fields: source.fields,
+        scheduling: request.scheduling,
+        control: request.control,
+    };
+    correction
+        .control
+        .with_source(correction_source(&correction)?, |_| Ok(()))?;
+    if let Some((info, pids)) = super::resolve_installed_package_runtime_info_cached(
+        &correction.installed_package_tracking,
+        &correction.expected_aumid,
+        |aumid| os.resolve_installed_package_runtime_info(aumid),
+    )
+    .ok()
+    .and_then(|info| {
+        collect_package_local_pids_from_live_snapshot(os, &info.install_root)
+            .ok()
+            .map(|pids| (info, pids))
+    }) {
+        correction.installed_package_info = Some(info);
+        correction.prelaunch_package_pids = pids;
+    }
+    correction
+        .control
+        .with_source(correction_source(&correction)?, |_| {
+            activate(&correction.expected_aumid)
+        })?;
+    os.start_post_launch_correction(correction);
+    Ok(())
+}
+
 impl LaunchOs for RealLaunchOs {
     fn launch_known_launcher(&self, app: &AppToRun) -> Result<(), String> {
         crate::app::features::rules::known_apps::launch_ordinary(app)
@@ -182,6 +262,10 @@ impl LaunchOs for RealLaunchOs {
     }
     fn get_process_instance_token(&self, pid: u32) -> Result<ProcessInstanceToken, String> {
         OS::get_process_instance_token(pid)
+    }
+
+    fn current_logon_instance(&self, pid: u32, token: ProcessInstanceToken) -> bool {
+        os_api::app_identity::verify_current_instance(pid, token)
     }
 
     fn apply_process_fields_if_instance(
@@ -389,7 +473,7 @@ fn run_app_row_action_with_os<O: LaunchOs>(
     }
 }
 
-fn affinity_mask_from_cores(cores: &[usize]) -> Result<usize, String> {
+pub(crate) fn affinity_mask_from_cores(cores: &[usize]) -> Result<usize, String> {
     if cores.is_empty() {
         return Err("CPU affinity has no selected logical processors".to_string());
     }
@@ -1086,13 +1170,16 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
                         os,
                         &runtime.control_handle(),
                         &runtime.scheduling_handle(),
-                        &rule_id,
-                        &app_key,
+                        super::control::SourceRequest {
+                            group: &group_id,
+                            rule: &rule_id,
+                            key: &app_key,
+                            app: &app_to_run,
+                            mask,
+                            fields,
+                        },
                         pid,
                         instance_token,
-                        mask,
-                        priority,
-                        fields,
                     );
                 }
             }
@@ -1126,7 +1213,8 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
                     running_apps: runtime.running_apps_handle(),
                     installed_package_tracking: runtime.installed_package_tracking_handle(),
                     app_key,
-                    initial_pid: pid,
+                    initial_pid: Some(pid),
+                    initial_token: launch_instance_token,
                     group_id,
                     rule_id,
                     group_cores,
@@ -1213,6 +1301,12 @@ fn complete_post_launch_correction<O: LaunchOs>(
     let publication = request
         .control
         .with_source(correction_source(request)?, |spec| {
+            let live_tokens: HashMap<_, _> = outcome
+                .instance_tokens
+                .iter()
+                .filter(|(pid, token)| os.get_process_instance_token(**pid).ok() == Some(**token))
+                .map(|(&pid, &token)| (pid, token))
+                .collect();
             let key = request
                 .control
                 .member(&apps, &spec.key)
@@ -1221,21 +1315,22 @@ fn complete_post_launch_correction<O: LaunchOs>(
             let mut changed = false;
             let mut helpers = Vec::new();
             apps.mutate_membership(|apps| {
-                if !outcome.managed_pids.is_empty() && !apps.apps.contains_key(&key) {
-                    apps.add_app(
-                        &key,
-                        outcome.managed_pids[0],
-                        spec.group.clone(),
-                        spec.rule.clone(),
-                    );
-                    changed = true;
+                if !apps.apps.contains_key(&key) {
+                    if let Some(&pid) = outcome
+                        .managed_pids
+                        .iter()
+                        .find(|pid| live_tokens.contains_key(pid))
+                    {
+                        apps.add_app(&key, pid, spec.group.clone(), spec.rule.clone());
+                        changed = true;
+                    }
                 }
                 if let Some(app) = apps.apps.get_mut(&key) {
                     changed |= app.group_id != spec.group || app.rule_id != spec.rule;
                     app.group_id = spec.group.clone();
                     app.rule_id = spec.rule.clone();
                     for &pid in &outcome.managed_pids {
-                        if let Some(&token) = outcome.instance_tokens.get(&pid) {
+                        if let Some(&token) = live_tokens.get(&pid) {
                             if !app.pids.contains(&pid) {
                                 app.pids.push(pid);
                                 changed = true;
@@ -1255,7 +1350,7 @@ fn complete_post_launch_correction<O: LaunchOs>(
                             if let Some(app) = apps.apps.get_mut(&key) {
                                 for &pid in &outcome.no_identity_package_pids {
                                     if !app.pids.contains(&pid) {
-                                        if let Some(&token) = outcome.instance_tokens.get(&pid) {
+                                        if let Some(&token) = live_tokens.get(&pid) {
                                             app.pids.push(pid);
                                             app.pid_instance_tokens.insert(pid, token);
                                             helpers.push(pid);
@@ -1277,13 +1372,9 @@ fn complete_post_launch_correction<O: LaunchOs>(
                 os,
                 &request.control,
                 &request.scheduling,
-                &request.rule_id,
-                &request.app_key,
+                correction_source(request)?,
                 pid,
                 token,
-                correction_source(request)?.mask,
-                request.priority,
-                request.fields,
             );
         }
     }
@@ -1297,7 +1388,12 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
 
     handle.spawn(async move {
         let os = RealLaunchOs;
-        let mut seed_pids = vec![request.initial_pid];
+        let mut seed_tokens: HashMap<_, _> = request
+            .initial_pid
+            .zip(request.initial_token)
+            .into_iter()
+            .collect();
+        let mut seed_pids: Vec<_> = seed_tokens.keys().copied().collect();
         let mut stable_polls = 0usize;
         let mut saw_identity_seed = false;
 
@@ -1316,6 +1412,7 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                 &os,
                 &request.expected_aumid,
                 &mut seed_pids,
+                &mut seed_tokens,
                 &request.group_cores,
                 request.priority,
                 request.installed_package_info.as_ref(),
@@ -1323,7 +1420,8 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                 request.manage_descendants,
                 request.fields,
                 &request.scheduling,
-                Some((&request.control, &request.rule_id, &request.app_key)),
+                Some((&request.control, source)),
+                request.initial_token.is_none(),
             );
 
             if let Ok(outcome) = outcome {
@@ -1347,6 +1445,11 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                 }
 
                 seed_pids = outcome.seed_pids;
+                for &pid in &attached_no_identity_pids {
+                    if let Some(&token) = outcome.instance_tokens.get(&pid) {
+                        seed_tokens.insert(pid, token);
+                    }
+                }
                 seed_pids.extend(attached_no_identity_pids);
 
                 if outcome.new_managed_pids_added + newly_attached_package_pids == 0 {
@@ -1375,10 +1478,19 @@ fn post_launch_correction_poll_with_os<O: LaunchOs>(
     prelaunch_package_pids: &HashSet<u32>,
     manage_descendants: bool,
 ) -> Result<PostLaunchCorrectionOutcome, String> {
+    let mut seed_tokens = seed_pids
+        .iter()
+        .filter_map(|&pid| {
+            os.get_process_instance_token(pid)
+                .ok()
+                .map(|token| (pid, token))
+        })
+        .collect();
     post_launch_correction_poll_with_fields(
         os,
         expected_aumid,
         seed_pids,
+        &mut seed_tokens,
         group_cores,
         priority,
         installed_package_info,
@@ -1387,32 +1499,29 @@ fn post_launch_correction_poll_with_os<O: LaunchOs>(
         ProcessSettingsFields::default(),
         &SchedulingHandoff::default(),
         None,
+        false,
     )
 }
-#[allow(clippy::too_many_arguments)] // Mirrors one exact native correction and its existing scheduling boundary.
 fn apply_initial_process<O: LaunchOs>(
     os: &O,
     control: &super::control::Authority,
     scheduling: &SchedulingHandoff,
-    rule: &RuleId,
-    key: &AppRuntimeKey,
+    source: super::control::SourceRequest<'_>,
     pid: u32,
     token: u64,
-    mask: usize,
-    priority: PriorityClass,
-    fields: ProcessSettingsFields,
 ) -> Result<(), String> {
     let image = os.get_process_image_path(pid).ok();
-    control.initial(
+    control.initial_with_source(
+        source,
         super::control::WriteRequest {
-            rule,
-            key,
+            rule: source.rule,
+            key: source.key,
             pid,
             token,
             image: image.as_deref(),
-            mask,
-            priority,
-            fields,
+            mask: source.mask,
+            priority: source.app.priority,
+            fields: source.fields,
             change: true,
         },
         |owner| {
@@ -1435,6 +1544,7 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
     os: &O,
     expected_aumid: &str,
     seed_pids: &mut Vec<u32>,
+    seed_tokens: &mut HashMap<u32, ProcessInstanceToken>,
     group_cores: &[usize],
     priority: PriorityClass,
     installed_package_info: Option<&InstalledPackageRuntimeInfo>,
@@ -1442,15 +1552,59 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
     manage_descendants: bool,
     fields: ProcessSettingsFields,
     scheduling: &SchedulingHandoff,
-    authority: Option<(&super::control::Authority, &RuleId, &AppRuntimeKey)>,
+    authority: Option<(
+        &super::control::Authority,
+        super::control::SourceRequest<'_>,
+    )>,
+    acknowledged: bool,
 ) -> Result<PostLaunchCorrectionOutcome, String> {
     let snapshot = os.snapshot_process_tree()?;
     let before: HashSet<u32> = seed_pids.iter().copied().collect();
 
+    // An acknowledgement or uninspectable activation carries no verified
+    // lifetime. Discover exact same-logon AUMID seeds in the existing finite poll.
+    if acknowledged {
+        seed_pids.clear();
+        seed_tokens.clear();
+        for &pid in snapshot.names.keys() {
+            let Ok(token) = os.get_process_instance_token(pid) else {
+                continue;
+            };
+            if os
+                .get_process_app_user_model_id(pid)
+                .ok()
+                .flatten()
+                .is_some_and(|aumid| aumid.eq_ignore_ascii_case(expected_aumid))
+                && os.current_logon_instance(pid, token)
+            {
+                seed_tokens.insert(pid, token);
+                seed_pids.push(pid);
+                if seed_pids.len() == 4096 {
+                    break;
+                }
+            }
+        }
+    } else {
+        // Retaining a PID from an earlier poll never grants a new lifetime.
+        seed_pids.retain(|pid| {
+            seed_tokens
+                .get(pid)
+                .is_some_and(|token| os.get_process_instance_token(*pid).ok() == Some(*token))
+        });
+    }
+
     if manage_descendants {
         extend_with_descendants(&snapshot, seed_pids);
+        for &pid in seed_pids.iter() {
+            if let std::collections::hash_map::Entry::Vacant(entry) = seed_tokens.entry(pid) {
+                if let Ok(token) = os.get_process_instance_token(pid) {
+                    entry.insert(token);
+                }
+            }
+        }
     }
     let mut no_identity_package_pids = Vec::new();
+    let mut package_tokens = HashMap::new();
 
     if let Some(package_info) = installed_package_info {
         let package_candidates = collect_package_local_pid_candidates_from_snapshot(
@@ -1463,11 +1617,15 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
         )?;
 
         for pid in package_candidates.same_aumid_pids {
+            if let Some(&token) = package_candidates.instance_tokens.get(&pid) {
+                seed_tokens.entry(pid).or_insert(token);
+            }
             if !seed_pids.contains(&pid) {
                 seed_pids.push(pid);
             }
         }
         no_identity_package_pids = package_candidates.no_identity_pids;
+        package_tokens = package_candidates.instance_tokens;
         retain_auto_managed_installed_pids(&snapshot, &mut no_identity_package_pids);
     }
 
@@ -1476,6 +1634,11 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
     } else {
         0
     };
+    if authority.is_some_and(|(_, source)| {
+        source.mask != mask || source.app.priority != priority || source.fields != fields
+    }) {
+        return Err("Initial correction settings do not match its source".into());
+    }
     let mut saw_identity_seed = false;
     let mut managed_pids = seed_pids.clone();
     retain_auto_managed_installed_pids(&snapshot, &mut managed_pids);
@@ -1485,19 +1648,16 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
         let Ok(instance_token) = os.get_process_instance_token(pid) else {
             return false;
         };
-        let result = if let Some((control, rule, key)) = authority {
-            apply_initial_process(
-                os,
-                control,
-                scheduling,
-                rule,
-                key,
-                pid,
-                instance_token,
-                mask,
-                priority,
-                fields,
-            )
+        if seed_tokens.get(&pid) != Some(&instance_token)
+            || package_tokens
+                .get(&pid)
+                .is_some_and(|token| *token != instance_token)
+            || (acknowledged && !os.current_logon_instance(pid, instance_token))
+        {
+            return false;
+        }
+        let result = if let Some((control, source)) = authority {
+            apply_initial_process(os, control, scheduling, source, pid, instance_token)
         } else {
             #[cfg(test)]
             {
@@ -1531,10 +1691,25 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
         let Ok(instance_token) = os.get_process_instance_token(pid) else {
             return false;
         };
+        if package_tokens.get(&pid) != Some(&instance_token)
+            || seed_tokens
+                .get(&pid)
+                .is_some_and(|token| *token != instance_token)
+            || (acknowledged && !os.current_logon_instance(pid, instance_token))
+        {
+            return false;
+        }
         instance_tokens.insert(pid, instance_token);
         true
     });
 
+    seed_pids.retain(|pid| {
+        seed_tokens
+            .get(pid)
+            .is_some_and(|token| os.get_process_instance_token(*pid).ok() == Some(*token))
+    });
+    let retained: HashSet<_> = seed_pids.iter().copied().collect();
+    seed_tokens.retain(|pid, _| retained.contains(pid));
     for &pid in seed_pids.iter() {
         if !saw_identity_seed
             && os
@@ -1600,6 +1775,7 @@ fn retain_auto_managed_installed_pids(
 struct PackageLocalPidCandidates {
     same_aumid_pids: Vec<u32>,
     no_identity_pids: Vec<u32>,
+    instance_tokens: HashMap<u32, ProcessInstanceToken>,
 }
 
 fn collect_package_local_pids_from_live_snapshot<O: LaunchOs>(
@@ -1635,6 +1811,9 @@ fn collect_package_local_pid_candidates_from_snapshot<O: LaunchOs>(
             continue;
         }
 
+        let Ok(token) = os.get_process_instance_token(pid) else {
+            continue;
+        };
         let Ok(image_path) = os.get_process_image_path(pid) else {
             continue;
         };
@@ -1642,13 +1821,21 @@ fn collect_package_local_pid_candidates_from_snapshot<O: LaunchOs>(
             continue;
         }
 
-        match os.get_process_app_user_model_id(pid)? {
+        let aumid = os.get_process_app_user_model_id(pid)?;
+        if os.get_process_instance_token(pid).ok() != Some(token) {
+            continue;
+        }
+        match aumid {
             Some(aumid) if !aumid.trim().is_empty() => {
                 if aumid.eq_ignore_ascii_case(expected_aumid) {
                     candidates.same_aumid_pids.push(pid);
+                    candidates.instance_tokens.insert(pid, token);
                 }
             }
-            _ => candidates.no_identity_pids.push(pid),
+            _ => {
+                candidates.no_identity_pids.push(pid);
+                candidates.instance_tokens.insert(pid, token);
+            }
         }
     }
 
@@ -1700,13 +1887,17 @@ mod tests {
         priority_calls: RefCell<Vec<(u32, PriorityClass)>>,
         priority_results: HashMap<u32, Result<(), String>>,
         instance_tokens: HashMap<u32, ProcessInstanceToken>,
+        token_after_aumid: HashMap<u32, ProcessInstanceToken>,
+        observed_token_changes: RefCell<HashMap<u32, ProcessInstanceToken>>,
+        before_image_read: RefCell<Option<Box<dyn FnOnce()>>>,
         unavailable_tokens: HashSet<u32>,
+        foreign_logon_pids: HashSet<u32>,
         focus_calls: RefCell<Vec<u32>>,
         focus_results: HashMap<u32, bool>,
         run_calls: RefCell<Vec<(PathBuf, Vec<String>, Vec<usize>, PriorityClass)>>,
         run_result: RefCell<Result<u32, String>>,
         activate_calls: RefCell<Vec<String>>,
-        correction_calls: RefCell<Vec<u32>>,
+        correction_calls: RefCell<Vec<PostLaunchCorrectionRequest>>,
         activate_result: RefCell<Result<u32, String>>,
         snapshot_result: RefCell<Result<LaunchProcessSnapshot, String>>,
         image_paths: HashMap<u32, PathBuf>,
@@ -1726,7 +1917,11 @@ mod tests {
                 priority_calls: RefCell::new(Vec::new()),
                 priority_results: HashMap::new(),
                 instance_tokens: HashMap::new(),
+                token_after_aumid: HashMap::new(),
+                observed_token_changes: RefCell::new(HashMap::new()),
+                before_image_read: RefCell::new(None),
                 unavailable_tokens: HashSet::new(),
+                foreign_logon_pids: HashSet::new(),
                 focus_calls: RefCell::new(Vec::new()),
                 focus_results: HashMap::new(),
                 run_calls: RefCell::new(Vec::new()),
@@ -1765,11 +1960,19 @@ mod tests {
             if self.unavailable_tokens.contains(&pid) {
                 return Err("process token temporarily unavailable".into());
             }
+            if let Some(token) = self.observed_token_changes.borrow().get(&pid) {
+                return Ok(*token);
+            }
             Ok(self
                 .instance_tokens
                 .get(&pid)
                 .copied()
                 .unwrap_or(pid as u64 + 1_000))
+        }
+
+        fn current_logon_instance(&self, pid: u32, token: ProcessInstanceToken) -> bool {
+            !self.foreign_logon_pids.contains(&pid)
+                && self.get_process_instance_token(pid) == Ok(token)
         }
 
         fn apply_process_fields_if_instance(
@@ -1832,7 +2035,7 @@ mod tests {
         }
 
         fn start_post_launch_correction(&self, request: PostLaunchCorrectionRequest) {
-            self.correction_calls.borrow_mut().push(request.initial_pid);
+            self.correction_calls.borrow_mut().push(request);
         }
 
         fn snapshot_process_tree(&self) -> Result<LaunchProcessSnapshot, String> {
@@ -1840,6 +2043,9 @@ mod tests {
         }
 
         fn get_process_image_path(&self, pid: u32) -> Result<PathBuf, String> {
+            if let Some(change) = self.before_image_read.borrow_mut().take() {
+                change();
+            }
             self.image_paths
                 .get(&pid)
                 .cloned()
@@ -1847,6 +2053,9 @@ mod tests {
         }
 
         fn get_process_app_user_model_id(&self, pid: u32) -> Result<Option<String>, String> {
+            if let Some(&token) = self.token_after_aumid.get(&pid) {
+                self.observed_token_changes.borrow_mut().insert(pid, token);
+            }
             Ok(self.process_aumids.get(&pid).cloned())
         }
 
@@ -1876,6 +2085,7 @@ mod tests {
 
     fn s112_installed_request() -> PostLaunchCorrectionRequest {
         let mut state = crate::app::features::execution::control::tests::fixture();
+        state.process_monitoring_enabled = false;
         state.groups.truncate(1);
         state.groups[0].programs[0] = AppToRun::new_installed(
             "Example".into(),
@@ -1898,7 +2108,8 @@ mod tests {
             running_apps: runtime.running_apps_handle(),
             installed_package_tracking: runtime.installed_package_tracking_handle(),
             app_key: key,
-            initial_pid: 42,
+            initial_pid: Some(42),
+            initial_token: Some(1042),
             group_id: group,
             rule_id: rule,
             group_cores: vec![0],
@@ -1916,6 +2127,92 @@ mod tests {
             control: runtime.control_handle(),
         }
     }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn s116_acknowledged_installed_activation_schedules_exact_main_with_monitor_off() {
+        let request = s112_installed_request();
+        request.running_apps.blocking_write().apps.clear();
+        let os = FakeLaunchOs {
+            snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                names: HashMap::from([
+                    (42, "Main.exe".into()),
+                    (43, "Foreign.exe".into()),
+                    (44, "Other.exe".into()),
+                    (45, "backgroundtaskhost.exe".into()),
+                ]),
+                ..Default::default()
+            })),
+            process_aumids: HashMap::from([
+                (42, "Example!Main".into()),
+                (43, "Example!Main".into()),
+                (44, "Other!Main".into()),
+                (45, "Example!Main".into()),
+            ]),
+            image_paths: HashMap::from([(42, r"C:\Package\Main.exe".into())]),
+            foreign_logon_pids: HashSet::from([43]),
+            ..Default::default()
+        };
+        let mut activated = false;
+        super::activate_installed_with_os(
+            super::InstalledActivationRequest {
+                source: super::correction_source(&request).unwrap(),
+                wake: None,
+                running_apps: request.running_apps.clone(),
+                installed_package_tracking: request.installed_package_tracking.clone(),
+                scheduling: request.scheduling.clone(),
+                control: request.control.clone(),
+            },
+            |aumid| {
+                assert_eq!(aumid, "Example!Main");
+                activated = true;
+                Ok(())
+            },
+            &os,
+        )
+        .unwrap();
+        assert!(activated);
+        assert!(os.affinity_calls.borrow().is_empty());
+        assert!(request.running_apps.blocking_read().apps.is_empty());
+        let pending =
+            os.correction_calls.borrow_mut().pop().expect(
+                "ordinary activation acknowledgement must enter bounded initial correction",
+            );
+        assert_eq!(
+            pending.initial_pid, None,
+            "acknowledgement must not invent a PID"
+        );
+        assert_eq!(pending.initial_token, None);
+        let mut seeds: Vec<_> = pending.initial_pid.into_iter().collect();
+        let outcome = super::post_launch_correction_poll_with_fields(
+            &os,
+            &pending.expected_aumid,
+            &mut seeds,
+            &mut HashMap::new(),
+            &pending.group_cores,
+            pending.priority,
+            pending.installed_package_info.as_ref(),
+            &pending.prelaunch_package_pids,
+            pending.manage_descendants,
+            pending.fields,
+            &pending.scheduling,
+            Some((
+                &pending.control,
+                super::correction_source(&pending).unwrap(),
+            )),
+            pending.initial_pid.is_none(),
+        )
+        .unwrap();
+        super::complete_post_launch_correction(&pending, &outcome, &os).unwrap();
+        assert_eq!(outcome.managed_pids, [42]);
+        assert!(os.affinity_calls.borrow().contains(&(42, 1)));
+        assert_eq!(os.affinity_calls.borrow().len(), 1);
+        assert_eq!(
+            pending.running_apps.blocking_read().apps[&pending.app_key]
+                .pid_instance_tokens
+                .get(&42),
+            Some(&1042)
+        );
+    }
     fn s112_late_helper_outcome() -> super::PostLaunchCorrectionOutcome {
         super::PostLaunchCorrectionOutcome {
             seed_pids: vec![42],
@@ -1925,6 +2222,210 @@ mod tests {
             saw_identity_seed: true,
             instance_tokens: HashMap::from([(42, 1042), (43, 1043)]),
         }
+    }
+
+    #[test]
+    fn s116_installed_correction_rechecks_source_at_each_native_write() {
+        for late_helper in [false, true] {
+            let mut request = s112_installed_request();
+            request.source.manage_descendants = true;
+            request.manage_descendants = true;
+            let mut changed = crate::app::features::execution::control::tests::fixture();
+            changed.groups.truncate(1);
+            changed.groups[0].programs[0] = request.source.clone();
+            changed.rule_identities = Some(crate::app::features::rules::PersistedRuleIdentities {
+                groups: vec![crate::app::features::rules::PersistedGroupIdentity {
+                    id: request.group_id.clone(),
+                    rule_ids: vec![request.rule_id.clone()],
+                }],
+                next_group_id: 20,
+                next_rule_id: 20,
+            });
+            let control = request.control.clone();
+            control.configure(&changed);
+            changed.groups[0].programs[0].manage_descendants = false;
+            let os = FakeLaunchOs {
+                before_image_read: RefCell::new(Some(Box::new(move || {
+                    control.configure(&changed);
+                }))),
+                snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                    names: HashMap::from([(42, "Main.exe".into()), (43, "Helper.exe".into())]),
+                    children_of: HashMap::from([(42, vec![43])]),
+                })),
+                image_paths: HashMap::from([
+                    (42, r"C:\Package\Main.exe".into()),
+                    (43, r"C:\Package\Helper.exe".into()),
+                ]),
+                process_aumids: HashMap::from([(42, "Example!Main".into())]),
+                ..Default::default()
+            };
+            if late_helper {
+                super::complete_post_launch_correction(&request, &s112_late_helper_outcome(), &os)
+                    .unwrap();
+            } else {
+                request
+                    .control
+                    .with_source(super::correction_source(&request).unwrap(), |_| Ok(()))
+                    .unwrap();
+                super::post_launch_correction_poll_with_fields(
+                    &os,
+                    &request.expected_aumid,
+                    &mut vec![42],
+                    &mut HashMap::from([(42, 1042)]),
+                    &request.group_cores,
+                    request.priority,
+                    None,
+                    &HashSet::new(),
+                    request.manage_descendants,
+                    request.fields,
+                    &request.scheduling,
+                    Some((
+                        &request.control,
+                        super::correction_source(&request).unwrap(),
+                    )),
+                    false,
+                )
+                .unwrap();
+            }
+            assert!(
+                os.affinity_calls.borrow().is_empty(),
+                "stale source applied affinity (late helper: {late_helper})"
+            );
+            assert!(
+                os.priority_calls.borrow().is_empty(),
+                "stale source applied priority (late helper: {late_helper})"
+            );
+        }
+    }
+
+    #[test]
+    fn s116_installed_correction_rejects_reused_package_candidates() {
+        for has_aumid in [false, true] {
+            let request = s112_installed_request();
+            let os = FakeLaunchOs {
+                snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                    names: HashMap::from([(42, "Main.exe".into()), (43, "Helper.exe".into())]),
+                    ..Default::default()
+                })),
+                image_paths: HashMap::from([
+                    (42, r"C:\Package\Main.exe".into()),
+                    (43, r"C:\Package\Helper.exe".into()),
+                ]),
+                process_aumids: if has_aumid {
+                    HashMap::from([(42, "Example!Main".into()), (43, "Example!Main".into())])
+                } else {
+                    HashMap::from([(42, "Example!Main".into())])
+                },
+                token_after_aumid: HashMap::from([(43, 2043)]),
+                ..Default::default()
+            };
+            let outcome = super::post_launch_correction_poll_with_fields(
+                &os,
+                &request.expected_aumid,
+                &mut vec![42],
+                &mut HashMap::from([(42, 1042)]),
+                &request.group_cores,
+                request.priority,
+                request.installed_package_info.as_ref(),
+                &HashSet::new(),
+                request.manage_descendants,
+                request.fields,
+                &request.scheduling,
+                Some((
+                    &request.control,
+                    super::correction_source(&request).unwrap(),
+                )),
+                false,
+            )
+            .unwrap();
+            super::complete_post_launch_correction(&request, &outcome, &os).unwrap();
+            assert!(
+                !os.affinity_calls.borrow().iter().any(|(pid, _)| *pid == 43),
+                "package evidence was rebound to reused PID (AUMID: {has_aumid})"
+            );
+            assert!(!request.running_apps.blocking_read().apps[&request.app_key]
+                .pid_instance_tokens
+                .contains_key(&43));
+        }
+
+        // A helper accepted by one GUI poll must retain that exact lifetime in
+        // the next poll, rather than adopting a replacement with the same PID.
+        let request = s112_installed_request();
+        let mut os = FakeLaunchOs {
+            snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                names: HashMap::from([(42, "Main.exe".into()), (43, "Helper.exe".into())]),
+                ..Default::default()
+            })),
+            image_paths: HashMap::from([
+                (42, r"C:\Package\Main.exe".into()),
+                (43, r"C:\Package\Helper.exe".into()),
+            ]),
+            process_aumids: HashMap::from([(42, "Example!Main".into())]),
+            ..Default::default()
+        };
+        let mut seeds = vec![42];
+        let mut seed_tokens = HashMap::from([(42, 1042)]);
+        let first = super::post_launch_correction_poll_with_fields(
+            &os,
+            &request.expected_aumid,
+            &mut seeds,
+            &mut seed_tokens,
+            &request.group_cores,
+            request.priority,
+            request.installed_package_info.as_ref(),
+            &HashSet::new(),
+            request.manage_descendants,
+            request.fields,
+            &request.scheduling,
+            Some((
+                &request.control,
+                super::correction_source(&request).unwrap(),
+            )),
+            false,
+        )
+        .unwrap();
+        let publication = super::complete_post_launch_correction(&request, &first, &os).unwrap();
+        assert_eq!(publication.helpers, [43]);
+        seeds = first.seed_pids;
+        for &pid in &publication.helpers {
+            seed_tokens.insert(pid, first.instance_tokens[&pid]);
+        }
+        seeds.extend(publication.helpers);
+        os.observed_token_changes.borrow_mut().insert(43, 2043);
+        os.image_paths.insert(43, r"C:\Other\Unrelated.exe".into());
+        os.affinity_calls.borrow_mut().clear();
+        os.priority_calls.borrow_mut().clear();
+        let second = super::post_launch_correction_poll_with_fields(
+            &os,
+            &request.expected_aumid,
+            &mut seeds,
+            &mut seed_tokens,
+            &request.group_cores,
+            request.priority,
+            request.installed_package_info.as_ref(),
+            &HashSet::new(),
+            request.manage_descendants,
+            request.fields,
+            &request.scheduling,
+            Some((
+                &request.control,
+                super::correction_source(&request).unwrap(),
+            )),
+            false,
+        )
+        .unwrap();
+        super::complete_post_launch_correction(&request, &second, &os).unwrap();
+        assert!(
+            !os.affinity_calls.borrow().iter().any(|(pid, _)| *pid == 43),
+            "retained helper PID was rebound on the next poll"
+        );
+        assert!(!second.seed_pids.contains(&43));
+        assert_eq!(
+            request.running_apps.blocking_read().apps[&request.app_key]
+                .pid_instance_tokens
+                .get(&43),
+            Some(&1043)
+        );
     }
     #[test]
     fn s112_last_stable_poll_applies_new_package_helper_immediately() {
@@ -2930,7 +3431,9 @@ mod tests {
         assert!(os.affinity_calls.borrow().is_empty());
         assert!(os.priority_calls.borrow().is_empty());
         assert!(runtime.get_running_app_pids(&key).is_none());
-        assert_eq!(os.correction_calls.borrow().as_slice(), &[4321]);
+        assert_eq!(os.correction_calls.borrow().len(), 1);
+        assert_eq!(os.correction_calls.borrow()[0].initial_pid, Some(4321));
+        assert_eq!(os.correction_calls.borrow()[0].initial_token, None);
     }
 
     #[test]

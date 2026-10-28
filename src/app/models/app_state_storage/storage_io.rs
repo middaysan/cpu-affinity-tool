@@ -909,6 +909,37 @@ mod tests {
     }
 
     #[test]
+    fn s116_failed_recovery_backup_cannot_be_overwritten_by_a_later_save() {
+        let path = state_path();
+        let mut fs = FakeFilesystem {
+            fail_copy: true,
+            ..Default::default()
+        };
+        fs.write_file(&path, "{recoverable original");
+        let recovered =
+            super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        fs.fail_copy = false;
+        let mut draft = recovered.clone();
+        draft.mark_ready_for_current_schema_save(
+            crate::app::features::rules::RulesContext::from_storage(&draft)
+                .to_persisted_identities(),
+        );
+        assert!(draft
+            .try_save_to_path_with_filesystem(&path, &mut fs)
+            .is_err());
+        assert_eq!(fs.read_file(&path), "{recoverable original");
+        assert!(!fs
+            .files
+            .contains_key(&path.with_file_name("state.json.old")));
+        let retried = super::super::AppStateStorage::load_from_path_with_filesystem(&path, &mut fs);
+        assert!(!retried.save_blocked());
+        assert_eq!(
+            fs.read_file(&path.with_file_name("state.json.old")),
+            "{recoverable original"
+        );
+    }
+
+    #[test]
     fn corrupt_recovery_preserves_original_when_backup_or_default_publish_fails() {
         let path = state_path();
         let mut backup_failure = FakeFilesystem {
@@ -923,7 +954,7 @@ mod tests {
         );
 
         assert_eq!(recovered.version, super::super::CURRENT_APP_STATE_VERSION);
-        assert!(!recovered.save_blocked());
+        assert!(recovered.save_blocked());
         assert_eq!(backup_failure.read_file(&path), "{broken json");
         assert!(!backup_failure
             .files

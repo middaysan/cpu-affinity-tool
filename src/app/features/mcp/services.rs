@@ -29,6 +29,8 @@ pub(super) struct Services {
     pub cpu: crate::app::features::cpu_load::CpuReadHandle,
     pub runs: Arc<crate::app::features::execution::managed_runs::ManagedRuns>,
     pub running: Arc<tokio::sync::RwLock<crate::app::models::RunningApps>>,
+    pub installed_package_tracking:
+        Arc<std::sync::RwLock<crate::app::features::execution::InstalledPackageTrackingState>>,
     pub scheduling: Arc<crate::app::features::system_tweaks::tweaks::scheduling::SchedulingHandoff>,
     pub control: Arc<crate::app::features::execution::control::Authority>,
     pub registry: crate::app::features::system_tweaks::platform::registry::Registry,
@@ -180,6 +182,7 @@ impl Services {
             cpu: app.cpu_load.read_handle(),
             runs: app.runtime.managed_runs.clone(),
             running: app.runtime.running_apps_handle(),
+            installed_package_tracking: app.runtime.installed_package_tracking_handle(),
             scheduling: app.runtime.scheduling_handle(),
             control: app.runtime.control_handle(),
             registry: app.tuning_editors().clone(),

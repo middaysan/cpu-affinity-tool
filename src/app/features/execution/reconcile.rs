@@ -106,7 +106,7 @@ pub async fn run_process_settings_monitor(
         interval.tick().await;
         crate::render_profile_scope!(Reconcile);
 
-        let (state_snapshot, monitoring_enabled) = {
+        let (state_snapshot, monitoring_enabled, generation) = {
             let state = match app_state.read() {
                 Ok(guard) => guard,
                 Err(_) => {
@@ -120,12 +120,19 @@ pub async fn run_process_settings_monitor(
             (
                 collect_program_settings(&state),
                 state.process_monitoring_enabled,
+                super::control::policy::Policy::read(&state)
+                    .map_or(u64::MAX, |policy| policy.generation()),
             )
         };
 
         if let Ok(mut apps) = running_apps.try_write() {
-            let outcome =
-                reconcile_settings_with_os(&mut apps, &state_snapshot, monitoring_enabled, &mut os);
+            let outcome = reconcile_settings_with_os(
+                &mut apps,
+                &state_snapshot,
+                monitoring_enabled,
+                generation,
+                &mut os,
+            );
             let status_cache_changed =
                 record_confirmed_match_statuses(&apps, &running_app_statuses);
 
@@ -222,7 +229,9 @@ fn process_settings_iteration_with_os<O: ProcessSettingsOs>(
     monitoring_enabled: bool,
     os: &mut O,
 ) -> ProcessSettingsIterationOutcome {
-    apps.control.configure(state);
+    let mut current = state.clone();
+    current.process_monitoring_enabled = monitoring_enabled;
+    apps.control.configure(&current);
     let expected = collect_program_settings(state);
     apps.mutate_membership(|apps| {
         for (key, app) in &mut apps.apps {
@@ -242,6 +251,7 @@ fn process_settings_iteration_with_os<O: ProcessSettingsOs>(
         apps,
         &collect_program_settings(state),
         monitoring_enabled,
+        super::control::policy::Policy::read(state).map_or(u64::MAX, |policy| policy.generation()),
         os,
     )
 }
@@ -250,10 +260,14 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
     apps: &mut RunningApps,
     key_to_settings: &HashMap<AppRuntimeKey, ProgramRuntimeSettings>,
     monitoring_enabled: bool,
+    generation: u64,
     os: &mut O,
 ) -> ProcessSettingsIterationOutcome {
     let scheduling = apps.scheduling.clone();
     let control = apps.control.clone();
+    let Ok(_observation) = control.observation(generation, Some(monitoring_enabled)) else {
+        return ProcessSettingsIterationOutcome::default();
+    };
     apps.mutate_membership(|apps| {
         let mut outcome = ProcessSettingsIterationOutcome::default();
 
@@ -819,6 +833,55 @@ mod tests {
     }
 
     #[test]
+    fn s116_stale_periodic_snapshot_cannot_revert_a_move_or_write_after_off() {
+        use crate::app::features::{execution::control::policy::Policy, rules::RulesContext};
+        for moved in [false, true] {
+            let mut before = sample_state();
+            before.process_monitoring_enabled = true;
+            let rules = RulesContext::from_storage(&before);
+            before.rule_identities = Some(rules.to_persisted_identities());
+            let rule = rules.rule_id_for_index(0, 0).unwrap();
+            let key = rules.runtime_key(&before.groups[0].programs[0], &rule);
+            let captured = super::collect_program_settings(&before);
+            let mut current = before.clone();
+            if moved {
+                let app = current.groups[0].programs.remove(0);
+                current.groups[1].programs.push(app);
+                let ids = current.rule_identities.as_mut().unwrap();
+                let id = ids.groups[0].rule_ids.remove(0);
+                ids.groups[1].rule_ids.push(id);
+            } else {
+                current.process_monitoring_enabled = false;
+            }
+            Policy::prepare_save(&before, &mut current).unwrap();
+            let group = rules.group_id_for_index(usize::from(moved)).unwrap();
+            let mut apps = RunningApps::default();
+            apps.add_app(&key, 93, group.clone(), rule);
+            let mut os = FakeProcessSettingsOs::new(
+                HashMap::from([(93, 8)]),
+                HashMap::from([(93, PriorityClass::Normal)]),
+            );
+            seed_tracked_instance(&mut apps, &key, 93, &mut os);
+            apps.control.configure(&current);
+            super::reconcile_settings_with_os(
+                &mut apps,
+                &captured,
+                true,
+                Policy::read(&before).unwrap().generation(),
+                &mut os,
+            );
+            assert_eq!(
+                apps.apps[&key].group_id, group,
+                "stale observation rewrote current membership"
+            );
+            assert!(
+                os.affinity_sets.is_empty(),
+                "stale On performed native correction after saved Off"
+            );
+        }
+    }
+
+    #[test]
     fn s113_monitor_reports_denied_member_without_skipping_other_processes() {
         let state = sample_state();
         let key = state.groups[1].programs[0].get_key();
@@ -1050,7 +1113,9 @@ pub(super) fn native_known_iteration(
     state: &AppStateStorage,
     enabled: bool,
 ) {
-    apps.control.configure(state);
+    let mut current = state.clone();
+    current.process_monitoring_enabled = enabled;
+    apps.control.configure(&current);
     apps.control.observe(
         apps,
         super::control::policy::Policy::read(state)
@@ -1067,6 +1132,9 @@ pub(super) fn native_known_iteration(
         apps,
         &collect_program_settings(state),
         enabled,
+        super::control::policy::Policy::read(state)
+            .unwrap()
+            .generation(),
         &mut RealProcessSettingsOs,
     );
 }

@@ -90,12 +90,14 @@ pub(crate) struct View {
 }
 
 pub(crate) struct Authority {
+    configuration: RwLock<()>,
     pub(crate) gate: Mutex<Gate>,
     view: RwLock<Arc<View>>,
 }
 impl Default for Authority {
     fn default() -> Self {
         Self {
+            configuration: RwLock::new(()),
             gate: Mutex::new(Gate::default()),
             view: RwLock::new(Arc::new(View::default())),
         }
@@ -109,6 +111,7 @@ pub(crate) struct Gate {
     images: HashMap<Instance, String>,
     pending: HashMap<String, Vec<RuleId>>,
     generation: u64,
+    monitoring_enabled: bool,
     error: Option<String>,
 }
 
@@ -126,10 +129,34 @@ pub(crate) fn differs(a: &RuleInfo, b: &RuleInfo) -> bool {
 }
 
 impl Gate {
+    fn source(&self, source: SourceRequest<'_>) -> Result<&RuleInfo, String> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        let spec = self
+            .rules
+            .iter()
+            .find(|spec| &spec.rule == source.rule)
+            .ok_or("Launch rule was removed")?;
+        if &spec.group != source.group
+            || !spec.key.namespace_equivalent(source.key, source.rule)
+            || spec.fields != source.fields
+            || (source.fields.affinity && spec.mask != source.mask)
+            || spec.app.priority != source.app.priority
+            || spec.app.launch_target != source.app.launch_target
+            || spec.app.additional_processes != source.app.additional_processes
+            || spec.app.manage_descendants != source.app.manage_descendants
+            || spec.app.builtin_process_binding != source.app.builtin_process_binding
+        {
+            return Err("Launch source changed; discard stale correction".into());
+        }
+        Ok(spec)
+    }
     pub fn configure(&mut self, state: &AppStateStorage) {
         let policy = Policy::read(state);
         let generation = policy.as_ref().map_or(u64::MAX, Policy::generation);
         self.generation = generation;
+        self.monitoring_enabled = state.process_monitoring_enabled;
         self.error = policy.as_ref().err().cloned();
         self.policy = policy.ok();
         let rules = RulesContext::from_storage(state);
@@ -344,6 +371,7 @@ pub(crate) struct WriteRequest<'a> {
     pub change: bool,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct SourceRequest<'a> {
     pub group: &'a GroupId,
     pub rule: &'a RuleId,
@@ -353,33 +381,40 @@ pub(crate) struct SourceRequest<'a> {
     pub fields: ProcessSettingsFields,
 }
 impl Authority {
+    pub fn configuration_write(&self) -> Result<std::sync::RwLockWriteGuard<'_, ()>, String> {
+        self.configuration
+            .write()
+            .map_err(|_| "Configuration admission is unavailable".into())
+    }
+    /// Called with RunningApps already held. Never wait behind a durable save.
+    pub fn observation(
+        &self,
+        generation: u64,
+        monitoring: Option<bool>,
+    ) -> Result<std::sync::RwLockReadGuard<'_, ()>, String> {
+        let lease = self
+            .configuration
+            .try_read()
+            .map_err(|_| "Configuration is changing")?;
+        let gate = self.lock()?;
+        if gate.generation != generation
+            || monitoring.is_some_and(|enabled| enabled != gate.monitoring_enabled)
+        {
+            return Err("Discard stale process observation".into());
+        }
+        Ok(lease)
+    }
+    #[cfg(test)]
+    pub fn generation(&self) -> u64 {
+        self.lock().map_or(u64::MAX, |gate| gate.generation)
+    }
     pub fn with_source<T>(
         &self,
         source: SourceRequest<'_>,
         publish: impl FnOnce(&RuleInfo) -> Result<T, String>,
     ) -> Result<T, String> {
         let gate = self.lock()?;
-        if let Some(error) = &gate.error {
-            return Err(error.clone());
-        }
-        let spec = gate
-            .rules
-            .iter()
-            .find(|spec| &spec.rule == source.rule)
-            .ok_or("Launch rule was removed")?;
-        if &spec.group != source.group
-            || !spec.key.namespace_equivalent(source.key, source.rule)
-            || spec.fields != source.fields
-            || (source.fields.affinity && spec.mask != source.mask)
-            || spec.app.priority != source.app.priority
-            || spec.app.launch_target != source.app.launch_target
-            || spec.app.additional_processes != source.app.additional_processes
-            || spec.app.manage_descendants != source.app.manage_descendants
-            || spec.app.builtin_process_binding != source.app.builtin_process_binding
-        {
-            return Err("Launch source changed; discard stale correction".into());
-        }
-        publish(spec)
+        publish(gate.source(source)?)
     }
     pub fn lock(&self) -> Result<MutexGuard<'_, Gate>, String> {
         self.gate
@@ -430,12 +465,24 @@ impl Authority {
         }
     }
     pub fn configure(&self, state: &AppStateStorage) {
+        let Ok(_configuration) = self.configuration_write() else {
+            return;
+        };
         if let Ok(mut gate) = self.lock() {
             gate.configure(state);
             self.publish_view(&gate);
         }
     }
     pub fn initialize(&self, state: &AppStateStorage) {
+        {
+            let Ok(gate) = self.lock() else { return };
+            if gate.policy.is_some() || gate.error.is_some() {
+                return;
+            }
+        }
+        let Ok(_configuration) = self.configuration_write() else {
+            return;
+        };
         if let Ok(mut gate) = self.lock() {
             if gate.policy.is_none() && gate.error.is_none() {
                 gate.configure(state);
@@ -514,7 +561,7 @@ impl Authority {
         request: WriteRequest<'_>,
         action: impl FnOnce(bool) -> Result<T, String>,
     ) -> Result<(T, bool), String> {
-        self.with_owner(request, |_, write| {
+        self.with_owner(request, None, |_, write| {
             action(write).map(|result| (result, write))
         })
     }
@@ -526,17 +573,37 @@ impl Authority {
         if !request.change {
             return Err("Initial correction requires launch intent".into());
         }
-        self.with_owner(request, |owner, _| action(owner))
+        self.with_owner(request, None, |owner, _| action(owner))
+    }
+    pub fn initial_with_source<T>(
+        &self,
+        source: SourceRequest<'_>,
+        request: WriteRequest<'_>,
+        action: impl FnOnce(&RuleInfo) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if !request.change {
+            return Err("Initial correction requires launch intent".into());
+        }
+        self.with_owner(request, Some(source), |owner, _| action(owner))
     }
     fn with_owner<T>(
         &self,
         request: WriteRequest<'_>,
+        source: Option<SourceRequest<'_>>,
         action: impl FnOnce(&RuleInfo, bool) -> Result<T, String>,
     ) -> Result<T, String> {
         if request.pid == 0 || request.token == 0 {
             return Err("Exact process identity is required".into());
         }
         let mut gate = self.lock()?;
+        if let Some(source) = source {
+            if source.rule != request.rule
+                || !source.key.namespace_equivalent(request.key, source.rule)
+            {
+                return Err("Initial correction source does not match its rule".into());
+            }
+            gate.source(source)?;
+        }
         let spec = gate
             .rules
             .iter()

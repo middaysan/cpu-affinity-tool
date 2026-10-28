@@ -252,8 +252,7 @@ struct Shared {
     cards_visible: AtomicBool,
     admission: Mutex<Admission>,
     latest: Mutex<Arc<TuningSnapshot>>,
-    #[cfg(all(target_os = "windows", feature = "windows"))]
-    receipts: Mutex<std::collections::VecDeque<TuningReceipt>>,
+    receipts: Mutex<Receipts>,
     #[cfg(test)]
     fixture: Mutex<Option<(Arc<ExecutionObservation>, Vec<(u32, u64)>)>>,
 }
@@ -262,11 +261,43 @@ pub(crate) struct TuningRuntime {
     worker: Option<JoinHandle<()>>,
 }
 #[derive(Clone, Copy, Debug)]
-#[cfg(all(target_os = "windows", feature = "windows"))]
 pub(crate) struct TuningReceipt {
     pub id: u64,
     pub revision: u64,
     pub result: Result<(), SaveError>,
+}
+#[derive(Default)]
+struct Receipts {
+    recent: std::collections::VecDeque<TuningReceipt>,
+    gui_request: Option<u64>,
+}
+impl Receipts {
+    fn record(&mut self, receipt: TuningReceipt) {
+        if self.recent.iter().any(|saved| saved.id == receipt.id) {
+            return;
+        }
+        if self.recent.len() == 64 {
+            // One GUI completion stays pinned until its draft owner observes it.
+            let oldest = self
+                .recent
+                .iter()
+                .position(|saved| Some(saved.id) != self.gui_request)
+                .expect("at most one retained GUI request");
+            self.recent.remove(oldest);
+        }
+        self.recent.push_back(receipt);
+    }
+    fn take_gui(&mut self, id: u64, adopted_revision: u64) -> Option<TuningReceipt> {
+        if self.gui_request != Some(id) {
+            return None;
+        }
+        let index = self
+            .recent
+            .iter()
+            .position(|receipt| receipt.id == id && receipt.revision <= adopted_revision)?;
+        self.gui_request = None;
+        self.recent.remove(index)
+    }
 }
 #[derive(Clone)]
 pub(crate) struct TuningClient {
@@ -287,6 +318,7 @@ impl TuningClient {
             .receipts
             .lock()
             .unwrap()
+            .recent
             .iter()
             .find(|receipt| receipt.id == id)
             .copied()
@@ -304,6 +336,15 @@ impl TuningClient {
         expected: Option<u64>,
         fence: Option<RequestFence>,
     ) -> Result<u64, SaveError> {
+        self.request_inner(request, expected, fence, false)
+    }
+    fn request_inner(
+        &self,
+        request: TuningRequest,
+        expected: Option<u64>,
+        fence: Option<RequestFence>,
+        retain_gui: bool,
+    ) -> Result<u64, SaveError> {
         if !self.shared.modules_enabled && !request.is_base_change() {
             return Err(SaveError::Invalid);
         }
@@ -312,6 +353,9 @@ impl TuningClient {
             return Err(SaveError::Recovering);
         }
         if admission.pending {
+            return Err(SaveError::Pending);
+        }
+        if retain_gui && self.shared.receipts.lock().unwrap().gui_request.is_some() {
             return Err(SaveError::Pending);
         }
         let id = admission.next.ok_or(SaveError::Invalid)?;
@@ -333,6 +377,9 @@ impl TuningClient {
         }
         admission.next = id.checked_add(1);
         admission.pending = true;
+        if retain_gui {
+            self.shared.receipts.lock().unwrap().gui_request = Some(id);
+        }
         let mut latest = (**self.shared.latest.lock().unwrap()).clone();
         latest.operation = TuningOperationState::Pending { id };
         latest.restoration_effect = None;
@@ -383,8 +430,7 @@ impl TuningRuntime {
                 closing: None,
             }),
             latest: Mutex::new(initial),
-            #[cfg(all(target_os = "windows", feature = "windows"))]
-            receipts: Mutex::new(std::collections::VecDeque::new()),
+            receipts: Mutex::new(Receipts::default()),
             #[cfg(test)]
             fixture: Mutex::new(None),
         });
@@ -483,23 +529,18 @@ impl TuningRuntime {
                         }
                         if owned.admission.lock().unwrap().closing.is_some() {
                             while let Ok(queued) = receiver.try_recv() {
-                                service.begin_operation();
                                 // Closing finishes already accepted classic saves, but never
                                 // starts queued native actions or new session reconciliation.
-                                let result = if !queued.request.is_base_change() {
-                                    Err(SaveError::Pending)
-                                } else if queued.revision != service.saved_revision() {
-                                    Err(SaveError::Invalid)
-                                } else {
-                                    apply(&mut service, queued.request)
-                                };
+                                let (id, result) = apply_queued(&mut service, queued, true);
                                 operation = match result {
                                     Ok(()) => TuningOperationState::Idle,
-                                    Err(error) => TuningOperationState::Refused {
-                                        id: queued.id,
-                                        error,
-                                    },
+                                    Err(error) => TuningOperationState::Refused { id, error },
                                 };
+                                owned.receipts.lock().unwrap().record(TuningReceipt {
+                                    id,
+                                    revision: service.saved_revision(),
+                                    result,
+                                });
                             }
                             service.expire_display_tweak(true);
                             let outcome = if !modules_enabled {
@@ -577,21 +618,10 @@ impl TuningRuntime {
                                     matches!(&queued.request, TuningRequest::RefreshModuleCards);
                                 #[cfg(not(all(target_os = "windows", feature = "windows")))]
                                 let refresh_modules = false;
-                                service.begin_operation();
-                                let result = if queued.revision != service.saved_revision()
-                                    || queued.fence.as_ref().is_some_and(|fence| {
-                                        fence.generation.load(Ordering::Acquire) != fence.expected
-                                    }) {
-                                    Err(SaveError::Invalid)
-                                } else {
-                                    apply(&mut service, queued.request)
-                                };
+                                let (id, result) = apply_queued(&mut service, queued, false);
                                 operation = match result {
                                     Ok(()) => TuningOperationState::Idle,
-                                    Err(error) => TuningOperationState::Refused {
-                                        id: queued.id,
-                                        error,
-                                    },
+                                    Err(error) => TuningOperationState::Refused { id, error },
                                 };
                                 let observation = if modules_enabled {
                                     session_work = session_work_needed(&service, &actors);
@@ -628,18 +658,11 @@ impl TuningRuntime {
                                 ));
                                 let mut admission = owned.admission.lock().unwrap();
                                 *owned.latest.lock().unwrap() = completed;
-                                #[cfg(all(target_os = "windows", feature = "windows"))]
-                                {
-                                    let mut receipts = owned.receipts.lock().unwrap();
-                                    if receipts.len() == 64 {
-                                        receipts.pop_front();
-                                    }
-                                    receipts.push_back(TuningReceipt {
-                                        id: queued.id,
-                                        revision: service.saved_revision(),
-                                        result,
-                                    });
-                                }
+                                owned.receipts.lock().unwrap().record(TuningReceipt {
+                                    id,
+                                    revision: service.saved_revision(),
+                                    result,
+                                });
                                 admission.pending = false;
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -685,12 +708,26 @@ impl TuningRuntime {
                     }
                 }));
                 if result.is_err() {
+                    let mut admission = owned.admission.lock().unwrap();
                     let mut latest = (**owned.latest.lock().unwrap()).clone();
+                    latest.revision = service.saved_revision();
+                    latest.state = Arc::new(service.state().clone());
+                    latest.rules = service.rules().clone();
+                    let failed = match latest.operation {
+                        TuningOperationState::Pending { id } => Some(TuningReceipt {
+                            id,
+                            revision: latest.revision,
+                            result: Err(SaveError::Recovering),
+                        }),
+                        _ => None,
+                    };
                     latest.operation = TuningOperationState::Recovering;
                     latest.shutdown_outcome = Some(ShutdownResult::Faulted);
                     latest.shutdown_complete = true;
                     *owned.latest.lock().unwrap() = Arc::new(latest);
-                    let mut admission = owned.admission.lock().unwrap();
+                    if let Some(receipt) = failed {
+                        owned.receipts.lock().unwrap().record(receipt);
+                    }
                     admission.pending = false;
                     admission.closing.get_or_insert_with(Instant::now);
                 }
@@ -700,6 +737,18 @@ impl TuningRuntime {
     }
     pub(crate) fn request(&self, request: TuningRequest) -> Result<u64, SaveError> {
         self.request_at_revision(request, None)
+    }
+    pub(crate) fn request_for_gui(&self, request: TuningRequest) -> Result<u64, SaveError> {
+        self.client()
+            .ok_or(SaveError::Recovering)?
+            .request_inner(request, None, None, true)
+    }
+    pub(crate) fn take_gui_receipt(&self, id: u64, adopted_revision: u64) -> Option<TuningReceipt> {
+        self.shared
+            .receipts
+            .lock()
+            .unwrap()
+            .take_gui(id, adopted_revision)
     }
     pub(crate) fn request_at_revision(
         &self,
@@ -786,6 +835,26 @@ fn display_retry_due(
     }
     *next_retry = now + Duration::from_secs(1);
     true
+}
+fn apply_queued(
+    service: &mut HeadlessTuning,
+    queued: Queued,
+    closing: bool,
+) -> (u64, Result<(), SaveError>) {
+    service.begin_operation();
+    let result = if closing && !queued.request.is_base_change() {
+        Err(SaveError::Pending)
+    } else if queued.revision != service.saved_revision()
+        || queued
+            .fence
+            .as_ref()
+            .is_some_and(|fence| fence.generation.load(Ordering::Acquire) != fence.expected)
+    {
+        Err(SaveError::Invalid)
+    } else {
+        apply(service, queued.request)
+    };
+    (queued.id, result)
 }
 fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), SaveError> {
     if !service.modules_enabled && !request.is_base_change() {
@@ -1728,6 +1797,79 @@ mod card_tests {
     };
 
     #[test]
+    fn s116_shutdown_refuses_revoked_queued_save() {
+        struct RecordingSave(Arc<Mutex<usize>>);
+        impl super::super::StatePersistence for RecordingSave {
+            fn save(
+                &mut self,
+                _: &mut AppStateStorage,
+            ) -> Result<super::super::service::SavedState, SaveError> {
+                *self.0.lock().unwrap() += 1;
+                Ok(super::super::service::SavedState::Unavailable)
+            }
+        }
+        let saves = Arc::new(Mutex::new(0));
+        let state = AppStateStorage::test_fixture(|state| state.theme_index = 0);
+        let service = super::super::Tuning::from_registry(Registry::default())
+            .headless(state.clone(), Box::new(RecordingSave(saves.clone())))
+            .without_modules();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let runtime = TuningRuntime::start_inner(
+            service,
+            Arc::new(tokio::sync::RwLock::new(RunningApps::default())),
+            Some((entered_tx, release_rx)),
+        );
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let generation = Arc::new(AtomicU64::new(1));
+        let mut candidate = state;
+        candidate.theme_index = 1;
+        let id = runtime
+            .client()
+            .unwrap()
+            .request_guarded(
+                TuningRequest::SaveBase {
+                    gui_import: false,
+                    candidate: Box::new(candidate),
+                    expected_revision: 0,
+                },
+                None,
+                Some(RequestFence {
+                    generation: generation.clone(),
+                    expected: 1,
+                }),
+            )
+            .unwrap();
+        generation.fetch_add(1, Ordering::AcqRel);
+        runtime.begin_shutdown();
+        release_tx.send(()).unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while !runtime.snapshot().shutdown_complete && Instant::now() < until {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let terminal = runtime.snapshot();
+        assert!(terminal.shutdown_complete);
+        assert_eq!(*saves.lock().unwrap(), 0, "Revocation survives shutdown");
+        assert_eq!(terminal.revision, 0);
+        assert_eq!(terminal.state.theme_index, 0);
+        assert_eq!(
+            terminal.operation,
+            TuningOperationState::Refused {
+                id,
+                error: SaveError::Invalid
+            }
+        );
+        let receipts = runtime.shared.receipts.lock().unwrap();
+        let receipt = receipts
+            .recent
+            .iter()
+            .find(|receipt| receipt.id == id)
+            .unwrap();
+        assert_eq!(receipt.revision, 0);
+        assert_eq!(receipt.result, Err(SaveError::Invalid));
+    }
+
+    #[test]
     fn accepted_classic_save_is_persisted_before_shutdown_completes() {
         struct RecordingSave(Arc<Mutex<Vec<usize>>>);
         impl super::super::StatePersistence for RecordingSave {
@@ -1779,6 +1921,14 @@ mod card_tests {
         assert_eq!(terminal.state.theme_index, 1);
         assert_eq!(terminal.operation, TuningOperationState::Idle);
         assert_eq!(terminal.shutdown_outcome, Some(ShutdownResult::Complete));
+        let receipts = runtime.shared.receipts.lock().unwrap();
+        let receipt = receipts
+            .recent
+            .iter()
+            .find(|receipt| receipt.id == accepted.unwrap())
+            .unwrap();
+        assert_eq!(receipt.revision, 1);
+        assert_eq!(receipt.result, Ok(()));
     }
 
     #[test]
