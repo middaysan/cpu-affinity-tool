@@ -133,7 +133,7 @@ Key directories:
 - `src/app/models/app_state_storage/` - internal persistence modules for state path resolution, storage I/O, migrations, and schema refresh; `app_state_storage.rs` remains the public storage schema and API entrypoint
 - `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, including startup-only own-process scheduling in `self_affinity.rs` and suspended-launch affinity inheritance handling in `launch.rs`; Linux remains a single-file desktop beta backend
 - `libs/os_api/src/windows/file_drop.rs` - GUI-thread Shell file-drop registration for the Windows root, with window-scoped UIPI exceptions, bounded path-only payloads and captured physical release coordinates; no worker or process-wide filter
-- `assets/` - icon, current main-window screenshot, bundled Inter UI font and license, `cpu_presets.json`, and social-preview guidance; `assets/screenshots/` holds additional actual development UI captures and their provenance
+- `assets/` - icon, generated three-view README lead image, bundled Inter UI font and license, `cpu_presets.json`, and social-preview guidance; `assets/screenshots/` holds the original native frames, capture provenance and checksums. `docs/readme-screenshots.md` and the existing live MCP runner own their refresh workflow.
 - `design/` - standalone HTML design reference for the approved compact Inter-based interface; it loads only repository-local assets and is not runtime input
 - `docs/` - release/process documentation and user-facing comparison/rationale references
 - `scripts/` - committed release/build verification helper scripts
@@ -630,6 +630,8 @@ The Windows CI verification job has a 60-minute budget, matching the stable Wind
 The root package alone overrides the test profile to opt-level 1 and limited debug information. Dependency/dev/release profiles, debug assertions and arithmetic behavior remain unchanged. `scripts/measure-test-build.ps1` records alternating root-only rebuild/test timings with cached dependencies; it does not measure a cold full CI job. `docs/testing.md` records the deterministic/live coverage split and consolidation limits.
 
 `scripts/test-windows-live-mcp.ps1` runs synthetic built-app acceptance against a separate nonshipping debug-MCP/diagnostics executable: real UI input, production HTTP configuration/receipts/restart, schema-upgrade failure/retry, extra/shared CPU/RAM unions and history/CSV. It requires elevation for protected diagnostic authority and ETW, owns fresh sidecars/keys/processes and treats forced cleanup as failure. Ordinary launch/native readback/Focus is an explicit interactive opt-in; shipping bootstrap and real vendor/VM smoke remain distinct. Windows CI reuses the crash probe's diagnostic build via `-WithDebugMcp`, then runs the default live pack and uploads only sanitized result JSON for seven days. Stable release gates remain unchanged.
+
+The same runner's optional `-CaptureReadme` mode uses the fixed eight-scene contract and owned measured workloads for documentation only. It is separate from the default acceptance pack. Windows and Linux CI check the committed PNG set, checksums, composition metadata and cleanup provenance without launching a capture or updating assets.
 
 Local verification commands:
 - `cargo test --manifest-path libs/os_api/Cargo.toml`

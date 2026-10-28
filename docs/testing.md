@@ -60,6 +60,12 @@ input; it does not replace the HTTP business API. The runner has no extra Python
 dependencies. A supplied `-Python` selects the interpreter; `-SkipBuild -ExePath`
 can select an already built diagnostic artifact.
 
+The separate `-CaptureReadme` mode reuses that fixture for fixed documentation
+scenes and measured owned workloads. It enables monitoring only after creating
+its synthetic rules; it does not run or replace the acceptance pack below.
+See [README screenshots](readme-screenshots.md) for capture, visual review and
+checked publication. CI validates committed assets without taking screenshots.
+
 | Case | Evidence |
 | --- | --- |
 | R1 | Selected artifact hash, actual child PID, synthetic monitoring Off, orderly exit |

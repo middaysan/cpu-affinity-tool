@@ -1,0 +1,152 @@
+{
+  "schema": 1,
+  "status": "pass",
+  "cleanup": "pass",
+  "source_commit": "974de6fc23fdac8743e025125ed1bd8be04dfdb7",
+  "package_version": "1.7.2",
+  "artifact_sha256": "fa6580962ec3a5029af7ed8e7d7c41e6897f1e9fb22e83e87e2a521414daadbb",
+  "artifact_kind": "diagnostic-dev",
+  "captured_utc": "2026-10-28T23:21:18.8239600+00:00",
+  "contract_sha256": "29fffbefa1bb2f680f604d11deaa98a83e211b484fbe8bb5ed6eba64c7cc82ab",
+  "ui_inputs": {
+    "assets/fonts/InterVariable.ttf": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
+    "assets/icon.ico": "e7f13604c9504edf7ad840d3a5381016cc71202759e3cc709699a9a4087248f9",
+    "src/app/features/cpu_load/chart.rs": "e0d27355074f7a891f34b757e77238df7b4df87d467de77081cd17cb43d7c3ba",
+    "src/app/features/cpu_load/controls.rs": "750b08ea7c85e05ce40e08b761cc5184c806cc239c4560c58ecf73f0ccedf827",
+    "src/app/features/cpu_load/export_ui.rs": "acfd09f9122133cf7e2edfdf7681c532d9f5b13317625d3242f5abdee8b5a7a1",
+    "src/app/features/cpu_load/process_list.rs": "c876f64c83ac29286f50ebccf7b54744378797c5d4f053f67138c2a6e00af51c",
+    "src/app/features/cpu_load/view.rs": "7cd0ea7933c2ae1101134370654efc5ba988aa66e4888e4b1a5a11ba8c63b6f9",
+    "src/app/features/mcp/activity_view.rs": "5547009b7f2d930f732a1050ecc02545d13c53fb1e9ecd493e0abd69c92b2a85",
+    "src/app/features/mcp/view.rs": "8d4c3476bca681528e85e3c4104f297f76c803a70e419b79cafb5c15a23d4505",
+    "src/app/features/system_tweaks/background_ui.rs": "21ee75b508e9f1c7e9b31b8a0ed97eccd55ce177c5cd4a4edef582e88318e8da",
+    "src/app/features/system_tweaks/presentation.rs": "eac6afaa4f098cd9fc3a3b51a00a6faaf5484dbcd4d1db34534f7ce8ea248585",
+    "src/app/features/system_tweaks/view.rs": "1576b84c8b670581c54cbf112fd5f8fe4e8ddf81357c6b1899377d811500605b",
+    "src/app/shell/render_preparation.rs": "f505f8a4a9a940b254b1bffce13cd6de5ae6fedd80d8910656bdd5106ea71121",
+    "src/app/views/central.rs": "5718d600430f9ad9a03896c25a2e3905fabf09d4c70de69965880f44fd42e43b",
+    "src/app/views/crash_reports.rs": "d5a29afaeb7d7f6ef3117427c39127fadeb08963dcc3457a97535046a442f8bf",
+    "src/app/views/group_editor.rs": "d4db97966ab0223a7bd18f323cc34c7bdde20cf2a7f9d21426acf69821ed6d76",
+    "src/app/views/header.rs": "40fd660976f5a7b6bb46dc957343fb556f55b03f976ed0cb3b7d79cad1bbf676",
+    "src/app/views/installed_app_picker.rs": "e25075d779786164c907a940fc082db35f6537b6f6260221fca4e6cb5fa7f9c6",
+    "src/app/views/logs.rs": "838096a26e128c09ee06fc20ea7f7872f264f2fe8fc055ed47e4b214f789c895",
+    "src/app/views/process_table.rs": "2e7d9a3c2a51d7897c3256aeaaedd356d6df96acf860335254adb086fa467c7f",
+    "src/app/views/run_settings.rs": "cfefc197264c9721f135bc69830936e7d7d52cfbc616f266ac9f1489d66847c2",
+    "src/app/views/service_controls.rs": "45986b98e324b1c9ee26793f3689ea1e90bad76533430e0457665ab9c93e6a09",
+    "src/app/views/shared_elements.rs": "6d378ff28646ceb445cbbaa2d6cc364366d0b90089410afd29ee65e46601b46c"
+  },
+  "captures": {
+    "main-dark": {
+      "file": "main-dark.png",
+      "sha256": "aa24ad84d64eabdaf80303b956cebd3733e6b78df8c7bc435b3a11b0c6ea8d65",
+      "width": 700,
+      "height": 1225,
+      "frame": "791",
+      "theme": "dark",
+      "label": "Affinity groups"
+    },
+    "topology": {
+      "file": "topology.png",
+      "sha256": "a99dd4aecca36fe2fee42911fa5a7db2d050aa54e79cfe91d7df55ee92a97854",
+      "width": 700,
+      "height": 1225,
+      "frame": "821",
+      "theme": "dark",
+      "label": "CPU selection"
+    },
+    "cpu-history": {
+      "file": "cpu-history.png",
+      "sha256": "9ebe4db828ee991cba3a33d95b006f3ace991e9e7c02c82f8b07e679253eaa10",
+      "width": 700,
+      "height": 1225,
+      "frame": "865",
+      "theme": "dark",
+      "label": "CPU history"
+    },
+    "processes": {
+      "file": "processes.png",
+      "sha256": "5b28b4a3e33c3f5c7e6b0560d8e829d9dea13be87ebeed64301525a22f7898f7",
+      "width": 700,
+      "height": 1225,
+      "frame": "886",
+      "theme": "dark",
+      "label": "Processes"
+    },
+    "history-export": {
+      "file": "history-export.png",
+      "sha256": "7c3d100f0fdd8cdc5464c7e4157d3cd2661dc3ba960b9f8a089a0018c06f4901",
+      "width": 700,
+      "height": 1225,
+      "frame": "929",
+      "theme": "dark",
+      "label": "History export"
+    },
+    "system-tweaks": {
+      "file": "system-tweaks.png",
+      "sha256": "570ed255268595cae0e2fcf47b4fa6e10eeea260944427bd6421c8fde93929b4",
+      "width": 700,
+      "height": 1225,
+      "frame": "970",
+      "theme": "dark",
+      "label": "System Tweaks"
+    },
+    "mcp-connection": {
+      "file": "mcp-connection.png",
+      "sha256": "41f074735544dd00a47d96426cb1c57e46ebc36158e36cfd9f09ed211b5b4141",
+      "width": 700,
+      "height": 1225,
+      "frame": "1015",
+      "theme": "dark",
+      "label": "MCP connection"
+    },
+    "main-light": {
+      "file": "main-light.png",
+      "sha256": "1d42ff594dd27f12ace55a8f0888cb299ae5134455ff38729bcb5a8fa2cbaeda",
+      "width": 700,
+      "height": 1225,
+      "frame": "1062",
+      "theme": "light",
+      "label": "Light theme"
+    }
+  },
+  "conditions": {
+    "data": "synthetic rules and owned workloads",
+    "charts": "measured, not injected",
+    "native_tweaks_applied": false,
+    "credentials_in_assets": false
+  },
+  "pixels_per_point": 1.75,
+  "hero": {
+    "gutter": 32,
+    "height": 1305,
+    "separator": 4,
+    "columns": [
+      {
+        "x": 16,
+        "width": 700,
+        "y": 64,
+        "height": 1225,
+        "scene": "main-dark",
+        "file": "main-dark.png"
+      },
+      {
+        "x": 748,
+        "width": 700,
+        "y": 64,
+        "height": 1225,
+        "scene": "topology",
+        "file": "topology.png"
+      },
+      {
+        "x": 1480,
+        "width": 700,
+        "y": 64,
+        "height": 1225,
+        "scene": "cpu-history",
+        "file": "cpu-history.png"
+      }
+    ],
+    "method": "Three original PNG frames, unscaled; labels and separators outside application pixels",
+    "file": "assets/screenshot.png",
+    "sha256": "09127af8043cbf02419fb9a920548f3d17bc6f7b0b1542fa78b6ce04bb078456",
+    "width": 2196
+  }
+}

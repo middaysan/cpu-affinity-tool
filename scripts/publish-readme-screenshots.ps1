@@ -13,6 +13,7 @@ $config = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'fixtures/readm
 & $Python (Join-Path $PSScriptRoot 'check-readme-screenshots.py') --capture $captureRoot
 if ($LASTEXITCODE -ne 0) { throw 'Screenshot verification failed; assets were not replaced.' }
 $report = Get-Content -Raw -LiteralPath (Join-Path $captureRoot 'capture.json') | ConvertFrom-Json
+$report.captured_utc = ([DateTimeOffset]$report.captured_utc).ToUniversalTime().ToString('o')
 $staging = Join-Path $repoRoot ('target/ss-publish-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path $staging | Out-Null
 Add-Type -AssemblyName System.Drawing
@@ -47,10 +48,8 @@ try {
     for ($index = 0; $index -lt 3; $index++) {
         $image = $images[$index]
         $graphics.TextRenderingHint = [Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        $graphics.CompositingMode = [Drawing.Drawing2D.CompositingMode]::SourceOver
         $graphics.DrawString($scenes[$index].label, $font, $textBrush, [single]$left, [single]($padding + 5))
-        # Never resize, crop, redraw or overlay the application pixels.
-        $graphics.CompositingMode = [Drawing.Drawing2D.CompositingMode]::SourceCopy
-        $graphics.DrawImageUnscaled($image, [int]$left, [int]($padding + $header))
         $columns += @{ scene = $scenes[$index].id; file = $scenes[$index].file; x = $left;
             y = $padding + $header; width = $image.Width; height = $image.Height }
         $left += $image.Width
@@ -58,6 +57,30 @@ try {
             $graphics.FillRectangle($separatorBrush, [int]($left + ($gutter - $config.hero.separator) / 2),
                 $padding, [int]$config.hero.separator, [int]($height - 2 * $padding))
             $left += $gutter
+        }
+    }
+    $graphics.Dispose()
+    $graphics = $null
+    # Copy straight-alpha pixels after drawing the exterior. GDI+ DrawImage would
+    # round translucent renderer pixels through its premultiplied-alpha pipeline.
+    for ($index = 0; $index -lt 3; $index++) {
+        $image = $images[$index]
+        $column = $columns[$index]
+        $sourceBits = $null
+        $targetBits = $null
+        try {
+            $sourceBits = $image.LockBits([Drawing.Rectangle]::new(0, 0, $image.Width, $image.Height),
+                [Drawing.Imaging.ImageLockMode]::ReadOnly, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+            $targetBits = $canvas.LockBits([Drawing.Rectangle]::new($column.x, $column.y, $image.Width, $image.Height),
+                [Drawing.Imaging.ImageLockMode]::WriteOnly, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+            $row = [byte[]]::new($image.Width * 4)
+            for ($y = 0; $y -lt $image.Height; $y++) {
+                [Runtime.InteropServices.Marshal]::Copy([IntPtr]::Add($sourceBits.Scan0, $y * $sourceBits.Stride), $row, 0, $row.Length)
+                [Runtime.InteropServices.Marshal]::Copy($row, 0, [IntPtr]::Add($targetBits.Scan0, $y * $targetBits.Stride), $row.Length)
+            }
+        } finally {
+            if ($sourceBits) { $image.UnlockBits($sourceBits) }
+            if ($targetBits) { $canvas.UnlockBits($targetBits) }
         }
     }
     $heroPath = Join-Path $staging 'screenshot.png'
