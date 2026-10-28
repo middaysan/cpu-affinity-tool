@@ -11,6 +11,113 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::BOOL;
 
 use super::OS;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowActivation {
+    Foreground,
+    NotReady,
+    Denied,
+    Cancelled,
+}
+
+fn activation_preflight(
+    owned: bool,
+    visible: bool,
+    minimized: bool,
+    foreground: bool,
+) -> Option<WindowActivation> {
+    if !owned {
+        Some(WindowActivation::Cancelled)
+    } else if !visible || minimized {
+        Some(WindowActivation::NotReady)
+    } else if foreground {
+        Some(WindowActivation::Foreground)
+    } else {
+        None
+    }
+}
+
+#[test]
+fn restored_owned_window_reaches_os_activation_after_pointer_motion() {
+    assert_eq!(
+        activation_preflight(true, true, false, false),
+        None,
+        "a raw last-input timestamp change must not veto an explicit Restore"
+    );
+    assert_eq!(
+        activation_preflight(false, true, false, true),
+        Some(WindowActivation::Cancelled)
+    );
+    assert_eq!(
+        activation_preflight(true, false, false, true),
+        Some(WindowActivation::NotReady)
+    );
+    assert_eq!(
+        activation_preflight(true, true, true, true),
+        Some(WindowActivation::NotReady)
+    );
+    assert_eq!(
+        activation_preflight(true, true, false, true),
+        Some(WindowActivation::Foreground)
+    );
+}
+
+fn focus_window_rank(
+    visible: bool,
+    tool: bool,
+    unowned: bool,
+    width: i64,
+    height: i64,
+) -> Option<(bool, bool, i64)> {
+    visible.then_some((!tool, unowned, width.max(0).saturating_mul(height.max(0))))
+}
+#[test]
+fn s103_focus_prefers_a_main_window_over_small_helpers() {
+    assert!(
+        focus_window_rank(true, false, true, 1280, 720)
+            > focus_window_rank(true, false, true, 100, 100)
+    );
+    assert!(
+        focus_window_rank(true, false, true, 1280, 720)
+            > focus_window_rank(true, false, false, 2000, 1000)
+    );
+    assert!(
+        focus_window_rank(true, true, true, 100, 100).is_some(),
+        "Tool-only ordinary applications retain a fallback"
+    );
+    assert!(
+        focus_window_rank(true, false, false, 100, 100)
+            > focus_window_rank(true, true, true, 1000, 1000)
+    );
+    assert_eq!(focus_window_rank(false, false, true, 100, 100), None);
+}
+
+impl OS {
+    /// Activate only a restored window owned by this GUI thread. Never changes
+    /// geometry, topmost state or input attachment. Windows owns foreground
+    /// permission; a raw input timestamp also changes on harmless mouse motion.
+    pub fn activate_own_window(hwnd: HWND) -> WindowActivation {
+        use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+        unsafe {
+            let mut pid = 0;
+            let thread = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if let Some(outcome) = activation_preflight(
+                thread == GetCurrentThreadId() && pid == GetCurrentProcessId(),
+                IsWindowVisible(hwnd).as_bool(),
+                IsIconic(hwnd).as_bool(),
+                GetForegroundWindow() == hwnd,
+            ) {
+                return outcome;
+            }
+            let _ = SetForegroundWindow(hwnd);
+            if GetForegroundWindow() == hwnd {
+                WindowActivation::Foreground
+            } else {
+                WindowActivation::Denied
+            }
+        }
+    }
+}
 fn qualified_foreground(window: usize, thread: u32, pid: u32) -> Result<(usize, u32), String> {
     if window == 0 || thread == 0 || pid == 0 {
         Err("foreground observation unavailable".into())
@@ -74,6 +181,7 @@ impl OS {
         struct Ctx {
             target_pid: u32,
             found: HWND,
+            rank: Option<(bool, bool, i64)>,
         }
 
         unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -84,9 +192,35 @@ impl OS {
                 GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
             }
 
-            if window_pid == ctx.target_pid && unsafe { IsWindowVisible(hwnd).as_bool() } {
-                ctx.found = hwnd;
-                return BOOL(0);
+            if window_pid == ctx.target_pid {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    GW_OWNER, GetWindow, GetWindowPlacement, WINDOWPLACEMENT,
+                };
+                let mut rect = windows::Win32::Foundation::RECT::default();
+                let _ = unsafe { GetWindowRect(hwnd, &mut rect) };
+                if unsafe { IsIconic(hwnd).as_bool() } {
+                    let mut placement = WINDOWPLACEMENT {
+                        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                        ..Default::default()
+                    };
+                    if unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_ok() {
+                        rect = placement.rcNormalPosition;
+                    }
+                }
+                let rank = focus_window_rank(
+                    unsafe { IsWindowVisible(hwnd).as_bool() },
+                    unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } & WS_EX_TOOLWINDOW.0 as i32 != 0,
+                    unsafe { GetWindow(hwnd, GW_OWNER) }
+                        .unwrap_or_default()
+                        .0
+                        .is_null(),
+                    i64::from(rect.right) - i64::from(rect.left),
+                    i64::from(rect.bottom) - i64::from(rect.top),
+                );
+                if rank > ctx.rank {
+                    ctx.rank = rank;
+                    ctx.found = hwnd;
+                }
             }
 
             BOOL(1)
@@ -96,15 +230,21 @@ impl OS {
             let mut ctx = Box::new(Ctx {
                 target_pid: pid,
                 found: HWND(null_mut()),
+                rank: None,
             });
 
             let ctx_ptr = ctx.as_mut() as *mut Ctx;
             let _ = EnumWindows(Some(enum_windows_proc), LPARAM(ctx_ptr as isize));
 
-            if ctx.found.0 == null_mut() {
+            if ctx.found.0.is_null() {
                 return false;
             }
 
+            let mut actual_pid = 0;
+            GetWindowThreadProcessId(ctx.found, Some(&mut actual_pid));
+            if actual_pid != pid {
+                return false;
+            }
             let _ = AllowSetForegroundWindow(ASFW_ANY);
             let _ = ShowWindowAsync(ctx.found, SW_RESTORE);
             let _ = SetForegroundWindow(ctx.found);
@@ -271,6 +411,24 @@ mod startup_window_tests {
                 let _ = UnregisterClassW(self.class, Some(self.instance));
             }
         }
+    }
+
+    #[test]
+    fn activation_waits_for_native_visibility_and_rejects_other_threads() {
+        let window = TestWindow::new(w!("CPU Affinity Tool activation regression"));
+        assert_eq!(
+            OS::activate_own_window(window.hwnd),
+            WindowActivation::NotReady
+        );
+        let raw = window.hwnd.0 as usize;
+        std::thread::spawn(move || {
+            assert_eq!(
+                OS::activate_own_window(HWND(raw as *mut _)),
+                WindowActivation::Cancelled
+            );
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

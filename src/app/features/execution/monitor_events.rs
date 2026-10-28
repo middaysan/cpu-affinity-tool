@@ -105,7 +105,7 @@ impl MonitorEventSender {
                     self.repaint_pending.store(true, Ordering::Release);
                     wake_needed = true;
                 }
-                DiagnosticEvent::Warning(_) => {
+                DiagnosticEvent::Warning(_) | DiagnosticEvent::MonitorError(_) => {
                     self.dropped_warnings.fetch_add(1, Ordering::Relaxed);
                     self.repaint_pending.store(true, Ordering::Release);
                     wake_needed = true;
@@ -187,6 +187,9 @@ mod tests {
 
         tx.try_send(ShellEvent::Monitor("dropped-monitor".to_string()));
         tx.try_send(ShellEvent::Warning("dropped-warning".to_string()));
+        tx.try_send(ShellEvent::MonitorError(
+            "dropped-correction-error".to_string(),
+        ));
         tx.try_send(ShellEvent::RuntimeStateChanged);
 
         for _ in 0..MONITOR_EVENT_QUEUE_CAPACITY {
@@ -195,7 +198,7 @@ mod tests {
         let status = rx.finish_drain();
         assert!(status.needs_repaint);
         assert_eq!(status.dropped_monitor_messages, 1);
-        assert_eq!(status.dropped_warnings, 1);
+        assert_eq!(status.dropped_warnings, 2);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Read;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -8,12 +9,15 @@ use std::process::Command;
 use std::ptr::null_mut;
 
 use serde::Deserialize;
-use windows::Win32::Foundation::{HLOCAL, HWND, LocalFree};
+use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, HWND, LocalFree};
 use windows::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_ELEVATION,
     TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenElevation, TokenIntegrityLevel,
 };
 use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
+use windows::Win32::Storage::Packaging::Appx::{
+    APPLICATION_USER_MODEL_ID_MAX_LENGTH, VerifyApplicationUserModelId,
+};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance,
     CoInitializeEx, CoTaskMemFree, IDispatch, IPersistFile, IServiceProvider, STGM_READ,
@@ -60,26 +64,44 @@ struct AppxPackageRuntimeInfoRecord {
     install_location: String,
 }
 
+const MAX_URL_FILE_BYTES: usize = 64 * 1024;
+
+fn read_url_file_bytes(reader: impl Read) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take((MAX_URL_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Failed to read file: {e}"))?;
+    if bytes.len() > MAX_URL_FILE_BYTES {
+        return Err(format!(".url file exceeds {MAX_URL_FILE_BYTES} bytes"));
+    }
+    Ok(bytes)
+}
+
 pub(super) fn parse_url_file(path: &Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
+    let file = fs::File::open(path).map_err(|e| format!("Failed to read file: {e}"))?;
+    let bytes = read_url_file_bytes(file)?;
     let content = if bytes.starts_with(&[0xFF, 0xFE]) && bytes.len() >= 2 {
         let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         String::from_utf16_lossy(&u16s)
     } else if bytes.starts_with(&[0xFE, 0xFF]) && bytes.len() >= 2 {
         let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
             .collect();
         String::from_utf16_lossy(&u16s)
     } else {
-        match String::from_utf8(bytes.clone()) {
+        match String::from_utf8(bytes) {
             Ok(s) => s,
-            Err(_) => {
-                decode_ansi(&bytes).ok_or("Failed to decode .url file using UTF-8 or ANSI")?
-            }
+            Err(error) => decode_ansi(error.as_bytes())
+                .ok_or("Failed to decode .url file using UTF-8 or ANSI")?,
         }
     };
 
@@ -330,10 +352,19 @@ fn parse_apps_folder_json(stdout: &str) -> Result<Vec<InstalledAppCatalogEntry>,
     Ok(entries)
 }
 
+fn hidden_powershell_command(script: &str) -> Command {
+    let mut command = Command::new("powershell.exe");
+    command.creation_flags(CREATE_NO_WINDOW.0).args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        script,
+    ]);
+    command
+}
+
 fn run_hidden_powershell(script: &str, operation: &str) -> Result<std::process::Output, String> {
-    Command::new("powershell.exe")
-        .creation_flags(CREATE_NO_WINDOW.0)
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+    hidden_powershell_command(script)
         .output()
         .map_err(|e| format!("Failed to execute {operation}: {e}"))
 }
@@ -583,12 +614,19 @@ fn merge_catalog_results(
 }
 
 fn package_family_name_from_aumid(aumid: &str) -> Result<String, String> {
-    let package_family_name = aumid
-        .split('!')
-        .next()
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .ok_or_else(|| format!("Invalid AUMID (missing package family name): {aumid}"))?;
+    let limit = APPLICATION_USER_MODEL_ID_MAX_LENGTH as usize;
+    let mut wide: Vec<u16> = aumid.encode_utf16().take(limit + 1).collect();
+    if wide.len() > limit || wide.contains(&0) {
+        return Err("Invalid installed application AUMID".into());
+    }
+    wide.push(0);
+    // This checks syntax only; it does not query or activate an installed package.
+    if unsafe { VerifyApplicationUserModelId(PCWSTR(wide.as_ptr())) } != ERROR_SUCCESS {
+        return Err("Invalid installed application AUMID".into());
+    }
+    let (package_family_name, _) = aumid
+        .split_once('!')
+        .ok_or("Invalid installed application AUMID")?;
 
     Ok(package_family_name.to_string())
 }
@@ -633,23 +671,27 @@ fn parse_appx_package_runtime_info_json(
     })
 }
 
+fn appx_package_runtime_command(aumid: &str) -> Result<Command, String> {
+    let package_family_name = package_family_name_from_aumid(aumid)?;
+    let mut command = hidden_powershell_command(concat!(
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ",
+        "$ErrorActionPreference = 'Stop'; ",
+        "$family = $env:CPU_AFFINITY_TOOL_PACKAGE_FAMILY_NAME; ",
+        "$pkg = Get-AppxPackage | Where-Object { $_.PackageFamilyName -eq $family } ",
+        "| Select-Object -First 1 PackageFamilyName,InstallLocation; ",
+        "if ($null -eq $pkg) { throw 'Package not found for requested family' }; ",
+        "$pkg | ConvertTo-Json -Compress"
+    ));
+    command.env("CPU_AFFINITY_TOOL_PACKAGE_FAMILY_NAME", package_family_name);
+    Ok(command)
+}
+
 fn resolve_installed_package_runtime_info_powershell(
     aumid: &str,
 ) -> Result<InstalledPackageRuntimeInfo, String> {
-    let package_family_name = package_family_name_from_aumid(aumid)?;
-    let script = format!(
-        concat!(
-            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ",
-            "$ErrorActionPreference = 'Stop'; ",
-            "$pkg = Get-AppxPackage | Where-Object {{ $_.PackageFamilyName -eq '{0}' }} ",
-            "| Select-Object -First 1 PackageFamilyName,InstallLocation; ",
-            "if ($null -eq $pkg) {{ throw 'Package not found for PackageFamilyName {0}' }}; ",
-            "$pkg | ConvertTo-Json -Compress"
-        ),
-        package_family_name
-    );
-
-    let output = run_hidden_powershell(&script, "Get-AppxPackage")?;
+    let output = appx_package_runtime_command(aumid)?
+        .output()
+        .map_err(|e| format!("Failed to execute Get-AppxPackage: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -976,6 +1018,7 @@ mod tests {
     use std::env;
     use std::ffi::OsStr;
     use std::fs;
+    use std::io::{Read, Write};
     use std::path::{Path, PathBuf};
     use std::process;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -990,11 +1033,12 @@ mod tests {
     use winreg::enums::HKEY_CURRENT_USER;
 
     use super::{
-        OS, app_paths_display_name, classify_app_paths_entry, classify_catalog_record,
-        classify_start_menu_entry, collect_start_menu_entries_from_dir, dedup_catalog_entries,
-        explorer_arguments, explorer_broker_token_is_acceptable, is_ignored_start_menu_entry_name,
-        merge_catalog_sources, normalize_existing_windows_path, package_family_name_from_aumid,
-        parse_apps_folder_json, parse_appx_package_runtime_info_json, parse_url_file,
+        OS, app_paths_display_name, appx_package_runtime_command, classify_app_paths_entry,
+        classify_catalog_record, classify_start_menu_entry, collect_start_menu_entries_from_dir,
+        dedup_catalog_entries, explorer_arguments, explorer_broker_token_is_acceptable,
+        is_ignored_start_menu_entry_name, merge_catalog_sources, normalize_existing_windows_path,
+        package_family_name_from_aumid, parse_apps_folder_json,
+        parse_appx_package_runtime_info_json, parse_url_file, read_url_file_bytes,
         strip_windows_verbatim_prefix, target_identity,
     };
     use crate::windows::common::{ComGuard, to_wide_z};
@@ -1075,7 +1119,7 @@ mod tests {
         }
     }
 
-    fn write_shortcut(path: &PathBuf, target: &PathBuf, args: &str) -> Result<(), String> {
+    fn write_shortcut(path: &Path, target: &Path, args: &str) -> Result<(), String> {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED)
                 .ok()
@@ -1127,6 +1171,59 @@ mod tests {
 
         let url = parse_url_file(&path).unwrap();
         assert_eq!(url, "https://example.com/bom");
+    }
+
+    #[test]
+    fn s116_url_file_rejects_oversized_input_before_decoding() {
+        let path = env::temp_dir().join(format!("codex-url-limit-{}.url", unique_suffix()));
+        let _guard = TempFileGuard::new(path.clone());
+        let mut bytes = b"[InternetShortcut]\nURL=https://example.com/bounded\n".to_vec();
+        bytes.resize(64 * 1024 + 1, b' ');
+        fs::write(&path, bytes).unwrap();
+
+        assert!(parse_url_file(&path).unwrap_err().contains("65536"));
+    }
+
+    #[test]
+    fn s116_url_file_read_is_bounded_even_when_file_grows() {
+        struct GrowingFile {
+            file: fs::File,
+            path: PathBuf,
+            grown: bool,
+            bytes_read: usize,
+        }
+        impl Read for GrowingFile {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.file.read(buffer)?;
+                self.bytes_read += count;
+                if count > 0 && !self.grown {
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&self.path)?
+                        .write_all(&vec![b' '; 128 * 1024])?;
+                    self.grown = true;
+                }
+                Ok(count)
+            }
+        }
+
+        let path = env::temp_dir().join(format!("codex-url-growing-{}.url", unique_suffix()));
+        let _guard = TempFileGuard::new(path.clone());
+        fs::write(&path, b"URL=https://example.com/bounded\n").unwrap();
+        let mut reader = GrowingFile {
+            file: fs::File::open(&path).unwrap(),
+            path,
+            grown: false,
+            bytes_read: 0,
+        };
+        assert!(read_url_file_bytes(&mut reader).is_err());
+        assert_eq!(reader.bytes_read, 64 * 1024 + 1);
+        assert_eq!(
+            read_url_file_bytes(std::io::Cursor::new(vec![b' '; 64 * 1024]))
+                .unwrap()
+                .len(),
+            64 * 1024
+        );
     }
 
     #[test]
@@ -1512,6 +1609,45 @@ mod tests {
             package_family_name_from_aumid("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify").unwrap();
 
         assert_eq!(family, "SpotifyAB.SpotifyMusic_zpdnekdrzrea0");
+    }
+
+    #[test]
+    fn s116_package_lookup_rejects_malformed_aumids() {
+        for aumid in [
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0",
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!",
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify!Extra",
+            "Package'Odd_8wekyb3d8bbwe!App",
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify\0tail",
+        ] {
+            assert!(package_family_name_from_aumid(aumid).is_err(), "{aumid:?}");
+        }
+        assert!(package_family_name_from_aumid(&"a".repeat(4096)).is_err());
+    }
+
+    #[test]
+    fn s116_package_lookup_passes_family_as_data_to_constant_script() {
+        let first =
+            appx_package_runtime_command("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify").unwrap();
+        let second =
+            appx_package_runtime_command("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App").unwrap();
+        assert_eq!(
+            first.get_args().collect::<Vec<_>>(),
+            second.get_args().collect::<Vec<_>>()
+        );
+        for (command, family) in [
+            (first, "SpotifyAB.SpotifyMusic_zpdnekdrzrea0"),
+            (second, "Microsoft.WindowsCalculator_8wekyb3d8bbwe"),
+        ] {
+            assert!(
+                !command
+                    .get_args()
+                    .any(|arg| arg.to_string_lossy().contains(family))
+            );
+            assert!(command.get_envs().any(|(key, value)| {
+                key == "CPU_AFFINITY_TOOL_PACKAGE_FAMILY_NAME" && value == Some(OsStr::new(family))
+            }));
+        }
     }
 
     #[test]

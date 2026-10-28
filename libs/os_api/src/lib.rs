@@ -1,4 +1,7 @@
+pub mod app_identity;
+pub mod background;
 mod catalog;
+pub mod core_parking;
 pub mod cpu_load;
 pub mod gaming;
 pub mod gaming_cpu_power;
@@ -9,6 +12,7 @@ mod process;
 #[cfg(all(target_os = "windows", feature = "render-profiling"))]
 pub mod render_profile;
 mod shortcut;
+pub mod steam;
 pub mod tuning;
 pub mod windows_tweaks;
 pub use catalog::{
@@ -31,5 +35,6 @@ pub use linux::OS;
 #[cfg(target_os = "windows")]
 pub use windows::{
     LocalIpcClientError, LocalIpcEndpoint, LocalIpcGuard, LocalIpcRequest, LocalIpcServer,
-    LocalIpcWake, OS, WindowFileDrop, WindowFileDropGuard, WindowsApplicationFailure,
+    LocalIpcWake, OS, WindowActivation, WindowFileDrop, WindowFileDropGuard,
+    WindowsApplicationFailure,
 };

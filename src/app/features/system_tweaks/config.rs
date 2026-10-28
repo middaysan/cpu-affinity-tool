@@ -32,6 +32,14 @@ pub(crate) enum TuningLoad {
     Blocked,
 }
 impl TuningEnvelope {
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+    pub(crate) fn same_document(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (None, None) => true,
+            (Some(first), Some(second)) => Arc::ptr_eq(first, second),
+            _ => false,
+        }
+    }
     pub(crate) fn is_off(&self) -> bool {
         self.0.is_none()
     }

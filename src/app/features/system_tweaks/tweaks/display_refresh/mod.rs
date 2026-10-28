@@ -192,11 +192,16 @@ impl Module for DisplayRefresh {
         &self,
         target: &TargetIdentity,
         _: Option<&ModuleEnvelope>,
-    ) -> (ModuleObservation, Result<bool, ModuleError>) {
+    ) -> (
+        ModuleObservation,
+        Result<bool, ModuleError>,
+        Option<ModuleEnvelope>,
+    ) {
         let result = read_card(target);
         (
             observation(result.clone().map(|(label, _)| label)),
             result.map(|(_, ready)| ready),
+            None,
         )
     }
     fn fields(

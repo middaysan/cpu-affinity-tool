@@ -2,6 +2,7 @@
 mod access;
 mod activation;
 pub use activation::activate_registered_aumid;
+pub(crate) use activation::activate_steam_game;
 mod identity;
 mod launch;
 mod process;

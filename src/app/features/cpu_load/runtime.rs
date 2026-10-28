@@ -59,6 +59,7 @@ pub(crate) struct CpuLoadRuntime {
     control: Arc<(Mutex<Control>, Condvar)>,
     pub(super) published: Arc<RwLock<Arc<Snapshot>>>,
     pub(super) history: Arc<RwLock<HistoryStore>>,
+    current_frame: Option<(u64, Arc<Snapshot>)>,
     series_cache: Series,
     series_key: Option<(Option<RuleTarget>, usize)>,
     overview_cache: Overview,
@@ -96,6 +97,7 @@ impl CpuLoadRuntime {
             control: Default::default(),
             published: Arc::new(RwLock::new(Arc::new(Snapshot::default()))),
             history: Default::default(),
+            current_frame: None,
             series_cache: Series::default(),
             series_key: None,
             overview_cache: Default::default(),
@@ -163,10 +165,12 @@ impl CpuLoadRuntime {
     }
     pub fn configure(&mut self, enabled: bool, _visible: bool) {
         if !enabled {
+            self.current_frame = None;
             self.close();
         }
         if let Ok(mut control) = self.control.0.lock() {
             if control.enabled != enabled {
+                self.current_frame = None;
                 control.enabled = enabled;
                 control.revision = control.revision.saturating_add(1);
                 self.control.1.notify_one();
@@ -227,17 +231,21 @@ impl CpuLoadRuntime {
             .map(|s| s.clone())
             .unwrap_or_else(|| Arc::new(Snapshot::default()))
     }
+    /// Keep current group and app summaries coherent through one GUI frame.
+    pub(super) fn frame_snapshot(&mut self, ctx: &eframe::egui::Context) -> Arc<Snapshot> {
+        let frame = ctx.cumulative_frame_nr();
+        if let Some((cached_frame, snapshot)) = &self.current_frame {
+            if *cached_frame == frame {
+                return snapshot.clone();
+            }
+        }
+        let snapshot = self.snapshot();
+        self.current_frame = Some((frame, snapshot.clone()));
+        snapshot
+    }
+
     pub fn tracked_only(&self) -> bool {
         self.group_tracked_only
-    }
-    pub(super) fn tracked_group_load(&self, cpus: &[usize]) -> (Option<f32>, bool) {
-        let Ok(history) = self.history.try_read() else {
-            return (None, false);
-        };
-        let Some(time) = history.latest_finalized() else {
-            return (None, false);
-        };
-        history.group_mean_at(LoadSource::Tracked, time, cpus)
     }
     pub fn set_tracked_only(&mut self, value: bool) {
         if self.group_tracked_only != value {
@@ -439,6 +447,16 @@ impl CpuLoadRuntime {
             .unwrap_or(usize::MAX);
         let snapshot = self.snapshot();
         let bookkeeping = ESTIMATED_COLLECTOR_RUNTIME_BYTES
+            + snapshot.process_memory.capacity()
+                * std::mem::size_of::<(RuleTarget, super::memory::MemoryUsage)>()
+            + snapshot.group_memory.as_ref().map_or(0, |groups| {
+                groups.capacity()
+                    * std::mem::size_of::<(
+                        crate::app::shared::ids::GroupId,
+                        super::memory::MemoryUsage,
+                    )>()
+                    + groups.keys().map(|id| id.0.capacity()).sum::<usize>()
+            })
             + snapshot.live_processes.reserved_bytes()
             + self.group_process_cache.reserved_bytes()
             + snapshot
@@ -594,6 +612,23 @@ fn membership_matches(running: &Arc<TokioRwLock<RunningApps>>, generation: u64) 
         .try_read()
         .is_ok_and(|current| current.membership_generation() == Some(generation))
 }
+fn history_tick_targets<'a>(
+    all: &'a [(u32, u64)],
+    tracked_valid: bool,
+    runs: &HashMap<String, (u32, u64)>,
+    fallback: &'a mut Vec<(u32, u64)>,
+) -> &'a [(u32, u64)] {
+    if tracked_valid {
+        return all;
+    }
+    // A transient membership race may omit tracked work for this cut only.
+    // The canonical sampler inventory must survive for the next valid tick.
+    fallback.clear();
+    fallback.extend(runs.values().copied());
+    fallback.sort_unstable();
+    fallback.dedup();
+    fallback
+}
 fn saved_targets(
     source: &Arc<RwLock<AppStateStorage>>,
     targets: &mut Vec<RuleTarget>,
@@ -719,6 +754,7 @@ fn run(
     let mut targets = Vec::new();
     let mut run_targets = HashMap::new();
     let mut all = Vec::new();
+    let mut history_fallback = Vec::new();
     let mut snapshot = Snapshot::default();
     let mut configured_cpus = 0;
     let mut configuration_error = None;
@@ -839,6 +875,8 @@ fn run(
             snapshot.error = Some(error.clone());
             snapshot.cpus.clear();
             snapshot.processes.clear();
+            snapshot.process_memory.clear();
+            snapshot.group_memory = None;
             snapshot.process_cpus.clear();
             snapshot.process_partial_cpus.clear();
             snapshot.run_cpus.clear();
@@ -946,6 +984,8 @@ fn run(
             values.fill(None);
         }
         snapshot.processes.clear();
+        snapshot.process_memory.clear();
+        snapshot.group_memory = None;
         pid_totals.clear();
         let tracked = tracking
             .as_ref()
@@ -976,6 +1016,13 @@ fn run(
                 snapshot.processes = process_totals(&tracked.targets, |pid, token| {
                     pid_totals.get(&(pid, token)).copied().flatten()
                 });
+                let memory = super::memory::tracked_memory(&tracked.targets, |pid, token| {
+                    processes
+                        .get(&(pid, token))
+                        .and_then(|sample| sample.private_working_set().ok())
+                });
+                snapshot.process_memory = memory.rules;
+                snapshot.group_memory = Some(memory.groups);
             }
             snapshot.run_totals = run_targets
                 .iter()
@@ -1036,15 +1083,12 @@ fn run(
                     tracked.filter(|tracked| membership_matches(&running, tracked.generation));
                 let tick = {
                     crate::render_profile_scope!(TraceTick);
-                    active.history_tick(if valid.is_some() {
-                        &all
-                    } else {
-                        all.clear();
-                        all.extend(run_targets.values().copied());
-                        all.sort_unstable();
-                        all.dedup();
-                        &all
-                    })
+                    active.history_tick(history_tick_targets(
+                        &all,
+                        valid.is_some(),
+                        &run_targets,
+                        &mut history_fallback,
+                    ))
                 };
                 match tick {
                     Ok(tick) => {
@@ -1071,6 +1115,8 @@ fn run(
             }
             (snapshot.bookkeeping_bytes, snapshot.threads) = active.memory_usage();
             snapshot.bookkeeping_bytes += event_history.bookkeeping_bytes();
+            snapshot.bookkeeping_bytes +=
+                history_fallback.capacity() * std::mem::size_of::<(u32, u64)>();
         }
         if let Some(error) = trace_error {
             let gap_reason = super::history::GapReason::from_error(&error);
@@ -1103,6 +1149,8 @@ fn run(
         live_processes.record_cores(count, event_history.samples());
         if tracked.is_none_or(|tracked| !membership_matches(&running, tracked.generation)) {
             snapshot.processes.clear();
+            snapshot.process_memory.clear();
+            snapshot.group_memory = None;
             live_processes.invalidate();
             snapshot.detail_error.get_or_insert_with(|| {
                 "Tracked processes changed; waiting for the next interval".into()
@@ -1152,3 +1200,7 @@ mod graph_tests;
 #[cfg(test)]
 #[path = "native_gui_probe.rs"]
 mod native_gui_probe;
+
+#[cfg(test)]
+#[path = "native_known_apps.rs"]
+mod native_known_apps;

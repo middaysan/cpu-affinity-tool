@@ -3,7 +3,9 @@ pub(crate) mod diagnostics;
 // Independent managed settings. Construction and editors perform no native reads.
 pub(crate) mod accessibility_hotkeys;
 pub(crate) mod background_capture;
+pub(crate) mod background_workload;
 pub(crate) mod common;
+pub(crate) mod core_parking;
 pub(crate) mod cpu_sets;
 pub(crate) mod display_refresh;
 pub(crate) mod game_mode;
@@ -31,10 +33,14 @@ pub(crate) fn modules_with_scheduling(
     vec![
         Arc::new(power_plan::PowerPlan::default()),
         Arc::new(power_mode::PowerMode),
+        Arc::new(core_parking::CoreParking),
         Arc::new(mouse_acceleration::MouseAcceleration),
         Arc::new(accessibility_hotkeys::AccessibilityHotkeys),
         Arc::new(process_qos::ProcessQos),
         Arc::new(cpu_sets::CpuSets::with_scheduling(scheduling.clone())),
+        Arc::new(background_workload::BackgroundWorkload::with_scheduling(
+            scheduling.clone(),
+        )),
         Arc::new(process_priority::ProcessPriority::with_scheduling(
             scheduling,
         )),
@@ -83,13 +89,13 @@ mod registry_tests {
     fn modules_default_registry_exposes_every_agreed_module_once_without_native_work() {
         let tuning = Tuning::default();
         let descriptors: Vec<_> = tuning.registry().descriptors().collect();
-        assert_eq!(descriptors.len(), 23);
+        assert_eq!(descriptors.len(), 25);
         assert_eq!(
             descriptors
                 .iter()
                 .filter(|d| d.access == ModuleAccess::Managed)
                 .count(),
-            13
+            15
         );
         assert_eq!(
             descriptors

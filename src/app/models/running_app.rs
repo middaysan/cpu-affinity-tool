@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::app::models::AppRuntimeKey;
 use crate::app::shared::ids::{GroupId, RuleId};
@@ -22,6 +22,8 @@ pub struct RunningApp {
     pub pids: Vec<u32>,
     /// Creation tokens captured with `pids`; absent tokens are not monitor-retainable.
     pub pid_instance_tokens: HashMap<u32, ProcessInstanceToken>,
+    /// Exact main lifetimes for strict game and built-in application launch decisions.
+    pub(crate) primary_instances: HashMap<u32, ProcessInstanceToken>,
     /// Logical group identity for the tracked rule.
     pub group_id: GroupId,
     /// Logical rule identity for the tracked rule.
@@ -36,19 +38,27 @@ pub struct RunningApp {
 /// This structure provides methods for adding and removing applications
 /// from the collection, indexed by a unique key.
 pub struct RunningApps {
+    pub(crate) control: std::sync::Arc<crate::app::features::execution::control::Authority>,
     /// Map of application keys to RunningApp instances
     pub apps: HashMap<AppRuntimeKey, RunningApp>,
     /// Runtime-only two-field handoff shared with the registered scheduling modules.
     pub(crate) scheduling:
         std::sync::Arc<crate::app::features::system_tweaks::tweaks::scheduling::SchedulingHandoff>,
+    pub(crate) steam_helpers: HashMap<(RuleId, u32), HashMap<u32, u64>>,
+    pub(crate) steam_evidence: HashMap<(RuleId, u32), HashMap<u32, os_api::steam::GameProcess>>,
+    pub(crate) steam_unresolved: HashSet<RuleId>,
     membership_generation: Option<u64>,
     editing_membership: bool,
 }
 impl Default for RunningApps {
     fn default() -> Self {
         Self {
+            control: Default::default(),
             apps: HashMap::new(),
             scheduling: Default::default(),
+            steam_helpers: HashMap::new(),
+            steam_evidence: HashMap::new(),
+            steam_unresolved: HashSet::new(),
             membership_generation: Some(0),
             editing_membership: false,
         }
@@ -119,6 +129,7 @@ impl RunningApps {
                 RunningApp {
                     pids: vec![pid],
                     pid_instance_tokens: HashMap::new(),
+                    primary_instances: HashMap::new(),
                     group_id,
                     rule_id,
                     created_at: std::time::SystemTime::now(),

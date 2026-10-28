@@ -7,6 +7,7 @@ use crate::app::features::system_tweaks::platform::{
 pub enum ShellEvent {
     Warning(String),
     Monitor(String),
+    MonitorError(String),
     RuntimeStateChanged,
     Tuning(TuningDiagnostic),
 }
@@ -75,7 +76,7 @@ impl ShellEvent {
         match self {
             Self::Warning(message) => Some((message.as_str(), true)),
             Self::Monitor(message) => Some((message.as_str(), false)),
-            Self::RuntimeStateChanged | Self::Tuning(_) => None,
+            Self::MonitorError(_) | Self::RuntimeStateChanged | Self::Tuning(_) => None,
         }
     }
     pub(crate) fn tuning_log_message(&self) -> Option<String> {

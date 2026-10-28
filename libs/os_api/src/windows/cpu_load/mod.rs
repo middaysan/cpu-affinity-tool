@@ -350,6 +350,67 @@ impl ProcessSampler {
             )
         }))
     }
+
+    /// Private resident pages of this exact retained process, excluding shared
+    /// mappings. EX2 is optional on older Windows; never substitute commit.
+    pub fn private_working_set(&self) -> Result<u64, String> {
+        use windows::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
+        };
+        if !self.process.alive()? {
+            return Err("Process exited before RAM sample".into());
+        }
+        let mut memory = PROCESS_MEMORY_COUNTERS_EX2 {
+            cb: size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32,
+            // Detect older implementations that leave the extension untouched.
+            PrivateWorkingSetSize: usize::MAX,
+            ..Default::default()
+        };
+        unsafe {
+            GetProcessMemoryInfo(
+                self.process.native(),
+                (&raw mut memory).cast::<PROCESS_MEMORY_COUNTERS>(),
+                size_of_val(&memory) as u32,
+            )
+        }
+        .map_err(|e| format!("Read process RAM: {e}"))?;
+        if memory.cb != size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32 || !self.process.alive()? {
+            return Err("Private RAM counter unavailable".into());
+        }
+        private_resident_bytes(memory.PrivateWorkingSetSize, memory.WorkingSetSize)
+            .ok_or_else(|| "Private RAM counter unsupported or invalid".into())
+    }
+}
+
+fn private_resident_bytes(private: usize, working_set: usize) -> Option<u64> {
+    (private != usize::MAX && private <= working_set).then_some(private as u64)
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn private_ram_rejects_unsupported_or_inconsistent_fields_without_inventing_zero() {
+        assert_eq!(private_resident_bytes(usize::MAX, 20), None);
+        assert_eq!(private_resident_bytes(30, 20), None);
+        assert_eq!(private_resident_bytes(0, 20), Some(0));
+        assert_eq!(private_resident_bytes(10, 20), Some(10));
+    }
+
+    #[test]
+    fn native_private_ram_uses_the_verified_retained_process_handle() {
+        use windows::Win32::System::Threading::GetCurrentProcessId;
+        let pid = unsafe { GetCurrentProcessId() };
+        let token = super::super::OS::get_process_instance_token(pid).unwrap();
+        let sample = ProcessSampler::open(pid, token).unwrap();
+        // Current supported Windows must expose real resident private pages.
+        if matches!(crate::platform::current_platform(), crate::platform::OsPlatform::Windows {build,..} if build >= 22631)
+        {
+            assert!(sample.private_working_set().unwrap() > 0);
+        }
+        assert!(ProcessSampler::open(pid, token.wrapping_add(1)).is_err());
+    }
 }
 
 #[cfg(test)]

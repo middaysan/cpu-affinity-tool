@@ -223,6 +223,7 @@ pub(super) fn history_bytes(cpus: usize, rules: usize, seconds: u32) -> Option<u
 
 impl HistoryStore {
     /// Read one exact interval without copying a row or scanning its history.
+    #[cfg(test)]
     pub fn group_mean_at(
         &self,
         source: LoadSource<'_>,

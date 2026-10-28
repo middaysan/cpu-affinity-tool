@@ -4,12 +4,13 @@ use crate::app::shell::presenters::shared_elements::{
 use eframe::egui::{self, Color32};
 
 #[derive(Default)]
-pub(super) struct MeterLoad {
+pub(super) struct MeterLoad<'a> {
     pub value: Option<f32>,
     pub partial: bool,
+    pub memory_label: Option<&'a str>,
 }
 
-impl From<Option<f32>> for MeterLoad {
+impl From<Option<f32>> for MeterLoad<'_> {
     fn from(value: Option<f32>) -> Self {
         Self {
             value,
@@ -30,7 +31,7 @@ impl MeterKind {
         match self {
             Self::System => 21.0,
             Self::Group => 30.0,
-            Self::Application => 18.0,
+            Self::Application => 21.0,
         }
     }
 
@@ -46,7 +47,7 @@ impl MeterKind {
 /// A compact inline group/application graph button.
 pub(super) fn load_meter(
     ui: &mut egui::Ui,
-    load: MeterLoad,
+    load: MeterLoad<'_>,
     color: Color32,
     interactive: bool,
     kind: MeterKind,
@@ -64,7 +65,7 @@ pub(super) fn load_meter(
                 match kind {
                     MeterKind::System => ui.available_width().max(1.0),
                     MeterKind::Group => 78.0,
-                    MeterKind::Application => 44.0,
+                    MeterKind::Application => super::view::APP_METRICS_WIDTH,
                 },
                 kind.height(),
             ),
@@ -81,9 +82,15 @@ pub(super) fn load_meter(
             MeterKind::System => {
                 format!("All logical CPUs, all programs: {value}. Open system CPU graphs")
             }
-            MeterKind::Group => format!("Tracked apps CPU load {value}. Open group CPU graphs"),
+            MeterKind::Group => format!(
+                "Group CPU load {value}, RAM {}. Open group CPU graphs",
+                load.memory_label.unwrap_or("—")
+            ),
             MeterKind::Application if interactive => {
-                format!("App CPU load {value}. Open CPU graphs")
+                format!(
+                    "App CPU load {value}, RAM {}. Open CPU graphs",
+                    load.memory_label.unwrap_or("—")
+                )
             }
             MeterKind::Application => format!("App CPU load {value}. Application is stopped"),
         };
@@ -127,7 +134,7 @@ pub(super) fn paint_system_summary(
 fn paint_meter(
     ui: &egui::Ui,
     button_rect: egui::Rect,
-    load: MeterLoad,
+    load: MeterLoad<'_>,
     color: Color32,
     interactive: bool,
     kind: MeterKind,
@@ -202,6 +209,11 @@ fn paint_meter(
         ui.painter().rect_filled(rect, radius, background);
     }
     let row = rect.shrink(1.0);
+    let fill_row = if kind == MeterKind::Application && interactive {
+        egui::Rect::from_min_max(row.min, egui::pos2(row.right(), row.top() + 10.0))
+    } else {
+        row
+    };
     let level = load
         .value
         .filter(|v| v.is_finite())
@@ -209,8 +221,10 @@ fn paint_meter(
         .clamp(0.0, 100.0)
         / 100.0;
     if level > 0.0 {
-        let fill =
-            egui::Rect::from_min_size(row.min, egui::vec2(row.width() * level, row.height()));
+        let fill = egui::Rect::from_min_size(
+            fill_row.min,
+            egui::vec2(fill_row.width() * level, fill_row.height()),
+        );
         let fill_color =
             color.lerp_to_gamma(background, if ui.visuals().dark_mode { 0.55 } else { 0.7 });
         if summary {
@@ -231,26 +245,63 @@ fn paint_meter(
             color,
         );
     }
-    let compact = kind == MeterKind::Application;
-    painter.text(
-        if compact {
-            row.center()
-        } else {
-            egui::pos2(row.right() - 4.0, row.center().y)
-        },
-        if compact {
-            egui::Align2::CENTER_CENTER
-        } else {
-            egui::Align2::RIGHT_CENTER
-        },
-        super::view::measured_percent(load.value, load.partial),
-        egui::FontId::proportional(if kind == MeterKind::Group { 9.0 } else { 9.5 }),
-        if interactive {
-            colors.text_primary
-        } else {
-            colors.text_muted.lerp_to_gamma(colors.row, 0.3)
-        },
-    );
+    if kind == MeterKind::Application && interactive {
+        let mut cpu_text = painter.layout_no_wrap(
+            format!(
+                "CPU {}",
+                super::view::measured_percent(load.value, load.partial)
+            ),
+            egui::FontId::proportional(9.0),
+            colors.text_primary,
+        );
+        if cpu_text.size().x + 2.0 > row.width() {
+            cpu_text = painter.layout_no_wrap(
+                cpu_text.text().to_owned(),
+                egui::FontId::proportional(8.5),
+                colors.text_primary,
+            );
+        }
+        painter.galley(
+            fill_row.center() - cpu_text.size() * 0.5,
+            cpu_text,
+            colors.text_primary,
+        );
+        painter.text(
+            egui::pos2(row.center().x, (fill_row.bottom() + row.bottom()) * 0.5),
+            egui::Align2::CENTER_CENTER,
+            load.memory_label.unwrap_or("—"),
+            egui::FontId::proportional(8.5),
+            colors.text_muted,
+        );
+    } else {
+        let compact = kind != MeterKind::System;
+        painter.text(
+            if compact {
+                row.center()
+            } else {
+                egui::pos2(row.right() - 4.0, row.center().y)
+            },
+            if compact {
+                egui::Align2::CENTER_CENTER
+            } else {
+                egui::Align2::RIGHT_CENTER
+            },
+            if kind == MeterKind::Group {
+                format!(
+                    "CPU {}",
+                    super::view::measured_percent(load.value, load.partial)
+                )
+            } else {
+                super::view::measured_percent(load.value, load.partial)
+            },
+            egui::FontId::proportional(if kind == MeterKind::Group { 9.0 } else { 9.5 }),
+            if interactive {
+                colors.text_primary
+            } else {
+                colors.text_muted.lerp_to_gamma(colors.row, 0.3)
+            },
+        );
+    }
     if kind != MeterKind::System {
         ui.painter().rect_stroke(
             rect,
@@ -279,7 +330,7 @@ fn paint_meter(
                 (rect.bottom() + button_rect.bottom() - 2.0) * 0.5,
             ),
             egui::Align2::CENTER_CENTER,
-            "Group CPU load",
+            format!("RAM {}", load.memory_label.unwrap_or("—")),
             egui::FontId::proportional(8.5),
             colors.text_muted,
         );
@@ -289,6 +340,57 @@ fn paint_meter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_cpu_and_ram_ink_fit_at_supported_scales_in_both_themes() {
+        for scale in [1.0, 1.25, 1.75, 2.0] {
+            for dark in [false, true] {
+                for memory in ["1023 MB*", "1.5 GB*", "24576.0 GB*"] {
+                    let ctx = egui::Context::default();
+                    crate::app::shell::presenters::shared_elements::install_ui_fonts(&ctx);
+                    ctx.set_pixels_per_point(scale);
+                    ctx.set_visuals(if dark {
+                        egui::Visuals::dark()
+                    } else {
+                        egui::Visuals::light()
+                    });
+                    let mut rect = egui::Rect::NOTHING;
+                    let mut output = ctx.run_ui(Default::default(), |ui| {
+                        rect = load_meter(
+                            ui,
+                            MeterLoad {
+                                value: Some(100.0),
+                                partial: true,
+                                memory_label: Some(memory),
+                            },
+                            Color32::GRAY,
+                            true,
+                            MeterKind::Group,
+                        )
+                        .rect;
+                    });
+                    output.textures_delta.clear();
+                    assert_eq!(rect.size(), egui::vec2(78.0, 30.0));
+                    for label in ["CPU 100%*".to_owned(), format!("RAM {memory}")] {
+                        let text = output
+                            .shapes
+                            .iter()
+                            .find_map(|s| match &s.shape {
+                                egui::Shape::Text(t) if t.galley.text() == label => {
+                                    Some((t.visual_bounding_rect(), s.clip_rect))
+                                }
+                                _ => None,
+                            })
+                            .unwrap();
+                        assert!(
+                            rect.contains_rect(text.0) && text.1.contains_rect(text.0),
+                            "{scale}x {label} outside {rect:?}: {text:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn group_meter_caption_and_pill_share_one_outlined_button() {
@@ -319,8 +421,8 @@ mod tests {
             .collect();
         assert!(!labels.contains(&"Tracked"));
         assert!(!labels.contains(&"All processes"));
-        assert!(labels.contains(&"Group CPU load"));
-        assert_eq!(labels.iter().filter(|&&label| label == "—").count(), 1);
+        assert!(labels.contains(&"RAM —"));
+        assert!(labels.contains(&"CPU —"));
     }
 
     #[test]
@@ -386,7 +488,14 @@ mod tests {
                     .collect();
                 let value = texts
                     .iter()
-                    .find(|text| text.galley.text() == "100%")
+                    .find(|text| {
+                        text.galley.text()
+                            == if kind == MeterKind::Group {
+                                "CPU 100%"
+                            } else {
+                                "100%"
+                            }
+                    })
                     .unwrap();
                 if kind == MeterKind::System {
                     assert_eq!(rect.height(), 21.0);
@@ -402,7 +511,7 @@ mod tests {
                     assert_eq!(texts.len(), 2);
                     let caption = texts
                         .iter()
-                        .find(|text| text.galley.text() == "Group CPU load")
+                        .find(|text| text.galley.text() == "RAM —")
                         .unwrap();
                     assert!(caption.pos.y > rect.bottom());
                 }
@@ -411,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn meter_keeps_compact_size_with_full_height_fill_and_centered_percentage() {
+    fn app_meter_fills_only_the_cpu_line_and_keeps_ram_separate() {
         for dark in [true, false] {
             for value in [Some(25.0), Some(50.0), Some(100.0), Some(0.0), None] {
                 let ctx = egui::Context::default();
@@ -424,16 +533,30 @@ mod tests {
                 let mut rect = egui::Rect::NOTHING;
                 let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                     ui.set_width(320.0);
-                    rect = load_meter(ui, value.into(), color, true, MeterKind::Application).rect;
+                    rect = load_meter(
+                        ui,
+                        MeterLoad {
+                            value,
+                            memory_label: Some("814 MB"),
+                            ..Default::default()
+                        },
+                        color,
+                        true,
+                        MeterKind::Application,
+                    )
+                    .rect;
                 });
                 output.textures_delta.clear();
-                assert_eq!(rect.width(), 44.0);
+                assert_eq!(rect.width(), 52.0);
                 assert!(
-                    (rect.height() - 18.0).abs() < 0.01,
-                    "application strips have one compact lane"
+                    (rect.height() - 21.0).abs() < 0.01,
+                    "both metrics share the existing row height"
                 );
                 let lane = rect;
-                let inner = lane.shrink(1.0);
+                let inner = egui::Rect::from_min_size(
+                    lane.min + egui::vec2(1.0, 1.0),
+                    egui::vec2(lane.width() - 2.0, 10.0),
+                );
                 let fill = output.shapes.iter().find_map(|shape| match &shape.shape {
                     egui::Shape::Rect(shape)
                         if (shape.rect.height() - inner.height()).abs() < 0.01 =>
@@ -465,7 +588,8 @@ mod tests {
                     .iter()
                     .find_map(|shape| match &shape.shape {
                         egui::Shape::Text(t)
-                            if t.galley.text() == super::super::view::percent(value) =>
+                            if t.galley.text()
+                                == format!("CPU {}", super::super::view::percent(value)) =>
                         {
                             Some(t)
                         }
@@ -477,6 +601,15 @@ mod tests {
                     (text_rect.center().x - lane.center().x).abs() < 1.0,
                     "keep compact app percentage centered"
                 );
+                let ram = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == "814 MB" => Some(text),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(ram.visual_bounding_rect().top() >= inner.bottom());
             }
         }
     }
@@ -524,8 +657,8 @@ mod tests {
                 rect = load_meter(ui, value.into(), color, true, MeterKind::Application).rect;
             });
             output.textures_delta.clear();
-            assert_eq!(rect.width(), 44.0);
-            assert!((rect.height() - 18.0).abs() < 0.01);
+            assert_eq!(rect.width(), 52.0);
+            assert!((rect.height() - 21.0).abs() < 0.01);
             assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.stroke.color == color)));
             for pressed in [true, false] {
                 let mut clicked = false;

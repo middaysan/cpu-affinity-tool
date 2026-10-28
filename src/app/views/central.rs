@@ -142,6 +142,22 @@ pub fn draw_central_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                 });
             });
             ui.add_space(5.0);
+            if let Some(error)=app.ui.file_import_error {
+                inset_frame(ui).show(ui,|ui|{
+                    let reason=match error {
+                        crate::app::features::system_tweaks::SaveError::Storage=>"Could not write the settings file. Your saved apps are unchanged.",
+                        crate::app::features::system_tweaks::SaveError::Invalid=>"Settings changed or this import was refused. Your saved apps are unchanged.",
+                        crate::app::features::system_tweaks::SaveError::Pending=>"Another save is still running. Wait, then retry.",
+                        crate::app::features::system_tweaks::SaveError::Recovering=>"Recovery needs attention. Check System Tweaks before retrying.",
+                    };
+                    ui.add(egui::Label::new(RichText::new(reason).small().color(warning_color(ui))).wrap());
+                    ui.horizontal(|ui|{
+                        if ui.button("Retry").clicked() {if let Some(group)=app.ui.file_drop_hover_target.clone(){app.consume_dropped_files_into_group(group);}}
+                        if ui.button("Dismiss").clicked() {app.ui.dropped_files=None;app.ui.file_drop_position=None;app.ui.file_drop_hover_target=None;app.ui.file_import_error=None;}
+                    });
+                });
+                ui.add_space(5.0);
+            }
             ScrollArea::vertical()
                 .id_salt("affinity-groups-scroll")
                 .max_height(ui.available_height())
@@ -201,12 +217,10 @@ fn format_core_summary(cores: &[usize]) -> String {
 
     let visible = cores
         .iter()
-        .take(8)
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let suffix = if cores.len() > 8 { ", …" } else { "" };
-    format!("{} threads · {visible}{suffix}", cores.len())
+    format!("{} threads · {visible}", cores.len())
 }
 
 fn app_status_label(status: AppStatus) -> &'static str {
@@ -302,6 +316,7 @@ fn render_groups(
     ctx: &egui::Context,
     snapshot: &CentralPanelSnapshot,
 ) -> Vec<CentralAction> {
+    let control = app.runtime.control_handle().view();
     let mut actions = Vec::new();
     let mut hovered_file_drop_group = None;
     let active_group_payload = egui::DragAndDrop::payload::<GroupDragPayload>(ctx);
@@ -364,7 +379,22 @@ fn render_groups(
                 };
                 #[cfg(not(all(target_os = "windows", feature = "windows")))]
                 let meter_width = 0.0;
-                let title_width = (ui.available_width() - 52.0 - meter_width).max(40.0);
+                let edit_text = format!("{ICON_EDIT} Edit");
+                let edit_width = (ui
+                    .painter()
+                    .layout_no_wrap(
+                        edit_text.clone(),
+                        egui::FontId::proportional(BUTTON_FONT_SIZE),
+                        colors.text_secondary,
+                    )
+                    .size()
+                    .x
+                    + 2.0 * ui.spacing().button_padding.x)
+                    .max(ui.spacing().interact_size.x);
+                let title_width =
+                    (ui.available_width() - edit_width - ui.spacing().item_spacing.x - meter_width)
+                        .max(40.0);
+                let core_summary = format_core_summary(&group.cores);
                 let title = ui.allocate_ui_with_layout(
                     egui::vec2(title_width, 32.0),
                     Layout::top_down(Align::Min),
@@ -384,13 +414,13 @@ fn render_groups(
                         ));
                         ui.add(
                             egui::Label::new(
-                                RichText::new(format_core_summary(&group.cores))
+                                RichText::new(&core_summary)
                                     .size(9.0)
                                     .color(colors.text_muted),
                             )
                             .truncate(),
                         )
-                        .on_hover_text(format_core_summary(&group.cores));
+                        .on_hover_text(&core_summary);
                         name
                     },
                 );
@@ -434,9 +464,7 @@ fn render_groups(
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                     if ghost_button(
                         ui,
-                        egui::Button::new(
-                            RichText::new(format!("{ICON_EDIT} Edit")).size(BUTTON_FONT_SIZE),
-                        ),
+                        egui::Button::new(RichText::new(edit_text).size(BUTTON_FONT_SIZE)),
                     )
                     .on_hover_text("Edit group settings")
                     .clicked()
@@ -521,7 +549,9 @@ fn render_groups(
                 });
             } else if !group.is_hidden {
                 for (program_index, program) in group.programs.iter().enumerate() {
-                    let app_status = app.get_app_status_sync(&program.app_key);
+                    let app_status = app.get_app_status_sync(&program.runtime_key);
+                    let choose_owner=control.needs_choice(&program.rule_id);
+                    let shared_control=control.shared_elsewhere(&program.rule_id);
 
                     let row_response = egui::Frame::NONE
                         .fill(row_fill(ui))
@@ -533,9 +563,11 @@ fn render_groups(
                                 AppStatusTone::Success => success_color(ui),
                                 AppStatusTone::Warning => warning_color(ui),
                             };
-                            let full_status = app_status_label(app_status);
+                            let starting = app_status == AppStatus::NotRunning && crate::app::features::execution::launch::steam_launch_pending(&program.rule_id,program.steam_app_id);
+                            let needs_selection=app.runtime.steam_needs_selection(&program.rule_id);
+                            let full_status = if choose_owner {"Choose process owner"} else if shared_control {"Shared process managed by another app"} else if needs_selection {"Choose game process"} else if starting { "Starting game..." } else { app_status_label(app_status) };
                             let status_tooltip =
-                                app.get_running_app_pids(&program.app_key).map_or_else(
+                                app.get_running_app_pids(&program.runtime_key).map_or_else(
                                     || format!("Status: {full_status}"),
                                     |pids| {
                                         format!("Status: {full_status}\nTracking PIDs: {pids:?}")
@@ -553,10 +585,14 @@ fn render_groups(
                                     ui.painter().circle_filled(rect.center(), 3.5, color);
                                 }
 
-                                let action_presentation = app_action_presentation(
+                                let mut action_presentation = app_action_presentation(
                                     app_status,
                                     platform_supports_app_focus(),
                                 );
+                                if choose_owner {action_presentation.label="Resolve";action_presentation.hover_text="Choose which app controls the shared process. CPU and RAM tracking stay unchanged.";action_presentation.action=Some(AppRowAction::Focus);}
+                                else if shared_control&&app_status!=AppStatus::NotRunning {action_presentation=app_action_presentation(AppStatus::Running,platform_supports_app_focus());}
+                                else if needs_selection {action_presentation.label="Select";action_presentation.hover_text="Automatic detection is uncertain. Open app settings and choose the game process.";action_presentation.action=Some(AppRowAction::Focus);}
+                                else if starting { action_presentation.label="Wait"; action_presentation.hover_text="Waiting for the Steam game. If detection is unavailable, open its settings and choose the game process."; action_presentation.action=None; }
                                 let status_color = match app_status_tone(app_status) {
                                     AppStatusTone::Neutral => colors.text_muted,
                                     AppStatusTone::Success => colors.success.fg,
@@ -564,7 +600,8 @@ fn render_groups(
                                 };
                                 #[cfg(all(target_os = "windows", feature = "windows"))]
                                 let meter_width = if app.cpu_load_enabled() {
-                                    44.0 + ui.spacing().item_spacing.x
+                                    crate::app::features::cpu_load::view::APP_METRICS_WIDTH
+                                        + ui.spacing().item_spacing.x
                                 } else {
                                     0.0
                                 };
@@ -573,7 +610,7 @@ fn render_groups(
                                 let action_width = 42.0;
                                 let settings_width = 23.0;
                                 let status_galley = ui.painter().layout_no_wrap(
-                                    app_status_display_label(app_status, 0.0).to_owned(),
+                                    if choose_owner {"Choose owner".into()} else if shared_control {"Shared control".into()} else if needs_selection {"Select game".into()} else if starting { "Starting...".into() } else { app_status_display_label(app_status, 0.0).to_owned() },
                                     egui::FontId::proportional(10.0),
                                     status_color,
                                 );
@@ -658,7 +695,8 @@ fn render_groups(
                                 }
                                 .on_hover_text(action_presentation.hover_text);
                                 if action_response.clicked() {
-                                    if let Some(row_action) = action_presentation.action {
+                                    if choose_owner||needs_selection { actions.push(CentralAction::OpenAppRunSettings{group_id:group_id.clone(),rule_id:program.rule_id.clone()}); }
+                                    else if let Some(row_action) = action_presentation.action {
                                         actions.push(CentralAction::RunGroupProgramAction {
                                             group_id: group_id.clone(),
                                             rule_id: program.rule_id.clone(),
@@ -869,6 +907,9 @@ fn render_groups(
         }
     }
 
+    if app.ui.file_import_error.is_some() {
+        return actions;
+    }
     if let Some(group_id) = resolve_file_drop_target(
         &mut app.ui.file_drop_hover_target,
         has_hovered_files,
@@ -1119,6 +1160,7 @@ fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
                 let _ = app.consume_dropped_files_into_group(group_id);
             }
             CentralAction::DiscardDroppedFiles => {
+                app.ui.file_import_error = None;
                 app.ui.dropped_files = None;
                 app.ui.file_drop_position = None;
                 app.ui.file_drop_hover_target = None;
@@ -1218,6 +1260,66 @@ mod tests {
         );
         assert_eq!(position(&output, "+ New group"), new_group);
         assert!(ctx.read_response(name_id).unwrap().rect.top() < before - 1.0);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn s104_failed_file_import_is_not_resubmitted_by_subsequent_frames() {
+        use std::sync::{Arc, RwLock};
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::shell::presenters::shared_elements::ui_font_definitions());
+        let mut app = AppState::new_for_test(
+            Arc::new(RwLock::new(
+                crate::app::models::AppStateStorage::test_fixture(|state| {
+                    state.groups = vec![crate::app::models::CoreGroup {
+                        name: "Import test".into(),
+                        cores: vec![0],
+                        programs: vec![],
+                        is_hidden: false,
+                        run_all_button: false,
+                    }];
+                }),
+            )),
+            20,
+        );
+        let snapshot = app.build_central_panel_snapshot();
+        let group = snapshot.groups[0].group_id.clone();
+        // Simulate a stale GUI projection: the worker must refuse this candidate.
+        app.persistent_state.write().unwrap().tuning =
+            crate::app::features::system_tweaks::config::TuningEnvelope::from_config(
+                &Default::default(),
+            )
+            .unwrap();
+        app.ui.dropped_files = Some(vec![r"C:\Import-test.exe".into()]);
+        assert!(app.consume_dropped_files_into_group(group.clone()));
+        app.wait_for_test_save();
+        assert!(app.ui.dropped_files.is_some());
+        for _ in 0..3 {
+            let mut actions = vec![];
+            let _ = ctx
+                .run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(600.0, 600.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        actions = render_groups(&mut app, ui, &ctx, &snapshot);
+                    },
+                )
+                .textures_delta
+                .clear();
+            assert!(
+                !actions.iter().any(|a| matches!(
+                    a,
+                    CentralAction::ConsumeDroppedFiles(_) | CentralAction::DiscardDroppedFiles
+                )),
+                "A failed save needs explicit retry; no per-frame import loop"
+            );
+            assert_eq!(app.ui.file_drop_hover_target.as_ref(), Some(&group));
+        }
     }
 
     #[test]
@@ -1488,9 +1590,11 @@ mod tests {
 
     fn program(rule_id: &str, name: &str, app_key: AppRuntimeKey) -> CentralProgramSnapshot {
         CentralProgramSnapshot {
+            steam_app_id: None,
             rule_id: RuleId(rule_id.to_string()),
             name: name.to_string(),
             launch_target_detail: name.to_string(),
+            runtime_key: app_key.clone(),
             app_key,
         }
     }
@@ -1731,13 +1835,86 @@ mod tests {
     }
 
     #[test]
-    fn test_format_core_summary_is_compact_and_handles_empty_groups() {
+    fn test_format_core_summary_retains_every_cpu_for_layout_clipping_and_hover() {
         assert_eq!(format_core_summary(&[]), "No CPU threads assigned");
         assert_eq!(format_core_summary(&[0, 1, 6, 7]), "4 threads · 0, 1, 6, 7");
         assert_eq!(
             format_core_summary(&[0, 1, 2, 3, 4, 5, 6, 7, 8]),
-            "9 threads · 0, 1, 2, 3, 4, 5, 6, 7, …"
+            "9 threads · 0, 1, 2, 3, 4, 5, 6, 7, 8"
         );
+        assert_eq!(
+            format_core_summary(&(0..12).collect::<Vec<_>>()),
+            "12 threads · 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11"
+        );
+    }
+
+    #[test]
+    fn core_summary_only_elides_when_it_reaches_header_controls() {
+        use std::sync::{Arc, RwLock};
+        for monitoring in [true, false] {
+            for (count, elided) in [(12, false), (64, true)] {
+                let ctx = egui::Context::default();
+                ctx.set_fonts(
+                    crate::app::shell::presenters::shared_elements::ui_font_definitions(),
+                );
+                ctx.all_styles_mut(
+                    crate::app::shell::presenters::shared_elements::apply_widget_style,
+                );
+                let mut app = AppState::new_for_test(
+                    Arc::new(RwLock::new(
+                        crate::app::models::AppStateStorage::test_fixture(|state| {
+                            state.cpu_load_monitoring_enabled = monitoring;
+                        }),
+                    )),
+                    64,
+                );
+                let mut group = group("g", "Performance", vec![]);
+                group.cores = (0..count).collect();
+                let snapshot = CentralPanelSnapshot {
+                    groups: vec![group],
+                };
+                for _ in 0..3 {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(400.0, 600.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| {
+                            render_groups(&mut app, ui, &ctx, &snapshot);
+                        },
+                    );
+                    output.textures_delta.clear();
+                    let summary = output
+                        .shapes
+                        .iter()
+                        .find_map(|s| match &s.shape {
+                            egui::Shape::Text(t)
+                                if t.galley.job.text.starts_with(&format!("{count} threads")) =>
+                            {
+                                Some(t)
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        summary.galley.job.text,
+                        format_core_summary(&(0..count).collect::<Vec<_>>())
+                    );
+                    assert_eq!(
+                        summary.galley.elided, elided,
+                        "monitoring={monitoring}, count={count}"
+                    );
+                    let title = ctx
+                        .read_response(egui::Id::new(("central-group-drag", "g")))
+                        .unwrap()
+                        .rect;
+                    assert!(summary.pos.x + summary.galley.rect.right() <= title.right() + 0.5);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1908,7 +2085,7 @@ mod tests {
                     .shapes
                     .iter()
                     .find_map(|shape| match &shape.shape {
-                        egui::Shape::Rect(shape) if shape.rect.size() == egui::vec2(44.0, 18.0) => {
+                        egui::Shape::Rect(shape) if shape.rect.size() == egui::vec2(52.0, 21.0) => {
                             Some(shape.rect)
                         }
                         _ => None,
@@ -1917,7 +2094,7 @@ mod tests {
                 assert!((3.0..=7.0).contains(&(meter.left() - status.right())));
             }
         }
-        assert!((name_widths[0] - name_widths[1] - 48.0).abs() < 1.0);
+        assert!((name_widths[0] - name_widths[1] - 56.0).abs() < 1.0);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod app_icon;
 #[cfg(all(debug_assertions, feature = "render-profiling"))]
 mod native_frame_probe;
 mod tray;
@@ -42,7 +43,12 @@ fn main() {
     } = prepare_startup_forwarding(startup_intent);
     let startup_intent = match action {
         EntryAction::RunGui(intent) => intent,
-        EntryAction::Exit(code) => std::process::exit(code),
+        EntryAction::Exit(code) => {
+            if let Some(warning) = forwarding_warning {
+                eprintln!("Single-instance startup failed: {warning}");
+            }
+            std::process::exit(code)
+        }
     };
     let crash_report_context = Arc::new(CrashReportContext::new(crash_report_directory()));
     if let Err(error) = install_panic_hook(crash_report_context.clone()) {
@@ -136,21 +142,6 @@ fn main() {
                     window.set_max_inner_size(maximum);
                 }
                 #[cfg(feature = "render-profiling")]
-                if let Some(gl) = &cc.gl {
-                    use eframe::glow::HasContext;
-                    let description = unsafe {
-                        format!(
-                            "{} / {} / {}",
-                            gl.get_parameter_string(eframe::glow::VENDOR),
-                            gl.get_parameter_string(eframe::glow::RENDERER),
-                            gl.get_parameter_string(eframe::glow::VERSION)
-                        )
-                    };
-                    app::features::diagnostics::render_profile::renderer(
-                        description.chars().take(512).collect(),
-                    );
-                }
-                #[cfg(feature = "render-profiling")]
                 if let Some(state) = &cc.wgpu_render_state {
                     let info = state.adapter.get_info();
                     app::features::diagnostics::render_profile::renderer(format!(
@@ -158,9 +149,7 @@ fn main() {
                         info.backend, info.name, info.driver
                     ));
                 }
-                let startup_requires_forwarding =
-                    matches!(&startup_intent, StartupIntent::RunRule { .. })
-                        && forwarding_runtime.is_some();
+                let startup_requires_forwarding = forwarding_runtime.is_some();
                 let mut app = App::new_with_storage(cc, storage);
                 for message in scheduling_messages {
                     app.state.log_manager.add_sticky_once(message);
@@ -170,6 +159,12 @@ fn main() {
                     forwarding_warning,
                     &cc.egui_ctx,
                 );
+                if startup_requires_forwarding && !forwarding_ready {
+                    return Err(std::io::Error::other(
+                        "Could not start the single-instance command channel",
+                    )
+                    .into());
+                }
                 app.handle_startup_intent_after_forwarding(
                     startup_intent,
                     startup_requires_forwarding && !forwarding_ready,
@@ -210,6 +205,7 @@ fn stop_async_runtime(runtime: Runtime) {
 
 fn windows_viewport(start_hidden: bool) -> eframe::egui::ViewportBuilder {
     eframe::egui::ViewportBuilder::default()
+        .with_icon(app_icon::load().expect("bundled application icon must decode"))
         .with_drag_and_drop(false)
         .with_visible(!start_hidden)
         .with_active(!start_hidden)
@@ -233,6 +229,22 @@ fn windows_window_limits(
 
 #[cfg(test)]
 mod viewport_tests {
+    #[test]
+    fn window_and_taskbar_use_the_bundled_tray_icon() {
+        let expected = image::load_from_memory_with_format(
+            include_bytes!("../assets/icon.ico"),
+            image::ImageFormat::Ico,
+        )
+        .unwrap()
+        .to_rgba8();
+        for hidden in [false, true] {
+            let viewport = super::windows_viewport(hidden);
+            let icon = viewport.icon.expect("window/taskbar icon must be explicit");
+            assert_eq!((icon.width, icon.height), expected.dimensions());
+            assert_eq!(icon.rgba, expected.as_raw().as_slice());
+        }
+    }
+
     #[test]
     fn shell_file_drops_replace_the_elevated_ole_drop_target() {
         for hidden in [false, true] {
@@ -412,7 +424,10 @@ fn requested_diagnostics_test_fault() -> Option<DiagnosticsTestFault> {
 fn prepare_startup_forwarding(
     startup_intent: StartupIntent,
 ) -> PreparedStartupForwarding<AppForwardingRuntime> {
-    let mut platform = WindowsStartupForwardingPlatform::default();
+    let mut platform = WindowsStartupForwardingPlatform {
+        activate_primary: matches!(startup_intent, StartupIntent::NormalGui),
+        ..Default::default()
+    };
     let mut clock = RealStartupForwardingClock::new();
     prepare_startup_forwarding_with(
         startup_intent,
@@ -455,6 +470,7 @@ impl StartupForwardingClock for RealStartupForwardingClock {
 #[derive(Default)]
 struct WindowsStartupForwardingPlatform {
     endpoint: Option<LocalIpcEndpoint>,
+    activate_primary: bool,
 }
 
 impl WindowsStartupForwardingPlatform {
@@ -495,7 +511,12 @@ impl StartupForwardingPlatform for WindowsStartupForwardingPlatform {
         timeout: Duration,
     ) -> Result<Vec<u8>, ForwardingClientError> {
         let endpoint = self.endpoint().map_err(ForwardingClientError::Io)?;
-        OS::send_local_ipc_request(endpoint, request, timeout).map_err(|err| match err {
+        let response = if self.activate_primary {
+            OS::send_local_ipc_activation_request(endpoint, request, timeout)
+        } else {
+            OS::send_local_ipc_request(endpoint, request, timeout)
+        };
+        response.map_err(|err| match err {
             LocalIpcClientError::NoServer => ForwardingClientError::NoServer,
             LocalIpcClientError::ServerNotReady => ForwardingClientError::ServerNotReady,
             LocalIpcClientError::Timeout => ForwardingClientError::Timeout,

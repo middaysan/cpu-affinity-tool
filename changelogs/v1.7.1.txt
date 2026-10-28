@@ -1,0 +1,18 @@
+## 1.7.1 - 2026-10-28
+
+### Added
+- Steam game shortcuts now track the game itself for CPU/RAM, affinity and Focus.
+- Helper-process defaults for 20 popular apps, plus a choice of which rule controls shared processes.
+- Current CPU and RAM totals for apps and groups.
+- Windows 11 all-core parking control with Undo.
+
+### Fixed
+- Group CPU totals now stay in sync with their apps and count shared processes once.
+- More reliable tray restore, single-instance launch and process tracking.
+- Safer settings saves and MCP commands, with clearer monitoring errors.
+
+### Notes
+Saved groups and apps are preserved. Settings upgrade when saved; downgrading afterward is unsupported. Windows background-task reduction remains inactive pending validation.
+
+### Download
+Use **cpu-affinity-tool.exe** below. The matching **cpu_affinity_tool.pdb** is optional for troubleshooting. Windows x64; administrator approval required.

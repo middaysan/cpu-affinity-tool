@@ -1,3 +1,5 @@
+mod failures;
+
 use crate::app::features::execution::MonitorEventSender;
 use crate::app::features::execution::RunningAppStatusCache;
 use crate::app::features::rules::RulesContext;
@@ -5,6 +7,7 @@ use crate::app::features::system_tweaks::tweaks::scheduling::fields_for_rule;
 use crate::app::models::{AppRuntimeKey, AppStateStorage, AppStatus, RunningApps};
 use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::events::ShellEvent;
+use failures::{Failure, FailureLog};
 use os_api::gaming::ProcessSettingsFields;
 use os_api::{PriorityClass, ProcessSettingsApplyOutcome, OS};
 use std::collections::HashMap;
@@ -19,15 +22,35 @@ struct ProgramRuntimeSettings {
     expected_mask: usize,
     expected_priority: PriorityClass,
     fields: ProcessSettingsFields,
+    launch_identity: Option<super::steam_pending::LaunchIdentity>,
+}
+
+#[derive(Clone, Copy)]
+struct DesiredSettings {
+    mask: usize,
+    priority: PriorityClass,
+    fields: ProcessSettingsFields,
+}
+impl DesiredSettings {
+    fn same(self, other: Self) -> bool {
+        self.fields == other.fields
+            && (!self.fields.affinity || self.mask == other.mask)
+            && (!self.fields.priority || self.priority == other.priority)
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ProcessSettingsIterationOutcome {
     changed: bool,
     notifications: Vec<String>,
+    failures: Vec<Failure>,
 }
 
 trait ProcessSettingsOs {
+    fn image(&mut self, _pid: u32, _token: u64) -> Option<std::path::PathBuf> {
+        None
+    }
+
     fn apply_process_fields_if_instance(
         &mut self,
         pid: u32,
@@ -42,6 +65,13 @@ trait ProcessSettingsOs {
 struct RealProcessSettingsOs;
 
 impl ProcessSettingsOs for RealProcessSettingsOs {
+    fn image(&mut self, pid: u32, token: u64) -> Option<std::path::PathBuf> {
+        OS::get_process_image_path_and_instance_token(pid)
+            .ok()
+            .filter(|(_, actual)| *actual == token)
+            .map(|(path, _)| path)
+    }
+
     fn apply_process_fields_if_instance(
         &mut self,
         pid: u32,
@@ -70,12 +100,13 @@ pub async fn run_process_settings_monitor(
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
     let mut os = RealProcessSettingsOs;
+    let mut failure_log = FailureLog::default();
 
     loop {
         interval.tick().await;
         crate::render_profile_scope!(Reconcile);
 
-        let (state_snapshot, monitoring_enabled) = {
+        let (state_snapshot, monitoring_enabled, generation) = {
             let state = match app_state.read() {
                 Ok(guard) => guard,
                 Err(_) => {
@@ -89,16 +120,27 @@ pub async fn run_process_settings_monitor(
             (
                 collect_program_settings(&state),
                 state.process_monitoring_enabled,
+                super::control::policy::Policy::read(&state)
+                    .map_or(u64::MAX, |policy| policy.generation()),
             )
         };
 
         if let Ok(mut apps) = running_apps.try_write() {
-            let outcome =
-                reconcile_settings_with_os(&mut apps, &state_snapshot, monitoring_enabled, &mut os);
+            let outcome = reconcile_settings_with_os(
+                &mut apps,
+                &state_snapshot,
+                monitoring_enabled,
+                generation,
+                &mut os,
+            );
             let status_cache_changed =
                 record_confirmed_match_statuses(&apps, &running_app_statuses);
 
             drop(apps);
+
+            for message in failure_log.report(outcome.failures, std::time::Instant::now()) {
+                monitor_tx.try_send(ShellEvent::MonitorError(format!("MONITOR: {message}")));
+            }
 
             if !outcome.notifications.is_empty() {
                 for message in outcome.notifications {
@@ -149,7 +191,7 @@ fn collect_program_settings(
                 continue;
             };
             settings.insert(
-                app.get_key(),
+                rules.runtime_key(app, &rule_id),
                 ProgramRuntimeSettings {
                     name: app.name.clone(),
                     group_id: group_id.clone(),
@@ -157,6 +199,7 @@ fn collect_program_settings(
                     expected_mask,
                     expected_priority: app.priority,
                     fields,
+                    launch_identity: super::steam_pending::identity_for_app(app),
                 },
             );
         }
@@ -186,10 +229,29 @@ fn process_settings_iteration_with_os<O: ProcessSettingsOs>(
     monitoring_enabled: bool,
     os: &mut O,
 ) -> ProcessSettingsIterationOutcome {
+    let mut current = state.clone();
+    current.process_monitoring_enabled = monitoring_enabled;
+    apps.control.configure(&current);
+    let expected = collect_program_settings(state);
+    apps.mutate_membership(|apps| {
+        for (key, app) in &mut apps.apps {
+            if let Some(spec) = expected.get(key) {
+                app.group_id = spec.group_id.clone();
+                app.rule_id = spec.rule_id.clone();
+            }
+        }
+    });
+    let control = apps.control.clone();
+    control.observe(
+        apps,
+        super::control::policy::Policy::read(state).map_or(u64::MAX, |policy| policy.generation()),
+        |_, _| None,
+    );
     reconcile_settings_with_os(
         apps,
         &collect_program_settings(state),
         monitoring_enabled,
+        super::control::policy::Policy::read(state).map_or(u64::MAX, |policy| policy.generation()),
         os,
     )
 }
@@ -198,9 +260,14 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
     apps: &mut RunningApps,
     key_to_settings: &HashMap<AppRuntimeKey, ProgramRuntimeSettings>,
     monitoring_enabled: bool,
+    generation: u64,
     os: &mut O,
 ) -> ProcessSettingsIterationOutcome {
     let scheduling = apps.scheduling.clone();
+    let control = apps.control.clone();
+    let Ok(_observation) = control.observation(generation, Some(monitoring_enabled)) else {
+        return ProcessSettingsIterationOutcome::default();
+    };
     apps.mutate_membership(|apps| {
         let mut outcome = ProcessSettingsIterationOutcome::default();
 
@@ -209,7 +276,7 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
                 app.group_id = settings.group_id.clone();
                 app.rule_id = settings.rule_id.clone();
 
-                let mut all_matched = true;
+                let mut all_matched = !app.pids.is_empty();
 
                 for &pid in &app.pids {
                     let Some(&instance_token) = app.pid_instance_tokens.get(&pid) else {
@@ -217,36 +284,95 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
                         continue;
                     };
 
-                    let fields = match scheduling.select(
+                    let initial = super::steam_pending::initial_apply(
+                        &settings.rule_id,
+                        settings.launch_identity.clone(),
                         pid,
                         instance_token,
-                        settings.fields,
-                        monitoring_enabled,
-                    ) {
-                        Ok(fields) => fields,
+                    );
+                    let apply_changes = monitoring_enabled || initial;
+                    let image = os.image(pid, instance_token);
+                    let desired = DesiredSettings {
+                        mask: settings.expected_mask,
+                        priority: settings.expected_priority,
+                        fields: settings.fields,
+                    };
+                    let mut effective = desired;
+                    let request = super::control::WriteRequest {
+                        rule: &settings.rule_id,
+                        key: app_key,
+                        pid,
+                        token: instance_token,
+                        image: image.as_deref(),
+                        mask: desired.mask,
+                        priority: desired.priority,
+                        fields: desired.fields,
+                        change: apply_changes,
+                    };
+                    let mut apply =
+                        |goal: DesiredSettings, write: bool, rule: &RuleId, name: &str| {
+                            let fields = scheduling
+                                .select(pid, instance_token, goal.fields, write)
+                                .map_err(|error| format!("{error:?}"))?;
+                            let applied = os
+                                .apply_process_fields_if_instance(
+                                    pid,
+                                    instance_token,
+                                    goal.mask,
+                                    goal.priority,
+                                    fields,
+                                    write,
+                                )
+                                .inspect_err(|error| {
+                                    // Only a native correction attempt is an error. Observers and
+                                    // unresolved ownership remain read-only, without warning spam.
+                                    if write && (fields.affinity || fields.priority) {
+                                        outcome.failures.push(Failure::new(
+                                            rule,
+                                            name,
+                                            pid,
+                                            instance_token,
+                                            error,
+                                        ));
+                                    }
+                                })?;
+                            Ok((applied, fields, write))
+                        };
+                    let guarded = if initial {
+                        control.initial(request, |owner| {
+                            effective = DesiredSettings {
+                                mask: owner.mask,
+                                priority: owner.app.priority,
+                                fields: owner.fields,
+                            };
+                            apply(effective, true, &owner.rule, &owner.app.name)
+                        })
+                    } else {
+                        control
+                            .write(request, |write| {
+                                apply(desired, write, &settings.rule_id, &settings.name)
+                            })
+                            .map(|(value, _)| value)
+                    };
+                    let (applied, fields, can_write) = match guarded {
+                        Ok(value) => value,
                         Err(_) => {
                             all_matched = false;
                             continue;
                         }
                     };
-                    match os.apply_process_fields_if_instance(
-                        pid,
-                        instance_token,
-                        settings.expected_mask,
-                        settings.expected_priority,
-                        fields,
-                        monitoring_enabled,
-                    ) {
-                        Ok(applied) if applied.affinity_changed || applied.priority_changed => {
+                    all_matched &= effective.same(desired);
+                    match applied {
+                        applied if applied.affinity_changed || applied.priority_changed => {
                             all_matched = false;
-                            if monitoring_enabled {
+                            if can_write {
                                 if applied.affinity_changed {
                                     outcome.notifications.push(format!(
                                         "Fixed affinity for {} (PID {}): {:X} -> {:X}",
                                         settings.name,
                                         pid,
                                         applied.previous_affinity,
-                                        settings.expected_mask
+                                        effective.mask
                                     ));
                                 }
                                 if applied.priority_changed {
@@ -255,13 +381,29 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
                                         settings.name,
                                         pid,
                                         applied.previous_priority,
-                                        settings.expected_priority
+                                        effective.priority
                                     ));
                                 }
                             }
                         }
-                        Ok(_) => {}
-                        Err(_) => all_matched = false,
+                        _ => {
+                            if initial && fields == effective.fields {
+                                super::steam_pending::confirm_instance(
+                                    &settings.rule_id,
+                                    settings.launch_identity.clone(),
+                                    pid,
+                                    instance_token,
+                                    if matches!(
+                                        settings.launch_identity,
+                                        Some(super::steam_pending::LaunchIdentity::Known(_))
+                                    ) {
+                                        !app.primary_instances.is_empty()
+                                    } else {
+                                        app.primary_instances.get(&pid) == Some(&instance_token)
+                                    },
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -297,6 +439,7 @@ mod tests {
         tokens: HashMap<u32, u64>,
         affinity_sets: Vec<(u32, usize)>,
         priority_sets: Vec<(u32, PriorityClass)>,
+        failures: HashMap<u32, String>,
     }
 
     impl FakeProcessSettingsOs {
@@ -307,6 +450,7 @@ mod tests {
                 tokens: HashMap::new(),
                 affinity_sets: Vec::new(),
                 priority_sets: Vec::new(),
+                failures: HashMap::new(),
             }
         }
     }
@@ -323,6 +467,9 @@ mod tests {
         ) -> Result<ProcessSettingsApplyOutcome, String> {
             if self.tokens.get(&pid).copied() != Some(expected_instance_token) {
                 return Err("process instance no longer matches the tracked PID".to_string());
+            }
+            if let Some(error) = self.failures.get(&pid) {
+                return Err(error.clone());
             }
             let previous_affinity = self
                 .affinity
@@ -407,6 +554,85 @@ mod tests {
         GroupId(format!("group-{value}"))
     }
 
+    #[test]
+    fn s112_off_deferred_launch_applies_effective_owner_then_stops_enforcing() {
+        use crate::app::features::execution::{control::policy::Policy, steam_pending};
+        let mut state = sample_state();
+        state.groups[0].programs[0]
+            .additional_processes
+            .push("game.exe".into());
+        state.groups[1].programs[0].launch_target = crate::app::models::LaunchTarget::Steam {
+            app_id: 912112,
+            executable: None,
+        };
+        let mut before = state.clone();
+        before.groups.pop();
+        Policy::prepare_save(&before, &mut state).unwrap();
+        let rules = crate::app::features::rules::RulesContext::from_storage(&state);
+        let launched = rules.rule_id_for_index(1, 0).unwrap();
+        assert!(steam_pending::mark_steam_launch(&launched, 912112));
+        let mut apps = RunningApps::default();
+        let mut os = FakeProcessSettingsOs::new(
+            HashMap::from([(42, 4)]),
+            HashMap::from([(42, PriorityClass::Normal)]),
+        );
+        for (i, group) in state.groups.iter().enumerate() {
+            let rule = rules.rule_id_for_index(i, 0).unwrap();
+            let key = rules.runtime_key(&group.programs[0], &rule);
+            apps.add_app(&key, 42, rules.group_id_for_index(i).unwrap(), rule);
+            seed_tracked_instance(&mut apps, &key, 42, &mut os);
+            if i == 1 {
+                let app = apps.apps.get_mut(&key).unwrap();
+                app.primary_instances
+                    .insert(42, app.pid_instance_tokens[&42]);
+            }
+        }
+        for _ in 0..3 {
+            process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
+        }
+        assert_eq!(
+            os.affinity[&42], 1,
+            "launch intent must apply the earlier owner's settings"
+        );
+        assert!(!steam_pending::steam_launch_pending(
+            &launched,
+            Some(912112)
+        ));
+        os.affinity.insert(42, 8);
+        process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
+        assert_eq!(
+            os.affinity[&42], 8,
+            "Off must remain read-only after confirmed initial correction"
+        );
+        steam_pending::finish_steam_launch(&launched, 912112);
+    }
+    #[test]
+    fn s110_legacy_conflicting_rules_do_not_rewrite_one_process_before_owner_choice() {
+        let state = sample_state();
+        let rules = crate::app::features::rules::RulesContext::from_storage(&state);
+        let mut apps = RunningApps::default();
+        let mut os = FakeProcessSettingsOs::new(
+            HashMap::from([(42, 8)]),
+            HashMap::from([(42, PriorityClass::Normal)]),
+        );
+        for (index, group) in state.groups.iter().enumerate() {
+            let key = group.programs[0].get_key();
+            apps.add_app(
+                &key,
+                42,
+                rules.group_id_for_index(index).unwrap(),
+                rules.rule_id_for_index(index, 0).unwrap(),
+            );
+            seed_tracked_instance(&mut apps, &key, 42, &mut os);
+        }
+        process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
+        assert!(
+            os.affinity_sets.is_empty(),
+            "old conflicting rules require an explicit owner choice"
+        );
+        assert!(os.priority_sets.is_empty());
+    }
+
     fn rule_id(value: usize) -> RuleId {
         RuleId(format!("rule-{value}"))
     }
@@ -424,6 +650,71 @@ mod tests {
             .pid_instance_tokens
             .insert(pid, token);
         os.tokens.insert(pid, token);
+    }
+
+    #[test]
+    fn s103_chosen_executable_keeps_initial_apply_with_monitor_off_and_waits_for_readback() {
+        let mut state = sample_state();
+        state.groups[0].programs[0].launch_target = crate::app::models::LaunchTarget::Steam {
+            app_id: 876543,
+            executable: None,
+        };
+        let rules = crate::app::features::rules::RulesContext::from_storage(&state);
+        state.rule_identities = Some(rules.to_persisted_identities());
+        let rule = rules.rule_id_for_index(0, 0).unwrap();
+        let group = rules.group_id_for_index(0).unwrap();
+        let old_key = state.groups[0].programs[0].get_key();
+        assert!(super::super::steam_pending::mark_steam_launch(
+            &rule, 876543
+        ));
+        state.groups[0].programs[0].launch_target = crate::app::models::LaunchTarget::Steam {
+            app_id: 876543,
+            executable: Some(r"C:\Game\game.exe".into()),
+        };
+        let key = state.groups[0].programs[0].get_key();
+        assert_ne!(old_key, key);
+        let mut apps = RunningApps::default();
+        apps.add_app(&key, 42, group, rule.clone());
+        let mut os = FakeProcessSettingsOs::new(
+            HashMap::from([(42, 2)]),
+            HashMap::from([(42, os_api::PriorityClass::Normal)]),
+        );
+        seed_tracked_instance(&mut apps, &key, 42, &mut os);
+        apps.apps
+            .get_mut(&key)
+            .unwrap()
+            .primary_instances
+            .insert(42, 10042);
+        process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
+        assert_eq!(os.affinity_sets, vec![(42, 1)]);
+        assert!(
+            super::super::steam_pending::steam_launch_pending(&rule, Some(876543)),
+            "Setter success is not readback"
+        );
+        process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
+        assert!(!super::super::steam_pending::steam_launch_pending(
+            &rule,
+            Some(876543)
+        ));
+        os.affinity.insert(42, 2);
+        process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
+        assert_eq!(
+            os.affinity_sets.len(),
+            1,
+            "Off must not continually enforce a completed instance"
+        );
+        super::super::steam_pending::finish_steam_launch(&rule, 876543);
+    }
+    #[test]
+    fn s103_empty_roster_cannot_confirm_settings() {
+        let state = sample_state();
+        let key = state.groups[0].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        apps.add_app(&key, 42, group_id(0), rule_id(0));
+        apps.apps.get_mut(&key).unwrap().pids.clear();
+        let mut os = FakeProcessSettingsOs::new(HashMap::new(), HashMap::new());
+        process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
+        assert!(!apps.apps[&key].settings_matched);
     }
 
     #[test]
@@ -539,6 +830,92 @@ mod tests {
         assert!(os.affinity_sets.is_empty());
         assert!(os.priority_sets.is_empty());
         assert!(!apps.apps.get(&key).unwrap().settings_matched);
+    }
+
+    #[test]
+    fn s116_stale_periodic_snapshot_cannot_revert_a_move_or_write_after_off() {
+        use crate::app::features::{execution::control::policy::Policy, rules::RulesContext};
+        for moved in [false, true] {
+            let mut before = sample_state();
+            before.process_monitoring_enabled = true;
+            let rules = RulesContext::from_storage(&before);
+            before.rule_identities = Some(rules.to_persisted_identities());
+            let rule = rules.rule_id_for_index(0, 0).unwrap();
+            let key = rules.runtime_key(&before.groups[0].programs[0], &rule);
+            let captured = super::collect_program_settings(&before);
+            let mut current = before.clone();
+            if moved {
+                let app = current.groups[0].programs.remove(0);
+                current.groups[1].programs.push(app);
+                let ids = current.rule_identities.as_mut().unwrap();
+                let id = ids.groups[0].rule_ids.remove(0);
+                ids.groups[1].rule_ids.push(id);
+            } else {
+                current.process_monitoring_enabled = false;
+            }
+            Policy::prepare_save(&before, &mut current).unwrap();
+            let group = rules.group_id_for_index(usize::from(moved)).unwrap();
+            let mut apps = RunningApps::default();
+            apps.add_app(&key, 93, group.clone(), rule);
+            let mut os = FakeProcessSettingsOs::new(
+                HashMap::from([(93, 8)]),
+                HashMap::from([(93, PriorityClass::Normal)]),
+            );
+            seed_tracked_instance(&mut apps, &key, 93, &mut os);
+            apps.control.configure(&current);
+            super::reconcile_settings_with_os(
+                &mut apps,
+                &captured,
+                true,
+                Policy::read(&before).unwrap().generation(),
+                &mut os,
+            );
+            assert_eq!(
+                apps.apps[&key].group_id, group,
+                "stale observation rewrote current membership"
+            );
+            assert!(
+                os.affinity_sets.is_empty(),
+                "stale On performed native correction after saved Off"
+            );
+        }
+    }
+
+    #[test]
+    fn s113_monitor_reports_denied_member_without_skipping_other_processes() {
+        let state = sample_state();
+        let key = state.groups[1].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        let mut os = FakeProcessSettingsOs::new(
+            HashMap::from([(89, 1), (90, 1)]),
+            HashMap::from([(89, PriorityClass::Normal), (90, PriorityClass::Normal)]),
+        );
+        apps.add_app(&key, 89, group_id(1), rule_id(0));
+        apps.apps.get_mut(&key).unwrap().pids.push(90);
+        for pid in [89, 90] {
+            seed_tracked_instance(&mut apps, &key, pid, &mut os);
+        }
+        os.failures.insert(
+            89,
+            "OpenProcess failed: Access is denied. (0x80070005)".into(),
+        );
+        let outcome = process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
+        assert_eq!(os.affinity_sets, vec![(90, 6)]);
+        assert!(!apps.apps[&key].settings_matched);
+        assert_eq!(outcome.failures.len(), 1);
+        let diagnostic = &outcome.failures[0].message;
+        assert!(
+            diagnostic.contains("Access is denied"),
+            "native failure disappeared: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("PID 89") && diagnostic.contains(&state.groups[1].programs[0].name)
+        );
+        let off = process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
+        assert!(
+            off.failures.is_empty(),
+            "read-only inspection is not a failed correction"
+        );
     }
 
     #[test]
@@ -694,4 +1071,70 @@ mod tests {
         let error = affinity_mask_from_cores(&[usize::BITS as usize]).unwrap_err();
         assert!(error.contains("out of range"));
     }
+
+    #[test]
+    fn s107_known_app_launch_applies_real_members_once_with_monitor_off() {
+        let (mut state, mut apps) = crate::app::features::execution::known_tracking_fixture();
+        state.groups[0].cores = vec![0];
+        let app = &state.groups[0].programs[0];
+        let key = app.get_key();
+        let rule = apps.apps[&key].rule_id.clone();
+        let identity = super::super::steam_pending::identity_for_app(app).unwrap();
+        assert!(matches!(
+            super::super::steam_pending::begin_launch(&rule, identity.clone()),
+            super::super::steam_pending::SteamLaunchBegin::Started(_)
+        ));
+        let mut os = FakeProcessSettingsOs::new(
+            HashMap::from([(1, 255), (2, 255)]),
+            HashMap::from([(1, PriorityClass::Normal), (2, PriorityClass::Normal)]),
+        );
+        os.tokens = HashMap::from([(1, 1), (2, 2)]);
+        for _ in 0..2 {
+            process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
+        }
+        assert_eq!(os.affinity[&1], 1);
+        assert_eq!(os.affinity[&2], 1);
+        assert!(!super::super::steam_pending::launch_pending(
+            &rule,
+            Some(identity.clone())
+        ));
+        os.affinity.insert(1, 7);
+        process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
+        assert_eq!(
+            os.affinity[&1], 7,
+            "Off must not become continuous enforcement after initial readback"
+        );
+    }
+}
+
+#[cfg(test)]
+pub(super) fn native_known_iteration(
+    apps: &mut RunningApps,
+    state: &AppStateStorage,
+    enabled: bool,
+) {
+    let mut current = state.clone();
+    current.process_monitoring_enabled = enabled;
+    apps.control.configure(&current);
+    apps.control.observe(
+        apps,
+        super::control::policy::Policy::read(state)
+            .unwrap()
+            .generation(),
+        |pid, token| {
+            OS::get_process_image_path_and_instance_token(pid)
+                .ok()
+                .filter(|(_, actual)| *actual == token)
+                .map(|(path, _)| path)
+        },
+    );
+    reconcile_settings_with_os(
+        apps,
+        &collect_program_settings(state),
+        enabled,
+        super::control::policy::Policy::read(state)
+            .unwrap()
+            .generation(),
+        &mut RealProcessSettingsOs,
+    );
 }

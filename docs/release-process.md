@@ -71,7 +71,7 @@ Before pushing a stable Windows tag, align:
 - the local `cpu-affinity-tool` package version in `Cargo.lock`
 - `changelogs/vX.Y.Z.txt`
 - release-facing docs if platform or process truth changed
-- configuration compatibility: current explicit saves upgrade older supported state to schema `v11`. Loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save; `v6` and later do not create that particular backup. Missing pre-`v10` descendant-management values retain the prior enabled behavior, while missing values in `v10` or later and newly created rules default to off. Downgrading after a current-schema save is unsupported.
+- configuration compatibility: current explicit saves upgrade older supported state to schema `v14`. Loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save; `v6` and later do not create that particular backup. Missing pre-`v10` descendant-management values retain the prior enabled behavior, while missing values in `v10` or later and newly created rules default to off. Downgrading after a current-schema save is unsupported.
 
 Before pushing a Linux beta tag, align:
 

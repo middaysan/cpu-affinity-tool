@@ -9,6 +9,7 @@ use tokio::sync::RwLock as TokioRwLock;
 pub(crate) type RunningAppStatusCache = Arc<RwLock<HashMap<AppRuntimeKey, AppStatus>>>;
 
 pub struct ExecutionStore {
+    control: Arc<super::control::Authority>,
     running_apps: Arc<TokioRwLock<RunningApps>>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     running_apps_statuses: RunningAppStatusCache,
@@ -63,11 +64,22 @@ fn normalize_package_family_key(package_family_name: &str) -> String {
     package_family_name.to_lowercase()
 }
 
+impl InstalledPackageTrackingState {
+    pub(super) fn rekey_owner(&mut self, old: &AppRuntimeKey, new: &AppRuntimeKey) {
+        for key in self.package_owner_by_family.values_mut() {
+            if key == old {
+                *key = new.clone();
+            }
+        }
+    }
+}
+
 impl ExecutionStore {
     pub fn new() -> Self {
         let running_apps = RunningApps::default();
         let scheduling = running_apps.scheduling.clone();
         Self {
+            control: running_apps.control.clone(),
             running_apps: Arc::new(TokioRwLock::new(running_apps)),
             installed_package_tracking: Arc::new(RwLock::new(
                 InstalledPackageTrackingState::default(),
@@ -145,7 +157,7 @@ impl ExecutionStore {
     pub fn contains_app(&self, app_key: &AppRuntimeKey) -> bool {
         self.running_apps
             .try_read()
-            .map(|apps| apps.apps.contains_key(app_key))
+            .map(|apps| self.control.member(&apps, app_key).is_some())
             .unwrap_or(false)
     }
 
@@ -157,7 +169,11 @@ impl ExecutionStore {
     ) -> bool {
         match self.running_apps.try_write() {
             Ok(mut apps) => apps.mutate_membership(|apps| {
-                if let Some(app) = apps.apps.get_mut(app_key) {
+                let key = self
+                    .control
+                    .member(apps, app_key)
+                    .map(|(key, _)| key.clone());
+                if let Some(app) = key.as_ref().and_then(|key| apps.apps.get_mut(key)) {
                     if !app.pids.contains(&pid) {
                         app.pids.push(pid);
                     }
@@ -173,7 +189,7 @@ impl ExecutionStore {
 
     pub fn get_app_status_sync(&mut self, app_key: &AppRuntimeKey) -> AppStatus {
         if let Ok(apps) = self.running_apps.try_read() {
-            let canonical_status = if let Some(app) = apps.apps.get(app_key) {
+            let canonical_status = if let Some((_, app)) = self.control.member(&apps, app_key) {
                 if app.settings_matched {
                     AppStatus::Running
                 } else {
@@ -214,9 +230,10 @@ impl ExecutionStore {
         app_key: &AppRuntimeKey,
     ) -> RunningAppInstancesLookup {
         match self.running_apps.try_read() {
-            Ok(apps) => apps
-                .apps
-                .get(app_key)
+            Ok(apps) => self
+                .control
+                .member(&apps, app_key)
+                .map(|(_, app)| app)
                 .map_or(RunningAppInstancesLookup::NotFound, |app| {
                     RunningAppInstancesLookup::Found(
                         app.pids
@@ -234,11 +251,39 @@ impl ExecutionStore {
         }
     }
 
+    pub(crate) fn lookup_focus_instances(
+        &self,
+        key: &AppRuntimeKey,
+        steam: bool,
+    ) -> RunningAppInstancesLookup {
+        match self.running_apps.try_read() {
+            Ok(apps) => self.control.member(&apps, key).map(|(_, app)| app).map_or(
+                RunningAppInstancesLookup::NotFound,
+                |app| {
+                    RunningAppInstancesLookup::Found(if steam {
+                        app.primary_instances
+                            .iter()
+                            .map(|(&pid, &token)| (pid, token))
+                            .collect()
+                    } else {
+                        app.pids
+                            .iter()
+                            .filter_map(|&pid| {
+                                app.pid_instance_tokens.get(&pid).map(|&token| (pid, token))
+                            })
+                            .collect()
+                    })
+                },
+            ),
+            Err(_) => RunningAppInstancesLookup::Busy,
+        }
+    }
     pub fn get_running_app_pids(&self, app_key: &AppRuntimeKey) -> Option<Vec<u32>> {
-        self.running_apps
-            .try_read()
-            .ok()
-            .and_then(|apps| apps.apps.get(app_key).map(|app| app.pids.clone()))
+        self.running_apps.try_read().ok().and_then(|apps| {
+            self.control
+                .member(&apps, app_key)
+                .map(|(_, app)| app.pids.clone())
+        })
     }
 
     pub(crate) fn mark_running_app_settings_matched(
@@ -260,13 +305,19 @@ impl ExecutionStore {
         app_key: &AppRuntimeKey,
     ) -> RunningAppSettingsUpdate {
         let outcome = match self.running_apps.try_write() {
-            Ok(mut apps) => match apps.apps.get_mut(app_key) {
-                Some(app) => {
-                    app.settings_matched = false;
-                    RunningAppSettingsUpdate::Updated
+            Ok(mut apps) => {
+                let key = self
+                    .control
+                    .member(&apps, app_key)
+                    .map(|(key, _)| key.clone());
+                match key.as_ref().and_then(|key| apps.apps.get_mut(key)) {
+                    Some(app) => {
+                        app.settings_matched = false;
+                        RunningAppSettingsUpdate::Updated
+                    }
+                    None => RunningAppSettingsUpdate::NotFound,
                 }
-                None => RunningAppSettingsUpdate::NotFound,
-            },
+            }
             Err(_) => RunningAppSettingsUpdate::Busy,
         };
 
@@ -291,13 +342,19 @@ impl ExecutionStore {
             RunningAppSettingsState::Mismatched => (false, AppStatus::SettingsMismatch),
         };
         let outcome = match self.running_apps.try_write() {
-            Ok(mut apps) => match apps.apps.get_mut(app_key) {
-                Some(app) => {
-                    app.settings_matched = settings_matched;
-                    RunningAppSettingsUpdate::Updated
+            Ok(mut apps) => {
+                let key = self
+                    .control
+                    .member(&apps, app_key)
+                    .map(|(key, _)| key.clone());
+                match key.as_ref().and_then(|key| apps.apps.get_mut(key)) {
+                    Some(app) => {
+                        app.settings_matched = settings_matched;
+                        RunningAppSettingsUpdate::Updated
+                    }
+                    None => RunningAppSettingsUpdate::NotFound,
                 }
-                None => RunningAppSettingsUpdate::NotFound,
-            },
+            }
             Err(_) => RunningAppSettingsUpdate::Busy,
         };
 
@@ -315,6 +372,19 @@ impl ExecutionStore {
 }
 
 impl RuntimeRegistry {
+    pub(crate) fn control_handle(&self) -> Arc<super::control::Authority> {
+        self.store.control.clone()
+    }
+    pub(crate) fn control_key(
+        &self,
+        rule: &RuleId,
+        app: &crate::app::models::AppToRun,
+    ) -> AppRuntimeKey {
+        self.store
+            .control
+            .key(rule)
+            .unwrap_or_else(|| app.get_key())
+    }
     pub fn new() -> Self {
         Self {
             #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -411,6 +481,20 @@ impl RuntimeRegistry {
         self.store.get_running_app_pids(app_key)
     }
 
+    pub(crate) fn lookup_focus_instances(
+        &self,
+        key: &AppRuntimeKey,
+        steam: bool,
+    ) -> RunningAppInstancesLookup {
+        self.store.lookup_focus_instances(key, steam)
+    }
+    pub(crate) fn steam_needs_selection(&self, rule: &RuleId) -> bool {
+        self.store
+            .running_apps
+            .try_read()
+            .ok()
+            .is_some_and(|a| a.steam_unresolved.contains(rule))
+    }
     pub(crate) fn lookup_running_app_instances(
         &self,
         app_key: &AppRuntimeKey,
@@ -531,6 +615,63 @@ mod tests {
         RuleId(format!("rule-{value}"))
     }
 
+    #[test]
+    fn s112_namespace_changes_preserve_live_lookup_before_discovery() {
+        use super::{RunningAppInstancesLookup, RuntimeRegistry};
+        use crate::app::{
+            features::{execution::control::tests::fixture, rules::RulesContext},
+            models::AppStatus,
+        };
+        let mut state = fixture();
+        state.groups.truncate(1);
+        state.rule_identities = None;
+        let ids = RulesContext::from_storage(&state);
+        state.rule_identities = Some(ids.to_persisted_identities());
+        let mut runtime = RuntimeRegistry::new();
+        runtime.control_handle().configure(&state);
+        let rule = ids.rule_id_for_index(0, 0).unwrap();
+        let old = state.groups[0].programs[0].get_key();
+        runtime.add_running_app_with_token(
+            &old,
+            42,
+            777,
+            ids.group_id_for_index(0).unwrap(),
+            rule.clone(),
+        );
+        let mut doubled = state.clone();
+        doubled.groups.push(state.groups[0].clone());
+        let context = RulesContext::from_storage(&doubled);
+        doubled.rule_identities = Some(context.to_persisted_identities());
+        runtime.control_handle().configure(&doubled);
+        let scoped = context.runtime_key(&doubled.groups[0].programs[0], &rule);
+        assert_eq!(
+            runtime.lookup_running_app_instances(&scoped),
+            RunningAppInstancesLookup::Found(vec![(42, 777)])
+        );
+        assert_eq!(runtime.get_app_status_sync(&scoped), AppStatus::Running);
+        assert_eq!(
+            runtime.lookup_focus_instances(&scoped, false),
+            RunningAppInstancesLookup::Found(vec![(42, 777)])
+        );
+        let other = context.rule_id_for_index(1, 0).unwrap();
+        let other_key = context.runtime_key(&doubled.groups[1].programs[0], &other);
+        assert_eq!(
+            runtime.lookup_running_app_instances(&other_key),
+            RunningAppInstancesLookup::NotFound
+        );
+
+        {
+            let handle = runtime.running_apps_handle();
+            let mut apps = handle.try_write().unwrap();
+            let app = apps.apps.remove(&old).unwrap();
+            apps.apps.insert(scoped.clone(), app);
+        }
+        runtime.control_handle().configure(&state);
+        assert_eq!(
+            runtime.lookup_running_app_instances(&old),
+            RunningAppInstancesLookup::Found(vec![(42, 777)])
+        );
+    }
     #[test]
     fn contended_status_read_requests_retry_until_fresh_state_is_observed() {
         let mut store = ExecutionStore::new();

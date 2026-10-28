@@ -1,6 +1,6 @@
 [package]
 name = "cpu-affinity-tool" 
-version = "1.7.0"
+version = "1.7.1"
 edition = "2021"
 rust-version = "1.95"
 default-run = "cpu-affinity-tool"
@@ -23,9 +23,9 @@ overflow-checks = false     # Disable integer overflow checks.
 debug = true
 
 [dependencies]
-tokio = { version = "1.53.2", default-features = false, features = ["rt-multi-thread", "time", "sync"] }
+tokio = { version = "1.53.3", default-features = false, features = ["rt-multi-thread", "time", "sync"] }
 os_api = { path = "libs/os_api" }
-eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts"] }
 num_cpus = "1.17.0"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -54,6 +54,9 @@ winres = "0.1.12"
 [target.'cfg(windows)'.dev-dependencies]
 # Validate advertised MCP contracts in tests, without network/file resolvers.
 jsonschema = { version = "=0.56.0", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "wayland", "x11"] }
 
 [features]
 windows = ["production-mcp"]

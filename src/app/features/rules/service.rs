@@ -123,22 +123,42 @@ pub fn load_group_for_edit(
     })
 }
 
+fn append_imports(
+    group: &mut CoreGroup,
+    apps: Vec<AppToRun>,
+    mut first_error: Option<String>,
+) -> AddAppsOutcome {
+    let mut keys: std::collections::HashSet<_> =
+        group.programs.iter().map(AppToRun::get_key).collect();
+    let mut added_count = 0;
+    for app in apps {
+        if !keys.insert(app.get_key()) {
+            first_error.get_or_insert_with(|| {
+                format!(
+                    "App '{}' is already in this group; skipped the duplicate",
+                    app.name
+                )
+            });
+            continue;
+        }
+        group.programs.push(app);
+        added_count += 1;
+    }
+    AddAppsOutcome {
+        added_count,
+        first_error,
+    }
+}
+
 pub fn add_apps_to_group(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     group_index: usize,
     paths: Vec<std::path::PathBuf>,
 ) -> AddAppsOutcome {
     let discovered = discovery::apps_from_dropped_paths(paths);
-    let added_count = discovered.apps.len();
-    let first_error = discovered.first_error.clone();
-
     let mut state = persistent_state.write().unwrap();
     if let Some(group) = state.groups.get_mut(group_index) {
-        group.programs.extend(discovered.apps);
-        AddAppsOutcome {
-            added_count,
-            first_error,
-        }
+        append_imports(group, discovered.apps, discovered.first_error)
     } else {
         AddAppsOutcome {
             added_count: 0,
@@ -156,11 +176,7 @@ pub fn add_installed_app_to_group(
         Ok(app) => {
             let mut state = persistent_state.write().unwrap();
             if let Some(group) = state.groups.get_mut(group_index) {
-                group.programs.push(app);
-                AddAppsOutcome {
-                    added_count: 1,
-                    first_error: None,
-                }
+                append_imports(group, vec![app], None)
             } else {
                 AddAppsOutcome {
                     added_count: 0,
@@ -287,6 +303,7 @@ mod tests {
                     },
                     args: vec![],
                     additional_processes: vec![],
+                    builtin_process_binding: None,
                     manage_descendants: false,
                     autorun: false,
                     priority: PriorityClass::Normal,
@@ -307,6 +324,37 @@ mod tests {
             state.pending_pre_v6_backup = false;
             state.tuning = Default::default();
         })))
+    }
+
+    #[test]
+    fn s104_import_separates_steam_client_and_games_and_skips_only_exact_duplicates() {
+        let client = AppToRun::new_path(
+            r"C:\Steam.exe".into(),
+            vec![],
+            r"C:\Steam.exe".into(),
+            os_api::PriorityClass::Normal,
+            false,
+        );
+        let mut game = client.clone();
+        game.name = "Game".into();
+        game.launch_target = crate::app::models::LaunchTarget::Steam {
+            app_id: 570,
+            executable: None,
+        };
+        let mut group = CoreGroup {
+            name: "Games".into(),
+            cores: vec![0],
+            programs: vec![client],
+            is_hidden: false,
+            run_all_button: false,
+        };
+        let outcome = append_imports(&mut group, vec![game.clone(), game.clone()], None);
+        assert_eq!(outcome.added_count, 1);
+        assert!(outcome.first_error.unwrap().contains("already"));
+        assert_eq!(group.programs.len(), 2);
+        let second = append_imports(&mut group, vec![game], None);
+        assert_eq!(second.added_count, 0);
+        assert_eq!(group.programs.len(), 2);
     }
 
     #[test]
@@ -442,6 +490,7 @@ mod tests {
             },
             args: vec!["--debug".to_string()],
             additional_processes: vec!["helper.exe".to_string()],
+            builtin_process_binding: None,
             manage_descendants: false,
             autorun: true,
             priority: PriorityClass::High,

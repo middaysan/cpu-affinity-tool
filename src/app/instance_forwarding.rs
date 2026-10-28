@@ -21,6 +21,7 @@ pub(crate) const EXIT_AUTH_FAILED: i32 = 26;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IpcCommand {
+    ShowWindow,
     RunRule { group_id: GroupId, rule_id: RuleId },
 }
 
@@ -127,6 +128,7 @@ struct WireCommandFrame {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WireCommand {
+    ShowWindow {},
     RunRule { group_id: String, rule_id: String },
 }
 
@@ -140,6 +142,7 @@ struct WireCommandFrameOut {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WireCommandOut {
+    ShowWindow,
     RunRule { group_id: String, rule_id: String },
 }
 
@@ -166,6 +169,7 @@ pub(crate) fn parse_ipc_command_frame(frame: &[u8]) -> Result<IpcCommand, IpcPro
     }
 
     match frame.command {
+        WireCommand::ShowWindow {} => Ok(IpcCommand::ShowWindow),
         WireCommand::RunRule { group_id, rule_id } => {
             if !is_cli_safe_id(&group_id) || !is_cli_safe_id(&rule_id) {
                 return Err(IpcProtocolError::InvalidId);
@@ -183,6 +187,7 @@ pub(crate) fn serialize_ipc_command_frame(
     command: &IpcCommand,
 ) -> Result<Vec<u8>, IpcProtocolError> {
     let command = match command {
+        IpcCommand::ShowWindow => WireCommandOut::ShowWindow,
         IpcCommand::RunRule { group_id, rule_id } => WireCommandOut::RunRule {
             group_id: group_id.0.clone(),
             rule_id: rule_id.0.clone(),
@@ -265,10 +270,6 @@ pub(crate) fn decide_entry_action(
     startup_intent: StartupIntent,
     probe_result: ForwardingProbeResult,
 ) -> EntryAction {
-    if matches!(startup_intent, StartupIntent::NormalGui) {
-        return EntryAction::RunGui(startup_intent);
-    }
-
     match probe_result {
         ForwardingProbeResult::Forwarded(response) => {
             EntryAction::Exit(forwarding_exit_code(&response))
@@ -291,70 +292,17 @@ where
     C: StartupForwardingClock,
 {
     if let Err(err) = platform.resolve_endpoint() {
-        return match startup_intent {
-            intent @ StartupIntent::NormalGui => PreparedStartupForwarding {
-                action: EntryAction::RunGui(intent),
-                forwarding_runtime: None,
-                forwarding_warning: Some(err),
-            },
-            intent @ StartupIntent::RunRule { .. } => PreparedStartupForwarding {
-                action: decide_entry_action(intent, ForwardingProbeResult::AuthFailed),
-                forwarding_runtime: None,
-                forwarding_warning: None,
-            },
+        return PreparedStartupForwarding {
+            action: decide_entry_action(startup_intent, ForwardingProbeResult::AuthFailed),
+            forwarding_runtime: None,
+            forwarding_warning: Some(err),
         };
     }
 
-    match startup_intent.clone() {
-        StartupIntent::NormalGui => {
-            let (forwarding_runtime, forwarding_warning) =
-                prepare_normal_gui_forwarding_with(platform);
-            PreparedStartupForwarding {
-                action: EntryAction::RunGui(startup_intent),
-                forwarding_runtime,
-                forwarding_warning,
-            }
-        }
-        StartupIntent::RunRule { group_id, rule_id } => prepare_run_rule_forwarding_with(
-            startup_intent,
-            group_id,
-            rule_id,
-            platform,
-            clock,
-            retry_policy,
-        ),
-    }
-}
-
-fn prepare_normal_gui_forwarding_with<P>(platform: &mut P) -> (Option<P::Runtime>, Option<String>)
-where
-    P: StartupForwardingPlatform,
-{
-    match platform.try_claim_primary_guard() {
-        Ok(Some(guard)) => match platform.start_forwarding_runtime(guard) {
-            Ok(runtime) => (Some(runtime), None),
-            Err(err) => (None, Some(err)),
-        },
-        Ok(None) => (
-            None,
-            Some("another instance owns the local shortcut endpoint".to_string()),
-        ),
-        Err(err) => (None, Some(err)),
-    }
-}
-
-fn prepare_run_rule_forwarding_with<P, C>(
-    startup_intent: StartupIntent,
-    group_id: GroupId,
-    rule_id: RuleId,
-    platform: &mut P,
-    clock: &mut C,
-    retry_policy: ForwardingRetryPolicy,
-) -> PreparedStartupForwarding<P::Runtime>
-where
-    P: StartupForwardingPlatform,
-    C: StartupForwardingClock,
-{
+    let command = match startup_intent.clone() {
+        StartupIntent::NormalGui => IpcCommand::ShowWindow,
+        StartupIntent::RunRule { group_id, rule_id } => IpcCommand::RunRule { group_id, rule_id },
+    };
     match platform.try_claim_primary_guard() {
         Ok(Some(guard)) => match platform.start_forwarding_runtime(guard) {
             Ok(runtime) => PreparedStartupForwarding {
@@ -373,7 +321,7 @@ where
         },
         Ok(None) => {
             let probe_result =
-                forward_run_rule_to_primary_with(platform, clock, retry_policy, group_id, rule_id);
+                forward_command_to_primary_with(platform, clock, retry_policy, command);
             PreparedStartupForwarding {
                 action: decide_entry_action(startup_intent, probe_result),
                 forwarding_runtime: None,
@@ -388,18 +336,17 @@ where
     }
 }
 
-fn forward_run_rule_to_primary_with<P, C>(
+fn forward_command_to_primary_with<P, C>(
     platform: &mut P,
     clock: &mut C,
     retry_policy: ForwardingRetryPolicy,
-    group_id: GroupId,
-    rule_id: RuleId,
+    command: IpcCommand,
 ) -> ForwardingProbeResult
 where
     P: StartupForwardingPlatform,
     C: StartupForwardingClock,
 {
-    let request = match serialize_ipc_command_frame(&IpcCommand::RunRule { group_id, rule_id }) {
+    let request = match serialize_ipc_command_frame(&command) {
         Ok(request) => request,
         Err(_) => return ForwardingProbeResult::ProtocolError,
     };
@@ -569,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn test_startup_decision_never_forwards_normal_gui() {
+    fn test_startup_decision_normal_gui_exits_after_restore_acknowledgement() {
         assert_eq!(
             decide_entry_action(
                 StartupIntent::NormalGui,
@@ -578,7 +525,7 @@ mod tests {
                     detail: None
                 })
             ),
-            EntryAction::RunGui(StartupIntent::NormalGui)
+            EntryAction::Exit(EXIT_ACCEPTED)
         );
     }
 
@@ -788,29 +735,103 @@ mod tests {
     }
 
     #[test]
-    fn test_startup_boundary_normal_gui_never_forwards_exits_or_retries() {
-        let mut platform = FakeStartupPlatform::primary();
-        platform.guard_result = Ok(None);
+    fn test_startup_boundary_normal_gui_secondary_restores_without_starting_gui() {
+        let mut platform = FakeStartupPlatform::secondary(vec![FakeSendOutcome::Response(
+            response_bytes(IpcResponseCode::Accepted),
+        )]);
 
         let prepared = prepare_with_fake(StartupIntent::NormalGui, &mut platform);
 
-        assert_eq!(
-            prepared.action,
-            EntryAction::RunGui(StartupIntent::NormalGui)
-        );
+        assert_eq!(prepared.action, EntryAction::Exit(EXIT_ACCEPTED));
         assert_eq!(prepared.forwarding_runtime, None);
-        assert_eq!(
-            prepared.forwarding_warning.as_deref(),
-            Some("another instance owns the local shortcut endpoint")
-        );
+        assert_eq!(prepared.forwarding_warning, None);
         assert_eq!(
             *platform.calls.borrow(),
             vec![
                 StartupCall::ResolveEndpoint,
-                StartupCall::TryClaimPrimaryGuard
+                StartupCall::TryClaimPrimaryGuard,
+                StartupCall::SendRequest(Duration::from_millis(50))
             ]
         );
+        assert_eq!(platform.sent_commands.borrow().len(), 1);
+        assert_eq!(platform.sent_commands.borrow()[0], IpcCommand::ShowWindow);
+    }
+
+    #[test]
+    fn normal_gui_primary_keeps_guard_and_secondary_waits_for_starting_primary() {
+        let mut platform = FakeStartupPlatform::primary();
+        let result = prepare_with_fake(StartupIntent::NormalGui, &mut platform);
+        assert_eq!(result.action, EntryAction::RunGui(StartupIntent::NormalGui));
+        assert_eq!(result.forwarding_runtime, Some("runtime"));
         assert!(platform.sent_commands.borrow().is_empty());
+
+        let mut platform = FakeStartupPlatform::secondary(vec![
+            FakeSendOutcome::Error(ForwardingClientError::NoServer),
+            FakeSendOutcome::Error(ForwardingClientError::ServerNotReady),
+            FakeSendOutcome::Response(response_bytes(IpcResponseCode::Accepted)),
+        ]);
+        let result = prepare_with_fake(StartupIntent::NormalGui, &mut platform);
+        assert_eq!(result.action, EntryAction::Exit(EXIT_ACCEPTED));
+        assert_eq!(
+            *platform.sent_commands.borrow(),
+            vec![IpcCommand::ShowWindow; 3]
+        );
+        assert!(!platform
+            .calls
+            .borrow()
+            .contains(&StartupCall::StartForwardingRuntime));
+        for error in [
+            ForwardingClientError::Timeout,
+            ForwardingClientError::SecurityRejected("denied".into()),
+            ForwardingClientError::Io("unavailable".into()),
+        ] {
+            let mut platform = FakeStartupPlatform::secondary(vec![FakeSendOutcome::Error(error)]);
+            assert!(
+                matches!(prepare_with_fake(StartupIntent::NormalGui, &mut platform).action, EntryAction::Exit(code) if code != 0)
+            );
+        }
+    }
+
+    #[test]
+    fn normal_gui_restore_frame_is_supported_and_has_no_launch_arguments() {
+        let frame = br#"{"version":1,"command":{"type":"show_window"}}"#;
+        assert!(parse_ipc_command_frame(frame).is_ok());
+        let command = parse_ipc_command_frame(frame).unwrap();
+        assert_eq!(
+            parse_ipc_command_frame(&serialize_ipc_command_frame(&command).unwrap()),
+            Ok(command)
+        );
+        assert!(parse_ipc_command_frame(
+            br#"{"version":1,"command":{"type":"show_window","path":"anything.exe"}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn normal_gui_ownership_failures_never_start_an_unprotected_second_instance() {
+        for failure in ["endpoint", "guard", "runtime"] {
+            let mut platform = FakeStartupPlatform::primary();
+            match failure {
+                "endpoint" => platform.endpoint_result = Err("denied".into()),
+                "guard" => platform.guard_result = Err("denied".into()),
+                _ => platform.server_result = Err("denied".into()),
+            }
+            let result = prepare_with_fake(StartupIntent::NormalGui, &mut platform);
+            assert_eq!(
+                result.action,
+                EntryAction::Exit(EXIT_AUTH_FAILED),
+                "{failure}"
+            );
+            assert!(result.forwarding_runtime.is_none());
+        }
+        let mut platform = FakeStartupPlatform::secondary(vec![]);
+        let result = prepare_with_fake(StartupIntent::NormalGui, &mut platform);
+        assert_eq!(result.action, EntryAction::Exit(EXIT_SERVER_NOT_READY));
+        assert!(platform
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| matches!(call, StartupCall::Sleep(_))));
     }
 
     #[test]

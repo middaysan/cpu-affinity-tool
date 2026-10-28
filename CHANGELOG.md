@@ -6,6 +6,67 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-10-28
+
+### Added
+
+- Shared-process control: duplicate-name hints, an explicit controlling-app choice for legacy conflicts and Take control here in the rule editor. Earlier rules retain new overlaps; process lists and CPU/RAM observation stay intact. Owner changes use the same durable path in GUI and MCP (state schema v14).
+
+- Expanded new-import process defaults to 20 application families with conditional app-owned helpers, ordinary launcher handoff and unchanged existing rules.
+
+- New Windows Steam-client and Discord Stable imports fill scoped helper names in the existing editor. Real application processes drive CPU/RAM and scheduling; Discord's updater stays an ordinary launcher. Focus can request normal activation for a hidden client. Schema v13 retains provenance without expanding old rules or explicit MCP lists.
+
+- Fixed current-format settings becoming read-only after restart when System Tweaks data was present. File imports now report save refusal once with explicit Retry/Dismiss; exact duplicate rules in the same group are skipped.
+- Windows Steam game shortcuts: launch through ordinary Steam while game-only processes drive CPU/RAM, affinity and Focus. Automatic installation/window discovery has an exact-process selection fallback; existing launcher rules convert explicitly. State schema v12 retains earlier groups and applications.
+
+- Current group RAM in the existing CPU summary button. Includes running apps and their tracked helpers, counts shared process instances once per group, marks incomplete sums and reuses the same one-second memory reads.
+
+- Current private RAM in each application row while CPU load monitoring is on, sharing one compact two-line button with CPU load to preserve application-name space. Includes all tracked process names and enabled descendants, counts each exact process once, excludes shared pages and marks incomplete totals. Uses the existing one-second worker; unsupported Windows counters remain unavailable.
+
+- Repeated Windows launches restore the existing window from the tray instead of starting another instance. The existing local command channel handles startup races and foreground handoff; the taskbar signals the window when activation is restricted.
+
+- A manual Windows 11 Core parking tweak for all cores, with captured AC plan/mode keys and exact conditional Undo. Detected separate classes are shown as unavailable: native checks found their stored class-1 policy did not keep those cores unparked. Per-chiplet or arbitrary CPU-number controls are not implied; battery and frequency settings are unchanged.
+- Local preview of per-app background CPU sessions: one default-Off checkbox in Application rule, priority/EcoQoS-only sessions, no Advanced/manual core selection and no separate System Tweaks card. Old placement recovery data remains readable. Native mechanism checks use test-owned processes; the system-role mutation qualification set remains empty pending controlled VM/function validation. See `docs/background-workload.md` for scope and limits.
+
+### Fixed
+
+- Group CPU now sums its own unique running processes from the same current counters and whole-host scale as app rows. Delayed ETW or a busy history lock no longer replaces fresh group usage with stale zero or a dash; one GUI-frame snapshot keeps all current CPU/RAM summaries coherent.
+
+- Preserve the original settings file when its recovery backup fails, and keep GUI drafts attached to the result of their own Save request.
+- Reject revoked queued MCP writes during shutdown and stale process observations after a saved rule change or Process monitor Off.
+- Apply initial saved settings after ordinary MCP Installed activation, recheck the complete source and exact process lifetime before correction, refuse stale known-app launch publication and recognize alternate main executables for helper-only tracking.
+- Bound Internet shortcut reads before decoding and validate installed-app IDs without inserting package names into PowerShell source.
+
+- Automatic Process monitor correction failures now retain the application, PID and Windows error in both log views, with bounded repeat suppression. A denied member does not prevent correction of other processes.
+
+- Preserve the selected process controller across deferred launches with monitoring Off and read-only System Tweaks checks. Correct late package helpers through the guarded initial path, reject stale installed-app callbacks, retain running-app lookups through duplicate-key transitions, and avoid false conflicts between disjoint instances of one EXE. Existing process lists and CPU/RAM scopes are retained.
+
+- Correct MCP process CPU-mapping quality: missing, incomplete or invalidated per-CPU evidence is marked incomplete, while complete idle mappings remain complete and independent process CPU totals are preserved.
+
+- Keep measured application CPU visible as a marked subtotal when another tracked process is inaccessible or waiting for its first sample. Hover help reports measured process coverage; a wholly unavailable reading stays unknown.
+
+- Keep the CPU sampler's exact PID cache across transient membership races, so adding a tracked process cannot leave application/group load unavailable while system graphs keep recording.
+- Reclaim deleted rules' internal background profiles after recovery releases them, and stop orphaned intent from retaining process-observation work.
+- Discover ordinary applications across verified UAC-linked desktop tokens, and isolate unavailable optional candidates from other session/foreground observations.
+- Include unsaved background-checkbox edits in the rule editor's shortcut guard.
+- The Windows window and taskbar use the same bundled application icon as the tray and EXE resource instead of eframe's default icon.
+- Tray Restore shows and unminimizes the native window on the GUI thread before requesting Windows foreground activation, with a short bounded retry that stops on success, hide or exit. Ordinary mouse movement no longer cancels the request.
+- Tray double-click Restore waits for the final left-button release so that release cannot invalidate its own activation request. Single clicks and other mouse buttons do not restore the window.
+- Group CPU lists use the available header width instead of stopping after eight entries; the hover text retains the full list.
+- Parked CPU tiles retain their neutral background. Only the parking status is yellow, and its help explains the displayed sample time and why interval load can be nonzero.
+
+### Changed
+
+- Update Tokio and the Windows clipboard dependency to patched releases after the release audit; keep existing features and platform boundaries.
+- Avoid a full tuning-document decode per background policy and repeat native identity reads only for unique candidate PIDs within an observation. Windows CI and release verification now run the pure background protocol/closed-admission checks and strict test-code Clippy; real Windows roles remain unqualified.
+- Windows no longer includes the unused Glow/OpenGL renderer; Linux keeps its existing Glow backend.
+- Updated the README lead screenshot to the supplied side-by-side groups and CPU selection view.
+
+### Compatibility
+
+- Saved groups and applications are preserved. Explicit saves upgrade compatible configurations to schema v14; older binaries cannot read the upgraded format. Existing process-name lists are not automatically expanded.
+- Windows background-task reduction remains an inactive preview pending controlled VM validation. The manual all-core parking control is a separate Windows 11 feature.
+
 ## [1.7.0] - 2026-10-22
 
 ### Added

@@ -81,6 +81,8 @@ impl StatePersistence for SelectedStatePersistence {
     }
 }
 pub(crate) struct HeadlessTuning {
+    process_control: Option<std::sync::Arc<crate::app::features::execution::control::Authority>>,
+    pub(super) background: super::background_policy::Runtime,
     pub(super) tweak_targets: std::collections::BTreeMap<FeatureId, TargetIdentity>,
     pub(super) pc_checks: Vec<super::pc_checks::PcCheck>,
     pub(super) display_confirmation: Option<std::time::Instant>,
@@ -103,6 +105,8 @@ impl HeadlessTuning {
     ) -> Self {
         let rules = RulesContext::from_storage(&state);
         Self {
+            process_control: None,
+            background: Default::default(),
             tweak_targets: Default::default(),
             pc_checks: vec![],
             display_confirmation: None,
@@ -120,6 +124,14 @@ impl HeadlessTuning {
     }
     pub(crate) fn state(&self) -> &AppStateStorage {
         &self.state
+    }
+    pub(crate) fn with_process_control(
+        mut self,
+        control: std::sync::Arc<crate::app::features::execution::control::Authority>,
+    ) -> Self {
+        control.configure(&self.state);
+        self.process_control = Some(control);
+        self
     }
     pub(crate) fn without_modules(mut self) -> Self {
         self.modules_enabled = false;
@@ -259,7 +271,7 @@ impl HeadlessTuning {
             }
         }
     }
-    fn configured(&self) -> Result<TuningConfig, SaveError> {
+    pub(super) fn configured(&self) -> Result<TuningConfig, SaveError> {
         if !self.modules_enabled {
             return Err(SaveError::Invalid);
         }
@@ -269,6 +281,37 @@ impl HeadlessTuning {
             _ => Err(SaveError::Invalid),
         }
     }
+    fn configured_for_edit(&self) -> Result<TuningConfig, SaveError> {
+        let mut config = self.configured()?;
+        self.prune_background_profiles(&mut config, &self.state, &self.rules);
+        Ok(config)
+    }
+    fn prune_background_profiles(
+        &self,
+        config: &mut TuningConfig,
+        state: &AppStateStorage,
+        rules: &RulesContext,
+    ) -> bool {
+        // An unrestored/uncertain journal is not proof that a profile is unused.
+        if !self.native_admitted || self.legacy_recovery || !self.controller.can_admit() {
+            return false;
+        }
+        let live = state
+            .groups
+            .iter()
+            .enumerate()
+            .flat_map(|(g, group)| {
+                group
+                    .programs
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(r, _)| rules.rule_id_for_index(g, r).map(|id| id.0))
+            })
+            .collect();
+        super::background_policy::prune_deleted_rule_profiles(config, &live, |id| {
+            self.controller.retains_profile(id)
+        })
+    }
     fn publish(
         &mut self,
         mut candidate: AppStateStorage,
@@ -276,15 +319,47 @@ impl HeadlessTuning {
     ) -> Result<(), SaveError> {
         let revision = self.revision.checked_add(1).ok_or(SaveError::Invalid)?;
         rules.reconcile_with_storage(&candidate);
+        if self.modules_enabled {
+            if let TuningLoad::Known(mut config) = candidate.tuning.decode() {
+                if self.prune_background_profiles(&mut config, &candidate, &rules) {
+                    candidate.tuning =
+                        TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
+                }
+            }
+        }
         candidate.mark_ready_for_current_schema_save(rules.to_persisted_identities());
+        crate::app::features::execution::control::policy::Policy::prepare_save(
+            &self.state,
+            &mut candidate,
+        )
+        .map_err(|_| SaveError::Invalid)?;
+        let control = self.process_control.clone();
+        let configuration = control
+            .as_ref()
+            .map(|control| control.configuration_write())
+            .transpose()
+            .map_err(|_| SaveError::Invalid)?;
+        let mut gate = control
+            .as_ref()
+            .map(|control| control.lock())
+            .transpose()
+            .map_err(|_| SaveError::Invalid)?;
         self.persistence.save(&mut candidate)?;
+        if let Some(gate) = gate.as_mut() {
+            gate.configure(&candidate);
+            if let Some(control) = &control {
+                control.publish_view(gate);
+            }
+        }
+        drop(gate);
+        drop(configuration);
         self.state = candidate;
         self.rules = rules;
         self.revision = revision;
         self.start_selected_recovery();
         Ok(())
     }
-    fn save_config(&mut self, config: TuningConfig) -> Result<(), SaveError> {
+    pub(super) fn save_config(&mut self, config: TuningConfig) -> Result<(), SaveError> {
         let mut candidate = self.state.clone();
         candidate.tuning = TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
         self.publish(candidate, self.rules.clone())?;
@@ -295,7 +370,7 @@ impl HeadlessTuning {
         name: String,
         modules: Vec<ModulePreference>,
     ) -> Result<ProfileId, SaveError> {
-        let mut config = self.configured()?;
+        let mut config = self.configured_for_edit()?;
         if name.trim().is_empty()
             || name.len() > 128
             || name.chars().any(char::is_control)
@@ -441,12 +516,34 @@ impl HeadlessTuning {
             .retain(|a| &a.group != group || &a.rule != rule);
         self.save_config(config)
     }
+    pub(crate) fn save_gui_candidate(
+        &mut self,
+        mut candidate: AppStateStorage,
+        gui_import: bool,
+    ) -> Result<(), SaveError> {
+        if gui_import {
+            crate::app::features::rules::known_apps::prepare_new_gui_rules(
+                &self.rules,
+                &mut candidate,
+            );
+        }
+        self.save_base(|saved| {
+            *saved = candidate;
+            Ok(())
+        })
+    }
+
     pub(crate) fn save_base(
         &mut self,
         edit: impl FnOnce(&mut AppStateStorage) -> Result<(), SaveError>,
     ) -> Result<(), SaveError> {
         let mut candidate = self.state.clone();
         edit(&mut candidate)?;
+        if candidate.process_control_raw().map(|raw| raw.get())
+            != self.state.process_control_raw().map(|raw| raw.get())
+        {
+            return Err(SaveError::Invalid);
+        }
         if candidate.tuning.raw() != self.state.tuning.raw() {
             return Err(SaveError::Invalid);
         }
@@ -511,15 +608,97 @@ impl HeadlessTuning {
         candidate.tuning = TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
         Ok(())
     }
+    #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
     pub(crate) fn edit_rule(
         &mut self,
         group: &GroupId,
         rule: &RuleId,
         app: AppToRun,
     ) -> Result<(), SaveError> {
+        self.edit_rule_choices(group, rule, app, None, vec![])
+    }
+    #[cfg(test)]
+    pub(crate) fn edit_rule_background(
+        &mut self,
+        group: &GroupId,
+        rule: &RuleId,
+        app: AppToRun,
+        background: Option<super::background_policy::RulePolicy>,
+    ) -> Result<(), SaveError> {
+        self.edit_rule_choices(group, rule, app, background, vec![])
+    }
+    pub(crate) fn edit_rule_choices(
+        &mut self,
+        group: &GroupId,
+        rule: &RuleId,
+        mut app: AppToRun,
+        background: Option<super::background_policy::RulePolicy>,
+        choices: Vec<crate::app::features::execution::control::policy::Choice>,
+    ) -> Result<(), SaveError> {
         let (g, r) = self.rule_index(group, rule)?;
+        app.builtin_process_binding = self.state.groups[g].programs[r]
+            .builtin_process_binding
+            .clone();
         let mut candidate = self.state.clone();
         candidate.groups[g].programs[r] = app;
+        if let Some(background) = background.filter(|policy| {
+            self.modules_enabled || *policy != super::background_policy::RulePolicy::default()
+        }) {
+            let is_exe = candidate.groups[g].programs[r]
+                .bin_path()
+                .is_some_and(|path| {
+                    path.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                });
+            if background.enabled && !is_exe {
+                return Err(SaveError::Invalid);
+            }
+            let mut config = self.configured_for_edit()?;
+            super::background_policy::put_rule_policy(
+                &mut config,
+                super::tweaks::background_workload::GameRule {
+                    group: group.0.clone(),
+                    rule: rule.0.clone(),
+                },
+                &background,
+            )?;
+            if config != self.configured()? {
+                candidate.tuning =
+                    TuningEnvelope::from_config(&config).map_err(|_| SaveError::Invalid)?;
+            }
+        }
+        self.apply_owner_choices(&mut candidate, &choices)?;
+        self.publish(candidate, self.rules.clone())
+    }
+    fn apply_owner_choices(
+        &self,
+        candidate: &mut AppStateStorage,
+        choices: &[crate::app::features::execution::control::policy::Choice],
+    ) -> Result<(), SaveError> {
+        if choices.is_empty() {
+            return Ok(());
+        }
+        self.process_control
+            .as_ref()
+            .ok_or(SaveError::Invalid)?
+            .validate_choices(candidate, choices)
+            .map_err(|_| SaveError::Invalid)?;
+        for choice in choices {
+            crate::app::features::execution::control::policy::Policy::choose(
+                candidate,
+                choice.clone(),
+            )
+            .map_err(|_| SaveError::Invalid)?;
+        }
+        Ok(())
+    }
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn choose_process_owner(
+        &mut self,
+        choice: crate::app::features::execution::control::policy::Choice,
+    ) -> Result<(), SaveError> {
+        let mut candidate = self.state.clone();
+        self.apply_owner_choices(&mut candidate, &[choice])?;
         self.publish(candidate, self.rules.clone())
     }
     pub(crate) fn remove_rule(&mut self, group: &GroupId, rule: &RuleId) -> Result<(), SaveError> {
@@ -1020,7 +1199,7 @@ impl HeadlessTuning {
                 .editor()
                 .tweak_ready_for_config(&target, Some(&desired))
                 .map_err(|e| self.native_failure(e))?;
-        let mut config = self.configured()?;
+        let mut config = self.configured_for_edit()?;
         let existing = config
             .profiles
             .iter()

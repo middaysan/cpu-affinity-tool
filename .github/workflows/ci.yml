@@ -46,6 +46,13 @@ jobs:
       - name: Run os_api tests
         run: cargo test --manifest-path libs/os_api/Cargo.toml
 
+      - name: Check background test code
+        run: cargo clippy --locked --manifest-path libs/os_api/Cargo.toml --features tuning-test-controls --tests -- -D warnings
+
+      - name: Test background protocol and closed role admission
+        shell: pwsh
+        run: ./scripts/test-windows-background-workload.ps1
+
       - name: Run tests
         run: cargo test --features windows --bin cpu-affinity-tool
 
@@ -55,6 +62,9 @@ jobs:
 
       - name: Check debug MCP protocol
         run: python scripts/test_cpu_affinity_mcp.py
+
+      - name: Check platform renderer dependencies
+        run: python scripts/test-renderer-dependencies.py
 
       - name: Run headless debug MCP tests
         run: cargo test --features windows,debug-mcp,diagnostics-test-controls --bin cpu-affinity-tool debug_mcp

@@ -13,6 +13,7 @@ const MAX_INSTANCES: usize = 1024;
 #[derive(Clone, Copy)]
 struct Instance {
     fresh: bool,
+    background_priority: bool,
     reserved: ProcessSettingsFields,
     attempted: ProcessSettingsFields,
 }
@@ -20,6 +21,7 @@ impl Instance {
     fn unknown() -> Self {
         Self {
             fresh: false,
+            background_priority: false,
             reserved: ProcessSettingsFields {
                 affinity: false,
                 priority: false,
@@ -37,6 +39,57 @@ pub(crate) struct SchedulingHandoff {
     instances: Mutex<BTreeMap<(u32, u64), Instance>>,
 }
 impl SchedulingHandoff {
+    /// Called only after exact native background qualification and durable intent.
+    /// Existing services remain non-fresh; classic attempt evidence is never reset.
+    pub(crate) fn reserve_existing_priority(
+        &self,
+        pid: u32,
+        token: u64,
+    ) -> Result<(), ModuleError> {
+        if pid == 0 || token == 0 {
+            return Err(ModuleError::new(
+                ErrorKind::Unsupported,
+                "existing process identity",
+            ));
+        }
+        self.prepare_instance(pid, token);
+        let mut instances = self
+            .instances
+            .lock()
+            .map_err(|_| ModuleError::new(ErrorKind::Verification, "scheduling metadata"))?;
+        if !instances.contains_key(&(pid, token)) && instances.len() >= MAX_INSTANCES {
+            return Err(ModuleError::new(
+                ErrorKind::Unsupported,
+                "scheduling metadata capacity",
+            ));
+        }
+        let instance = instances
+            .entry((pid, token))
+            .or_insert_with(Instance::unknown);
+        if instance.attempted.priority
+            || (instance.reserved.priority && !instance.background_priority)
+        {
+            return Err(ModuleError::new(
+                ErrorKind::Conflict,
+                "existing priority baseline",
+            ));
+        }
+        instance.background_priority = true;
+        instance.reserved.priority = true;
+        Ok(())
+    }
+
+    /// Only the controller's durable last-field retirement may release this fence.
+    pub(crate) fn retire_existing_priority(&self, pid: u32, token: u64) {
+        if let Ok(mut instances) = self.instances.lock() {
+            if let Some(instance) = instances.get_mut(&(pid, token)) {
+                if instance.background_priority {
+                    instance.background_priority = false;
+                    instance.reserved.priority = false;
+                }
+            }
+        }
+    }
     fn prepare_instance(&self, pid: u32, token: u64) {
         if self
             .instances
@@ -113,6 +166,23 @@ impl SchedulingHandoff {
         requested: ProcessSettingsFields,
         write: bool,
     ) -> Result<ProcessSettingsFields, ModuleError> {
+        if !write {
+            let instances = self
+                .instances
+                .lock()
+                .map_err(|_| ModuleError::new(ErrorKind::Verification, "scheduling metadata"))?;
+            let reserved = instances
+                .get(&(pid, token))
+                .map(|instance| instance.reserved)
+                .unwrap_or(ProcessSettingsFields {
+                    affinity: false,
+                    priority: false,
+                });
+            return Ok(ProcessSettingsFields {
+                affinity: requested.affinity && !reserved.affinity,
+                priority: requested.priority && !reserved.priority,
+            });
+        }
         self.prepare_instance(pid, token);
         let mut instances = self
             .instances
@@ -248,6 +318,94 @@ pub(crate) fn fields_for_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn s112_readonly_observer_does_not_create_field_reservations() {
+        for observed in [
+            ProcessSettingsFields {
+                affinity: false,
+                priority: true,
+            },
+            ProcessSettingsFields {
+                affinity: true,
+                priority: false,
+            },
+        ] {
+            let handoff = SchedulingHandoff::default();
+            handoff.select(42, 4200, observed, false).unwrap();
+            assert_eq!(
+                handoff
+                    .select(42, 4200, ProcessSettingsFields::default(), true)
+                    .unwrap(),
+                ProcessSettingsFields::default()
+            );
+        }
+    }
+
+    #[test]
+    fn existing_background_priority_baseline_is_not_a_fake_fresh_launch() {
+        let handoff = SchedulingHandoff::default();
+        handoff.reserve_existing_priority(77, 700).unwrap();
+        assert!(handoff.baseline(77, 700, false).is_err());
+        assert!(
+            !handoff
+                .select(77, 700, ProcessSettingsFields::default(), true)
+                .unwrap()
+                .priority
+        );
+        handoff.reserve_existing_priority(77, 700).unwrap();
+        handoff.retire_existing_priority(77, 700);
+        assert!(
+            handoff
+                .select(77, 700, ProcessSettingsFields::default(), true)
+                .unwrap()
+                .priority
+        );
+        assert!(handoff.reserve_existing_priority(77, 700).is_err());
+    }
+
+    #[test]
+    fn existing_background_admission_refuses_previous_or_uncertain_classic_writes() {
+        let handoff = SchedulingHandoff::default();
+        handoff
+            .external_write(
+                77,
+                700,
+                ProcessSettingsFields {
+                    affinity: false,
+                    priority: true,
+                },
+            )
+            .unwrap();
+        assert!(handoff.reserve_existing_priority(77, 700).is_err());
+        assert!(handoff.reserve_existing_priority(77, 701).is_ok());
+        assert!(handoff.reserve_existing_priority(0, 701).is_err());
+        assert!(handoff.reserve_existing_priority(77, 0).is_err());
+    }
+
+    #[test]
+    fn retiring_background_priority_cannot_release_another_modules_reservation() {
+        let handoff = SchedulingHandoff::default();
+        // A verified fresh launch owns this reservation; a read-only observer does not.
+        handoff
+            .started(
+                77,
+                700,
+                ProcessSettingsFields {
+                    affinity: true,
+                    priority: false,
+                },
+            )
+            .unwrap();
+        assert!(handoff.reserve_existing_priority(77, 700).is_err());
+        handoff.retire_existing_priority(77, 700);
+        assert!(
+            !handoff
+                .select(77, 700, ProcessSettingsFields::default(), false)
+                .unwrap()
+                .priority
+        );
+    }
     fn full_handoff() -> SchedulingHandoff {
         let handoff = SchedulingHandoff::default();
         for pid in 1..=MAX_INSTANCES as u32 {
@@ -255,6 +413,7 @@ mod tests {
                 (pid, u64::from(pid)),
                 Instance {
                     fresh: true,
+                    background_priority: false,
                     reserved: ProcessSettingsFields {
                         affinity: true,
                         priority: false,

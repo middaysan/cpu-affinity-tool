@@ -36,10 +36,12 @@ use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CentralProgramSnapshot {
+    pub steam_app_id: Option<u32>,
     pub rule_id: RuleId,
     pub name: String,
     pub launch_target_detail: String,
     pub app_key: AppRuntimeKey,
+    pub runtime_key: AppRuntimeKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +155,8 @@ enum LegacyCompletion {
     Rule(
         crate::app::shell::sessions::RuleEditorTarget,
         Option<AppToRun>,
+        Option<crate::app::features::system_tweaks::background_policy::RulePolicy>,
+        Vec<crate::app::features::execution::control::policy::Choice>,
     ),
     Group(Option<GroupId>, String, Vec<bool>, bool),
     Import(ImportIntent, String),
@@ -247,7 +251,9 @@ impl AppState {
             ),
         );
         let tuning_editors = registered.registry().clone();
-        let service = registered.headless_selected(saved);
+        let service = registered
+            .headless_selected(saved)
+            .with_process_control(runtime.control_handle());
         let tuning = TuningRuntime::start(
             if crate::app::features::system_tweaks::MODULES_ENABLED {
                 service
@@ -312,7 +318,9 @@ impl AppState {
             .clone();
         let registered = Tuning::from_registry(Default::default());
         let tuning_editors = registered.registry().clone();
-        let service = registered.headless(saved, Box::new(TestStatePersistence));
+        let service = registered
+            .headless(saved, Box::new(TestStatePersistence))
+            .with_process_control(runtime.control_handle());
         let tuning = TuningRuntime::start(
             if crate::app::features::system_tweaks::MODULES_ENABLED {
                 service
@@ -436,32 +444,74 @@ impl AppState {
                 self.tuning_shutdown_reported = Some(outcome);
             }
         }
-        if self.pending_legacy.as_ref().is_some_and(|pending| !matches!(snapshot.operation, crate::app::features::system_tweaks::TuningOperationState::Pending { id } if id == pending.id)) {
+        let completion = self.pending_legacy.as_ref().and_then(|pending| {
+            self.tuning
+                .take_gui_receipt(pending.id, self.tuning_adopted_revision)
+        });
+        if let Some(receipt) = completion {
             let pending = self.pending_legacy.take().unwrap();
-            if matches!(snapshot.operation, crate::app::features::system_tweaks::TuningOperationState::Idle) && snapshot.revision > pending.revision {
+            if receipt.result.is_ok() && receipt.revision >= pending.revision {
                 match pending.completion {
-                    Some(LegacyCompletion::Rule(target, draft)) if self.ui.app_edit_state.target.as_ref() == Some(&target) && self.ui.app_edit_state.current_edit == draft => self.close_app_run_settings(),
-                    Some(LegacyCompletion::Group(target, name, selection, run_all)) if self.ui.group_form.editing_group_id == target && self.ui.group_form.group_name == name && self.ui.group_form.core_selection == selection && self.ui.group_form.run_all_enabled == run_all => self.cancel_group_form_session(),
+                    Some(LegacyCompletion::Rule(target, draft, background, choices))
+                        if self.ui.app_edit_state.target.as_ref() == Some(&target)
+                            && self.ui.app_edit_state.current_edit == draft
+                            && self.ui.app_edit_state.background == background
+                            && self.ui.app_edit_state.control_choices == choices =>
+                    {
+                        self.close_app_run_settings()
+                    }
+                    Some(LegacyCompletion::Group(target, name, selection, run_all))
+                        if self.ui.group_form.editing_group_id == target
+                            && self.ui.group_form.group_name == name
+                            && self.ui.group_form.core_selection == selection
+                            && self.ui.group_form.run_all_enabled == run_all =>
+                    {
+                        self.cancel_group_form_session()
+                    }
                     Some(LegacyCompletion::Import(intent, message)) => {
                         match intent {
-                            ImportIntent::Installed { group, entry, selected, query } if matches!(self.ui.current_window, WindowRoute::InstalledAppPicker) && self.ui.installed_app_picker.target_group_id.as_ref() == Some(&group) && self.ui.installed_app_picker.selected_entry_index == selected && self.ui.installed_app_picker.query == query && selected.and_then(|index| self.ui.installed_app_picker.entries.get(index)) == Some(&entry) => self.close_installed_app_picker(),
-                            _ => {},
+                            ImportIntent::Installed {
+                                group,
+                                entry,
+                                selected,
+                                query,
+                            } if matches!(
+                                self.ui.current_window,
+                                WindowRoute::InstalledAppPicker
+                            ) && self.ui.installed_app_picker.target_group_id.as_ref()
+                                == Some(&group)
+                                && self.ui.installed_app_picker.selected_entry_index
+                                    == selected
+                                && self.ui.installed_app_picker.query == query
+                                && selected.and_then(|index| {
+                                    self.ui.installed_app_picker.entries.get(index)
+                                }) == Some(&entry) =>
+                            {
+                                self.close_installed_app_picker()
+                            }
+                            _ => {}
                         }
                         self.log_manager.add_entry(message);
                     }
-                    _ => {},
+                    _ => {}
                 }
             } else {
-                if let Some(LegacyCompletion::Import(ImportIntent::Files(group, files), _)) = pending.completion {
+                if let Some(LegacyCompletion::Import(ImportIntent::Files(group, files), _)) =
+                    pending.completion
+                {
                     if self.ui.dropped_files.is_none() {
                         self.ui.dropped_files = Some(files);
                         self.ui.file_drop_hover_target = Some(group);
-                        self.log_manager.add_important_sticky_once("App targets were not saved. The files and target group were retained for retry.".into());
+                        let error = receipt.result.err().unwrap_or(SaveError::Recovering);
+                        self.ui.file_import_error = Some(error);
+                        self.log_manager.add_important_entry(format!("App targets were not saved ({error:?}). The files and target group were retained. Use Retry or Dismiss in Affinity groups."));
                     } else {
-                        self.log_manager.add_important_sticky_once(format!("App targets were not saved for group {}: {files:?}. A newer file selection was preserved; select these files again to retry.", group.0));
+                        self.log_manager.add_important_entry(format!("App targets were not saved for group {}: {files:?}. A newer file selection was preserved; select these files again to retry.", group.0));
                     }
                 } else {
-                    self.log_manager.add_important_sticky_once("Settings were not saved. The draft and saved values were retained.".into());
+                    self.log_manager.add_important_sticky_once(
+                        "Settings were not saved. The draft and saved values were retained.".into(),
+                    );
                 }
             }
         }
@@ -532,6 +582,7 @@ impl AppState {
         };
         self.enqueue_legacy(
             TuningRequest::SaveBase {
+                gui_import: matches!(&completion, Some(LegacyCompletion::Import(..))),
                 candidate: Box::new(candidate),
                 expected_revision,
             },
@@ -544,10 +595,18 @@ impl AppState {
         completion: Option<LegacyCompletion>,
     ) -> bool {
         let revision = self.tuning.snapshot().revision;
-        let id = match self.tuning.request(request) {
+        let id = match self.tuning.request_for_gui(request) {
             Ok(id) => id,
             Err(error) => {
-                self.log_manager.add_important_sticky_once(format!("Settings were not queued: {error:?}. Saved values and the draft were retained."));
+                if matches!(
+                    &completion,
+                    Some(LegacyCompletion::Import(ImportIntent::Files(_, _), _))
+                ) {
+                    self.ui.file_import_error = Some(error);
+                    self.log_manager.add_important_entry(format!("App targets were not queued ({error:?}). The files and target group were retained. Use Retry or Dismiss in Affinity groups."));
+                } else {
+                    self.log_manager.add_important_sticky_once(format!("Settings were not queued: {error:?}. Saved values and the draft were retained."));
+                }
                 return false;
             }
         };
@@ -634,6 +693,7 @@ impl AppState {
                             .iter()
                             .enumerate()
                             .map(|(rule_index, app)| CentralProgramSnapshot {
+                                steam_app_id: app.steam_game().map(|(id, _)| id),
                                 rule_id: self
                                     .rules
                                     .rule_id_for_index(group_index, rule_index)
@@ -641,6 +701,13 @@ impl AppState {
                                 name: app.name.clone(),
                                 launch_target_detail: app.launch_target_detail(),
                                 app_key: app.get_key(),
+                                runtime_key: self.rules.runtime_key(
+                                    app,
+                                    &self
+                                        .rules
+                                        .rule_id_for_index(group_index, rule_index)
+                                        .expect("rule identity"),
+                                ),
                             })
                             .collect(),
                     })
@@ -826,6 +893,7 @@ impl AppState {
             return;
         };
         self.ui.dropped_files = Some(paths.clone());
+        self.ui.file_import_error = None;
         self.ui.file_drop_hover_target = Some(group_id.clone());
         let intent = ImportIntent::Files(group_id, paths.clone());
         let outcome = rules::add_apps_to_group(&draft, group_index, paths);
@@ -875,6 +943,7 @@ impl AppState {
     pub fn consume_dropped_files_into_group(&mut self, group_id: GroupId) -> bool {
         let Some(files) = self.ui.dropped_files.clone() else {
             self.ui.file_drop_hover_target = None;
+            self.ui.file_import_error = None;
             return false;
         };
 
@@ -882,6 +951,7 @@ impl AppState {
             self.ui.dropped_files = None;
             self.ui.file_drop_position = None;
             self.ui.file_drop_hover_target = None;
+            self.ui.file_import_error = None;
             return false;
         }
 
@@ -889,8 +959,16 @@ impl AppState {
             self.ui.dropped_files = None;
             self.ui.file_drop_position = None;
             self.ui.file_drop_hover_target = None;
+            self.ui.file_import_error = None;
             return false;
         };
+        if matches!(
+            self.tuning_snapshot().operation,
+            crate::app::features::system_tweaks::TuningOperationState::Pending { .. }
+        ) {
+            return false;
+        }
+        self.ui.file_import_error = None;
         self.ui.file_drop_hover_target = Some(group_id.clone());
 
         let group_name = self.get_group_name(group_index).unwrap_or_default();
@@ -1254,6 +1332,18 @@ impl AppState {
             return false;
         };
 
+        if !self.ui.app_edit_state.control_choices.is_empty() {
+            return true;
+        }
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        {
+            let Ok(saved) = self.persistent_state.try_read() else {
+                return true;
+            };
+            if self.ui.app_edit_state.background_is_dirty(&saved.tuning) {
+                return true;
+            }
+        }
         rules::load_rule(&self.persistent_state, group_idx, prog_idx)
             .is_none_or(|saved| saved != current_edit)
     }
@@ -1864,6 +1954,13 @@ impl AppState {
     pub fn open_app_run_settings(&mut self, group_id: GroupId, rule_id: RuleId) {
         self.ui.app_edit_state.process_names.request_refresh();
         self.ui.app_edit_state.current_edit = None;
+        self.ui.app_edit_state.control_choices.clear();
+        self.ui.app_edit_state.background = None;
+        #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+        {
+            self.ui.app_edit_state.background_baseline = None;
+        }
+        self.ui.app_edit_state.background_error = None;
         self.ui.app_edit_state.target =
             Some(crate::app::shell::sessions::RuleEditorTarget { group_id, rule_id });
         self.ui.app_edit_state.shortcut_result = None;
@@ -1891,6 +1988,25 @@ impl AppState {
         if self.ui.app_edit_state.current_edit.is_none() {
             if let Some(original) = rules::load_rule(&self.persistent_state, group_idx, prog_idx) {
                 self.ui.app_edit_state.current_edit = Some(original);
+                #[cfg(all(target_os = "windows", feature = "windows"))]
+                {
+                    use crate::app::features::system_tweaks::{
+                        background_policy, config::TuningLoad,
+                    };
+                    let policy = self.persistent_state.read().ok().and_then(|state| {
+                        match state.tuning.decode() {
+                            TuningLoad::Off => Some(Ok(background_policy::RulePolicy::default())),
+                            TuningLoad::Known(config) => {
+                                Some(background_policy::rule_policy(&config, &target.rule_id.0))
+                            }
+                            _ => None,
+                        }
+                    });
+                    match policy {
+                        Some(Ok(policy)) => self.ui.app_edit_state.background = Some(policy),
+                        _ => self.ui.app_edit_state.background_error = Some("Background settings cannot be edited until the saved configuration is readable.".into()),
+                    }
+                }
             } else {
                 self.close_app_run_settings();
                 return false;
@@ -1918,12 +2034,16 @@ impl AppState {
                 let completion = LegacyCompletion::Rule(
                     target.clone(),
                     self.ui.app_edit_state.current_edit.clone(),
+                    self.ui.app_edit_state.background.clone(),
+                    self.ui.app_edit_state.control_choices.clone(),
                 );
                 let _ = self.enqueue_legacy(
-                    TuningRequest::EditRule {
+                    TuningRequest::EditOwnedRule {
                         group: target.group_id,
                         rule: target.rule_id,
                         app: Box::new(updated_app),
+                        background: self.ui.app_edit_state.background.clone(),
+                        choices: self.ui.app_edit_state.control_choices.clone(),
                     },
                     Some(completion),
                 );
@@ -1937,8 +2057,12 @@ impl AppState {
                 .rule_indices_for_ids(&target.group_id, &target.rule_id)
                 .and_then(|(group, rule)| self.get_group_program(group, rule))
                 .map(|app| app.launch_target_label());
-            let completion =
-                LegacyCompletion::Rule(target.clone(), self.ui.app_edit_state.current_edit.clone());
+            let completion = LegacyCompletion::Rule(
+                target.clone(),
+                self.ui.app_edit_state.current_edit.clone(),
+                self.ui.app_edit_state.background.clone(),
+                self.ui.app_edit_state.control_choices.clone(),
+            );
             if self.enqueue_legacy(
                 TuningRequest::RemoveRule {
                     group: target.group_id,
@@ -2224,7 +2348,15 @@ impl AppState {
     }
 
     fn reset_app_run_settings_session(&mut self) {
+        self.ui.app_edit_state.steam_picker.reset_view();
         self.ui.app_edit_state.current_edit = None;
+        self.ui.app_edit_state.control_choices.clear();
+        self.ui.app_edit_state.background = None;
+        #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
+        {
+            self.ui.app_edit_state.background_baseline = None;
+        }
+        self.ui.app_edit_state.background_error = None;
         self.ui.app_edit_state.target = None;
         self.ui.app_edit_state.shortcut_result = None;
     }
@@ -2232,6 +2364,102 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn s116_gui_save_completion_survives_unrelated_request_churn() {
+        use crate::app::features::system_tweaks::{
+            service::{SavedState, StatePersistence},
+            SaveError, TuningOperationState, TuningRequest, TuningRuntime,
+        };
+        struct FirstSave {
+            fail: bool,
+        }
+        impl StatePersistence for FirstSave {
+            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                if std::mem::take(&mut self.fail) {
+                    Err(SaveError::Storage)
+                } else {
+                    Ok(SavedState::Unavailable)
+                }
+            }
+        }
+        let wait = |app: &AppState| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while matches!(
+                app.tuning_snapshot().operation,
+                TuningOperationState::Pending { .. }
+            ) {
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        for fail in [true, false] {
+            let mut app = sample_state();
+            let original = app.persistent_state.read().unwrap().clone();
+            let runtime = TuningRuntime::start(
+                crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                    .headless(original.clone(), Box::new(FirstSave { fail }))
+                    .without_modules(),
+                app.runtime.running_apps_handle(),
+            );
+            app.replace_tuning_for_test(runtime, Default::default());
+            let mut draft = original.groups[0].programs[0].clone();
+            draft.name = "GUI draft".into();
+            edit_first_rule(&mut app, draft);
+            app.commit_current_app_edit_session();
+            wait(&app);
+            // Keep the GUI unpolled while other clients exceed receipt retention.
+            for index in 0..65 {
+                let latest = app.tuning_snapshot();
+                let mut candidate = (*latest.state).clone();
+                candidate.theme_index = index % 3;
+                app.tuning
+                    .request(TuningRequest::SaveBase {
+                        gui_import: false,
+                        candidate: Box::new(candidate),
+                        expected_revision: latest.revision,
+                    })
+                    .unwrap();
+                wait(&app);
+            }
+            if !fail {
+                let latest = app.tuning_snapshot();
+                app.tuning
+                    .request(TuningRequest::SaveBase {
+                        gui_import: false,
+                        candidate: Box::new((*latest.state).clone()),
+                        expected_revision: latest.revision + 1,
+                    })
+                    .unwrap();
+                wait(&app);
+            }
+            let latest = app.tuning_snapshot();
+            assert_eq!(
+                app.tuning.request_for_gui(TuningRequest::SaveBase {
+                    gui_import: false,
+                    candidate: Box::new((*latest.state).clone()),
+                    expected_revision: latest.revision,
+                }),
+                Err(SaveError::Pending),
+                "An unconsumed GUI result cannot be replaced by another GUI request"
+            );
+            app.poll_tuning();
+            assert_eq!(
+                app.ui.app_edit_state.current_edit.is_some(),
+                fail,
+                "Only the GUI request's own result may close its draft"
+            );
+            assert_eq!(
+                app.get_group_program(0, 0).unwrap().name,
+                if fail {
+                    original.groups[0].programs[0].name.as_str()
+                } else {
+                    "GUI draft"
+                }
+            );
+            assert!(app.pending_legacy.is_none());
+        }
+    }
+
     #[test]
     fn followup_classic_save_reports_acceptance_before_gated_completion() {
         use crate::app::features::system_tweaks::{
@@ -2282,6 +2510,7 @@ mod tests {
             candidate.theme_index = 2;
             let accepted = app.enqueue_legacy(
                 super::TuningRequest::SaveBase {
+                    gui_import: false,
                     candidate: Box::new(candidate),
                     expected_revision: 0,
                 },
@@ -2761,6 +2990,73 @@ mod tests {
 
     #[cfg(all(target_os = "windows", feature = "windows"))]
     #[test]
+    fn s92_background_only_draft_blocks_shortcut_until_saved() {
+        let mut app = sample_state();
+        let group = group_id(&app, 0);
+        let rule = rule_id(&app, 0, 0);
+        app.open_app_run_settings(group, rule);
+        assert!(app.ensure_current_edit_loaded());
+        app.ui.app_edit_state.background.as_mut().unwrap().enabled = true;
+        assert!(app.is_current_app_edit_dirty());
+        assert!(!app.current_app_edit_shortcut_status().enabled);
+        let mut platform = FakeShortcutPlatform::supported();
+        assert_eq!(
+            app.create_shortcut_for_current_rule_with_platform(&mut platform),
+            Err(CreateRuleShortcutError::SaveChangesFirst)
+        );
+        assert!(platform.create_calls.is_empty());
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn s92_background_dirty_cache_refreshes_on_saved_document_and_rule_changes() {
+        use crate::app::features::system_tweaks::{
+            background_policy::{put_rule_policy, RulePolicy},
+            config::{TuningConfig, TuningEnvelope},
+            tweaks::background_workload::GameRule,
+        };
+        let mut app = sample_state();
+        let group = group_id(&app, 0);
+        let rule = rule_id(&app, 0, 0);
+        app.open_app_run_settings(group.clone(), rule.clone());
+        assert!(app.ensure_current_edit_loaded());
+        assert!(!app.is_current_app_edit_dirty());
+        app.ui.app_edit_state.background.as_mut().unwrap().enabled = true;
+        assert!(app.is_current_app_edit_dirty());
+        let mut saved = TuningConfig::default();
+        put_rule_policy(
+            &mut saved,
+            GameRule {
+                group: group.0,
+                rule: rule.0,
+            },
+            &RulePolicy {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let envelope = TuningEnvelope::from_config(&saved).unwrap();
+        assert!(envelope.same_document(&envelope.clone()));
+        assert!(!envelope.same_document(&TuningEnvelope::from_config(&saved).unwrap()));
+        let policy = super::super::super::features::system_tweaks::background_policy::rule_policy(
+            &saved,
+            &app.ui.app_edit_state.target.as_ref().unwrap().rule_id.0,
+        )
+        .unwrap();
+        app.ui.app_edit_state.background = Some(policy);
+        app.persistent_state.write().unwrap().tuning = envelope;
+        assert!(!app.is_current_app_edit_dirty());
+        app.ui.app_edit_state.target.as_mut().unwrap().rule_id =
+            crate::app::shared::ids::RuleId("another-rule".into());
+        let document = app.persistent_state.read().unwrap().tuning.clone();
+        assert!(app.ui.app_edit_state.background_is_dirty(&document));
+        app.close_app_run_settings();
+        assert!(app.ui.app_edit_state.background_baseline.is_none());
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
     fn test_create_shortcut_for_current_rule_dirty_draft_does_not_call_platform() {
         let mut app = sample_state();
         let group_id = group_id(&app, 0);
@@ -2966,6 +3262,28 @@ mod tests {
             .core_selection
             .iter()
             .all(|selected| !selected));
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn background_rule_cancel_discards_both_drafts_and_reopens_default_off() {
+        let mut app = sample_state();
+        let group = group_id(&app, 0);
+        let rule = rule_id(&app, 0, 0);
+        let before = serde_json::to_value(&*app.persistent_state.read().unwrap()).unwrap();
+        app.open_app_run_settings(group.clone(), rule.clone());
+        assert!(app.ensure_current_edit_loaded());
+        assert!(!app.ui.app_edit_state.background.as_ref().unwrap().enabled);
+        app.ui.app_edit_state.background.as_mut().unwrap().enabled = true;
+        app.ui.app_edit_state.current_edit.as_mut().unwrap().name = "Unsaved app".into();
+        app.close_app_run_settings();
+        assert_eq!(
+            serde_json::to_value(&*app.persistent_state.read().unwrap()).unwrap(),
+            before
+        );
+        app.open_app_run_settings(group, rule);
+        assert!(app.ensure_current_edit_loaded());
+        assert!(!app.ui.app_edit_state.background.as_ref().unwrap().enabled);
     }
 
     #[test]
@@ -3845,6 +4163,7 @@ mod tests {
             candidate.mark_ready_for_current_schema_save(app.rules.to_persisted_identities());
             app.request_tuning(
                 crate::app::features::system_tweaks::TuningRequest::SaveBase {
+                    gui_import: false,
                     candidate: Box::new(candidate),
                     expected_revision: app.tuning_adopted_revision,
                 },
@@ -3909,6 +4228,82 @@ mod tests {
 
     #[cfg(all(target_os = "windows", feature = "windows"))]
     #[test]
+    #[ignore = "Explicit read-only local shortcut/state characterization; persistence is isolated"]
+    fn s104_local_steam_import_characterization() {
+        use crate::app::features::system_tweaks::{
+            service::SavedState, SaveError, StatePersistence,
+        };
+        struct Disk(std::path::PathBuf);
+        impl StatePersistence for Disk {
+            fn save(&mut self, state: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                state
+                    .try_save_to_path(&self.0)
+                    .map_err(|_| SaveError::Storage)?;
+                Ok(SavedState::Unavailable)
+            }
+        }
+        let source = std::env::var_os("CPU_AFFINITY_IMPORT_STATE").expect("explicit input state");
+        let shortcut = std::env::var_os("CPU_AFFINITY_IMPORT_SHORTCUT").expect("explicit shortcut");
+        let temp = std::env::temp_dir().join(format!(
+            "cpu-affinity-import-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp).unwrap();
+        let copy = temp.join("state.json");
+        std::fs::write(&copy, std::fs::read(&source).unwrap()).unwrap();
+        let state = AppStateStorage::load_from_path(&copy);
+        assert!(
+            !state.save_blocked(),
+            "Real file loader blocked current supported state"
+        );
+        let count = state.groups[0].programs.len();
+        let mut app = AppState::new_for_test(Arc::new(RwLock::new(state)), 20);
+        let state = app.persistent_state.read().unwrap().clone();
+        let runtime = crate::app::features::system_tweaks::TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(state, Box::new(Disk(copy.clone()))),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        let group = group_id(&app, 0);
+        app.add_selected_files_to_group(group.clone(), vec![shortcut.clone().into()]);
+        await_import_completion(&mut app);
+        assert!(
+            matches!(
+                app.tuning_snapshot().operation,
+                crate::app::features::system_tweaks::TuningOperationState::Idle
+            ),
+            "{:?}",
+            app.tuning_snapshot().operation
+        );
+        let saved = AppStateStorage::load_from_path(&copy);
+        assert!(!saved.save_blocked());
+        assert_eq!(saved.groups[0].programs.len(), count + 1);
+        assert!(saved.groups[0]
+            .programs
+            .last()
+            .unwrap()
+            .steam_game()
+            .is_some());
+        app.add_selected_files_to_group(group, vec![shortcut.into()]);
+        await_import_completion(&mut app);
+        assert_eq!(
+            app.persistent_state.read().unwrap().groups[0]
+                .programs
+                .len(),
+            count + 1
+        );
+        drop(app);
+        std::fs::remove_file(&copy).unwrap();
+        std::fs::remove_dir(&temp).unwrap();
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
     fn import_retention_dropped_pending_retry() {
         let mut app = sample_state();
         let (_fail, gate) = install_import_persistence(&mut app, true);
@@ -3961,6 +4356,32 @@ mod tests {
             WindowRoute::Groups(GroupRoute::List)
         ));
         assert_one_import_saved(&app, &group, &old_rule);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    #[test]
+    fn s104_failed_import_reports_the_actual_refusal_once() {
+        let mut app = sample_state();
+        let (fail, _) = install_import_persistence(&mut app, false);
+        let group = group_id(&app, 0);
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.add_selected_files_to_group(group, vec![r"C:\Import-test.exe".into()]);
+        await_import_completion(&mut app);
+        let failures: Vec<_> = app
+            .log_manager
+            .entries
+            .iter()
+            .filter(|e| e.message.contains("not saved"))
+            .collect();
+        assert_eq!(
+            failures.len(),
+            1,
+            "One failed operation produces one diagnostic"
+        );
+        assert!(
+            failures[0].message.contains("Storage"),
+            "The refusal kind must be visible"
+        );
     }
 
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -4346,5 +4767,48 @@ mod tests {
 
         assert!(!app.start_windows_event_log_scan_after_shell_gate());
         assert!(!app.windows_event_log_worker_is_active());
+    }
+    #[test]
+    fn s110_editor_cancel_and_save_keep_process_lists_and_owner_intent_separate() {
+        use crate::app::features::execution::control::{
+            policy::{Choice, Policy},
+            tests::{fixture, observe},
+        };
+        let state = fixture();
+        let original = serde_json::to_value(&state.groups).unwrap();
+        let mut app = AppState::new_for_test(Arc::new(RwLock::new(state.clone())), 4);
+        let view = app.runtime.control_handle().view();
+        let target = &view.rules[1];
+        app.open_app_run_settings(target.group.clone(), target.rule.clone());
+        app.ensure_current_edit_loaded();
+        observe(
+            &app.runtime.control_handle(),
+            &state,
+            &[0, 1],
+            1,
+            r"C:\Shared\helper.exe",
+        );
+        app.ui.app_edit_state.control_choices.push(Choice {
+            image: r"C:\Shared\helper.exe".into(),
+            owner: target.rule.clone(),
+        });
+        assert!(app.is_current_app_edit_dirty());
+        app.close_app_run_settings();
+        assert!(app.ui.app_edit_state.control_choices.is_empty());
+        assert!(Policy::read(&app.persistent_state.read().unwrap())
+            .unwrap()
+            .choices
+            .is_empty());
+        app.open_app_run_settings(target.group.clone(), target.rule.clone());
+        app.ensure_current_edit_loaded();
+        app.ui.app_edit_state.control_choices.push(Choice {
+            image: r"C:\Shared\helper.exe".into(),
+            owner: target.rule.clone(),
+        });
+        app.commit_current_app_edit_session();
+        app.wait_for_test_save();
+        let saved = app.persistent_state.read().unwrap();
+        assert_eq!(serde_json::to_value(&saved.groups).unwrap(), original);
+        assert_eq!(Policy::read(&saved).unwrap().choices[0].owner, target.rule);
     }
 }

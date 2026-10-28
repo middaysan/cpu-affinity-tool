@@ -113,6 +113,8 @@ pub(super) fn command_label(tool: &str) -> &'static str {
         "read_crash_report" => "Read crash report",
         "list_groups" => "List affinity groups",
         "list_rules" => "List saved apps",
+        "read_process_control" => "Read shared-process control",
+        "choose_process_owner" => "Choose process controller",
         "create_group" => "Create affinity group",
         "update_group" => "Change affinity group",
         "delete_group" => "Remove affinity group",

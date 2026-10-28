@@ -14,6 +14,11 @@ pub enum LaunchTarget {
     Installed {
         aumid: String,
     },
+    Steam {
+        app_id: u32,
+        #[serde(default)]
+        executable: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -28,6 +33,16 @@ struct AppRuntimeKeyPayload {
 pub struct AppRuntimeKey(String);
 
 impl AppRuntimeKey {
+    pub(crate) fn scoped_to_rule(&self, rule: &crate::app::shared::ids::RuleId) -> Self {
+        Self(serde_json::to_string(&(self.as_str(), &rule.0)).expect("runtime rule key"))
+    }
+    pub(crate) fn namespace_equivalent(
+        &self,
+        other: &Self,
+        rule: &crate::app::shared::ids::RuleId,
+    ) -> bool {
+        self == other || self.scoped_to_rule(rule) == *other || other.scoped_to_rule(rule) == *self
+    }
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -79,6 +94,9 @@ pub struct AppToRun {
     /// Additional process names to track (e.g. "discord.exe")
     #[serde(default)]
     pub additional_processes: Vec<String>,
+    /// Import provenance for built-in app helpers; unknown data stays inert and preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_process_binding: Option<serde_json::Value>,
     /// Whether descendants of verified managed processes receive this rule's settings.
     #[serde(default = "default_manage_descendants")]
     pub manage_descendants: bool,
@@ -96,6 +114,8 @@ struct AppToRunV5 {
     args: Vec<String>,
     #[serde(default)]
     additional_processes: Vec<String>,
+    #[serde(default, deserialize_with = "read_binding")]
+    builtin_process_binding: Option<serde_json::Value>,
     #[serde(default = "default_manage_descendants")]
     manage_descendants: bool,
     autorun: bool,
@@ -111,6 +131,8 @@ struct AppToRunV4 {
     bin_path: PathBuf,
     #[serde(default)]
     additional_processes: Vec<String>,
+    #[serde(default, deserialize_with = "read_binding")]
+    builtin_process_binding: Option<serde_json::Value>,
     #[serde(default = "default_manage_descendants")]
     manage_descendants: bool,
     autorun: bool,
@@ -124,6 +146,13 @@ enum AppToRunSerde {
     V4(AppToRunV4),
 }
 
+fn read_binding<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    // Explicit null is malformed evidence, not permission to use global helper matching.
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
 impl<'de> Deserialize<'de> for AppToRun {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -135,6 +164,7 @@ impl<'de> Deserialize<'de> for AppToRun {
                 launch_target: v5.launch_target,
                 args: v5.args,
                 additional_processes: v5.additional_processes,
+                builtin_process_binding: v5.builtin_process_binding,
                 manage_descendants: v5.manage_descendants,
                 autorun: v5.autorun,
                 priority: v5.priority,
@@ -147,6 +177,7 @@ impl<'de> Deserialize<'de> for AppToRun {
                 },
                 args: v4.args,
                 additional_processes: v4.additional_processes,
+                builtin_process_binding: v4.builtin_process_binding,
                 manage_descendants: v4.manage_descendants,
                 autorun: v4.autorun,
                 priority: v4.priority,
@@ -179,10 +210,21 @@ impl AppToRun {
             },
             args,
             additional_processes: Vec::new(),
+            builtin_process_binding: None,
             manage_descendants: false,
             autorun,
             priority,
         };
+        if cfg!(target_os = "windows")
+            && app
+                .dropped_path()
+                .and_then(Path::extension)
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("url") || ext.eq_ignore_ascii_case("lnk")
+                })
+        {
+            app.convert_steam_shortcut();
+        }
         app.ensure_primary_process_name_tracked();
         app
     }
@@ -198,6 +240,7 @@ impl AppToRun {
             launch_target: LaunchTarget::Installed { aumid },
             args: Vec::new(),
             additional_processes: Vec::new(),
+            builtin_process_binding: None,
             manage_descendants: false,
             autorun,
             priority,
@@ -207,28 +250,28 @@ impl AppToRun {
     pub fn bin_path(&self) -> Option<&Path> {
         match &self.launch_target {
             LaunchTarget::Path { bin_path, .. } => Some(bin_path.as_path()),
-            LaunchTarget::Installed { .. } => None,
+            LaunchTarget::Installed { .. } | LaunchTarget::Steam { .. } => None,
         }
     }
 
     pub fn bin_path_mut(&mut self) -> Option<&mut PathBuf> {
         match &mut self.launch_target {
             LaunchTarget::Path { bin_path, .. } => Some(bin_path),
-            LaunchTarget::Installed { .. } => None,
+            LaunchTarget::Installed { .. } | LaunchTarget::Steam { .. } => None,
         }
     }
 
     pub fn dropped_path(&self) -> Option<&Path> {
         match &self.launch_target {
             LaunchTarget::Path { dropped_path, .. } => Some(dropped_path.as_path()),
-            LaunchTarget::Installed { .. } => None,
+            LaunchTarget::Installed { .. } | LaunchTarget::Steam { .. } => None,
         }
     }
 
     pub fn installed_aumid(&self) -> Option<&str> {
         match &self.launch_target {
             LaunchTarget::Installed { aumid } => Some(aumid.as_str()),
-            LaunchTarget::Path { .. } => None,
+            LaunchTarget::Path { .. } | LaunchTarget::Steam { .. } => None,
         }
     }
 
@@ -240,6 +283,39 @@ impl AppToRun {
         matches!(self.launch_target, LaunchTarget::Installed { .. })
     }
 
+    pub fn steam_game(&self) -> Option<(u32, Option<&Path>)> {
+        match &self.launch_target {
+            LaunchTarget::Steam { app_id, executable } => Some((*app_id, executable.as_deref())),
+            _ => None,
+        }
+    }
+
+    pub fn steam_shortcut_id(&self) -> Option<u32> {
+        if !self
+            .bin_path()?
+            .file_name()?
+            .eq_ignore_ascii_case("steam.exe")
+        {
+            return None;
+        }
+        os_api::steam::parse_launch_args(&self.args)
+    }
+
+    pub fn convert_steam_shortcut(&mut self) -> bool {
+        let Some(app_id) = self.steam_shortcut_id() else {
+            return false;
+        };
+        self.launch_target = LaunchTarget::Steam {
+            app_id,
+            executable: None,
+        };
+        self.args.clear();
+        self.additional_processes
+            .retain(|name| normalize_process_name(name) != "steam");
+        self.manage_descendants = false;
+        true
+    }
+
     pub fn is_args_editable(&self) -> bool {
         self.is_path_target()
     }
@@ -248,6 +324,7 @@ impl AppToRun {
         match &self.launch_target {
             LaunchTarget::Path { bin_path, .. } => bin_path.display().to_string(),
             LaunchTarget::Installed { aumid } => format!("Installed app ({aumid})"),
+            LaunchTarget::Steam { app_id, .. } => format!("Steam game · App ID {app_id}"),
         }
     }
 
@@ -262,6 +339,13 @@ impl AppToRun {
                 self.dropped_path().unwrap_or(dropped_path).display()
             ),
             LaunchTarget::Installed { aumid } => format!("Installed app AUMID: {aumid}"),
+            LaunchTarget::Steam { app_id, executable } => format!(
+                "Steam game {app_id}; {}",
+                executable
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "automatic game process detection".into())
+            ),
         }
     }
 
@@ -356,6 +440,7 @@ impl AppToRun {
             LaunchTarget::Installed { aumid } => {
                 format!("Installed({aumid}) P({:?})", self.priority)
             }
+            LaunchTarget::Steam { app_id, .. } => format!("Steam({app_id}) P({:?})", self.priority),
         }
     }
 
@@ -363,7 +448,60 @@ impl AppToRun {
         match &self.launch_target {
             LaunchTarget::Path { bin_path, .. } => normalized_path_identity(bin_path),
             LaunchTarget::Installed { aumid } => aumid.clone(),
+            LaunchTarget::Steam { app_id, executable } => format!(
+                "{app_id}:{}",
+                executable
+                    .as_deref()
+                    .map(normalized_path_identity)
+                    .unwrap_or_default()
+            ),
         }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod steam_shortcut_regressions {
+    use super::*;
+
+    #[test]
+    fn steam_shortcut_tracks_the_game_not_the_protocol_handler() {
+        let app = AppToRun::new_path(
+            PathBuf::from(r"C:\Games\WARDOGS.url"),
+            vec!["steam://rungameid/1867240".into()],
+            PathBuf::from(r"C:\Program Files (x86)\Steam\steam.exe"),
+            PriorityClass::Normal,
+            false,
+        );
+        assert!(
+            app.primary_process_name().is_none(),
+            "Steam is not the game"
+        );
+        assert!(app.additional_processes.is_empty());
+        assert!(!app.is_args_editable());
+        assert!(app.launch_target_label().contains("1867240"));
+    }
+
+    #[test]
+    fn steam_selection_survives_roundtrip_without_rewriting_legacy_rules() {
+        let mut app = AppToRun::new_path(
+            PathBuf::from(r"C:\game.exe"),
+            vec![],
+            PathBuf::from(r"C:\game.exe"),
+            PriorityClass::Normal,
+            false,
+        );
+        app.launch_target = LaunchTarget::Steam {
+            app_id: 570,
+            executable: Some(PathBuf::from(r"C:\Games\Dota\dota2.exe")),
+        };
+        let copy: AppToRun = serde_json::from_str(&serde_json::to_string(&app).unwrap()).unwrap();
+        assert_eq!(copy, app);
+        let legacy = serde_json::json!({"name":"Old game","launch_target":{"Path":{"dropped_path":"C:\\old.url","bin_path":"C:\\Steam\\steam.exe"}},"args":["steam://rungameid/570"],"additional_processes":["steam.exe"],"priority":"Normal","autorun":false});
+        let mut legacy: AppToRun = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.is_path_target());
+        assert!(legacy.convert_steam_shortcut());
+        assert!(legacy.additional_processes.is_empty());
+        assert!(legacy.steam_game().is_some());
     }
 }
 
@@ -424,7 +562,9 @@ fn normalize_windows_path_text(path: &Path) -> String {
 
 impl From<&AppToRun> for AppRuntimeKey {
     fn from(app: &AppToRun) -> Self {
-        let target_kind = if app.is_installed_target() {
+        let target_kind = if app.steam_game().is_some() {
+            "steam"
+        } else if app.is_installed_target() {
             "installed"
         } else {
             "path"

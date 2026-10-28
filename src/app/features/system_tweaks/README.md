@@ -11,6 +11,7 @@ Each adapter supplies `ModuleEditor::platform_support()`. The map separates Wind
 | Tweak | Windows 10 | Windows 11 |
 | --- | --- | --- |
 | Performance on AC power | Unavailable | Available, subject to native API support |
+| Core parking | Unavailable | All cores; detected class-only control is visibly unavailable |
 | Game Mode | 1703+ | Available |
 | Background clips | Available | Available |
 | Windowed games | Unavailable | 22H2+ |
@@ -34,8 +35,27 @@ readiness result through `Module::observe_tweak`; display refresh uses one mode
 inventory instead of repeated driver tests. Apply and Undo retain independent
 native validation and never use a UI snapshot as mutation authority.
 
-Session observations run only for enabled non-manual associations or retained
-Session owners, once per second and after accepted requests. Manual-only and
+Core parking has a separate manual adapter and reuses the legacy native CPU AC
+field boundary, so equal/conflicting legacy requests retain the same resource
+identity. One combined observation publishes bounded immutable option data with
+the card. The GUI never queries native topology; Apply rechecks plan/mode and
+class identity before persisting exact parking-only keys. Class 0's shared
+minimum is not presented as an E-only switch. Separate-class activation is
+rejected at the configuration boundary, not just disabled in the GUI: actual
+class-1 policy readback did not establish functional unparking on the test host.
+Uncertain class mappings and
+missing policy fields remain unavailable. Recovery uses captured keys rather
+than rediscovering a new active plan. The original absent/explicit distinction
+and conditional restoration are unchanged.
+
+Session observations run only for enabled non-manual associations, enabled
+background policies selecting a current saved EXE, or retained session owners,
+once per second and after accepted requests. Deleted internal per-rule profiles
+are reclaimed on explicit saves after recovery releases them; custom and legacy
+profiles remain intact. Optional saved-EXE candidates reuse exact PID facts and
+cannot invalidate reliable tracked/foreground observations through an access or
+exit race. Their desktop logon is verified through the existing Explorer/UAC
+boundary. Manual-only and
 undone configurations perform no session enumeration or repeated saved-state
 verification on queue timeouts. Inspection, confirmation expiry and shutdown
 keep their independent safety checks.

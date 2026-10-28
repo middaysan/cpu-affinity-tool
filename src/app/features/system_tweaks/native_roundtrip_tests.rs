@@ -35,6 +35,7 @@ use std::{
 
 type TestResult<T = ()> = Result<T, String>;
 static NATIVE_SERIAL: Mutex<()> = Mutex::new(());
+mod core_parking;
 /// Test-only legacy fixture: retired CPU options remain verifiable for recovery.
 fn legacy_cpu_configuration(
     module: &dyn Module,

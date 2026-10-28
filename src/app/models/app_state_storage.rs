@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Current version of the application state schema.
-pub const CURRENT_APP_STATE_VERSION: u32 = 11;
+pub const CURRENT_APP_STATE_VERSION: u32 = 14;
 
 pub(crate) const fn default_windows_event_log_diagnostics_enabled() -> bool {
     true
@@ -86,6 +86,8 @@ pub struct AppStateStorage {
 enum SaveAdmission {
     #[default]
     Writable,
+
+    RecoveryBackupRequired,
 
     Blocked {
         raw: Option<Arc<str>>,
@@ -228,6 +230,17 @@ impl Serialize for AppStateStorage {
 }
 
 impl AppStateStorage {
+    pub(crate) fn process_control_raw(&self) -> Option<&RawValue> {
+        self.extensions
+            .get("process_control")
+            .map(|value| value.as_ref())
+    }
+    pub(crate) fn set_process_control_raw(&mut self, raw: String) {
+        self.extensions.insert(
+            "process_control".into(),
+            Arc::from(RawValue::from_string(raw).expect("encoded process control")),
+        );
+    }
     pub(crate) const fn normalize_cpu_load_history_seconds(seconds: u32) -> u32 {
         match seconds {
             30 | 300 | 1800 => seconds,
@@ -236,7 +249,7 @@ impl AppStateStorage {
     }
 
     pub(crate) fn save_blocked(&self) -> bool {
-        matches!(self.save_admission, SaveAdmission::Blocked { .. })
+        !matches!(self.save_admission, SaveAdmission::Writable)
             || self.version > CURRENT_APP_STATE_VERSION
             || matches!(
                 self.tuning.decode(),
@@ -301,9 +314,51 @@ impl AppStateStorage {
                             return blocked;
                         }
                     };
+                    let control_present = raw_fields.0.contains_key("process_control");
+                    if control_present
+                        && !matches!(
+                            selected,
+                            migrations::VersionSelection::Known(14..=CURRENT_APP_STATE_VERSION)
+                        )
+                    {
+                        let mut blocked = schema_refresh::build_default_state();
+                        blocked.block_save(Some(Arc::from(data.as_str())), data.len());
+                        return blocked;
+                    }
+                    let builtin_present = raw_fields
+                        .0
+                        .get("groups")
+                        .and_then(|groups| {
+                            serde_json::from_str::<serde_json::Value>(groups.get()).ok()
+                        })
+                        .and_then(|groups| groups.as_array().cloned())
+                        .is_some_and(|groups| {
+                            groups.iter().any(|group| {
+                                group
+                                    .get("programs")
+                                    .and_then(serde_json::Value::as_array)
+                                    .is_some_and(|apps| {
+                                        apps.iter()
+                                            .any(|app| app.get("builtin_process_binding").is_some())
+                                    })
+                            })
+                        });
+                    if builtin_present
+                        && !matches!(
+                            selected,
+                            migrations::VersionSelection::Known(13..=CURRENT_APP_STATE_VERSION)
+                        )
+                    {
+                        let mut blocked = schema_refresh::build_default_state();
+                        blocked.block_save(Some(Arc::from(data.as_str())), data.len());
+                        return blocked;
+                    }
                     let tuning_present = raw_fields.0.contains_key("tuning");
                     let old_tuning = tuning_present
-                        && !matches!(selected, migrations::VersionSelection::Known(11));
+                        && !matches!(
+                            selected,
+                            migrations::VersionSelection::Known(11..=CURRENT_APP_STATE_VERSION)
+                        );
                     if let Some(mut state) = migrations::load_from_data(data, path) {
                         if old_tuning
                             || matches!(
@@ -315,7 +370,7 @@ impl AppStateStorage {
                         }
                         return state;
                     }
-                    if tuning_present {
+                    if tuning_present || builtin_present || control_present {
                         // Invalid unrelated base fields cannot erase any tuning
                         // evidence merely because the full typed decode failed.
                         let mut blocked = schema_refresh::build_default_state();
@@ -326,13 +381,18 @@ impl AppStateStorage {
             }
         }
         let mut default_state = schema_refresh::build_default_state();
+        let mut backup_secured = false;
         let recovered = (|| -> Result<(), Box<dyn std::error::Error>> {
             let serialized = storage_io::serialize_state_bounded(&default_state)?;
             storage_io::backup_state_file_with_filesystem(path, filesystem)?;
+            backup_secured = true;
             storage_io::publish_state_bytes_with_filesystem(&serialized, path, filesystem)
         })();
         if let Err(error) = recovered {
             eprintln!("ERROR: Failed to recover unreadable state: {error}");
+            if !backup_secured {
+                default_state.save_admission = SaveAdmission::RecoveryBackupRequired;
+            }
         }
         default_state.loaded_version = default_state.version;
         default_state
@@ -355,6 +415,9 @@ impl AppStateStorage {
         path: &Path,
         filesystem: &mut impl storage_io::StateFilesystem,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if matches!(self.save_admission, SaveAdmission::RecoveryBackupRequired) {
+            return Err("Recovery backup could not be secured; original settings are retained. Resolve the storage error and restart before saving.".into());
+        }
         if let SaveAdmission::Blocked { raw, size } = &self.save_admission {
             let refusal = if raw.is_some() {
                 format!("state evidence is blocked ({size} bytes); save refused")

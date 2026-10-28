@@ -1,7 +1,7 @@
 //! Advertised wire contracts. Built once with the tool catalog, never per sample.
 use serde_json::{json, Value};
 
-pub(super) const RULE_UPDATE_GUIDE: &str = "update_rule is a complete replacement, NOT a patch. First read list_rules at the current configuration_revision. From the selected row's app, preserve name, args, autorun, priority and manage_descendants; map app.additional_processes to rule.tracked_process_names. For app.launch_target.Path use bin_path as rule.path (not dropped_path); for Installed use aumid as rule.aumid. Send exactly one target and all six editable fields, changing only what the user requested. tracked_process_names and args replace entire lists: append to the existing list to add an item, and use [] only to intentionally clear it. Explicit false disables a boolean. Omitted fields are rejected before admission. Never silently downgrade an unsupported legacy priority. Use the returned configuration_revision as expected_revision, poll get_operation to completion and read list_rules again to verify the change; on revision conflict reread and rebuild the replacement.";
+pub(super) const RULE_UPDATE_GUIDE: &str = "update_rule is a complete replacement, NOT a patch. First read list_rules at the current configuration_revision. Process-control preferences are separate: inspect read_process_control and use choose_process_owner only when the user requests a transfer; do not remove tracked names to resolve ownership. Built-in helper provenance is read-only and preserved by the service; do not submit it as an editable field. An empty tracked list does not refill defaults. From the selected row's app, preserve name, args, autorun, priority and manage_descendants; map app.additional_processes to rule.tracked_process_names. For app.launch_target.Path use bin_path as rule.path (not dropped_path); for Installed use aumid as rule.aumid; for Steam use app_id as rule.steam_app_id and always preserve executable as rule.steam_executable (path or explicit null for automatic game detection). Send exactly one target and all six editable fields, changing only what the user requested. tracked_process_names and args replace entire lists: append to the existing list to add an item, and use [] only to intentionally clear it. Explicit false disables a boolean. Omitted fields are rejected before admission. Never silently downgrade an unsupported legacy priority. Use the returned configuration_revision as expected_revision, poll get_operation to completion and read list_rules again to verify the change; on revision conflict reread and rebuild the replacement.";
 
 pub(super) fn describe_input(tool: &str, schema: &mut Value) {
     fn walk(tool: &str, schema: &mut Value) {
@@ -28,7 +28,10 @@ pub(super) fn describe_input(tool: &str, schema: &mut Value) {
                     "catalog_id" => "Opaque current ID from list_installed_apps; resolve it before creating a rule. Catalog changes can invalidate it.",
                     "report_id" => "Opaque validated ID from list_crash_reports. Arbitrary filesystem paths are not accepted.",
                     "name" => "User-visible name. When updating a rule, preserve the existing name unless renaming was requested.",
+                    "image" => "Exact executable image from read_process_control. The choice is not a basename-wide grant and does not authorize arbitrary process control.",
                     "path" => "Absolute .exe launch path, not a shortcut or shell command. In saved rules specify exactly one path or aumid; when replacing map launch_target.Path.bin_path here.",
+                    "steam_app_id" => "Native Steam game AppID. Mutually exclusive with path/aumid. Launches through Steam; tracking, CPU/RAM and scheduling follow the game instead of the Steam client. Extra args are not supported.",
+                    "steam_executable" => "Optional exact game executable path. Explicit null selects automatic detection. Preserve this field on Steam rule replacement; do not substitute steam.exe or a launcher.",
                     "aumid" => "Installed-app AUMID, mutually exclusive with path. Installed apps do not accept command-line arguments or inherited output capture.",
                     "args" => "Separate literal argument strings, never a shell command. Full list replacement; [] intentionally clears it. Defaults to [] only on create_rule/launch, never on update_rule.",
                     "tracked_process_names" => "Executable basenames such as game.exe/helper.exe, without directories or wildcards. Replaces the ENTIRE saved list; preserve existing names when adding one. Map from list_rules.app.additional_processes. [] intentionally clears tracking names.",
@@ -93,7 +96,10 @@ pub(super) fn describe_input(tool: &str, schema: &mut Value) {
         if tool == "update_rule" {
             rule["required"] = json!(super::services::REPLACEMENT_RULE_FIELDS);
         }
-        rule["oneOf"] = json!([{"required":["path"],"not":{"required":["aumid"]}}, {"required":["aumid"],"not":{"required":["path"]}}]);
+        rule["oneOf"] = json!([{"required":["path"],"not":{"anyOf":[{"required":["aumid"]},{"required":["steam_app_id"]},{"required":["steam_executable"]}]}}, {"required":["aumid"],"not":{"anyOf":[{"required":["path"]},{"required":["steam_app_id"]},{"required":["steam_executable"]}]}}, {"required":["steam_app_id"],"not":{"anyOf":[{"required":["path"]},{"required":["aumid"]}]}}]);
+        if tool == "update_rule" {
+            rule["oneOf"][2]["required"] = json!(["steam_app_id", "steam_executable"]);
+        }
     }
 }
 
@@ -308,14 +314,16 @@ fn tweaks() -> Value {
     ])
 }
 fn saved_app() -> Value {
-    object(&[
+    let mut schema = object(&[
     ("name",text("Saved app name; map to rule.name.")),
-    ("launch_target",choice(vec![object(&[("Path",object(&[("dropped_path",text("Original import path; do not use as launch identity.")),("bin_path",text("Resolved executable; map to rule.path."))]))]),object(&[("Installed",object(&[("aumid",text("Map to rule.aumid."))]))])])),
+    ("launch_target",choice(vec![object(&[("Path",object(&[("dropped_path",text("Original import path; do not use as launch identity.")),("bin_path",text("Resolved executable; map to rule.path."))]))]),object(&[("Installed",object(&[("aumid",text("Map to rule.aumid."))]))]),object(&[("Steam",object(&[("app_id",integer("Map to rule.steam_app_id.")),("executable",nullable(text("Exact game executable; map to rule.steam_executable including null for automatic detection.")))]))])])),
     ("args",list(text("Literal argument."),"Map unchanged to rule.args during unrelated edits.")),
     ("additional_processes",list(text("Executable basename."),"Map to rule.tracked_process_names; preserve existing entries when adding one.")),
     ("manage_descendants",flag("Map unchanged to rule.manage_descendants.")),("autorun",flag("Map unchanged to rule.autorun.")),
     ("priority",text("Map unchanged to rule.priority. Legacy Realtime is readable but cannot be submitted by the agent API.")),
-])
+]);
+    schema["properties"]["builtin_process_binding"] = json!({"description":"Optional read-only import provenance. Preserved by update_rule; generated helper names stay scoped to their installation. Unknown definitions remain inert. Do not submit as editable input.","readOnly":true});
+    schema
 }
 fn page(rows: Value) -> Value {
     object(&[
@@ -383,7 +391,7 @@ fn action_result(name: &str) -> Value {
     match name {
         "get_operation" => opaque("Completed tool-specific result. Use operation.tool to select that tool's outputSchema.operation.result contract; null before completion or after failure."),
         "create_group" | "create_rule" => {let mut s=durable();let field=if name=="create_group"{"group_id"}else{"rule_id"};s["properties"][field]=text("New stable saved identity.");s["required"].as_array_mut().unwrap().push(json!(field));s},
-        "update_group"|"delete_group"|"move_group"|"update_rule"|"delete_rule"|"move_rule"|"update_preferences" => durable(),
+        "update_group"|"delete_group"|"move_group"|"update_rule"|"delete_rule"|"move_rule"|"update_preferences"|"choose_process_owner" => durable(),
         "launch_program"|"launch_saved"|"restart_saved"|"restart_run" => choice(vec![run(),object(&[("status",text("already_tracked; no duplicate program was launched.")),("instances",list(object(&native_identity()),"Verified existing exact instances.")),("action",text("No-new-launch explanation."))]),object(&[("status",text("activation_requested is acknowledgement, not confirmed process startup.")),("group_id",text("Saved GroupId.")),("rule_id",text("Saved RuleId.")),("pid",json!({"type":"null","description":"Installed activation returns no invented PID."})),("creation_token",json!({"type":"null","description":"No invented creation token."})),("capture_supported",flag("false for installed-app activation.")),("elevated",flag("false for ordinary Explorer activation.")),("settings",text("Pending discovery/readback explanation.")),("note",text("Activation limitations."))]),{let mut s=object(&[("status",text("already_tracked installed activation.")),("instances",list(object(&native_identity()),"Verified instances."))]);s["description"]=text("Installed-app already-tracked response.")["description"].clone();s}]),
         "stop_run" => {let mut f=native_identity();f.extend([("run_id",text("Exact managed root.")),("request",text("window_close or force_terminate; not proof of exit.")),("exit_code",nullable(integer("Exit code if already observed.")))]);choice(vec![run(),object(&f)])},
         "create_shortcut" => object(&[("path",text("Created desktop shortcut path."))]),
@@ -425,6 +433,7 @@ pub(super) fn output(name: &str, read_only: bool) -> Value {
         "get_app_state" => object(&[("configuration_revision",decimal("Current durable configuration revision.")),("save_status",text("Current writer status.")),("preferences",preferences()),("group_count",integer("Saved affinity-group count."))]),
         "get_topology" => object(&[("model",text("CPU model.")),("logical_cpu_count",integer("Logical processor count.")),("rows",list(object(&[("cpu",integer("Logical CPU index.")),("cluster",text("Topology cluster name.")),("type",text("Core type.")),("label",text("Core label."))]),"Paged topology entries.")),("total",integer("Topology entry count.")),("next_offset",nullable(integer("Next topology page.")))]),
         "list_groups" => page(object(&[("group_id",nullable(text("Stable GroupId; null for unresolved legacy identity."))),("name",text("Group display name.")),("cpus",list(integer("Logical CPU index."),"Saved mask.")),("hidden",flag("Collapsed list state.")),("run_all",flag("Run-all action preference.")),("rule_count",integer("Saved application count."))])),
+        "read_process_control" => object(&[("configuration_revision",decimal("Current durable configuration revision.")),("rows",list(object(&[("image",text("Exact shared executable for choose_process_owner.")),("name",text("Executable basename.")),("owner_rule_id",nullable(text("Current controlling RuleId; null requires a user choice."))),("different_settings",flag("Claimants request different effective settings.")),("claimants",list(object(&[("rule_id",text("Eligible stable RuleId.")),("group_id",nullable(text("Current saved GroupId."))),("label",text("Group and app display label."))]),"Eligible saved app rules."))]),"Bounded current shared-process observations.")),("total",integer("Observed conflicts retained.")),("next_offset",nullable(integer("Next page offset."))),("error",nullable(text("Unreadable control policy blocks writes.")))]),
         "list_rules" => page(object(&[("group_id",text("Owning GroupId.")),("rule_id",nullable(text("Stable RuleId; null for unresolved identity."))),("app",saved_app())])),
         "list_installed_apps" => object(&[("rows",list(object(&[("catalog_id",text("Resolve this opaque catalog ID before creation.")),("name",text("App display name.")),("source",text("Discovery source label."))]),"Supported launch-safe apps matching query.")),("total",integer("Matching entry count.")),("next_offset",nullable(integer("Next matching page."))),("note",text("Discovery limitations."))]),
         "resolve_installed_app" => {let mut rule=object(&[("name",text("Resolved display name.")),("path",text("Resolved absolute executable path, when a file target.")),("aumid",text("Resolved installed-app ID, when an installed target.")),("args",list(text("Literal argument."),"Resolved launch arguments; input validation still applies on create/update.")),("tracked_process_names",list(text("Executable basename."),"Resolved initial process names.")),("manage_descendants",flag("Initial descendant policy.")),("autorun",flag("Initial startup policy, false for discovery.")),("priority",text("Resolved priority."))]);rule["required"]=json!(super::services::REPLACEMENT_RULE_FIELDS);rule["oneOf"]=json!([{"required":["path"]},{"required":["aumid"]}]);object(&[("rule_template",rule),("note",text("Resolved without launching."))])},
@@ -718,4 +727,25 @@ fn contributors() -> Value {
             text("Historical/live identity distinction."),
         ),
     ])
+}
+
+#[cfg(test)]
+mod steam_schema_tests {
+    use super::*;
+    #[test]
+    fn advertised_steam_replacement_and_saved_row_schemas_match_runtime() {
+        let mut schema = json!({"type":"object","properties":{"rule":super::super::catalog::rule_schema()},"required":["rule"]});
+        describe_input("update_rule", &mut schema);
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let mut input = json!({"rule":{"steam_app_id":570,"name":"Game","args":[],"tracked_process_names":[],"priority":"Normal","autorun":false,"manage_descendants":false}});
+        assert!(!validator.is_valid(&input));
+        input["rule"]["steam_executable"] = Value::Null;
+        assert!(validator.is_valid(&input));
+        input["rule"]["path"] = json!("C:\\Steam\\steam.exe");
+        assert!(!validator.is_valid(&input));
+        let saved = json!({"name":"Game","launch_target":{"Steam":{"app_id":570,"executable":null}},"args":[],"additional_processes":[],"priority":"Normal","autorun":false,"manage_descendants":false});
+        assert!(jsonschema::validator_for(&saved_app())
+            .unwrap()
+            .is_valid(&saved));
+    }
 }

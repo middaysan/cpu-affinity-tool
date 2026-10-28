@@ -31,35 +31,6 @@ fn reserve_identity(counter: &AtomicU64) -> Result<u64, &'static str> {
     }
 }
 
-#[cfg(test)]
-mod identity_tests {
-    use super::*;
-    #[test]
-    fn contributor_identity_reservation_is_unique_and_never_wraps() {
-        let counter = AtomicU64::new(u64::MAX - 1);
-        assert_eq!(reserve_identity(&counter), Ok(u64::MAX - 1));
-        assert!(reserve_identity(&counter).is_err());
-        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
-        let shared = Arc::new(AtomicU64::new(1));
-        let workers: Vec<_> = (0..8)
-            .map(|_| {
-                let shared = shared.clone();
-                std::thread::spawn(move || {
-                    (0..128)
-                        .map(|_| reserve_identity(&shared).unwrap())
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        let values: std::collections::HashSet<_> = workers
-            .into_iter()
-            .flat_map(|w| w.join().unwrap())
-            .collect();
-        assert_eq!(values.len(), 1024);
-        assert_eq!(shared.load(Ordering::Relaxed), 1025);
-    }
-}
-
 struct Interval {
     process: Arc<CpuProcess>,
     ticks: Vec<u64>,
@@ -198,5 +169,34 @@ impl Contributors {
                 .flatten()
                 .map(|s| s.ticks.capacity() * 8 + s.process.name.len() + 64)
                 .sum::<usize>()
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn contributor_identity_reservation_is_unique_and_never_wraps() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(reserve_identity(&counter), Ok(u64::MAX - 1));
+        assert!(reserve_identity(&counter).is_err());
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+        let shared = Arc::new(AtomicU64::new(1));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let shared = shared.clone();
+                std::thread::spawn(move || {
+                    (0..128)
+                        .map(|_| reserve_identity(&shared).unwrap())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let values: std::collections::HashSet<_> = workers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap())
+            .collect();
+        assert_eq!(values.len(), 1024);
+        assert_eq!(shared.load(Ordering::Relaxed), 1025);
     }
 }

@@ -29,7 +29,160 @@ fn debug_disabled_acknowledgement_requires_the_worker_release_revision() {
 use crate::app::shared::ids::{GroupId, RuleId};
 
 #[test]
-fn group_meter_uses_latest_finalized_tracked_interval_and_keeps_missing_data_unknown() {
+fn transient_membership_race_does_not_erase_the_next_valid_cpu_target_set() {
+    let expected = vec![(10, 100), (20, 200), (30, 300)];
+    let all = expected.clone();
+    let mut fallback = Vec::new();
+    let runs = HashMap::from([("run".into(), (30, 300))]);
+    assert_eq!(
+        history_tick_targets(&all, false, &runs, &mut fallback),
+        &[(30, 300)]
+    );
+    assert_eq!(
+        history_tick_targets(&all, true, &runs, &mut fallback),
+        expected,
+        "a one-tick lock/generation race must not permanently remove saved app PIDs"
+    );
+}
+
+#[test]
+fn s92_membership_race_recovers_app_group_history_contributors_and_current_api() {
+    use super::super::worker_history::{EventHistory, OwnerInput};
+    use os_api::cpu_load::{CpuHistoryFrame, CpuHistoryTarget, CpuHistoryTick, CpuHistoryValue};
+    let runtime = runtime();
+    let target = target();
+    let all = vec![(10, 100), (20, 200)];
+    let targets = HashMap::from([(target.clone(), all.clone())]);
+    let names: HashMap<_, _> = all
+        .iter()
+        .map(|&(pid, token)| {
+            (
+                (pid, token),
+                Arc::new(os_api::cpu_load::CpuProcess {
+                    pid,
+                    instance: token,
+                    name: if pid == 10 {
+                        "launcher.exe"
+                    } else {
+                        "added-game.exe"
+                    }
+                    .into(),
+                }),
+            )
+        })
+        .collect();
+    let rules = HashMap::from([(target.clone(), Arc::new(target.rule.clone()))]);
+    let runs = HashMap::new();
+    let mut scratch = Vec::new();
+    let mut previous = Vec::new();
+    let mut events = EventHistory::default();
+    let mut store = runtime.history.write().unwrap();
+    store
+        .configure(2, 30, std::slice::from_ref(&target))
+        .unwrap();
+    for id in 0..=4 {
+        let valid = id != 2;
+        let selected = history_tick_targets(&all, valid, &runs, &mut scratch);
+        events
+            .enqueue(
+                CpuHistoryTick {
+                    id,
+                    seconds: id as f64,
+                    timestamp: SystemTime::UNIX_EPOCH + Duration::from_secs(id),
+                },
+                OwnerInput {
+                    generation: valid.then_some(1),
+                    targets: valid.then_some(&targets),
+                    names: &names,
+                    rules: &rules,
+                    runs: &runs,
+                    changed: false,
+                },
+                &[],
+                &mut store,
+            )
+            .unwrap();
+        let mut frame = CpuHistoryFrame::new(2).unwrap();
+        frame.id = id;
+        frame.available = id != 0;
+        frame.cpus = vec![Some(10.0), Some(80.0)];
+        for (index, &(pid, token)) in previous.iter().enumerate() {
+            frame.targets.push(CpuHistoryTarget { pid, token });
+            frame.coverage.push(3);
+            frame.tracked.push(CpuHistoryValue {
+                target: index as u16,
+                cpu: if pid == 10 { 0 } else { 1 },
+                load: if pid == 10 { 10.0 } else { 80.0 },
+            });
+        }
+        events.apply(&frame, &mut store);
+        previous = selected.to_vec();
+    }
+    let mut snapshot = Snapshot {
+        cpus: vec![Some(10.0), Some(80.0)],
+        ..Default::default()
+    };
+    events.publish(&mut snapshot);
+    let totals = HashMap::from([((10, 100), Some(5.0)), ((20, 200), Some(40.0))]);
+    snapshot.processes = process_totals(&targets, |pid, token| totals[&(pid, token)]);
+    let mut current =
+        super::super::process_list::ProcessList::from_tracking(&targets, &totals, &names);
+    current.record_cores(2, events.samples());
+    snapshot.live_processes = Arc::new(current);
+    assert_eq!(snapshot.processes[&target], Some(45.0));
+    assert_eq!(snapshot.process_cpus[&target], [Some(10.0), Some(80.0)]);
+    let recovered = SampleTime {
+        seconds: 4.0,
+        wall: SystemTime::UNIX_EPOCH + Duration::from_secs(4),
+    };
+    assert_eq!(
+        store.group_mean_at(LoadSource::Tracked, recovered, &[0, 1]),
+        (Some(45.0), false)
+    );
+    assert_eq!(
+        store.value_at(LoadSource::Rule(&target), recovered, 1),
+        Some(80.0)
+    );
+    let mut contributors = super::super::contributors::ContributorView::default();
+    store
+        .contributors
+        .copy(recovered, 1, Some(&target.rule), &mut contributors);
+    assert_eq!(contributors.rows.len(), 1);
+    assert_eq!(contributors.rows[0].process.pid, 20);
+    assert_eq!(contributors.rows[0].load, 80.0);
+    assert_eq!(
+        store.value_at(
+            LoadSource::Tracked,
+            SampleTime {
+                seconds: 3.0,
+                wall: SystemTime::UNIX_EPOCH + Duration::from_secs(3)
+            },
+            1
+        ),
+        None,
+        "the uncertain original interval must remain a gap"
+    );
+    drop(store);
+    *runtime.published.write().unwrap() = Arc::new(snapshot);
+    let api = runtime
+        .read_handle()
+        .read("read_cpu_current", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(
+        api["tracked_etw_residency_percent"],
+        serde_json::json!([10.0, 80.0])
+    );
+    assert!(api["current_processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["pid"] == 20
+            && row["whole_host_cpu_percent"] == 40.0
+            && row["active_cpus"] == serde_json::json!([[1, 80.0]])));
+}
+
+#[test]
+fn historical_group_mean_keeps_original_finalized_pending_and_lost_intervals() {
     let runtime = runtime();
     {
         let mut history = runtime.history.write().unwrap();
@@ -50,8 +203,18 @@ fn group_meter_uses_latest_finalized_tracked_interval_and_keeps_missing_data_unk
             &[],
         );
     }
-    assert_eq!(runtime.tracked_group_load(&[0, 1, 1]), (Some(30.0), false));
-    assert_eq!(runtime.tracked_group_load(&[]), (None, false));
+    {
+        let history = runtime.history.read().unwrap();
+        let time = history.latest_finalized().unwrap();
+        assert_eq!(
+            history.group_mean_at(LoadSource::Tracked, time, &[0, 1, 1]),
+            (Some(30.0), false)
+        );
+        assert_eq!(
+            history.group_mean_at(LoadSource::Tracked, time, &[]),
+            (None, false)
+        );
+    }
     {
         let mut history = runtime.history.write().unwrap();
         history.mark_lost_reason(
@@ -62,9 +225,15 @@ fn group_meter_uses_latest_finalized_tracked_interval_and_keeps_missing_data_unk
             super::super::history::GapReason::TraceUnavailable,
         );
     }
-    assert_eq!(runtime.tracked_group_load(&[0, 1]), (None, false));
-    let _writer = runtime.history.write().unwrap();
-    assert_eq!(runtime.tracked_group_load(&[0, 1]), (None, false));
+    let history = runtime.history.read().unwrap();
+    assert_eq!(
+        history.group_mean_at(
+            LoadSource::Tracked,
+            history.latest_finalized().unwrap(),
+            &[0, 1]
+        ),
+        (None, false)
+    );
 }
 
 #[test]
@@ -416,6 +585,64 @@ fn runtime() -> CpuLoadRuntime {
         Arc::new(RwLock::new(AppStateStorage::test_fixture(|_| {}))),
     )
 }
+
+#[test]
+fn memory_snapshot_rejects_stale_control_revisions_and_monitoring_off() {
+    let mut runtime = runtime();
+    let rule = target();
+    let usage = super::super::memory::MemoryUsage {
+        bytes: Some(256 * 1024 * 1024),
+        measured: 2,
+        instances: 2,
+    };
+    {
+        let mut control = runtime.control.0.lock().unwrap();
+        control.enabled = true;
+        control.revision = 7;
+    }
+    *runtime.published.write().unwrap() = Arc::new(Snapshot {
+        revision: 7,
+        process_memory: HashMap::from([(rule.clone(), usage)]),
+        group_memory: Some(HashMap::from([(rule.group.clone(), usage)])),
+        ..Default::default()
+    });
+    assert_eq!(runtime.snapshot().process_memory.get(&rule), Some(&usage));
+    assert_eq!(
+        runtime
+            .snapshot()
+            .group_memory
+            .as_ref()
+            .unwrap()
+            .get(&rule.group),
+        Some(&usage)
+    );
+    *runtime.published.write().unwrap() = Arc::new(Snapshot {
+        revision: 7,
+        at: Instant::now() - Duration::from_secs(5),
+        process_memory: HashMap::from([(rule.clone(), usage)]),
+        group_memory: Some(HashMap::from([(rule.group.clone(), usage)])),
+        ..Default::default()
+    });
+    assert!(runtime.snapshot().process_memory.is_empty());
+    assert!(runtime.snapshot().group_memory.is_none());
+    *runtime.published.write().unwrap() = Arc::new(Snapshot {
+        revision: 6,
+        process_memory: HashMap::from([(rule.clone(), usage)]),
+        group_memory: Some(HashMap::from([(rule.group.clone(), usage)])),
+        ..Default::default()
+    });
+    assert!(runtime.snapshot().process_memory.is_empty());
+    assert!(runtime.snapshot().group_memory.is_none());
+    *runtime.published.write().unwrap() = Arc::new(Snapshot {
+        revision: 7,
+        group_memory: Some(HashMap::from([(rule.group, usage)])),
+        ..Default::default()
+    });
+    assert!(runtime.snapshot().group_memory.is_some());
+    runtime.configure(false, false);
+    assert!(runtime.snapshot().process_memory.is_empty());
+    assert!(runtime.snapshot().group_memory.is_none());
+}
 #[test]
 fn graph_contributors_follow_exact_hover_cpu_and_never_fall_back_to_live_rows() {
     let mut runtime = runtime();
@@ -654,6 +881,7 @@ fn native_continuous_history_cost_and_lifecycle() {
             RunningApp {
                 pids: vec![pid],
                 pid_instance_tokens: HashMap::from([(pid, token)]),
+                primary_instances: HashMap::new(),
                 group_id: group.clone(),
                 rule_id: rule.clone(),
                 created_at: SystemTime::now(),
@@ -1104,4 +1332,134 @@ fn preference_save_and_reopen_preserve_classic_monitoring() {
     let app = AppState::new_for_test(Arc::new(RwLock::new(restored)), 8);
     assert!(!app.cpu_load_enabled());
     assert!(app.is_process_monitoring_enabled());
+}
+
+#[test]
+fn s107_catalog_members_feed_app_group_and_system_cpu_and_unique_ram() {
+    use super::super::worker_history::{EventHistory, OwnerInput};
+    use os_api::cpu_load::{CpuHistoryFrame, CpuHistoryTarget, CpuHistoryTick, CpuHistoryValue};
+    let (_state, apps) = crate::app::features::execution::known_tracking_fixture();
+    let running = Arc::new(TokioRwLock::new(apps));
+    let tracking = tracked_instances(&running).unwrap();
+    let targets = tracking.targets;
+    assert_eq!(targets.len(), 2);
+    assert!(targets.values().all(|members| members == &[(1, 1), (2, 2)]));
+    let mut reads = 0;
+    let totals = process_totals(&targets, |pid, _| {
+        reads += 1;
+        Some(if pid == 1 { 10.0 } else { 20.0 })
+    });
+    assert!(totals.values().all(|total| *total == Some(30.0)));
+    assert_eq!(reads, 2);
+    let mut ram_reads = 0;
+    let ram = super::super::memory::tracked_memory(&targets, |pid, _| {
+        ram_reads += 1;
+        Some(u64::from(pid) * 1024 * 1024)
+    });
+    assert!(ram
+        .rules
+        .values()
+        .all(|usage| usage.bytes == Some(3 * 1024 * 1024)));
+    assert!(ram
+        .groups
+        .values()
+        .all(|usage| usage.bytes == Some(3 * 1024 * 1024)));
+    assert_eq!(ram_reads, 2);
+    let all = normalized_instances(targets.values().flatten().copied());
+    let names: HashMap<_, _> = all
+        .iter()
+        .map(|&(pid, token)| {
+            (
+                (pid, token),
+                Arc::new(os_api::cpu_load::CpuProcess {
+                    pid,
+                    instance: token,
+                    name: if pid == 1 {
+                        "steam.exe"
+                    } else {
+                        "steamwebhelper.exe"
+                    }
+                    .into(),
+                }),
+            )
+        })
+        .collect();
+    let rules = targets
+        .keys()
+        .map(|target| (target.clone(), Arc::new(target.rule.clone())))
+        .collect();
+    let mut history = super::super::history::HistoryStore::default();
+    history
+        .configure(2, 30, &targets.keys().cloned().collect::<Vec<_>>())
+        .unwrap();
+    let mut events = EventHistory::default();
+    let runs = HashMap::new();
+    for id in 0..=1 {
+        events
+            .enqueue(
+                CpuHistoryTick {
+                    id,
+                    seconds: id as f64,
+                    timestamp: SystemTime::UNIX_EPOCH + Duration::from_secs(id),
+                },
+                OwnerInput {
+                    generation: Some(tracking.generation),
+                    targets: Some(&targets),
+                    names: &names,
+                    rules: &rules,
+                    runs: &runs,
+                    changed: false,
+                },
+                &[],
+                &mut history,
+            )
+            .unwrap();
+        let mut frame = CpuHistoryFrame::new(2).unwrap();
+        frame.id = id;
+        frame.available = id != 0;
+        frame.cpus = vec![Some(70.0), Some(40.0)];
+        if id != 0 {
+            frame.targets = all
+                .iter()
+                .map(|&(pid, token)| CpuHistoryTarget { pid, token })
+                .collect();
+            frame.coverage = vec![3; all.len()];
+            frame.tracked = vec![
+                CpuHistoryValue {
+                    target: 0,
+                    cpu: 0,
+                    load: 20.0,
+                },
+                CpuHistoryValue {
+                    target: 1,
+                    cpu: 0,
+                    load: 10.0,
+                },
+                CpuHistoryValue {
+                    target: 1,
+                    cpu: 1,
+                    load: 30.0,
+                },
+            ];
+        }
+        events.apply(&frame, &mut history);
+    }
+    let time = SampleTime {
+        seconds: 1.0,
+        wall: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+    };
+    assert_eq!(
+        history.group_mean_at(LoadSource::Tracked, time, &[0, 1]),
+        (Some(30.0), false)
+    );
+    assert_eq!(
+        history.group_mean_at(LoadSource::System, time, &[0, 1]),
+        (Some(55.0), false)
+    );
+    for target in targets.keys() {
+        assert_eq!(
+            history.value_at(LoadSource::Rule(target), time, 0),
+            Some(30.0)
+        );
+    }
 }

@@ -1,10 +1,11 @@
 #[cfg(all(target_os = "windows", feature = "windows"))]
 pub(crate) mod commands;
+pub(crate) mod known_apps;
 pub(crate) mod process_names;
 mod service;
+pub(crate) mod steam_picker;
 
 use crate::app::models::AppStateStorage;
-#[cfg(test)]
 use crate::app::models::AppToRun;
 use crate::app::shared::ids::{GroupId, RuleId};
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,7 @@ pub struct RulesSnapshot {
 
 #[derive(Debug, Clone, Default)]
 pub struct RulesContext {
+    duplicate_launches: std::collections::HashSet<crate::app::models::AppRuntimeKey>,
     next_group_id: usize,
     next_rule_id: usize,
     group_ids: Vec<GroupId>,
@@ -69,7 +71,33 @@ impl RulesContext {
         } else {
             context.rebuild_from_storage(storage);
         }
+        context.refresh_launch_keys(storage);
         context
+    }
+
+    fn refresh_launch_keys(&mut self, storage: &AppStateStorage) {
+        let mut seen = std::collections::HashSet::new();
+        self.duplicate_launches.clear();
+        for app in storage.groups.iter().flat_map(|group| &group.programs) {
+            let key = app.get_key();
+            if !seen.insert(key.clone()) {
+                self.duplicate_launches.insert(key);
+            }
+        }
+    }
+
+    /// Keep legacy launch keys for unique entries; distinguish colliding logical rules.
+    pub(crate) fn runtime_key(
+        &self,
+        app: &AppToRun,
+        rule: &RuleId,
+    ) -> crate::app::models::AppRuntimeKey {
+        let key = app.get_key();
+        if self.duplicate_launches.contains(&key) {
+            key.scoped_to_rule(rule)
+        } else {
+            key
+        }
     }
 
     pub fn rebuild_from_storage(&mut self, storage: &AppStateStorage) {
@@ -109,6 +137,7 @@ impl RulesContext {
     }
 
     pub fn reconcile_with_storage(&mut self, storage: &AppStateStorage) {
+        self.refresh_launch_keys(storage);
         while self.group_ids.len() > storage.groups.len() {
             self.group_ids.pop();
             self.rule_ids.pop();

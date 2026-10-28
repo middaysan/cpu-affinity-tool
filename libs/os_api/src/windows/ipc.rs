@@ -28,9 +28,9 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResultEx, OVERLAPPED};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientSessionId,
-    GetNamedPipeServerSessionId, ImpersonateNamedPipeClient, NAMED_PIPE_MODE,
-    PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
-    SetNamedPipeHandleState,
+    GetNamedPipeServerProcessId, GetNamedPipeServerSessionId, ImpersonateNamedPipeClient,
+    NAMED_PIPE_MODE, PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE,
+    PIPE_WAIT, SetNamedPipeHandleState,
 };
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{
@@ -254,6 +254,25 @@ impl OS {
         request: &[u8],
         timeout: Duration,
     ) -> Result<Vec<u8>, LocalIpcClientError> {
+        Self::send_local_ipc_request_with_activation(endpoint, request, timeout, false)
+    }
+
+    /// Transfer this explicit launch gesture's foreground permission to the
+    /// connected primary before asking its GUI thread to restore the window.
+    pub fn send_local_ipc_activation_request(
+        endpoint: &LocalIpcEndpoint,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, LocalIpcClientError> {
+        Self::send_local_ipc_request_with_activation(endpoint, request, timeout, true)
+    }
+
+    fn send_local_ipc_request_with_activation(
+        endpoint: &LocalIpcEndpoint,
+        request: &[u8],
+        timeout: Duration,
+        activate: bool,
+    ) -> Result<Vec<u8>, LocalIpcClientError> {
         if request.len() > MAX_FRAME_BYTES {
             return Err(LocalIpcClientError::Io(
                 "request frame is too large".to_string(),
@@ -270,6 +289,7 @@ impl OS {
                 endpoint,
                 request,
                 deadline.saturating_duration_since(now),
+                activate,
             ) {
                 Err(LocalIpcClientError::ServerNotReady) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(25));
@@ -708,6 +728,7 @@ fn send_local_ipc_request_once(
     endpoint: &LocalIpcEndpoint,
     request: &[u8],
     timeout: Duration,
+    activate: bool,
 ) -> Result<Vec<u8>, LocalIpcClientError> {
     let name = to_wide_z_str(&endpoint.pipe_name);
     let handle = unsafe {
@@ -741,6 +762,10 @@ fn send_local_ipc_request_once(
         ));
     }
 
+    if activate {
+        grant_connected_server_foreground(handle.0);
+    }
+
     let mode = PIPE_READMODE_MESSAGE;
     let _ = unsafe { SetNamedPipeHandleState(handle.0, Some(&mode), None, None) };
 
@@ -758,6 +783,34 @@ fn send_local_ipc_request_once(
     buffer.truncate(bytes_read as usize);
 
     Ok(buffer)
+}
+
+fn grant_connected_server_foreground(pipe: HANDLE) {
+    use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+    let mut pid = 0;
+    // Never grant ASFW_ANY or trust a PID supplied in a request. Windows may
+    // refuse the gesture; the GUI still restores and signals the taskbar.
+    if unsafe { GetNamedPipeServerProcessId(pipe, &mut pid) }.is_ok() {
+        grant_exact_server_foreground(pid, |pid| {
+            let _ = unsafe { AllowSetForegroundWindow(pid) };
+        });
+    }
+}
+
+fn grant_exact_server_foreground(pid: u32, allow: impl FnOnce(u32)) {
+    if pid != 0 && pid != u32::MAX {
+        allow(pid);
+    }
+}
+
+#[test]
+fn foreground_transfer_grants_only_a_real_connected_server_pid() {
+    for invalid in [0, u32::MAX] {
+        grant_exact_server_foreground(invalid, |_| panic!("invalid or wildcard grant"));
+    }
+    let mut granted = None;
+    grant_exact_server_foreground(42, |pid| granted = Some(pid));
+    assert_eq!(granted, Some(42));
 }
 
 fn client_error_from_pipe_io(err: PipeIoError) -> LocalIpcClientError {
@@ -1169,25 +1222,37 @@ mod tests {
 
     #[test]
     fn local_ipc_round_trips_one_request_and_response() {
-        let endpoint = unique_endpoint("roundtrip");
-        let server = OS::start_local_ipc_server(&endpoint).expect("server should start");
-        let client_endpoint = endpoint.clone();
-        let client = thread::spawn(move || {
-            OS::send_local_ipc_request(&client_endpoint, b"ping", Duration::from_secs(2))
-        });
+        for activate in [false, true] {
+            let endpoint = unique_endpoint(if activate { "activate" } else { "roundtrip" });
+            let server = OS::start_local_ipc_server(&endpoint).expect("server should start");
+            let client_endpoint = endpoint.clone();
+            let client = thread::spawn(move || {
+                if activate {
+                    OS::send_local_ipc_activation_request(
+                        &client_endpoint,
+                        b"ping",
+                        Duration::from_secs(2),
+                    )
+                } else {
+                    OS::send_local_ipc_request(&client_endpoint, b"ping", Duration::from_secs(2))
+                }
+            });
 
-        let request = recv_request(&server, Duration::from_secs(2));
-        assert_eq!(request.request, b"ping");
-        request
-            .response_tx
-            .send(b"pong".to_vec())
-            .expect("response should send");
+            let request = recv_request(&server, Duration::from_secs(2));
+            assert_eq!(request.request, b"ping");
+            request
+                .response_tx
+                .send(b"pong".to_vec())
+                .expect("response should send");
 
-        let response = client
-            .join()
-            .expect("client thread should not panic")
-            .expect("client request should succeed");
-        assert_eq!(response, b"pong");
+            let response = client
+                .join()
+                .expect("client thread should not panic")
+                .expect(
+                    "client request should succeed even when Windows denies foreground permission",
+                );
+            assert_eq!(response, b"pong");
+        }
     }
 
     #[test]
@@ -1370,12 +1435,9 @@ mod tests {
         let endpoint = unique_endpoint("no-extra-instance");
         let _server = OS::start_local_ipc_server(&endpoint).expect("server should start");
 
-        match create_raw_non_first_pipe(&endpoint) {
-            Ok(pipe) => {
-                drop(pipe);
-                panic!("additional non-first pipe server instance should be denied");
-            }
-            Err(_) => {}
+        if let Ok(pipe) = create_raw_non_first_pipe(&endpoint) {
+            drop(pipe);
+            panic!("additional non-first pipe server instance should be denied");
         }
     }
 
@@ -1434,10 +1496,12 @@ mod tests {
             0,
             "client SQOS should limit server impersonation to identification"
         );
-        assert!(
-            OPEN_CLIENT_TOKEN_AS_SELF,
-            "OpenThreadToken must use OpenAsSelf for SecurityIdentification clients"
-        );
+        const {
+            assert!(
+                OPEN_CLIENT_TOKEN_AS_SELF,
+                "OpenThreadToken must use OpenAsSelf for SecurityIdentification clients"
+            );
+        }
     }
 
     #[test]

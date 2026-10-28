@@ -784,7 +784,7 @@ fn verify_process(handle: HANDLE, expected: &ProcessIdentity) -> Result<(), Gami
     }
     Ok(())
 }
-fn with_process<T>(
+pub(crate) fn with_process<T>(
     expected: &ProcessIdentity,
     writing: bool,
     operation: impl FnOnce(HANDLE) -> Result<T, GamingError>,

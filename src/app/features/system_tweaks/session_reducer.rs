@@ -26,6 +26,18 @@ use std::{
     time::{Duration, Instant},
 };
 pub(crate) enum TuningRequest {
+    // Retained for internal compatibility/fixtures; the rule editor saves atomically.
+    #[allow(dead_code)]
+    ConfigureBackground {
+        enabled: bool,
+        config: Box<super::tweaks::background_workload::Config>,
+    },
+    #[allow(dead_code)]
+    InspectBackground,
+    #[allow(dead_code)]
+    PreviewBackground,
+    #[allow(dead_code)]
+    UndoBackground,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     ActivateSelectedManual {
         profile: ProfileId,
@@ -108,6 +120,7 @@ pub(crate) enum TuningRequest {
         target: TargetIdentity,
     },
     SaveBase {
+        gui_import: bool,
         candidate: Box<AppStateStorage>,
         expected_revision: u64,
     },
@@ -124,16 +137,20 @@ pub(crate) enum TuningRequest {
         target: GroupId,
         index: usize,
     },
-    EditRule {
+    EditOwnedRule {
         group: GroupId,
         rule: RuleId,
         app: Box<AppToRun>,
+        background: Option<super::background_policy::RulePolicy>,
+        choices: Vec<crate::app::features::execution::control::policy::Choice>,
     },
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    ChooseProcessOwner(crate::app::features::execution::control::policy::Choice),
 }
 impl TuningRequest {
     fn is_base_change(&self) -> bool {
         #[cfg(all(target_os = "windows", feature = "windows"))]
-        if matches!(self, Self::ConfigureBase(_)) {
+        if matches!(self, Self::ConfigureBase(_) | Self::ChooseProcessOwner(_)) {
             return true;
         }
         matches!(
@@ -142,7 +159,7 @@ impl TuningRequest {
                 | Self::RemoveRule { .. }
                 | Self::RemoveGroup { .. }
                 | Self::MoveRule { .. }
-                | Self::EditRule { .. }
+                | Self::EditOwnedRule { .. }
         )
     }
 }
@@ -182,6 +199,9 @@ pub(crate) struct ProfileCard {
 }
 #[derive(Clone)]
 pub(crate) struct TuningSnapshot {
+    // Bounded background telemetry remains available to debug-only diagnostics.
+    #[cfg_attr(not(feature = "debug-mcp"), allow(dead_code))]
+    pub background: super::background_policy::Snapshot,
     pub tweak_cards: Vec<TweakCard>,
     pub pc_checks: Vec<super::pc_checks::PcCheck>,
     pub display_confirmation: Option<Instant>,
@@ -211,6 +231,7 @@ pub(crate) struct TweakCard {
     pub owned: bool,
     pub baseline: Option<String>,
     pub config: Option<ModuleEnvelope>,
+    pub options: Option<ModuleEnvelope>,
     pub capability: Capability,
     pub availability: super::platforms::TweakAvailability,
 }
@@ -231,8 +252,7 @@ struct Shared {
     cards_visible: AtomicBool,
     admission: Mutex<Admission>,
     latest: Mutex<Arc<TuningSnapshot>>,
-    #[cfg(all(target_os = "windows", feature = "windows"))]
-    receipts: Mutex<std::collections::VecDeque<TuningReceipt>>,
+    receipts: Mutex<Receipts>,
     #[cfg(test)]
     fixture: Mutex<Option<(Arc<ExecutionObservation>, Vec<(u32, u64)>)>>,
 }
@@ -241,11 +261,43 @@ pub(crate) struct TuningRuntime {
     worker: Option<JoinHandle<()>>,
 }
 #[derive(Clone, Copy, Debug)]
-#[cfg(all(target_os = "windows", feature = "windows"))]
 pub(crate) struct TuningReceipt {
     pub id: u64,
     pub revision: u64,
     pub result: Result<(), SaveError>,
+}
+#[derive(Default)]
+struct Receipts {
+    recent: std::collections::VecDeque<TuningReceipt>,
+    gui_request: Option<u64>,
+}
+impl Receipts {
+    fn record(&mut self, receipt: TuningReceipt) {
+        if self.recent.iter().any(|saved| saved.id == receipt.id) {
+            return;
+        }
+        if self.recent.len() == 64 {
+            // One GUI completion stays pinned until its draft owner observes it.
+            let oldest = self
+                .recent
+                .iter()
+                .position(|saved| Some(saved.id) != self.gui_request)
+                .expect("at most one retained GUI request");
+            self.recent.remove(oldest);
+        }
+        self.recent.push_back(receipt);
+    }
+    fn take_gui(&mut self, id: u64, adopted_revision: u64) -> Option<TuningReceipt> {
+        if self.gui_request != Some(id) {
+            return None;
+        }
+        let index = self
+            .recent
+            .iter()
+            .position(|receipt| receipt.id == id && receipt.revision <= adopted_revision)?;
+        self.gui_request = None;
+        self.recent.remove(index)
+    }
 }
 #[derive(Clone)]
 pub(crate) struct TuningClient {
@@ -266,6 +318,7 @@ impl TuningClient {
             .receipts
             .lock()
             .unwrap()
+            .recent
             .iter()
             .find(|receipt| receipt.id == id)
             .copied()
@@ -283,6 +336,15 @@ impl TuningClient {
         expected: Option<u64>,
         fence: Option<RequestFence>,
     ) -> Result<u64, SaveError> {
+        self.request_inner(request, expected, fence, false)
+    }
+    fn request_inner(
+        &self,
+        request: TuningRequest,
+        expected: Option<u64>,
+        fence: Option<RequestFence>,
+        retain_gui: bool,
+    ) -> Result<u64, SaveError> {
         if !self.shared.modules_enabled && !request.is_base_change() {
             return Err(SaveError::Invalid);
         }
@@ -291,6 +353,9 @@ impl TuningClient {
             return Err(SaveError::Recovering);
         }
         if admission.pending {
+            return Err(SaveError::Pending);
+        }
+        if retain_gui && self.shared.receipts.lock().unwrap().gui_request.is_some() {
             return Err(SaveError::Pending);
         }
         let id = admission.next.ok_or(SaveError::Invalid)?;
@@ -312,6 +377,9 @@ impl TuningClient {
         }
         admission.next = id.checked_add(1);
         admission.pending = true;
+        if retain_gui {
+            self.shared.receipts.lock().unwrap().gui_request = Some(id);
+        }
         let mut latest = (**self.shared.latest.lock().unwrap()).clone();
         latest.operation = TuningOperationState::Pending { id };
         latest.restoration_effect = None;
@@ -362,8 +430,7 @@ impl TuningRuntime {
                 closing: None,
             }),
             latest: Mutex::new(initial),
-            #[cfg(all(target_os = "windows", feature = "windows"))]
-            receipts: Mutex::new(std::collections::VecDeque::new()),
+            receipts: Mutex::new(Receipts::default()),
             #[cfg(test)]
             fixture: Mutex::new(None),
         });
@@ -462,23 +529,18 @@ impl TuningRuntime {
                         }
                         if owned.admission.lock().unwrap().closing.is_some() {
                             while let Ok(queued) = receiver.try_recv() {
-                                service.begin_operation();
                                 // Closing finishes already accepted classic saves, but never
                                 // starts queued native actions or new session reconciliation.
-                                let result = if !queued.request.is_base_change() {
-                                    Err(SaveError::Pending)
-                                } else if queued.revision != service.saved_revision() {
-                                    Err(SaveError::Invalid)
-                                } else {
-                                    apply(&mut service, queued.request)
-                                };
+                                let (id, result) = apply_queued(&mut service, queued, true);
                                 operation = match result {
                                     Ok(()) => TuningOperationState::Idle,
-                                    Err(error) => TuningOperationState::Refused {
-                                        id: queued.id,
-                                        error,
-                                    },
+                                    Err(error) => TuningOperationState::Refused { id, error },
                                 };
+                                owned.receipts.lock().unwrap().record(TuningReceipt {
+                                    id,
+                                    revision: service.saved_revision(),
+                                    result,
+                                });
                             }
                             service.expire_display_tweak(true);
                             let outcome = if !modules_enabled {
@@ -498,6 +560,12 @@ impl TuningRuntime {
                                 {
                                     if !may_restore {
                                         failed = true;
+                                        continue;
+                                    }
+                                    if matches!(owner, OwnerKey::SessionTarget { .. })
+                                        && service.controller.retire_expired_target(&owner)
+                                            == Ok(true)
+                                    {
                                         continue;
                                     }
                                     let exited = actors.get_mut(&owner).is_some_and(|actor| {
@@ -550,21 +618,10 @@ impl TuningRuntime {
                                     matches!(&queued.request, TuningRequest::RefreshModuleCards);
                                 #[cfg(not(all(target_os = "windows", feature = "windows")))]
                                 let refresh_modules = false;
-                                service.begin_operation();
-                                let result = if queued.revision != service.saved_revision()
-                                    || queued.fence.as_ref().is_some_and(|fence| {
-                                        fence.generation.load(Ordering::Acquire) != fence.expected
-                                    }) {
-                                    Err(SaveError::Invalid)
-                                } else {
-                                    apply(&mut service, queued.request)
-                                };
+                                let (id, result) = apply_queued(&mut service, queued, false);
                                 operation = match result {
                                     Ok(()) => TuningOperationState::Idle,
-                                    Err(error) => TuningOperationState::Refused {
-                                        id: queued.id,
-                                        error,
-                                    },
+                                    Err(error) => TuningOperationState::Refused { id, error },
                                 };
                                 let observation = if modules_enabled {
                                     session_work = session_work_needed(&service, &actors);
@@ -601,18 +658,11 @@ impl TuningRuntime {
                                 ));
                                 let mut admission = owned.admission.lock().unwrap();
                                 *owned.latest.lock().unwrap() = completed;
-                                #[cfg(all(target_os = "windows", feature = "windows"))]
-                                {
-                                    let mut receipts = owned.receipts.lock().unwrap();
-                                    if receipts.len() == 64 {
-                                        receipts.pop_front();
-                                    }
-                                    receipts.push_back(TuningReceipt {
-                                        id: queued.id,
-                                        revision: service.saved_revision(),
-                                        result,
-                                    });
-                                }
+                                owned.receipts.lock().unwrap().record(TuningReceipt {
+                                    id,
+                                    revision: service.saved_revision(),
+                                    result,
+                                });
                                 admission.pending = false;
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -658,12 +708,26 @@ impl TuningRuntime {
                     }
                 }));
                 if result.is_err() {
+                    let mut admission = owned.admission.lock().unwrap();
                     let mut latest = (**owned.latest.lock().unwrap()).clone();
+                    latest.revision = service.saved_revision();
+                    latest.state = Arc::new(service.state().clone());
+                    latest.rules = service.rules().clone();
+                    let failed = match latest.operation {
+                        TuningOperationState::Pending { id } => Some(TuningReceipt {
+                            id,
+                            revision: latest.revision,
+                            result: Err(SaveError::Recovering),
+                        }),
+                        _ => None,
+                    };
                     latest.operation = TuningOperationState::Recovering;
                     latest.shutdown_outcome = Some(ShutdownResult::Faulted);
                     latest.shutdown_complete = true;
                     *owned.latest.lock().unwrap() = Arc::new(latest);
-                    let mut admission = owned.admission.lock().unwrap();
+                    if let Some(receipt) = failed {
+                        owned.receipts.lock().unwrap().record(receipt);
+                    }
                     admission.pending = false;
                     admission.closing.get_or_insert_with(Instant::now);
                 }
@@ -673,6 +737,18 @@ impl TuningRuntime {
     }
     pub(crate) fn request(&self, request: TuningRequest) -> Result<u64, SaveError> {
         self.request_at_revision(request, None)
+    }
+    pub(crate) fn request_for_gui(&self, request: TuningRequest) -> Result<u64, SaveError> {
+        self.client()
+            .ok_or(SaveError::Recovering)?
+            .request_inner(request, None, None, true)
+    }
+    pub(crate) fn take_gui_receipt(&self, id: u64, adopted_revision: u64) -> Option<TuningReceipt> {
+        self.shared
+            .receipts
+            .lock()
+            .unwrap()
+            .take_gui(id, adopted_revision)
     }
     pub(crate) fn request_at_revision(
         &self,
@@ -760,11 +836,40 @@ fn display_retry_due(
     *next_retry = now + Duration::from_secs(1);
     true
 }
+fn apply_queued(
+    service: &mut HeadlessTuning,
+    queued: Queued,
+    closing: bool,
+) -> (u64, Result<(), SaveError>) {
+    service.begin_operation();
+    let result = if closing && !queued.request.is_base_change() {
+        Err(SaveError::Pending)
+    } else if queued.revision != service.saved_revision()
+        || queued
+            .fence
+            .as_ref()
+            .is_some_and(|fence| fence.generation.load(Ordering::Acquire) != fence.expected)
+    {
+        Err(SaveError::Invalid)
+    } else {
+        apply(service, queued.request)
+    };
+    (queued.id, result)
+}
 fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), SaveError> {
     if !service.modules_enabled && !request.is_base_change() {
         return Err(SaveError::Invalid);
     }
     match request {
+        TuningRequest::ConfigureBackground { enabled, config } => {
+            service.configure_background(enabled, *config)
+        }
+        TuningRequest::InspectBackground => {
+            service.background.request_inspect();
+            Ok(())
+        }
+        TuningRequest::PreviewBackground => service.preview_background(),
+        TuningRequest::UndoBackground => service.undo_background(),
         #[cfg(all(target_os = "windows", feature = "windows"))]
         TuningRequest::RefreshModuleCards => Ok(()),
         #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -836,10 +941,11 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             feature,
             target,
         } => service.activate_manual(profile, feature, target),
-        TuningRequest::SaveBase { candidate, .. } => service.save_base(|saved| {
-            *saved = *candidate;
-            Ok(())
-        }),
+        TuningRequest::SaveBase {
+            candidate,
+            gui_import,
+            ..
+        } => service.save_gui_candidate(*candidate, gui_import),
         TuningRequest::RemoveRule { group, rule } => service.remove_rule(&group, &rule),
         TuningRequest::RemoveGroup { group } => service.remove_group(&group),
         TuningRequest::MoveRule {
@@ -848,7 +954,15 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             target,
             index,
         } => service.move_rule_at(&group, &rule, &target, index),
-        TuningRequest::EditRule { group, rule, app } => service.edit_rule(&group, &rule, *app),
+        TuningRequest::EditOwnedRule {
+            group,
+            rule,
+            app,
+            background,
+            choices,
+        } => service.edit_rule_choices(&group, &rule, *app, background, choices),
+        #[cfg(all(target_os = "windows", feature = "windows"))]
+        TuningRequest::ChooseProcessOwner(choice) => service.choose_process_owner(choice),
     }
 }
 struct Actor {
@@ -866,7 +980,7 @@ fn retained_actors(service: &HeadlessTuning) -> BTreeMap<OwnerKey, Actor> {
         .controller
         .owners()
         .into_iter()
-        .filter(OwnerKey::is_session)
+        .filter(|owner| matches!(owner, OwnerKey::Session { .. }))
     {
         let Some(record) = service.controller.owner_record(&owner) else {
             continue;
@@ -957,6 +1071,18 @@ fn session_work_needed(service: &HeadlessTuning, actors: &BTreeMap<OwnerKey, Act
     if !actors.is_empty() || service.controller.owners().iter().any(OwnerKey::is_session) {
         return true;
     }
+    if service.background.needs_work()
+        || super::background_policy::policies(service)
+            .iter()
+            .any(|(_, on, config)| {
+                *on && config
+                    .games
+                    .iter()
+                    .any(|game| super::background_policy::game_rule_exists(service, &game.rule))
+            })
+    {
+        return true;
+    }
     let TuningLoad::Known(config) = service.state().tuning.decode() else {
         return false;
     };
@@ -974,6 +1100,7 @@ fn reconcile_sessions(
     observation: &ExecutionObservation,
     actors: &mut BTreeMap<OwnerKey, Actor>,
 ) {
+    super::background_policy::tick(service, observation, Instant::now());
     if !service.native_admitted || service.legacy_recovery {
         return;
     }
@@ -1023,6 +1150,9 @@ fn reconcile_sessions(
                             let Some(module) = service.registry().get(&preference.feature) else {
                                 continue;
                             };
+                            if module.requires_session_target() {
+                                continue;
+                            }
                             if !module.editor().availability().is_available() {
                                 continue;
                             }
@@ -1230,16 +1360,17 @@ fn tweak_cards(
                     })
             })
             .map(|p| p.modules[0].config.clone());
-        let (observed, ready) = if observe && availability.is_available() {
+        let (observed, ready, options) = if observe && availability.is_available() {
             target
                 .as_ref()
                 .map(|target| {
-                    let (value, ready) = module.observe_tweak(target, saved_config.as_ref());
-                    (Some(value), ready.ok())
+                    let (value, ready, options) =
+                        module.observe_tweak(target, saved_config.as_ref());
+                    (Some(value), ready.ok(), options)
                 })
-                .unwrap_or((None, None))
+                .unwrap_or((None, None, None))
         } else {
-            (None, None)
+            (None, None, None)
         };
         // Target discovery may fail while the diagnostic read still explains why.
         // Retain that explanation, without treating it as authority to write.
@@ -1304,6 +1435,7 @@ fn tweak_cards(
             Some(ModuleStatus::Unmanaged)
         };
         cards.push(TweakCard {
+            options,
             config: saved_config,
             availability,
             feature: descriptor.id.clone(),
@@ -1344,6 +1476,7 @@ fn snapshot(
 ) -> TuningSnapshot {
     if !service.modules_enabled {
         return TuningSnapshot {
+            background: Default::default(),
             tweak_cards: vec![],
             pc_checks: vec![],
             display_confirmation: None,
@@ -1523,6 +1656,7 @@ fn snapshot(
         operation
     };
     TuningSnapshot {
+        background: super::background_policy::snapshot(service),
         tweak_cards: tweak_cards(service, &templates, observe),
         pc_checks: service.pc_checks.clone(),
         display_confirmation: service.display_confirmation,
@@ -1579,11 +1713,16 @@ mod card_tests {
                 &self,
                 target: &TargetIdentity,
                 saved: Option<&ModuleEnvelope>,
-            ) -> (ModuleObservation, Result<bool, ModuleError>) {
+            ) -> (
+                ModuleObservation,
+                Result<bool, ModuleError>,
+                Option<ModuleEnvelope>,
+            ) {
                 self.1.fetch_add(1, Ordering::SeqCst);
                 (
                     self.0.observe(target),
                     self.0.editor().tweak_ready_for_config(target, saved),
+                    Some(self.0.editor().default_config()),
                 )
             }
             fn fields(
@@ -1634,6 +1773,14 @@ mod card_tests {
             1,
             "one combined observation on open"
         );
+        assert!(
+            runtime
+                .snapshot()
+                .tweak_cards
+                .iter()
+                .all(|card| card.options.is_some()),
+            "The worker publishes immutable options with the combined observation"
+        );
         runtime.set_cards_visible(false);
         thread::sleep(Duration::from_millis(1100));
         assert_eq!(
@@ -1648,6 +1795,79 @@ mod card_tests {
         presentation::ModuleEditor,
         simple_tests::Setting,
     };
+
+    #[test]
+    fn s116_shutdown_refuses_revoked_queued_save() {
+        struct RecordingSave(Arc<Mutex<usize>>);
+        impl super::super::StatePersistence for RecordingSave {
+            fn save(
+                &mut self,
+                _: &mut AppStateStorage,
+            ) -> Result<super::super::service::SavedState, SaveError> {
+                *self.0.lock().unwrap() += 1;
+                Ok(super::super::service::SavedState::Unavailable)
+            }
+        }
+        let saves = Arc::new(Mutex::new(0));
+        let state = AppStateStorage::test_fixture(|state| state.theme_index = 0);
+        let service = super::super::Tuning::from_registry(Registry::default())
+            .headless(state.clone(), Box::new(RecordingSave(saves.clone())))
+            .without_modules();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let runtime = TuningRuntime::start_inner(
+            service,
+            Arc::new(tokio::sync::RwLock::new(RunningApps::default())),
+            Some((entered_tx, release_rx)),
+        );
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let generation = Arc::new(AtomicU64::new(1));
+        let mut candidate = state;
+        candidate.theme_index = 1;
+        let id = runtime
+            .client()
+            .unwrap()
+            .request_guarded(
+                TuningRequest::SaveBase {
+                    gui_import: false,
+                    candidate: Box::new(candidate),
+                    expected_revision: 0,
+                },
+                None,
+                Some(RequestFence {
+                    generation: generation.clone(),
+                    expected: 1,
+                }),
+            )
+            .unwrap();
+        generation.fetch_add(1, Ordering::AcqRel);
+        runtime.begin_shutdown();
+        release_tx.send(()).unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while !runtime.snapshot().shutdown_complete && Instant::now() < until {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let terminal = runtime.snapshot();
+        assert!(terminal.shutdown_complete);
+        assert_eq!(*saves.lock().unwrap(), 0, "Revocation survives shutdown");
+        assert_eq!(terminal.revision, 0);
+        assert_eq!(terminal.state.theme_index, 0);
+        assert_eq!(
+            terminal.operation,
+            TuningOperationState::Refused {
+                id,
+                error: SaveError::Invalid
+            }
+        );
+        let receipts = runtime.shared.receipts.lock().unwrap();
+        let receipt = receipts
+            .recent
+            .iter()
+            .find(|receipt| receipt.id == id)
+            .unwrap();
+        assert_eq!(receipt.revision, 0);
+        assert_eq!(receipt.result, Err(SaveError::Invalid));
+    }
 
     #[test]
     fn accepted_classic_save_is_persisted_before_shutdown_completes() {
@@ -1677,11 +1897,13 @@ mod card_tests {
         let mut candidate = state;
         candidate.theme_index = 1;
         let accepted = runtime.request(TuningRequest::SaveBase {
+            gui_import: false,
             candidate: Box::new(candidate.clone()),
             expected_revision: 0,
         });
         runtime.begin_shutdown();
         let late_request = runtime.request(TuningRequest::SaveBase {
+            gui_import: false,
             candidate: Box::new(candidate),
             expected_revision: 0,
         });
@@ -1699,6 +1921,14 @@ mod card_tests {
         assert_eq!(terminal.state.theme_index, 1);
         assert_eq!(terminal.operation, TuningOperationState::Idle);
         assert_eq!(terminal.shutdown_outcome, Some(ShutdownResult::Complete));
+        let receipts = runtime.shared.receipts.lock().unwrap();
+        let receipt = receipts
+            .recent
+            .iter()
+            .find(|receipt| receipt.id == accepted.unwrap())
+            .unwrap();
+        assert_eq!(receipt.revision, 1);
+        assert_eq!(receipt.result, Ok(()));
     }
 
     #[test]
@@ -2282,6 +2512,32 @@ mod card_tests {
     }
 
     #[test]
+    fn s92_orphan_background_intent_does_not_keep_session_observation_running() {
+        let mut service = super::super::Tuning::from_registry(Registry::default())
+            .headless(AppStateStorage::test_fixture(|_| {}), Box::new(NoSave));
+        service.admit_test_modules();
+        let config = super::super::tweaks::background_workload::Config {
+            games: vec![super::super::tweaks::background_workload::GameRule {
+                group: "deleted".into(),
+                rule: "deleted".into(),
+            }],
+            ..Default::default()
+        };
+        service
+            .create_profile(
+                "Legacy custom intent".into(),
+                vec![ModulePreference {
+                    feature: FeatureId::new("background_workload").unwrap(),
+                    enabled: true,
+                    mode: ActivationMode::Session,
+                    config: config.envelope(),
+                }],
+            )
+            .unwrap();
+        assert!(!session_work_needed(&service, &BTreeMap::new()));
+    }
+
+    #[test]
     fn followup_session_work_requires_an_enabled_bound_session_or_retained_owner() {
         use crate::app::models::CoreGroup;
         let module = Setting::new("scalar", false);
@@ -2402,6 +2658,7 @@ mod card_tests {
             );
             entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
             let accepted = runtime.request(TuningRequest::SaveBase {
+                gui_import: false,
                 candidate: Box::new(candidate),
                 expected_revision,
             });
