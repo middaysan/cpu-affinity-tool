@@ -61,7 +61,9 @@ jobs:
         run: ./scripts/Start-mcp-debug.ps1 -SelfTest
 
       - name: Check debug MCP protocol
-        run: python scripts/test_cpu_affinity_mcp.py
+        run: |
+          python scripts/test_cpu_affinity_mcp.py
+          python scripts/test_live_mcp.py
 
       - name: Check platform renderer dependencies
         run: python scripts/test-renderer-dependencies.py
@@ -126,7 +128,20 @@ jobs:
 
       - name: Run Windows crash report probes
         shell: pwsh
-        run: ./scripts/test-windows-crash-reports.ps1
+        run: ./scripts/test-windows-crash-reports.ps1 -WithDebugMcp
+
+      - name: Run synthetic built-app MCP scenarios
+        shell: pwsh
+        run: ./scripts/test-windows-live-mcp.ps1 -SkipBuild
+
+      - name: Upload live MCP evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-live-mcp-evidence
+          path: target/lm-*/evidence/result.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Verify Windows release manifest
         shell: pwsh

@@ -313,19 +313,6 @@ fn owner(id: u64) -> OwnerKey {
 }
 
 #[test]
-fn fixture_availability_is_deterministic_and_keeps_unsupported_cases() {
-    use super::platforms::TweakAvailability;
-    assert_eq!(
-        Setting::new("scalar", false).availability(),
-        TweakAvailability::Available
-    );
-    assert_eq!(
-        Setting::new("unsupported_tweak", false).availability(),
-        TweakAvailability::Unavailable("Windows 10 required")
-    );
-}
-
-#[test]
 fn simple_controller_shares_equal_fields_and_conflicts_without_writes() {
     let module = Setting::new("scalar", false);
     let mut controller = Controller::default();

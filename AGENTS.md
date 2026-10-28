@@ -50,6 +50,32 @@ Test-first development rules:
 - If an OS or GUI interaction cannot be reproduced deterministically in automated tests, add the closest reliable unit or state-level coverage and document the required manual smoke validation in the change plan or release notes
 - Behavior changes must not rely on manual testing alone unless automated coverage is impractical and that limitation is explicitly called out
 
+### Verification workflow
+
+- Select checks from the changed behavior and its failure modes. Extend an existing regression or shared fixture before creating another equivalent test.
+- Every new test must protect an observable behavior, invariant or intentional build/security contract. Avoid tests of a fixture's hardcoded answer, immutable self-comparisons and incidental source formatting. Do not create production abstractions solely to increase coverage counts.
+- During implementation, use the narrow failing test and affected checks. Run the applicable broader checks after the change settles; repeat them only after new changes, failures or unresolved concerns. Documentation-only edits need text/link/diff review, not an application rebuild or native probe.
+- Consolidate duplicates only after identifying the retained check that would catch the same defect. Keep deterministic identity/lifetime/logon, ownership/stale-generation, CPU/RAM union/partial/unknown, persistence/conditional Undo, revocation/shutdown and shipping-fence checks. Live polling supplements these checks; it cannot replace controlled race or failure injection. There is no test-count reduction target.
+
+Choose local validation by scope; committed CI and release gates remain mandatory:
+
+| Change | Relevant local validation |
+| --- | --- |
+| Documentation and project instructions | Review accuracy, links and `git diff --check`; do not claim runtime validation from a text edit |
+| Presentation only | Reuse existing layout/geometry coverage; inspect the affected view when clipping, input or scaling can change; do not add unit tests just to mirror a label or color |
+| Pure logic or persisted state | Focused TDD/regressions, then affected platform tests, formatting and Clippy |
+| Configuration, monitoring or production MCP | Relevant deterministic tests plus affected built-app cases from `docs/testing.md`; use the default live pack for changes crossing the writer, telemetry or HTTP/UI boundaries |
+| Launch, Focus, affinity or priority | Add the relevant native readback/interactive case, including `-InteractiveLaunch` where applicable; preserve exact owned-process cleanup |
+| Native System Tweaks | Controller/recovery regressions and, when authorized, exact field readback/reload/conditional Undo; real background-role promotion still requires controlled-VM qualification |
+| Build, dependencies, manifests or feature fences | Affected platform/feature builds and the existing artifact, renderer, PDB, manifest, crash/recovery or vendor gates |
+
+Use the existing tools and evidence boundaries:
+
+- Reuse `scripts/test-windows-live-mcp.ps1` and the helpers documented in `docs/testing.md` for built-app tests. Add a case to that runner before creating an ad-hoc launcher, worker or testing framework. In the default suite, keep fixtures synthetic, autorun/enforcement/tuning Off at startup, and mutations limited to explicitly owned test data/processes. Never copy user state or recovery journals into that suite.
+- Use bounded waits, terminal receipts and exact process handles/lifetimes. Always clean up owned children, listeners, tickets and temporary keys; forced or incomplete cleanup is a failure. Missing privileges, a desktop or supported counters do not count as successful coverage. This workflow grants no additional permission to change Windows settings or admit real background roles.
+- Distinguish pure/state tests, a diagnostic EXE, the exact shipping EXE and interactive/vendor/VM acceptance. Debug-MCP selectors and authority overrides are absent from shipping builds; `LOCALAPPDATA` alone does not isolate production authority or Windows settings. A diagnostic pass is not shipping or real-service certification.
+- Report compilation, test execution and setup/cache time separately. Compare the same source/toolchain/profile/cache conditions and identify the artifact; a cached root-test rebuild speedup is not an application or full-CI performance gain. Before calling a PR green, verify its current head; an earlier green run remains evidence only for that earlier head.
+
 ## Project and platform status
 `cpu-affinity-tool` is a desktop utility for managing CPU affinity and process priority.
 
@@ -593,6 +619,10 @@ Do not invent dependency purpose just because a crate appears in `Cargo.toml`.
 The root package requires Rust 1.95 or newer, matching the `eframe` / `egui` 0.36 desktop stack. CI and release workflows use the stable toolchain.
 
 The Windows CI verification job has a 60-minute budget, matching the stable Windows release build job, so cold optimized application/test builds and final cache compression can finish the existing gates. Linux CI retains its 30-minute budget.
+
+The root package alone overrides the test profile to opt-level 1 and limited debug information. Dependency/dev/release profiles, debug assertions and arithmetic behavior remain unchanged. `scripts/measure-test-build.ps1` records alternating root-only rebuild/test timings with cached dependencies; it does not measure a cold full CI job. `docs/testing.md` records the deterministic/live coverage split and consolidation limits.
+
+`scripts/test-windows-live-mcp.ps1` runs synthetic built-app acceptance against a separate nonshipping debug-MCP/diagnostics executable: real UI input, production HTTP configuration/receipts/restart, schema-upgrade failure/retry, extra/shared CPU/RAM unions and history/CSV. It requires elevation for protected diagnostic authority and ETW, owns fresh sidecars/keys/processes and treats forced cleanup as failure. Ordinary launch/native readback/Focus is an explicit interactive opt-in; shipping bootstrap and real vendor/VM smoke remain distinct. Windows CI reuses the crash probe's diagnostic build via `-WithDebugMcp`, then runs the default live pack and uploads only sanitized result JSON for seven days. Stable release gates remain unchanged.
 
 Local verification commands:
 - `cargo test --manifest-path libs/os_api/Cargo.toml`

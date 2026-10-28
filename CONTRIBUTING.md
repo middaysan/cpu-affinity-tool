@@ -56,6 +56,10 @@ cargo build --release --features linux --bin cpu-affinity-tool-linux
 
 The [release checklist](docs/release-checklist.md) adds native crash/recovery probes, dependency audits, vendor regressions and manual Windows smoke. The [Linux beta checklist](docs/linux-beta-release-checklist.md) covers its separate prerelease path. See [release process](docs/release-process.md) for version, tag and artifact requirements.
 
+See [testing](docs/testing.md) for comparable test-build measurements and the
+synthetic built-app MCP suite. Live scenarios supplement the deterministic
+identity, ownership, CPU/RAM, persistence and recovery regressions.
+
 ## Reporting bugs
 
 Please use the bug report issue template and include:
