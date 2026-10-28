@@ -7,7 +7,7 @@ import tempfile
 import unittest
 import zlib
 
-from readme_screenshots import CONTRACT, digest, png_size, verify_capture
+from readme_screenshots import CONTRACT, contract_digest, digest, png_size, verify_capture
 
 
 def png():
@@ -20,7 +20,7 @@ def png():
 class PublicationGuards(unittest.TestCase):
     def fixture(self, root):
         report = {'schema': 1, 'status': 'pass', 'cleanup': 'pass',
-                  'contract_sha256': digest(CONTRACT), 'captures': {}}
+                  'contract_sha256': contract_digest(), 'captures': {}}
         data = png()
         for scene in json.loads(CONTRACT.read_bytes())['scenes']:
             path = root / scene['file']
@@ -54,6 +54,17 @@ class PublicationGuards(unittest.TestCase):
             report['captures']['main-dark']['file'] = '../state.json'
             with self.assertRaises(ValueError):
                 verify_capture(root, report)
+
+    def test_contract_identity_survives_checkout_newlines_but_not_scene_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = pathlib.Path(folder) / 'contract.json'
+            data = CONTRACT.read_bytes().replace(b'\r\n', b'\n')
+            path.write_bytes(data.replace(b'\n', b'\r\n'))
+            self.assertEqual(contract_digest(path), contract_digest())
+            spec = json.loads(data)
+            spec['scenes'][0]['file'] = 'different.png'
+            path.write_text(json.dumps(spec), encoding='utf-8')
+            self.assertNotEqual(contract_digest(path), contract_digest())
 
 
 if __name__ == '__main__':

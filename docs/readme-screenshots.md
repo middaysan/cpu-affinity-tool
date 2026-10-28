@@ -30,7 +30,7 @@ artifact. It refuses an administrator shipping manifest rather than silently
 using a production profile.
 
 Publication first checks all eight native PNGs, fixed asset names, byte hashes,
-dimensions, the scenario-contract hash and successful cleanup. It copies only
+dimensions, the normalized scenario-contract hash and successful cleanup. It copies only
 the PNG whitelist and sanitized `capture.json`. Logs, state, session tickets and
 credentials remain outside assets. Failed or partial captures cannot replace the
 README set. Publication does not launch the app or need administrator rights.

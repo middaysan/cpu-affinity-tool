@@ -26,6 +26,12 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def contract_digest(path=CONTRACT):
+    # Git checkout newlines must not invalidate Windows captures on Linux CI.
+    data = json.dumps(json.loads(path.read_bytes()), sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(data).hexdigest()
+
+
 def png_size(data):
     if (not 45 <= len(data) <= 10 * 1024 * 1024 or not data.startswith(PNG_SIGNATURE)
             or data[12:16] != b'IHDR' or not data.endswith(PNG_END)):
@@ -39,7 +45,7 @@ def png_size(data):
 def verify_capture(root, report):
     config = json.loads(CONTRACT.read_bytes())
     if (report.get('schema') != 1 or report.get('status') != 'pass' or report.get('cleanup') != 'pass'
-            or report.get('contract_sha256') != digest(CONTRACT)):
+            or report.get('contract_sha256') != contract_digest()):
         raise ValueError('Only a complete capture with successful cleanup can be published')
     expected = {scene['id']: scene['file'] for scene in config['scenes']}
     if set(report.get('captures', {})) != set(expected):
@@ -65,7 +71,9 @@ def verify_capture(root, report):
 def ui_inputs():
     paths = {path for pattern in json.loads(CONTRACT.read_bytes())['ui_inputs']
              for path in REPO.glob(pattern) if path.is_file()}
-    return {path.relative_to(REPO).as_posix(): digest(path) for path in sorted(paths)}
+    return {path.relative_to(REPO).as_posix():
+            hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest()
+            if path.suffix == '.rs' else digest(path) for path in sorted(paths)}
 
 
 def capture(exe, workload, output):
@@ -78,7 +86,7 @@ def capture(exe, workload, output):
               'package_version': tomllib.loads((REPO / 'Cargo.toml').read_text(encoding='utf-8'))['package']['version'],
               'artifact_sha256': digest(exe), 'artifact_kind': 'diagnostic-dev',
               'captured_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-              'contract_sha256': digest(CONTRACT), 'ui_inputs': ui_inputs(), 'captures': {},
+              'contract_sha256': contract_digest(), 'ui_inputs': ui_inputs(), 'captures': {},
               'conditions': {'data': 'synthetic rules and owned workloads', 'charts': 'measured, not injected',
                              'native_tweaks_applied': False, 'credentials_in_assets': False}}
     fixture = None
