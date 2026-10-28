@@ -2199,6 +2199,7 @@ mod tests {
         let mut runtime = RuntimeRegistry::new();
         let mut log = LogManager::default();
         let app = state.read().unwrap().groups[0].programs[0].clone();
+        let expected_priority = app.priority;
         runtime.add_running_app_with_token(&app.get_key(), 322, 1322, group_id(0), rule_id(0));
         let os = FakeLaunchOs::default();
         assert_eq!(
@@ -2220,7 +2221,7 @@ mod tests {
         } else {
             assert_eq!(
                 os.priority_calls.borrow().as_slice(),
-                &[(322, PriorityClass::Normal)]
+                &[(322, expected_priority)]
             );
         }
     }

@@ -1292,14 +1292,15 @@ impl AppState {
             return false;
         };
 
+        if !self.ui.app_edit_state.control_choices.is_empty() {
+            return true;
+        }
         #[cfg(all(target_os = "windows", feature = "windows"))]
         {
             let Ok(saved) = self.persistent_state.try_read() else {
                 return true;
             };
-            if !self.ui.app_edit_state.control_choices.is_empty()
-                || self.ui.app_edit_state.background_is_dirty(&saved.tuning)
-            {
+            if self.ui.app_edit_state.background_is_dirty(&saved.tuning) {
                 return true;
             }
         }
