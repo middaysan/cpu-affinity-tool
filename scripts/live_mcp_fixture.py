@@ -95,7 +95,10 @@ class Fixture:
             assert self.process.poll() is None, "Diagnostic app exited before readiness"
             if not ticket.exists():
                 return False
-            data = json.loads(ticket.read_text(encoding="utf-8-sig"))
+            try:
+                data = json.loads(ticket.read_text(encoding="utf-8-sig"))
+            except json.JSONDecodeError:
+                return False  # The debug transport may still be publishing its fresh ticket.
             assert data["pid"] == self.process.pid, "Debug ticket belongs to a different process"
             return True
         wait_until("diagnostic readiness", ready, bool, seconds=30)

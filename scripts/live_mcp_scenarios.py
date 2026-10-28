@@ -161,6 +161,8 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
                    and rows.get("meter." + key, {}).get("measured") == 2
                    and (rows.get("meter." + key, {}).get("cpu_percent") or 0) > 0
                    and (rows.get("memory." + key, {}).get("private_bytes") or 0) > 0
+                   and rows.get("memory." + key, {}).get("instances") == 2
+                   and rows.get("memory." + key, {}).get("measured") == 2
                    for key in ["group." + group, "rule." + rule_id, "rule." + shared,
                                "group." + peer_group, "rule." + peer])
     wait_until("root/helper measured", fixture.state, measured, seconds=25)
@@ -184,7 +186,9 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
     wait_until("extra process survives primary exit", fixture.state,
                lambda s: controls(s).get("meter.rule." + rule_id, {}).get("instances") == 1
                and controls(s).get("meter.rule." + rule_id, {}).get("measured") == 1
-               and (controls(s).get("meter.rule." + rule_id, {}).get("cpu_percent") or 0) > 0)
+               and (controls(s).get("meter.rule." + rule_id, {}).get("cpu_percent") or 0) > 0
+               and controls(s).get("memory.rule." + rule_id, {}).get("instances") == 1
+               and controls(s).get("memory.rule." + rule_id, {}).get("measured") == 1)
     fixture.call("monitor", enabled=False)
     assert fixture.call("wait", condition="collection_released", timeout_ms=6000)["satisfied"]
     assert not any(key.startswith(("meter.group.", "meter.rule.")) for key in controls(fixture.state()))
