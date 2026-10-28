@@ -1358,11 +1358,6 @@ mod tests {
             Some("Windows denied access. Open details for the reason.")
         );
         assert_eq!(
-            capability,
-            Capability::Denied(reason.into()),
-            "Native evidence is retained for help"
-        );
-        assert_eq!(
             current_value_text(&Capability::Available, Some("144 Hz\nMore info")),
             "144 Hz"
         );

@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$WithDebugMcp)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -64,7 +64,8 @@ function Invoke-CrashProbe {
 }
 
 try {
-    & cargo build --features "windows,diagnostics-test-controls" --bin cpu-affinity-tool
+    $features = if ($WithDebugMcp) { 'windows,debug-mcp,diagnostics-test-controls' } else { 'windows,diagnostics-test-controls' }
+    & cargo build --locked --features $features --bin cpu-affinity-tool
     if ($LASTEXITCODE -ne 0) {
         throw "The diagnostics probe build failed."
     }

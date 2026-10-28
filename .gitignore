@@ -7,3 +7,6 @@ ROADMAP*.md
 
 # Local task handoff workspace
 /tasks/
+
+# Python validation helpers
+__pycache__/

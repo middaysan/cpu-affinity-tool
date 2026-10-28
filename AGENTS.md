@@ -594,6 +594,10 @@ The root package requires Rust 1.95 or newer, matching the `eframe` / `egui` 0.3
 
 The Windows CI verification job has a 60-minute budget, matching the stable Windows release build job, so cold optimized application/test builds and final cache compression can finish the existing gates. Linux CI retains its 30-minute budget.
 
+The root package alone overrides the test profile to opt-level 1 and limited debug information. Dependency/dev/release profiles, debug assertions and arithmetic behavior remain unchanged. `scripts/measure-test-build.ps1` records alternating root-only rebuild/test timings with cached dependencies; it does not measure a cold full CI job. `docs/testing.md` records the deterministic/live coverage split and consolidation limits.
+
+`scripts/test-windows-live-mcp.ps1` runs synthetic built-app acceptance against a separate nonshipping debug-MCP/diagnostics executable: real UI input, production HTTP configuration/receipts/restart, schema-upgrade failure/retry, extra/shared CPU/RAM unions and history/CSV. It requires elevation for protected diagnostic authority and ETW, owns fresh sidecars/keys/processes and treats forced cleanup as failure. Ordinary launch/native readback/Focus is an explicit interactive opt-in; shipping bootstrap and real vendor/VM smoke remain distinct. Windows CI reuses the crash probe's diagnostic build via `-WithDebugMcp`, then runs the default live pack and uploads only sanitized result JSON for seven days. Stable release gates remain unchanged.
+
 Local verification commands:
 - `cargo test --manifest-path libs/os_api/Cargo.toml`
 - `cargo test --features windows --bin cpu-affinity-tool`

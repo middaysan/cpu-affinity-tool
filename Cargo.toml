@@ -22,6 +22,12 @@ opt-level = 3               # Use slightly better optimizations.
 overflow-checks = false     # Disable integer overflow checks.
 debug = true
 
+# Keep dependency artifacts shared with dev, but avoid expensive root-test codegen.
+# Debug assertions and arithmetic behavior still inherit the existing dev profile.
+[profile.test.package.cpu-affinity-tool]
+opt-level = 1
+debug = "limited"
+
 [dependencies]
 tokio = { version = "1.53.3", default-features = false, features = ["rt-multi-thread", "time", "sync"] }
 os_api = { path = "libs/os_api" }

@@ -288,6 +288,24 @@ mod tests {
                 let logs = label(&output, "Logs");
                 assert!((connection.center().y - logs.center().y).abs() < 1.0);
                 assert!(logs.center().x - connection.center().x > 120.0);
+                for name in ["Port", "Copy connection", "Copy AI prompt"] {
+                    label(&output, name);
+                }
+                for shape in &output.shapes {
+                    if let egui::Shape::Text(text) = &shape.shape {
+                        assert!(![
+                            "AI clients",
+                            "Permissions",
+                            "Choose apps",
+                            "Additional permissions",
+                            "Selected client",
+                            "Save changes"
+                        ]
+                        .iter()
+                        .any(|name| text.galley.job.text.contains(name)));
+                    }
+                }
+                assert!(label(&output, "Copy connection").bottom() - title.top() < 180.0);
                 mcp.logs_selected = true;
                 let output = settle(&mut mcp, &ctx, size);
                 label(&output, "No commands yet");
@@ -404,32 +422,6 @@ mod tests {
         let output = settle(&mut mcp, &ctx, size);
         for name in ["Enable MCP server", "No commands yet"] {
             label(&output, name);
-        }
-    }
-    #[test]
-    fn connection_settings_show_enable_port_and_copy_without_client_management() {
-        for dark in [true, false] {
-            let (mut mcp, ctx) = fixture(dark);
-            let output = settle(&mut mcp, &ctx, egui::vec2(400.0, 600.0));
-            for name in ["Enable MCP server", "Port", "Copy connection"] {
-                label(&output, name);
-            }
-            for shape in &output.shapes {
-                if let egui::Shape::Text(text) = &shape.shape {
-                    assert!(![
-                        "AI clients",
-                        "Permissions",
-                        "Choose apps",
-                        "Additional permissions",
-                        "Selected client",
-                        "Save changes"
-                    ]
-                    .iter()
-                    .any(|name| text.galley.job.text.contains(name)));
-                }
-            }
-            let top = label(&output, "MCP server").top();
-            assert!(label(&output, "Copy connection").bottom() - top < 180.0);
         }
     }
     #[test]
