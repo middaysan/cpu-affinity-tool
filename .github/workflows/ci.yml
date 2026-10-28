@@ -65,6 +65,11 @@ jobs:
           python scripts/test_cpu_affinity_mcp.py
           python scripts/test_live_mcp.py
 
+      - name: Check README screenshot assets
+        run: |
+          python scripts/test_readme_screenshots.py
+          python scripts/check-readme-screenshots.py
+
       - name: Check platform renderer dependencies
         run: python scripts/test-renderer-dependencies.py
 
@@ -181,6 +186,11 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Check README screenshot assets
+        run: |
+          python scripts/test_readme_screenshots.py
+          python scripts/check-readme-screenshots.py
 
       - name: Run clippy
         run: cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings

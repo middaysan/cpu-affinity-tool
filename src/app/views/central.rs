@@ -127,16 +127,16 @@ pub fn draw_central_panel(app: &mut AppState, root_ui: &mut egui::Ui) {
                     },
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if toned_sized_button(
+                    let new_group = toned_sized_button(
                         ui,
                         [105.0, 25.0],
                         egui::Button::new(
                             RichText::new("+ New group").size(BUTTON_FONT_SIZE).strong(),
                         ),
                         ToneRole::Primary,
-                    )
-                    .clicked()
-                    {
+                    );
+                    crate::debug_mcp_control!("group.new", new_group);
+                    if new_group.clicked() {
                         app.start_creating_group();
                     }
                 });
@@ -462,13 +462,13 @@ fn render_groups(
                 );
 
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ghost_button(
+                    let edit = ghost_button(
                         ui,
                         egui::Button::new(RichText::new(edit_text).size(BUTTON_FONT_SIZE)),
                     )
-                    .on_hover_text("Edit group settings")
-                    .clicked()
-                    {
+                    .on_hover_text("Edit group settings");
+                    crate::debug_mcp_control!(format!("group.edit.{}", group_id.0), edit);
+                    if edit.clicked() {
                         actions.push(CentralAction::StartEditGroup(group_id.clone()));
                     }
                 });

@@ -3,6 +3,7 @@ param(
     [string]$Python = 'python',
     [string]$ExePath,
     [switch]$InteractiveLaunch,
+    [switch]$CaptureReadme,
     [switch]$SkipBuild
 )
 
@@ -29,6 +30,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Owned workload compilation failed.' }
     $runnerArguments = @((Join-Path $PSScriptRoot 'run_live_mcp.py'), '--exe', $ExePath, '--workload', $workload, '--output', (Join-Path $runRoot 'evidence'))
     if ($InteractiveLaunch) { $runnerArguments += '--interactive-launch' }
+    if ($CaptureReadme) { $runnerArguments += '--capture-readme' }
     & $Python @runnerArguments
     if ($LASTEXITCODE -ne 0) { throw "Live MCP acceptance failed. Evidence: $runRoot/evidence/result.json" }
     Write-Host "Live MCP acceptance passed. Evidence: $runRoot/evidence/result.json"

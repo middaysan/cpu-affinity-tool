@@ -76,6 +76,13 @@ Use the existing tools and evidence boundaries:
 - Distinguish pure/state tests, a diagnostic EXE, the exact shipping EXE and interactive/vendor/VM acceptance. Debug-MCP selectors and authority overrides are absent from shipping builds; `LOCALAPPDATA` alone does not isolate production authority or Windows settings. A diagnostic pass is not shipping or real-service certification.
 - Report compilation, test execution and setup/cache time separately. Compare the same source/toolchain/profile/cache conditions and identify the artifact; a cached root-test rebuild speedup is not an application or full-CI performance gain. Before calling a PR green, verify its current head; an earlier green run remains evidence only for that earlier head.
 
+### README screenshot maintenance
+
+- Review screenshot impact whenever visible layout, copy, navigation, controls, themes, metrics, charts or tables change. Refresh the affected README scenes in the same change; refresh the full set for shared header/font/theme/layout changes. Keep captions and links accurate. For a reviewed nonvisual source change, explain why the existing image still represents the UI; never relabel old provenance as a fresh capture.
+- Follow `docs/readme-screenshots.md` and reuse `scripts/test-windows-live-mcp.ps1 -CaptureReadme` with the fixed scene contract. Capture actual settled renderer frames and measured owned workloads; do not synthesize/retouch UI or inject chart values. Use isolated synthetic rules/authority, leave real Windows settings untouched and require successful cleanup before publication.
+- Use `scripts/publish-readme-screenshots.ps1` for the checked PNG whitelist and generated lead image; run `scripts/check-readme-screenshots.py`. Preserve the lead's three columns (Affinity groups / CPU selection / CPU history), original unscaled individual frames and clear exterior separators. Inspect the actual PNGs at full size and README display width; do not rely on hashes alone for visual correctness.
+- Record source/artifact/scale/scenes and cleanup in `assets/screenshots/capture.json` and keep `assets/screenshots/README.md` truthful. Never commit user state, tickets, keys or raw inventories. Static integrity checks in CI do not replace capture/visual review, and a documentation screenshot is not a shipping or performance acceptance result.
+
 ## Project and platform status
 `cpu-affinity-tool` is a desktop utility for managing CPU affinity and process priority.
 

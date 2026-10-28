@@ -413,7 +413,9 @@ pub fn create_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    if close_button(ui).on_hover_text("Close").clicked() {
+                    let close = close_button(ui).on_hover_text("Close");
+                    crate::debug_mcp_control!("group.form.close", close);
+                    if close.clicked() {
                         cancel_clicked = true;
                     }
                 });
@@ -464,7 +466,9 @@ pub fn edit_group_window(app: &mut AppState, root_ui: &mut egui::Ui) {
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    if close_button(ui).on_hover_text("Close").clicked() {
+                    let close = close_button(ui).on_hover_text("Close");
+                    crate::debug_mcp_control!("group.form.close", close);
+                    if close.clicked() {
                         cancel_clicked = true;
                     }
                 });

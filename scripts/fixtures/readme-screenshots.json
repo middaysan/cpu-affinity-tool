@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "scenes": [
+    {"id": "main-dark", "file": "main-dark.png", "label": "Affinity groups", "theme": "dark"},
+    {"id": "topology", "file": "topology.png", "label": "CPU selection", "theme": "dark"},
+    {"id": "cpu-history", "file": "cpu-history.png", "label": "CPU history", "theme": "dark"},
+    {"id": "processes", "file": "processes.png", "label": "Processes", "theme": "dark"},
+    {"id": "history-export", "file": "history-export.png", "label": "History export", "theme": "dark"},
+    {"id": "system-tweaks", "file": "system-tweaks.png", "label": "System Tweaks", "theme": "dark"},
+    {"id": "mcp-connection", "file": "mcp-connection.png", "label": "MCP connection", "theme": "dark"},
+    {"id": "main-light", "file": "main-light.png", "label": "Light theme", "theme": "light"}
+  ],
+  "hero": {"scenes": ["main-dark", "topology", "cpu-history"], "padding": 16, "gutter": 32, "separator": 4, "header": 48},
+  "ui_inputs": [
+    "src/app/views/*.rs",
+    "src/app/features/cpu_load/view.rs",
+    "src/app/features/cpu_load/chart.rs",
+    "src/app/features/cpu_load/controls.rs",
+    "src/app/features/cpu_load/export_ui.rs",
+    "src/app/features/cpu_load/process_list.rs",
+    "src/app/features/mcp/view.rs",
+    "src/app/features/mcp/activity_view.rs",
+    "src/app/features/system_tweaks/view.rs",
+    "src/app/features/system_tweaks/background_ui.rs",
+    "src/app/features/system_tweaks/presentation.rs",
+    "src/app/shell/render_preparation.rs",
+    "assets/fonts/InterVariable.ttf",
+    "assets/icon.ico"
+  ]
+}
