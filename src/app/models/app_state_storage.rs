@@ -297,88 +297,11 @@ impl AppStateStorage {
             }
             Err(_) => None,
         };
-        if let Some(data) = &data {
-            match migrations::version_selection(data) {
-                migrations::VersionSelection::Blocked => {
-                    let mut blocked = schema_refresh::build_default_state();
-                    blocked.block_save(Some(Arc::from(data.as_str())), data.len());
-                    return blocked;
-                }
-                migrations::VersionSelection::InvalidJson => {}
-                selected => {
-                    let raw_fields = match serde_json::from_str::<RawStateFields<'_>>(data) {
-                        Ok(fields) => fields,
-                        Err(_) => {
-                            let mut blocked = schema_refresh::build_default_state();
-                            blocked.block_save(Some(Arc::from(data.as_str())), data.len());
-                            return blocked;
-                        }
-                    };
-                    let control_present = raw_fields.0.contains_key("process_control");
-                    if control_present
-                        && !matches!(
-                            selected,
-                            migrations::VersionSelection::Known(14..=CURRENT_APP_STATE_VERSION)
-                        )
-                    {
-                        let mut blocked = schema_refresh::build_default_state();
-                        blocked.block_save(Some(Arc::from(data.as_str())), data.len());
-                        return blocked;
-                    }
-                    let builtin_present = raw_fields
-                        .0
-                        .get("groups")
-                        .and_then(|groups| {
-                            serde_json::from_str::<serde_json::Value>(groups.get()).ok()
-                        })
-                        .and_then(|groups| groups.as_array().cloned())
-                        .is_some_and(|groups| {
-                            groups.iter().any(|group| {
-                                group
-                                    .get("programs")
-                                    .and_then(serde_json::Value::as_array)
-                                    .is_some_and(|apps| {
-                                        apps.iter()
-                                            .any(|app| app.get("builtin_process_binding").is_some())
-                                    })
-                            })
-                        });
-                    if builtin_present
-                        && !matches!(
-                            selected,
-                            migrations::VersionSelection::Known(13..=CURRENT_APP_STATE_VERSION)
-                        )
-                    {
-                        let mut blocked = schema_refresh::build_default_state();
-                        blocked.block_save(Some(Arc::from(data.as_str())), data.len());
-                        return blocked;
-                    }
-                    let tuning_present = raw_fields.0.contains_key("tuning");
-                    let old_tuning = tuning_present
-                        && !matches!(
-                            selected,
-                            migrations::VersionSelection::Known(11..=CURRENT_APP_STATE_VERSION)
-                        );
-                    if let Some(mut state) = migrations::load_from_data(data, path) {
-                        if old_tuning
-                            || matches!(
-                                state.tuning.decode(),
-                                crate::app::features::system_tweaks::config::TuningLoad::Blocked
-                            )
-                        {
-                            state.block_save(Some(Arc::from(data.as_str())), data.len());
-                        }
-                        return state;
-                    }
-                    if tuning_present || builtin_present || control_present {
-                        // Invalid unrelated base fields cannot erase any tuning
-                        // evidence merely because the full typed decode failed.
-                        let mut blocked = schema_refresh::build_default_state();
-                        blocked.block_save(Some(Arc::from(data.as_str())), data.len());
-                        return blocked;
-                    }
-                }
-            }
+        if let Some(state) = data
+            .as_ref()
+            .and_then(|data| Self::decode_loaded_state(data, path))
+        {
+            return state;
         }
         let mut default_state = schema_refresh::build_default_state();
         let mut backup_secured = false;
@@ -397,6 +320,90 @@ impl AppStateStorage {
         default_state.loaded_version = default_state.version;
         default_state
     }
+    // Shared, non-repairing decoder: observing an old file never publishes it.
+    fn decode_loaded_state(data: &str, path: &Path) -> Option<Self> {
+        match migrations::version_selection(data) {
+            migrations::VersionSelection::Blocked => {
+                let mut blocked = schema_refresh::build_default_state();
+                blocked.block_save(Some(Arc::from(data)), data.len());
+                return Some(blocked);
+            }
+            migrations::VersionSelection::InvalidJson => {}
+            selected => {
+                let raw_fields = match serde_json::from_str::<RawStateFields<'_>>(data) {
+                    Ok(fields) => fields,
+                    Err(_) => {
+                        let mut blocked = schema_refresh::build_default_state();
+                        blocked.block_save(Some(Arc::from(data)), data.len());
+                        return Some(blocked);
+                    }
+                };
+                let control_present = raw_fields.0.contains_key("process_control");
+                if control_present
+                    && !matches!(
+                        selected,
+                        migrations::VersionSelection::Known(14..=CURRENT_APP_STATE_VERSION)
+                    )
+                {
+                    let mut blocked = schema_refresh::build_default_state();
+                    blocked.block_save(Some(Arc::from(data)), data.len());
+                    return Some(blocked);
+                }
+                let builtin_present = raw_fields
+                    .0
+                    .get("groups")
+                    .and_then(|groups| serde_json::from_str::<serde_json::Value>(groups.get()).ok())
+                    .and_then(|groups| groups.as_array().cloned())
+                    .is_some_and(|groups| {
+                        groups.iter().any(|group| {
+                            group
+                                .get("programs")
+                                .and_then(serde_json::Value::as_array)
+                                .is_some_and(|apps| {
+                                    apps.iter()
+                                        .any(|app| app.get("builtin_process_binding").is_some())
+                                })
+                        })
+                    });
+                if builtin_present
+                    && !matches!(
+                        selected,
+                        migrations::VersionSelection::Known(13..=CURRENT_APP_STATE_VERSION)
+                    )
+                {
+                    let mut blocked = schema_refresh::build_default_state();
+                    blocked.block_save(Some(Arc::from(data)), data.len());
+                    return Some(blocked);
+                }
+                let tuning_present = raw_fields.0.contains_key("tuning");
+                let old_tuning = tuning_present
+                    && !matches!(
+                        selected,
+                        migrations::VersionSelection::Known(11..=CURRENT_APP_STATE_VERSION)
+                    );
+                if let Some(mut state) = migrations::load_from_data(data, path) {
+                    if old_tuning
+                        || matches!(
+                            state.tuning.decode(),
+                            crate::app::features::system_tweaks::config::TuningLoad::Blocked
+                        )
+                    {
+                        state.block_save(Some(Arc::from(data)), data.len());
+                    }
+                    return Some(state);
+                }
+                if tuning_present || builtin_present || control_present {
+                    // Invalid unrelated base fields cannot erase any tuning
+                    // evidence merely because the full typed decode failed.
+                    let mut blocked = schema_refresh::build_default_state();
+                    blocked.block_save(Some(Arc::from(data)), data.len());
+                    return Some(blocked);
+                }
+            }
+        }
+        None
+    }
+
     #[cfg_attr(test, allow(dead_code))]
     pub fn try_save_state(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let path = state_path::get_state_path();
@@ -458,6 +465,29 @@ impl AppStateStorage {
             return Err("saved state unavailable for tuning".into());
         }
         state.loaded_version = state.version;
+        Ok(state)
+    }
+    /// Reads through ordinary compatibility guards without repair or publication.
+    pub(crate) fn read_saved_for_settings_update(
+        path: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let filesystem = storage_io::RealStateFilesystem;
+        let storage_io::StateRead::Text(raw) =
+            storage_io::read_state_file_with_filesystem(path, &filesystem)?
+        else {
+            return Err("Saved settings exceed the supported size".into());
+        };
+        let state = Self::decode_loaded_state(&raw, path)
+            .ok_or("Saved settings could not be read safely")?;
+        if state.save_blocked()
+            || !matches!(
+                state.tuning.decode(),
+                crate::app::features::system_tweaks::config::TuningLoad::Off
+                    | crate::app::features::system_tweaks::config::TuningLoad::Known(_)
+            )
+        {
+            return Err("This saved format cannot be safely updated by this version".into());
+        }
         Ok(state)
     }
     pub(crate) fn publish_recovery_file(staging: &Path, destination: &Path) -> std::io::Result<()> {

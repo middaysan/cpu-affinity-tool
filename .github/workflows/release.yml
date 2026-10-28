@@ -19,7 +19,7 @@ jobs:
   build-windows:
     name: Check, Build, and Package Windows Binary
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

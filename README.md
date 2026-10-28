@@ -6,6 +6,8 @@ Set up a game and its background apps once, instead of repeating the changes in 
 
 **[Download for Windows](https://github.com/middaysan/cpu-affinity-tool/releases/latest)** · [Getting started](#getting-started) · [MCP guide](docs/mcp.md) · [Documentation](#documentation)
 
+**Latest fix in [1.7.2](https://github.com/middaysan/cpu-affinity-tool/releases/tag/v1.7.2):** System Tweaks offers **Update saved settings** after upgrading from an older version, keeping apps, groups and Undo information.
+
 **New in [1.7.1](https://github.com/middaysan/cpu-affinity-tool/releases/tag/v1.7.1):** Steam game tracking, helper-process profiles for popular apps, shared-process control, and current CPU/RAM totals for apps and groups.
 
 ![Affinity groups and CPU topology selection shown side by side](assets/screenshot.png)
@@ -85,7 +87,7 @@ An agent can manage groups and rules, change monitoring settings, launch program
 - **Windows x64** is the stable release platform. The current renderer uses DirectX 12, and the release requires administrator approval. Saved-rule shortcuts may show the same UAC prompt.
 - **Linux** has a separate desktop beta for x86_64 glibc, with X11/Wayland sessions and [beta prereleases](https://github.com/middaysan/cpu-affinity-tool/releases). CPU recording, System Tweaks and production MCP are Windows-only; Linux does not have full Windows feature parity. macOS is unsupported.
 - New Windows configurations use `%LOCALAPPDATA%\CpuAffinityTool\state.json`. An existing `state.json` beside the EXE keeps its legacy location. **Logs → Data folder** opens the active directory.
-- Version 1.7.1 saves configuration as schema v14 (Steam game targets, built-in helper provenance and process-control ownership); 1.7.0 used v11. Keep a backup before upgrading; loading an older format alone does not rewrite it, but an explicit save upgrades it. Downgrading after a current-format save is unsupported.
+- Versions 1.7.1 and 1.7.2 save configuration as schema v14 (Steam game targets, built-in helper provenance and process-control ownership); 1.7.0 used v11. Keep a backup before upgrading; loading an older format alone does not rewrite it, but an explicit save upgrades it. Downgrading after a current-format save is unsupported.
 - Logs and available crash reports stay local and are not uploaded automatically. Review them before sharing. CPU history is retained in memory and saved to a file only when you export it.
 
 ## Build from source

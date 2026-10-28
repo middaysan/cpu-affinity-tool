@@ -847,6 +847,210 @@ fn durable_disk_lease_ambiguous_artifact_unknown_and_source_mismatch_block() {
 struct SavedFile(PathBuf);
 
 #[test]
+fn s121_explicit_update_preserves_apps_helpers_and_original_undo() {
+    use super::{config::ModulePreference, SettingsUpdate};
+    use crate::app::models::{AppStateStorage, AppToRun, CoreGroup};
+    let directory = OwnedDirectory::new();
+    let path = directory.0.join("state.json");
+    let mut app = AppToRun::new_path(
+        "game.exe".into(),
+        vec!["--saved".into()],
+        "game.exe".into(),
+        os_api::PriorityClass::Normal,
+        false,
+    );
+    app.additional_processes = vec!["game.exe".into(), "extra-worker.exe".into()];
+    let mut state = AppStateStorage::test_fixture(|state| {
+        state.groups = vec![CoreGroup {
+            name: "Existing group".into(),
+            cores: vec![0, 2],
+            programs: vec![app],
+            is_hidden: false,
+            run_all_button: false,
+        }]
+    });
+    state.try_save_to_path(&path).unwrap();
+    let module = Setting::new("scalar", false);
+    let mut registry = Registry::default();
+    registry.register(module.clone()).unwrap();
+    let tuning = super::Tuning::from_registry(registry);
+    let mut original = tuning.headless(state, Box::new(SavedFile(path.clone())));
+    original.start_selected_recovery();
+    let profile = original
+        .create_profile(
+            "Existing tweak".into(),
+            vec![ModulePreference {
+                feature: FeatureId::new("scalar").unwrap(),
+                enabled: true,
+                mode: ActivationMode::Manual,
+                config: module.config(12),
+            }],
+        )
+        .unwrap();
+    original
+        .activate_manual(
+            profile,
+            FeatureId::new("scalar").unwrap(),
+            TargetIdentity::Machine,
+        )
+        .unwrap();
+    drop(original);
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    old["version"] = 13.into();
+    old.as_object_mut().unwrap().remove("process_control");
+    let bytes = serde_json::to_vec(&old).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let journal_path = directory.0.join("recovery-v1.json");
+    let journal = std::fs::read(&journal_path).unwrap();
+    let mut service = tuning.headless(
+        AppStateStorage::load_from_path(&path),
+        Box::new(SavedFile(path.clone())),
+    );
+    assert!(service.verify_saved().is_err());
+    assert_eq!(
+        service.settings_update,
+        SettingsUpdate::Required { from_version: 13 }
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    service.update_saved_settings().unwrap();
+    assert_eq!(service.settings_update, SettingsUpdate::Checking);
+    let updated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(updated["groups"], old["groups"]);
+    assert_eq!(updated["tuning"], old["tuning"]);
+    assert_eq!(
+        updated["version"],
+        crate::app::models::CURRENT_APP_STATE_VERSION
+    );
+    assert_eq!(
+        std::fs::read(&journal_path).unwrap(),
+        journal,
+        "saving the format cannot erase Undo evidence"
+    );
+    service.check_updated_settings().unwrap();
+    assert_eq!(service.settings_update, SettingsUpdate::None);
+    assert_eq!(module.value(), vec![12]);
+    service
+        .undo_previous_module(profile, &FeatureId::new("scalar").unwrap())
+        .unwrap();
+    assert_eq!(
+        module.value(),
+        vec![7],
+        "Undo retains the original baseline across the update"
+    );
+}
+
+#[test]
+fn s121_update_write_failure_and_recovery_retry_keep_original_evidence() {
+    use super::{
+        service::{SavedState, StatePersistence},
+        SaveError, SettingsUpdate,
+    };
+    use crate::app::models::AppStateStorage;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct FailingFile(PathBuf, Arc<AtomicBool>);
+    impl StatePersistence for FailingFile {
+        fn save(&mut self, state: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+            if self.1.load(Ordering::SeqCst) {
+                return Err(SaveError::Storage);
+            }
+            state
+                .try_save_to_path(&self.0)
+                .map_err(|_| SaveError::Storage)?;
+            Ok(SavedState::Unavailable)
+        }
+        fn source_path(&self) -> Option<PathBuf> {
+            Some(self.0.clone())
+        }
+        fn recovery_directory(&self) -> Option<PathBuf> {
+            self.0.parent().map(PathBuf::from)
+        }
+    }
+    let directory = OwnedDirectory::new();
+    let path = directory.0.join("state.json");
+    let state = AppStateStorage::test_fixture(|state| state.version = 13);
+    let bytes = serde_json::to_vec(&state).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let module = Setting::new("scalar", false);
+    let mut registry = Registry::default();
+    registry.register(module.clone()).unwrap();
+    let fail = Arc::new(AtomicBool::new(true));
+    let mut service = super::Tuning::from_registry(registry).headless(
+        AppStateStorage::load_from_path(&path),
+        Box::new(FailingFile(path.clone(), fail.clone())),
+    );
+    assert!(service.verify_saved().is_err());
+    assert_eq!(service.update_saved_settings(), Err(SaveError::Storage));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(service.state().version, 13);
+    assert_eq!(
+        service.settings_update,
+        SettingsUpdate::Required { from_version: 13 }
+    );
+    fail.store(false, Ordering::SeqCst);
+    service.update_saved_settings().unwrap();
+    let updated = std::fs::read(&path).unwrap();
+    let staging = directory.0.join("recovery-v1.staging");
+    std::fs::write(&staging, b"retained evidence").unwrap();
+    assert_eq!(service.check_updated_settings(), Err(SaveError::Recovering));
+    assert_eq!(service.settings_update, SettingsUpdate::NeedsAttention);
+    assert_eq!(std::fs::read(&staging).unwrap(), b"retained evidence");
+    assert_eq!(std::fs::read(&path).unwrap(), updated);
+    assert_eq!(*module.writes.lock().unwrap(), 0);
+    std::fs::remove_file(staging).unwrap();
+    service.prepare_settings_check().unwrap();
+    service.check_updated_settings().unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        updated,
+        "Check again must not save a second time"
+    );
+    assert_eq!(service.settings_update, SettingsUpdate::None);
+}
+
+#[test]
+fn s121_update_rechecks_stale_foreign_and_unreadable_sources_without_repair() {
+    use super::SettingsUpdate;
+    use crate::app::models::AppStateStorage;
+    let directory = OwnedDirectory::new();
+    let path = directory.0.join("state.json");
+    let baseline = AppStateStorage::test_fixture(|state| state.version = 13);
+    let base = serde_json::to_value(&baseline).unwrap();
+    let mut changed = base.clone();
+    changed["theme_index"] = 2.into();
+    let mut future = base.clone();
+    future["version"] = 99.into();
+    let mut unknown = base.clone();
+    unknown["tuning"] = serde_json::json!({"version":99});
+    let mut foreign = base.clone();
+    foreign["process_control"] = serde_json::json!({"format":2});
+    let mut invalid = base.clone();
+    invalid["tuning"] = serde_json::Value::Null;
+    let mut cases: Vec<_> = [changed, future, unknown, foreign, invalid]
+        .into_iter()
+        .map(|value| serde_json::to_vec(&value).unwrap())
+        .collect();
+    cases.push(b"{broken".to_vec());
+    for evidence in cases {
+        std::fs::write(&path, serde_json::to_vec(&base).unwrap()).unwrap();
+        let mut service = super::Tuning::from_registry(Registry::default()).headless(
+            AppStateStorage::load_from_path(&path),
+            Box::new(SavedFile(path.clone())),
+        );
+        assert!(service.verify_saved().is_err());
+        assert!(matches!(
+            service.settings_update,
+            SettingsUpdate::Required { .. }
+        ));
+        std::fs::write(&path, &evidence).unwrap();
+        assert!(service.update_saved_settings().is_err());
+        assert_eq!(service.settings_update, SettingsUpdate::None);
+        assert_eq!(std::fs::read(&path).unwrap(), evidence);
+    }
+}
+
+#[test]
 fn legacy_undo_after_restart_retains_drift_evidence_and_other_modules() {
     use super::{config::ModulePreference, SaveError};
     use crate::app::models::AppStateStorage;

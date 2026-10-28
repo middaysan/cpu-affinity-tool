@@ -20,7 +20,7 @@ jobs:
   windows-check:
     name: Windows Check and Build
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

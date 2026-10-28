@@ -8,7 +8,7 @@ use super::{
         contract::*,
         controller::{LifetimeEvidence, OwnerKey, RecoveryIntent, ShutdownResult},
     },
-    service::{HeadlessTuning, SaveError},
+    service::{HeadlessTuning, SaveError, SettingsUpdate},
 };
 use crate::app::{
     features::rules::RulesContext,
@@ -26,6 +26,8 @@ use std::{
     time::{Duration, Instant},
 };
 pub(crate) enum TuningRequest {
+    UpdateSavedSettings,
+    CheckSavedSettings,
     // Retained for internal compatibility/fixtures; the rule editor saves atomically.
     #[allow(dead_code)]
     ConfigureBackground {
@@ -199,6 +201,7 @@ pub(crate) struct ProfileCard {
 }
 #[derive(Clone)]
 pub(crate) struct TuningSnapshot {
+    pub settings_update: SettingsUpdate,
     // Bounded background telemetry remains available to debug-only diagnostics.
     #[cfg_attr(not(feature = "debug-mcp"), allow(dead_code))]
     pub background: super::background_policy::Snapshot,
@@ -365,6 +368,11 @@ impl TuningClient {
             } => *expected_revision,
             _ => expected.unwrap_or_else(|| self.shared.latest.lock().unwrap().revision),
         };
+        let settings_progress = match &request {
+            TuningRequest::UpdateSavedSettings => Some(SettingsUpdate::Updating),
+            TuningRequest::CheckSavedSettings => Some(SettingsUpdate::Checking),
+            _ => None,
+        };
         match admission.sender.try_send(Queued {
             id,
             revision,
@@ -382,6 +390,9 @@ impl TuningClient {
         }
         let mut latest = (**self.shared.latest.lock().unwrap()).clone();
         latest.operation = TuningOperationState::Pending { id };
+        if let Some(progress) = settings_progress {
+            latest.settings_update = progress;
+        }
         latest.restoration_effect = None;
         *self.shared.latest.lock().unwrap() = Arc::new(latest);
         Ok(id)
@@ -613,12 +624,28 @@ impl TuningRuntime {
                             250
                         })) {
                             Ok(queued) => {
+                                let settings_check = matches!(
+                                    &queued.request,
+                                    TuningRequest::UpdateSavedSettings
+                                        | TuningRequest::CheckSavedSettings
+                                );
                                 #[cfg(all(target_os = "windows", feature = "windows"))]
                                 let refresh_modules =
                                     matches!(&queued.request, TuningRequest::RefreshModuleCards);
                                 #[cfg(not(all(target_os = "windows", feature = "windows")))]
                                 let refresh_modules = false;
-                                let (id, result) = apply_queued(&mut service, queued, false);
+                                let (id, mut result) = apply_queued(&mut service, queued, false);
+                                if settings_check && result.is_ok() {
+                                    *owned.latest.lock().unwrap() = Arc::new(snapshot(
+                                        &service,
+                                        TuningOperationState::Pending { id },
+                                        bridge.latest(),
+                                        false,
+                                        None,
+                                        false,
+                                    ));
+                                    result = service.check_updated_settings();
+                                }
                                 operation = match result {
                                     Ok(()) => TuningOperationState::Idle,
                                     Err(error) => TuningOperationState::Refused { id, error },
@@ -861,6 +888,8 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
         return Err(SaveError::Invalid);
     }
     match request {
+        TuningRequest::UpdateSavedSettings => service.update_saved_settings(),
+        TuningRequest::CheckSavedSettings => service.prepare_settings_check(),
         TuningRequest::ConfigureBackground { enabled, config } => {
             service.configure_background(enabled, *config)
         }
@@ -1476,6 +1505,7 @@ fn snapshot(
 ) -> TuningSnapshot {
     if !service.modules_enabled {
         return TuningSnapshot {
+            settings_update: SettingsUpdate::None,
             background: Default::default(),
             tweak_cards: vec![],
             pc_checks: vec![],
@@ -1656,6 +1686,7 @@ fn snapshot(
         operation
     };
     TuningSnapshot {
+        settings_update: service.settings_update,
         background: super::background_policy::snapshot(service),
         tweak_cards: tweak_cards(service, &templates, observe),
         pc_checks: service.pc_checks.clone(),

@@ -14,7 +14,7 @@ pub(crate) mod tweaks;
 use service::HeadlessTuning;
 pub(crate) const MODULES_ENABLED: bool = cfg!(all(target_os = "windows", feature = "windows"));
 pub(crate) use pc_checks::PcCheck;
-pub(crate) use service::{SaveError, StatePersistence};
+pub(crate) use service::{SaveError, SettingsUpdate, StatePersistence};
 #[cfg(all(target_os = "windows", feature = "windows"))]
 pub(crate) use session_reducer::{RequestFence, TuningClient};
 pub(crate) use session_reducer::{
