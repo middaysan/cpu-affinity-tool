@@ -18,10 +18,17 @@ def main():
     parser.add_argument("--workload", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--interactive-launch", action="store_true", help="Also require a real interactive Explorer broker for ordinary managed launch")
+    parser.add_argument("--capture-readme", action="store_true", help="Capture the fixed README scenes instead of the acceptance pack")
     args = parser.parse_args()
     if os.name != "nt":
         parser.error("These scenarios require a Windows desktop")
     exe, workload, root = args.exe.resolve(strict=True), args.workload.resolve(strict=True), args.output.resolve()
+    if args.capture_readme:
+        if args.interactive_launch:
+            parser.error('README capture and interactive acceptance are separate modes')
+        from readme_screenshots import capture
+        capture(exe, workload, root)
+        return
     assert_diagnostic_exe(exe)
     root.mkdir(parents=True, exist_ok=False)
     report = {"artifact_sha256": sha256(exe), "artifact_kind": "diagnostic-dev",

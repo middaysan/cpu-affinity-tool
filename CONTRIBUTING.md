@@ -60,6 +60,10 @@ See [testing](docs/testing.md) for comparable test-build measurements and the
 synthetic built-app MCP suite. Live scenarios supplement the deterministic
 identity, ownership, CPU/RAM, persistence and recovery regressions.
 
+Visible UI changes also need a [README screenshot review](docs/readme-screenshots.md).
+Use the existing MCP capture mode and checked three-view composition rather than
+manually replacing unrelated images or editing application pixels.
+
 ## Reporting bugs
 
 Please use the bug report issue template and include:

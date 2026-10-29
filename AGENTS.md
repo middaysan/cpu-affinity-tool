@@ -76,6 +76,13 @@ Use the existing tools and evidence boundaries:
 - Distinguish pure/state tests, a diagnostic EXE, the exact shipping EXE and interactive/vendor/VM acceptance. Debug-MCP selectors and authority overrides are absent from shipping builds; `LOCALAPPDATA` alone does not isolate production authority or Windows settings. A diagnostic pass is not shipping or real-service certification.
 - Report compilation, test execution and setup/cache time separately. Compare the same source/toolchain/profile/cache conditions and identify the artifact; a cached root-test rebuild speedup is not an application or full-CI performance gain. Before calling a PR green, verify its current head; an earlier green run remains evidence only for that earlier head.
 
+### README screenshot maintenance
+
+- Review screenshot impact whenever visible layout, copy, navigation, controls, themes, metrics, charts or tables change. Refresh the affected README scenes in the same change; refresh the full set for shared header/font/theme/layout changes. Keep captions and links accurate. For a reviewed nonvisual source change, explain why the existing image still represents the UI; never relabel old provenance as a fresh capture.
+- Follow `docs/readme-screenshots.md` and reuse `scripts/test-windows-live-mcp.ps1 -CaptureReadme` with the fixed scene contract. Capture actual settled renderer frames and measured owned workloads; do not synthesize/retouch UI or inject chart values. Use isolated synthetic rules/authority, leave real Windows settings untouched and require successful cleanup before publication.
+- Use `scripts/publish-readme-screenshots.ps1` for the checked PNG whitelist and generated lead image; run `scripts/check-readme-screenshots.py`. Preserve the lead's three columns (Affinity groups / CPU selection / CPU history), original unscaled individual frames and clear exterior separators. Inspect the actual PNGs at full size and README display width; do not rely on hashes alone for visual correctness.
+- Record source/artifact/scale/scenes and cleanup in `assets/screenshots/capture.json` and keep `assets/screenshots/README.md` truthful. Never commit user state, tickets, keys or raw inventories. Static integrity checks in CI do not replace capture/visual review, and a documentation screenshot is not a shipping or performance acceptance result.
+
 ## Project and platform status
 `cpu-affinity-tool` is a desktop utility for managing CPU affinity and process priority.
 
@@ -126,7 +133,7 @@ Key directories:
 - `src/app/models/app_state_storage/` - internal persistence modules for state path resolution, storage I/O, migrations, and schema refresh; `app_state_storage.rs` remains the public storage schema and API entrypoint
 - `libs/os_api/` - platform boundary for OS-specific operations; Windows internals are split under `libs/os_api/src/windows/`, including startup-only own-process scheduling in `self_affinity.rs` and suspended-launch affinity inheritance handling in `launch.rs`; Linux remains a single-file desktop beta backend
 - `libs/os_api/src/windows/file_drop.rs` - GUI-thread Shell file-drop registration for the Windows root, with window-scoped UIPI exceptions, bounded path-only payloads and captured physical release coordinates; no worker or process-wide filter
-- `assets/` - icon, current main-window screenshot, bundled Inter UI font and license, `cpu_presets.json`, and social-preview guidance; `assets/screenshots/` holds additional actual development UI captures and their provenance
+- `assets/` - icon, generated three-view README lead image, bundled Inter UI font and license, `cpu_presets.json`, and social-preview guidance; `assets/screenshots/` holds the original native frames, capture provenance and checksums. `docs/readme-screenshots.md` and the existing live MCP runner own their refresh workflow.
 - `design/` - standalone HTML design reference for the approved compact Inter-based interface; it loads only repository-local assets and is not runtime input
 - `docs/` - release/process documentation and user-facing comparison/rationale references
 - `scripts/` - committed release/build verification helper scripts
@@ -623,6 +630,8 @@ The Windows CI verification job has a 60-minute budget, matching the stable Wind
 The root package alone overrides the test profile to opt-level 1 and limited debug information. Dependency/dev/release profiles, debug assertions and arithmetic behavior remain unchanged. `scripts/measure-test-build.ps1` records alternating root-only rebuild/test timings with cached dependencies; it does not measure a cold full CI job. `docs/testing.md` records the deterministic/live coverage split and consolidation limits.
 
 `scripts/test-windows-live-mcp.ps1` runs synthetic built-app acceptance against a separate nonshipping debug-MCP/diagnostics executable: real UI input, production HTTP configuration/receipts/restart, schema-upgrade failure/retry, extra/shared CPU/RAM unions and history/CSV. It requires elevation for protected diagnostic authority and ETW, owns fresh sidecars/keys/processes and treats forced cleanup as failure. Ordinary launch/native readback/Focus is an explicit interactive opt-in; shipping bootstrap and real vendor/VM smoke remain distinct. Windows CI reuses the crash probe's diagnostic build via `-WithDebugMcp`, then runs the default live pack and uploads only sanitized result JSON for seven days. Stable release gates remain unchanged.
+
+The same runner's optional `-CaptureReadme` mode uses the fixed eight-scene contract and owned measured workloads for documentation only. It is separate from the default acceptance pack. Windows and Linux CI check the committed PNG set, checksums, composition metadata and cleanup provenance without launching a capture or updating assets.
 
 Local verification commands:
 - `cargo test --manifest-path libs/os_api/Cargo.toml`

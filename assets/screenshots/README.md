@@ -1,18 +1,36 @@
 # Application screenshots
 
-The lead image at [`../screenshot.png`](../screenshot.png) was supplied by the project author on 2026-10-22. It combines the Affinity groups and Create affinity group views and is retained exactly as supplied.
+These images show the current Windows interface with synthetic rules and owned
+demonstration processes. They were captured through the existing diagnostic MCP
+renderer using package version **1.7.2**. Capture-time source was
+`974de6fc23fdac8743e025125ed1bd8be04dfdb7`; the diagnostic EXE's SHA-256, UTC time,
+scale, scene/frame identities and original PNG hashes are in
+[`capture.json`](capture.json). This is documentation capture, not certification
+of a published executable or a performance benchmark.
 
-The six individual images in this directory were captured on 2026-10-22 from the Windows UI during 1.7.0 development. `main-light.png` was refreshed at source commit `9dba66e75f121df9fcc3a1e238789c6566733faa` using the diagnostic build with package version 1.7.0, including the approved **Group CPU load** caption. The other five images were captured at `fc02c4d20c199edd1e89ebbda0182585e2aebeda`; that earlier diagnostic build still reported package version 1.6.3. It contains development features and does not represent the published 1.6.3 release.
+The lead [`../screenshot.png`](../screenshot.png) combines **Affinity groups / CPU
+selection / CPU history** in that order. All three original frames are copied
+unscaled and uncropped; exterior labels, gutters and vertical separators make
+the boundaries visible. The composition is 2196 x 1305 pixels. Individual native
+frames are 700 x 1225 pixels at 1.75 pixels per UI point and remain unchanged.
 
-The individual images show:
+| Original | View |
+| --- | --- |
+| [`main-dark.png`](main-dark.png) | Two groups, current per-app/group CPU and RAM, dark theme |
+| [`topology.png`](topology.png) | Group editor with actual host topology and selected CPUs |
+| [`cpu-history.png`](cpu-history.png) | Selected logical CPU, measured history and contributors |
+| [`processes.png`](processes.png) | The same group's populated Processes table |
+| [`history-export.png`](history-export.png) | The graph's real PNG/CSV context menu |
+| [`system-tweaks.png`](system-tweaks.png) | Current Windows settings, without applying a change |
+| [`mcp-connection.png`](mcp-connection.png) | Isolated localhost connection; no key is shown or copied |
+| [`main-light.png`](main-light.png) | The same groups in the light theme |
 
-- `cpu-history.png`: a selected logical CPU, real recorded history and its contributing process.
-- `processes.png`: the same group's current Processes view.
-- `history-export.png`: the graph's PNG/CSV export menu.
-- `system-tweaks.png`: current Windows settings and explicit actions; no tweaks were applied for the capture.
-- `mcp-connection.png`: the actual connection window, using an isolated instance and temporary port. No connection key is displayed or copied into an image.
-- `main-light.png`: the same example groups in the light theme.
+`DemoApp.exe`, `DemoHelper.exe` and `BackgroundWorker.exe` are private copies of
+the repository's bounded test workload. CPU activity is measured by the normal
+collector, not injected or redrawn. CPU selections and current Windows settings
+reflect the capture host and are not universal recommendations.
 
-The isolated configuration for the individual captures uses demonstration groups and private copies of program files. `CpuAffinityReadmeLoad.exe` is a locally named Python interpreter running a bounded CPU workload. The graph data is measured, not drawn or injected. These images are not performance benchmarks. The six individual captures retain original PNG pixels without retouching or compositing; the lead image is the author-provided composition described above.
-
-No working user rules, Windows tweaks or published executable were changed. The demo processes, listener and temporary connection credentials were closed or removed after capture. Refresh this set when visible controls change.
+No working user rules, published executable, real services or Windows settings
+were changed. The app, workloads, listener, ticket and temporary keys were
+cleaned up successfully. Refresh affected scenes alongside visible UI changes
+using [the capture and publication workflow](../../docs/readme-screenshots.md).
