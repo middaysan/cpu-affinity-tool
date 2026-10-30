@@ -25,6 +25,53 @@ fn s103_os(id: u32, candidates: Vec<os_api::steam::GameProcess>) -> FakeRunningA
 }
 
 #[test]
+fn steam_missing_installation_requests_selection_and_exact_choice_recovers() {
+    let mut state = steam_state(570);
+    state.groups[0].programs[0].additional_processes = vec!["game.exe".into()];
+    let rule = collect_configured_programs(&state)[0].rule_id.clone();
+    let mut apps = RunningApps::default();
+    let mut os = FakeRunningAppsOs::default();
+    os.steam_directory_error = Some("Game is installed in multiple Steam libraries; choose its process".into());
+    run_iteration(&mut apps, collect_configured_programs(&state), &os);
+    assert!(apps.steam_unresolved.contains_key(&rule), "Missing metadata must offer process selection, not silently look stopped/starting");
+    assert!(apps.apps.is_empty());
+    assert!(apps.steam_unresolved.get(&rule).unwrap().reason().contains("multiple Steam libraries"));
+
+    let game = s103_candidate(2, r"C:\Game\game.exe");
+    state.groups[0].programs[0].launch_target = crate::app::models::LaunchTarget::Steam {
+        app_id: 570,
+        executable: Some(game.path.clone()),
+    };
+    os = s103_os(570, vec![game]);
+    os.steam_root = None;
+    run_iteration(&mut apps, collect_configured_programs(&state), &os);
+    assert!(!apps.steam_unresolved.contains_key(&rule));
+    assert_eq!(apps.apps.values().next().unwrap().primary_instances, HashMap::from([(2, 2)]));
+    assert_eq!(state.groups[0].programs[0].additional_processes, ["game.exe"]);
+}
+
+#[test]
+fn steam_warning_explains_helper_only_and_ambiguous_candidates_without_admitting_them() {
+    use crate::app::features::execution::steam_detection::SteamDetectionIssue;
+    let mut state = steam_state(570);
+    let rule = collect_configured_programs(&state)[0].rule_id.clone();
+    state.groups[0].programs[0].additional_processes = vec!["game.exe".into()];
+    let mut os = s103_os(570, vec![s103_candidate(2, r"C:\Game\game.exe")]);
+    let mut apps = RunningApps::default();
+    run_iteration(&mut apps, collect_configured_programs(&state), &os);
+    assert_eq!(apps.steam_unresolved.get(&rule), Some(&SteamDetectionIssue::HelperOnly));
+    assert!(apps.apps.is_empty());
+    state.groups[0].programs[0].additional_processes.clear();
+    os.steam.get_mut(&570).unwrap().push(s103_candidate(3, r"C:\Game\second.exe"));
+    os.instance_tokens.insert(3, 3);
+    os.image_paths.insert(3, r"C:\Game\second.exe".into());
+    os.snapshot.as_mut().unwrap().names.insert(3, "second.exe".into());
+    run_iteration(&mut apps, collect_configured_programs(&state), &os);
+    assert_eq!(apps.steam_unresolved.get(&rule), Some(&SteamDetectionIssue::AmbiguousProcesses));
+    assert!(apps.apps.is_empty());
+}
+
+#[test]
 fn s103_windowed_helper_cannot_reseed_main_after_game_exit() {
     let mut state = steam_state(570);
     state.groups[0].programs[0].additional_processes = vec!["helper.exe".into()];

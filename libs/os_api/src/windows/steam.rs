@@ -209,6 +209,10 @@ pub fn game_directory(app_id: u32) -> Option<PathBuf> {
     directory(app_id).ok()
 }
 
+pub fn game_directory_result(app_id: u32) -> Result<PathBuf, String> {
+    directory(app_id)
+}
+
 #[cfg(test)]
 mod native_tests {
     use super::*;

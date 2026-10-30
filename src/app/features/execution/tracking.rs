@@ -98,8 +98,8 @@ trait RunningAppsOs {
     ) -> Vec<os_api::steam::GameProcess> {
         Vec::new()
     }
-    fn steam_game_directory(&self, _app_id: u32) -> Option<PathBuf> {
-        None
+    fn steam_game_directory(&self, _app_id: u32) -> Result<PathBuf, String> {
+        Err("Steam game installation could not be located.".into())
     }
     fn snapshot_process_tree(&self) -> Result<ProcessSnapshot, String>;
     fn get_process_image_path_and_instance_token(&self, pid: u32)
@@ -165,8 +165,8 @@ impl RunningAppsOs for RealRunningAppsOs {
     ) -> Vec<os_api::steam::GameProcess> {
         os_api::steam::game_processes(app_id, selected, names)
     }
-    fn steam_game_directory(&self, app_id: u32) -> Option<PathBuf> {
-        os_api::steam::game_directory(app_id)
+    fn steam_game_directory(&self, app_id: u32) -> Result<PathBuf, String> {
+        os_api::steam::game_directory_result(app_id)
     }
     fn snapshot_process_tree(&self) -> Result<ProcessSnapshot, String> {
         OS::snapshot_process_tree().map(|tree| ProcessSnapshot {
@@ -732,7 +732,8 @@ fn rekey_rule_membership(
     true
 }
 
-type SteamObservations = HashMap<AppRuntimeKey, (Option<PathBuf>, Vec<os_api::steam::GameProcess>)>;
+type SteamObservations =
+    HashMap<AppRuntimeKey, (Result<PathBuf, String>, Vec<os_api::steam::GameProcess>)>;
 fn observe_steam<O: RunningAppsOs>(
     configured_programs: &[ConfiguredProgramSnapshot],
     snapshot: &ProcessSnapshot,
@@ -833,14 +834,19 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
             })
             .collect();
         apps.steam_unresolved
-            .retain(|rule| steam_rules.iter().any(|(r, _)| r == rule));
+            .retain(|rule, _| steam_rules.iter().any(|(r, _)| r == rule));
         for configured in configured_programs {
             let key = configured.key.clone();
             processed_keys.insert(key.clone());
             let was_tracked = apps.apps.contains_key(&key);
 
             if let ConfiguredProgramMatcher::Steam { app_id, executable } = &configured.matcher {
-                let (root, candidates) = steam_detected.remove(&key).unwrap_or_default();
+                let (root, candidates) = steam_detected.remove(&key).unwrap_or_else(|| {
+                    (
+                        Err("Steam game observation is unavailable.".into()),
+                        Vec::new(),
+                    )
+                });
                 update_steam_rule(
                     apps,
                     &configured,
@@ -1160,6 +1166,7 @@ mod tests {
         denied_steam: HashSet<u32>,
         steam: HashMap<u32, Vec<os_api::steam::GameProcess>>,
         steam_root: Option<PathBuf>,
+        steam_directory_error: Option<String>,
         snapshot: Result<ProcessSnapshot, String>,
         image_paths: HashMap<u32, PathBuf>,
         image_instance_tokens: HashMap<u32, u64>,
@@ -1181,6 +1188,7 @@ mod tests {
                 denied_steam: HashSet::new(),
                 steam: Default::default(),
                 steam_root: None,
+                steam_directory_error: None,
                 snapshot: Ok(ProcessSnapshot::default()),
                 image_paths: HashMap::new(),
                 image_instance_tokens: HashMap::new(),
@@ -1222,8 +1230,12 @@ mod tests {
         ) -> Vec<os_api::steam::GameProcess> {
             self.steam.get(&id).cloned().unwrap_or_default()
         }
-        fn steam_game_directory(&self, _id: u32) -> Option<PathBuf> {
-            self.steam_root.clone()
+        fn steam_game_directory(&self, _id: u32) -> Result<PathBuf, String> {
+            self.steam_root.clone().ok_or_else(|| {
+                self.steam_directory_error
+                    .clone()
+                    .unwrap_or_else(|| "Steam game installation could not be located.".into())
+            })
         }
         fn snapshot_process_tree(&self) -> Result<ProcessSnapshot, String> {
             self.snapshot.clone()
@@ -2092,6 +2104,7 @@ mod tests {
             denied_steam: HashSet::new(),
             steam: Default::default(),
             steam_root: None,
+            steam_directory_error: None,
             live_pids: HashSet::from([21]),
             instance_tokens: HashMap::new(),
             aumids: HashMap::new(),

@@ -12,6 +12,10 @@ pub(crate) struct SteamProcessPicker {
     edited: Option<std::time::Instant>,
 }
 impl SteamProcessPicker {
+    pub(crate) fn open(&mut self) {
+        self.reset_view();
+        self.open = true;
+    }
     fn refresh(&mut self, ctx: &egui::Context) {
         if self.pending.is_some() || self.epoch == u64::MAX {
             return;
@@ -66,7 +70,9 @@ impl SteamProcessPicker {
         self.poll();
         let mut changed = false;
         ui.horizontal(|ui| {
-            if ui.button("Choose game process…").clicked() {
+            let choose = ui.button("Choose game process…");
+            crate::debug_mcp_control!("steam.choose_process", choose);
+            if choose.clicked() {
                 self.open = !self.open;
                 if self.open {
                     self.refresh(ui.ctx());
@@ -89,9 +95,8 @@ impl SteamProcessPicker {
         if !self.open {
             return changed;
         }
-        ui.label(
-            "Start the game, then select its process. Steam and infrastructure processes are excluded. Choose the executable that owns the game window.",
-        );
+        let guidance = ui.add(egui::Label::new("Start the game in Steam. Select its main executable (for example, dota2.exe), then Save Changes. Helper names below do not select the main process.").wrap());
+        crate::debug_mcp_control!("steam.picker", guidance);
         ui.horizontal(|ui| {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
@@ -139,7 +144,7 @@ impl SteamProcessPicker {
                         .contains(&query)
                 }) {
                     let name = row.path.file_name().unwrap_or_default().to_string_lossy();
-                    if ui
+                    let choice = ui
                         .selectable_label(
                             selected.as_ref() == Some(&row.path),
                             format!(
@@ -151,9 +156,9 @@ impl SteamProcessPicker {
                         .on_hover_ui(|ui| {
                             ui.set_max_width(260.0);
                             ui.add(egui::Label::new(row.path.display().to_string()).wrap());
-                        })
-                        .clicked()
-                    {
+                        });
+                    crate::debug_mcp_control!(format!("steam.process.{}", row.pid), choice);
+                    if choice.clicked() {
                         *selected = Some(row.path.clone());
                         self.open = false;
                         changed = true;
@@ -179,6 +184,12 @@ mod tests {
         };
         p.reset_view();
         assert!(p.pending.is_some());
+        p.open();
+        assert!(p.open);
+        assert!(
+            p.pending.is_some(),
+            "Opening selection must retain ownership of an earlier worker"
+        );
         tx.send((
             0,
             String::new(),

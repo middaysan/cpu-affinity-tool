@@ -4,6 +4,7 @@ pub(crate) mod launch;
 pub(crate) mod managed_runs;
 mod monitor_events;
 mod reconcile;
+pub(crate) mod steam_detection;
 mod store;
 mod tracking;
 

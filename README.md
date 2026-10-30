@@ -36,7 +36,7 @@ Performance depends on the application and workload. Compare CPU activity and re
 
 - Create groups of logical CPUs for foreground work, background apps, or a particular workload.
 - Add executables, supported launcher files, or installed apps. Drag and drop from Explorer also works.
-- Steam game shortcuts launch through Steam while CPU/RAM, affinity and Focus follow the game. If automatic detection is ambiguous, choose the running game process in its rule settings. Existing Steam shortcuts can switch using **Use Steam game tracking**.
+- Steam game shortcuts launch through Steam while CPU/RAM, affinity and Focus follow the game. If detection is unavailable or ambiguous, the amber **Select game** warning explains why and opens the process chooser. Select the running game's main EXE and save. Existing Steam shortcuts can switch using **Use Steam game tracking**.
 - New entries recognize 20 application families and fill supported app-owned helper names automatically. Helpers stay tied to the selected installation; shared services/runtimes are excluded. [Supported entries and limits](docs/known-app-processes.md).
 - Save priority, startup behavior, and extra process names, plus launch arguments for file-based targets. Name suggestions come from running processes.
 - Use **Process monitor** to find your saved apps and reapply their affinity and priority. Its **Processes** and **Logs** tabs show what it found and changed.

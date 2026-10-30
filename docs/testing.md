@@ -74,6 +74,7 @@ checked publication. CI validates committed assets without taking screenshots.
 | E1, interactive opt-in | Ordinary managed launch, independent exact-handle affinity/priority readback, bounded output/EOF, wrong creation-token refusal, actual Focus acknowledgement |
 | T1 | Two owned workloads, extra process, identical overlapping rule sets in two groups; three fresh coherent CPU/RAM union samples; helper after primary exit; graph opening and Off/On |
 | T2 | Original system history, bounded UTF-8 CSV cursor download and parsing, retained immutable export after Off, foreign history epoch refused |
+| S1 | Deliberately uninstalled synthetic Steam AppID, actionable warning in both themes, direct reason/chooser, no premature draft save, exact owned-process selection/measurement and unchanged helper list; never launches Steam |
 
 The opt-in E1 requires a real same-logon Explorer broker; CI does not pretend to
 certify that interactive path. Windows may refuse foreground activation; the
