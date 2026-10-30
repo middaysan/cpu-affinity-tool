@@ -9,7 +9,7 @@ import time
 import uuid
 
 from live_mcp_fixture import Fixture, assert_diagnostic_exe, sha256
-from live_mcp_scenarios import configuration, connect, execution, history, telemetry, upgrade
+from live_mcp_scenarios import configuration, connect, execution, history, telemetry, upgrade, steam_selection
 
 
 def main():
@@ -92,6 +92,13 @@ def main():
             fixtures.append(migration)
             migration.start()
             case("U1-upgrade-retry-" + theme, lambda: upgrade(migration))
+        steam_fixture = Fixture(exe, root / 'steam-selection')
+        fixtures.append(steam_fixture)
+        steam_fixture.start()
+        steam_client = connect(steam_fixture)
+        steam_workload = steam_fixture.root / 'owned-steam-game.exe'
+        shutil.copy2(workload, steam_workload)
+        case('S1-steam-warning-selection', lambda: steam_selection(steam_fixture, steam_client, steam_workload))
         report["status"] = "pass"
     except Exception:
         report["status"] = "fail"

@@ -488,12 +488,15 @@ impl RuntimeRegistry {
     ) -> RunningAppInstancesLookup {
         self.store.lookup_focus_instances(key, steam)
     }
-    pub(crate) fn steam_needs_selection(&self, rule: &RuleId) -> bool {
+    pub(crate) fn steam_detection_issue(
+        &self,
+        rule: &RuleId,
+    ) -> Option<super::steam_detection::SteamDetectionIssue> {
         self.store
             .running_apps
             .try_read()
             .ok()
-            .is_some_and(|a| a.steam_unresolved.contains(rule))
+            .and_then(|a| a.steam_unresolved.get(rule).cloned())
     }
     pub(crate) fn lookup_running_app_instances(
         &self,

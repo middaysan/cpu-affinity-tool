@@ -47,6 +47,15 @@ struct Intent {
     confirmed: HashSet<(u32, u64)>,
 }
 impl Launches {
+    fn detection_overdue(&self, rule: &RuleId, id: u32, now: Instant) -> bool {
+        // A diagnostic can outlive the scheduling intent; it grants no initial writes.
+        self.intents
+            .get(&(rule.clone(), LaunchIdentity::Steam(id)))
+            .is_some_and(|intent| {
+                !intent.main_seen
+                    && now.saturating_duration_since(intent.at) >= Duration::from_secs(30)
+            })
+    }
     fn begin(
         &mut self,
         rule: &RuleId,
@@ -159,6 +168,12 @@ pub(crate) fn confirm_instance(
 pub(crate) fn steam_launch_pending(rule: &RuleId, id: Option<u32>) -> bool {
     launch_pending(rule, id.map(LaunchIdentity::Steam))
 }
+pub(crate) fn steam_detection_overdue(rule: &RuleId, id: u32) -> bool {
+    launches()
+        .lock()
+        .ok()
+        .is_some_and(|l| l.detection_overdue(rule, id, Instant::now()))
+}
 pub(crate) fn begin_steam_launch(rule: &RuleId, id: u32) -> SteamLaunchBegin {
     begin_launch(rule, LaunchIdentity::Steam(id))
 }
@@ -196,6 +211,15 @@ mod tests {
             .is_some());
         assert!(l.get(&rule, 571u32, now).is_none());
         assert!(l.get(&rule, 570u32, now + WINDOW).is_none());
+        assert!(!l.detection_overdue(&rule, 570, now + Duration::from_secs(29)));
+        assert!(l.detection_overdue(&rule, 570, now + Duration::from_secs(30)));
+        assert!(l.detection_overdue(&rule, 570, now + WINDOW));
+        assert!(!l.detection_overdue(&rule, 571, now + WINDOW));
+        l.intents
+            .get_mut(&(rule.clone(), 570u32.into()))
+            .unwrap()
+            .main_seen = true;
+        assert!(!l.detection_overdue(&rule, 570, now + WINDOW));
     }
     #[test]
     fn s103_atomic_launch_coalesces_and_old_failure_cannot_cancel_a_new_generation() {

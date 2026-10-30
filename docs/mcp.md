@@ -130,6 +130,18 @@ A saved Steam game uses `launch_target.Steam.app_id` and optional `executable`. 
 
 Steam launch intent follows the logical rule and matching AppID for at most five minutes, including a later exact-EXE selection. With Process monitor Off, initial settings are applied once per discovered exact instance and confirmed by subsequent native readback; late helpers can join during that window. After expiry, use Run/launch_saved again if the game is still unresolved. Off does not become continuous enforcement. Ambiguous/cross-game evidence withdraws automatic membership; choose the game process rather than treating the Steam client as the game.
 
+The desktop shows an amber **Select game** warning for unavailable/ambiguous
+installation metadata, competing processes, or a possible main EXE listed among
+helpers. A launch with no detected main after 30 seconds also offers selection;
+this does not extend the five-minute scheduling intent. Click the warning or
+**Select** to open the existing rule editor and process chooser, with the reason
+visible. Start the game in Steam, choose its main running EXE and save. This
+saves `steam_executable`; adding `dota2.exe` to optional helper names does not
+select the main game. Selection preserves those names and does not launch a
+candidate. The warning clears when exact game membership is verified. If initial
+intent has expired with Process monitor Off, use **Fix** on the detected game or
+request another saved launch to apply settings explicitly.
+
 
 ## Built-in application rules
 

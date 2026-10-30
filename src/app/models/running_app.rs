@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::app::models::AppRuntimeKey;
 use crate::app::shared::ids::{GroupId, RuleId};
@@ -46,7 +46,8 @@ pub struct RunningApps {
         std::sync::Arc<crate::app::features::system_tweaks::tweaks::scheduling::SchedulingHandoff>,
     pub(crate) steam_helpers: HashMap<(RuleId, u32), HashMap<u32, u64>>,
     pub(crate) steam_evidence: HashMap<(RuleId, u32), HashMap<u32, os_api::steam::GameProcess>>,
-    pub(crate) steam_unresolved: HashSet<RuleId>,
+    pub(crate) steam_unresolved:
+        HashMap<RuleId, crate::app::features::execution::steam_detection::SteamDetectionIssue>,
     membership_generation: Option<u64>,
     editing_membership: bool,
 }
@@ -58,7 +59,7 @@ impl Default for RunningApps {
             scheduling: Default::default(),
             steam_helpers: HashMap::new(),
             steam_evidence: HashMap::new(),
-            steam_unresolved: HashSet::new(),
+            steam_unresolved: HashMap::new(),
             membership_generation: Some(0),
             editing_membership: false,
         }

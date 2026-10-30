@@ -31,6 +31,10 @@ enum CentralAction {
         group_id: GroupId,
         rule_id: RuleId,
     },
+    ChooseSteamProcess {
+        group_id: GroupId,
+        rule_id: RuleId,
+    },
     RunGroup(GroupId),
     RunGroupProgramAction {
         group_id: GroupId,
@@ -564,15 +568,19 @@ fn render_groups(
                                 AppStatusTone::Warning => warning_color(ui),
                             };
                             let starting = app_status == AppStatus::NotRunning && crate::app::features::execution::launch::steam_launch_pending(&program.rule_id,program.steam_app_id);
-                            let needs_selection=app.runtime.steam_needs_selection(&program.rule_id);
+                            let steam_issue = app.runtime.steam_detection_issue(&program.rule_id);
+                            let needs_selection = steam_issue.is_some();
                             let full_status = if choose_owner {"Choose process owner"} else if shared_control {"Shared process managed by another app"} else if needs_selection {"Choose game process"} else if starting { "Starting game..." } else { app_status_label(app_status) };
-                            let status_tooltip =
+                            let mut status_tooltip =
                                 app.get_running_app_pids(&program.runtime_key).map_or_else(
                                     || format!("Status: {full_status}"),
                                     |pids| {
                                         format!("Status: {full_status}\nTracking PIDs: {pids:?}")
                                     },
                                 );
+                            if let Some(issue) = &steam_issue {
+                                status_tooltip = format!("{}\n\n{}", issue.reason(), issue.guidance());
+                            }
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 #[cfg(not(all(target_os = "windows", feature = "windows")))]
@@ -593,11 +601,11 @@ fn render_groups(
                                 else if shared_control&&app_status!=AppStatus::NotRunning {action_presentation=app_action_presentation(AppStatus::Running,platform_supports_app_focus());}
                                 else if needs_selection {action_presentation.label="Select";action_presentation.hover_text="Automatic detection is uncertain. Open app settings and choose the game process.";action_presentation.action=Some(AppRowAction::Focus);}
                                 else if starting { action_presentation.label="Wait"; action_presentation.hover_text="Waiting for the Steam game. If detection is unavailable, open its settings and choose the game process."; action_presentation.action=None; }
-                                let status_color = match app_status_tone(app_status) {
+                                let status_color = if needs_selection { colors.warning.fg } else { match app_status_tone(app_status) {
                                     AppStatusTone::Neutral => colors.text_muted,
                                     AppStatusTone::Success => colors.success.fg,
                                     AppStatusTone::Warning => colors.warning.fg,
-                                };
+                                }};
                                 #[cfg(all(target_os = "windows", feature = "windows"))]
                                 let meter_width = if app.cpu_load_enabled() {
                                     crate::app::features::cpu_load::view::APP_METRICS_WIDTH
@@ -641,15 +649,21 @@ fn render_groups(
                                 ));
 
                                 ui.add_space(4.0);
-                                ui.allocate_ui_with_layout(
+                                let status_response = ui.allocate_ui_with_layout(
                                     egui::vec2(status_width, 21.0),
                                     Layout::right_to_left(Align::Center),
                                     |ui| {
-                                        ui.add(egui::Label::new(status_galley));
+                                        ui.add(egui::Label::new(status_galley).sense(if needs_selection && !choose_owner { egui::Sense::click() } else { egui::Sense::hover() }))
                                     },
                                 )
-                                .response
+                                .inner
                                 .on_hover_text(&status_tooltip);
+                                if needs_selection {
+                                    crate::debug_mcp_control!(format!("steam.warning.{}", program.rule_id.0), status_response);
+                                    if !choose_owner && status_response.clicked() {
+                                        actions.push(CentralAction::ChooseSteamProcess { group_id: group_id.clone(), rule_id: program.rule_id.clone() });
+                                    }
+                                }
 
                                 drag_response.dnd_set_drag_payload(RuleDragPayload {
                                     source_group_id: group_id.clone(),
@@ -683,7 +697,7 @@ fn render_groups(
                                     )
                                 } else if action_presentation.action == Some(AppRowAction::Run) {
                                     app_run_button(ui, [action_width, 21.0], button)
-                                } else if app_status == AppStatus::SettingsMismatch {
+                                } else if needs_selection || app_status == AppStatus::SettingsMismatch {
                                     toned_sized_button(
                                         ui,
                                         [action_width, 21.0],
@@ -694,8 +708,10 @@ fn render_groups(
                                     ui.add(button.min_size(egui::vec2(action_width, 21.0)))
                                 }
                                 .on_hover_text(action_presentation.hover_text);
+                                if needs_selection { crate::debug_mcp_control!(format!("steam.select.{}", program.rule_id.0), action_response); }
                                 if action_response.clicked() {
-                                    if choose_owner||needs_selection { actions.push(CentralAction::OpenAppRunSettings{group_id:group_id.clone(),rule_id:program.rule_id.clone()}); }
+                                    if choose_owner { actions.push(CentralAction::OpenAppRunSettings{group_id:group_id.clone(),rule_id:program.rule_id.clone()}); }
+                                    else if needs_selection { actions.push(CentralAction::ChooseSteamProcess { group_id: group_id.clone(), rule_id: program.rule_id.clone() }); }
                                     else if let Some(row_action) = action_presentation.action {
                                         actions.push(CentralAction::RunGroupProgramAction {
                                             group_id: group_id.clone(),
@@ -1129,6 +1145,19 @@ fn execute_actions(app: &mut AppState, actions: Vec<CentralAction>) {
             }
             CentralAction::OpenAppRunSettings { group_id, rule_id } => {
                 app.open_app_run_settings(group_id, rule_id);
+            }
+            CentralAction::ChooseSteamProcess { group_id, rule_id } => {
+                app.open_app_run_settings(group_id, rule_id);
+                if app.ensure_current_edit_loaded()
+                    && app
+                        .ui
+                        .app_edit_state
+                        .current_edit
+                        .as_ref()
+                        .is_some_and(|draft| draft.steam_game().is_some())
+                {
+                    app.ui.app_edit_state.steam_picker.open();
+                }
             }
             CentralAction::RunGroup(group_id) => {
                 app.run_group(group_id);

@@ -17,6 +17,62 @@ def controls(state):
     return {row["id"]: row["extra"] for row in state["controls"]}
 
 
+def steam_selection(fixture, client, workload):
+    """Missing Steam metadata must open the existing chooser, never launch Steam."""
+    cpu = available_cpus()[-1]
+    group = client.mutate('create_group', {'name': 'Steam detection', 'cpus': [cpu]})['group_id']
+    # This deliberately uninstalled AppID has no metadata; no URI is dispatched.
+    rule = {'name': 'Sample Steam game', 'steam_app_id': 4294967294, 'steam_executable': None,
+            'args': [], 'tracked_process_names': [workload.name], 'manage_descendants': False,
+            'autorun': False, 'priority': 'Normal'}
+    rule_id = client.mutate('create_rule', {'group_id': group, 'rule': rule})['rule_id']
+    warning = 'steam.warning.' + rule_id
+    select = 'steam.select.' + rule_id
+    wait_until('actionable Steam warning', fixture.state,
+               lambda s: warning in controls(s) and select in controls(s))
+    for theme, index in [('dark', 2), ('light', 1)]:
+        if index == 1:
+            fixture.click('settings.open')
+            fixture.click('settings.theme.1')
+            fixture.click('settings.open')
+        fixture.call('input', target='nav.groups', kind='move', x=0.05, y=0.1)
+        assert fixture.call('wait', condition='ui_settled', timeout_ms=6000)['satisfied']
+        frame = fixture.rpc({'action': 'screenshot'})
+        assert frame.get('ok') and frame.get('image')
+        (fixture.root / ('steam-warning-' + theme + '.png')).write_bytes(base64.b64decode(frame['image']))
+    original = fixture.state_path.read_bytes()
+    fixture.click(warning)
+    wait_until('warning opens chooser with reason', fixture.state,
+               lambda s: 'steam.picker' in controls(s) and 'steam.detection_reason' in controls(s))
+    frame = fixture.rpc({'action': 'screenshot'})
+    assert frame.get('ok') and frame.get('image')
+    (fixture.root / 'steam-selection.png').write_bytes(base64.b64decode(frame['image']))
+    fixture.click('rule.form.close')
+    assert fixture.state_path.read_bytes() == original, 'Opening/closing warning changed the saved rule'
+    stop = fixture.root / 'steam-workload.stop'
+    process = subprocess.Popen([str(workload), str(stop)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    fixture.children.append((process, stop))
+    fixture.click(select)
+    fixture.click('steam.process.' + str(process.pid))
+    assert fixture.state_path.read_bytes() == original, 'Choosing a draft process saved prematurely'
+    fixture.call('input', target='steam.choose_process', kind='scroll', delta=700)
+    assert fixture.call('wait', condition='ui_settled', timeout_ms=6000)['satisfied']
+    fixture.click('rule.form.save')
+    wait_until('saved exact Steam executable', lambda: client.tool('list_rules', {'group_id': group}),
+               lambda value: value['rows'][0]['app']['launch_target']['Steam']['executable'] == str(workload))
+    saved = client.tool('list_rules', {'group_id': group})['rows'][0]['app']
+    assert saved['additional_processes'] == [workload.name], 'Selection rewrote helper names'
+    wait_until('Steam warning clears after exact choice', fixture.state,
+               lambda s: warning not in controls(s) and 'rule.form.close' not in controls(s))
+    client.mutate('update_preferences', {'preferences': {'cpu_load_monitoring_enabled': True}})
+    wait_until('exact owned game is measured', fixture.state,
+               lambda s: controls(s).get('meter.rule.' + rule_id, {}).get('instances') == 1
+               and controls(s).get('meter.rule.' + rule_id, {}).get('measured') == 1,
+               seconds=20)
+    return {'warning_actionable': True, 'reason_visible': True, 'chooser_opened': True,
+            'draft_not_published_early': True, 'exact_choice_measured': True, 'helper_names_preserved': True}
+
+
 def assert_unions(rows, group, first, second):
     cpu = [rows["meter." + key] for key in ["group." + group, "rule." + first, "rule." + second]]
     assert cpu[0]["sample_unix_ms"] and len({r["sample_unix_ms"] for r in cpu}) == 1, "Mixed current CPU samples"

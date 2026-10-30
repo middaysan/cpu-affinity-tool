@@ -82,7 +82,7 @@ pub(super) fn update_steam_rule<O: RunningAppsOs>(
     configured: &ConfiguredProgramSnapshot,
     app_id: u32,
     executable: Option<&Path>,
-    metadata_root: Option<PathBuf>,
+    metadata_root: Result<PathBuf, String>,
     candidates: Vec<os_api::steam::GameProcess>,
     claims: &HashMap<(u32, u64), HashSet<u32>>,
     snapshot: &ProcessSnapshot,
@@ -90,6 +90,9 @@ pub(super) fn update_steam_rule<O: RunningAppsOs>(
     os: &O,
     outcome: &mut RunningAppsIterationOutcome,
 ) {
+    use crate::app::features::execution::steam_detection::SteamDetectionIssue;
+    let metadata_error = metadata_root.as_ref().err().cloned();
+    let metadata_root = metadata_root.ok();
     let key = &configured.key;
     // An explicitly selected image outside a Steam stub/junction uses its own directory.
     let root = executable
@@ -107,6 +110,13 @@ pub(super) fn update_steam_rule<O: RunningAppsOs>(
         .entry((configured.rule_id.clone(), app_id))
         .or_default();
     let raw_present = !candidates.is_empty();
+    let helper_candidate = candidates.iter().any(|p| {
+        configured
+            .additional_processes_normalized
+            .contains(&normalize_process_name(
+                &p.path.file_name().unwrap_or_default().to_string_lossy(),
+            ))
+    });
     // Unknown access is not proof that an established competing lifetime ended.
     let potential_paths: HashSet<_> = candidates
         .iter()
@@ -235,14 +245,31 @@ pub(super) fn update_steam_rule<O: RunningAppsOs>(
             }
         }
     }
-    let unresolved = executable.is_none() && primary.is_empty() && (raw_present || conflict);
-    let previous_unresolved = apps.steam_unresolved.contains(&configured.rule_id);
-    if unresolved {
-        apps.steam_unresolved.insert(configured.rule_id.clone());
+    let issue = if primary.is_empty() {
+        if let Some(error) = metadata_error.filter(|_| executable.is_none()) {
+            Some(SteamDetectionIssue::Installation(
+                error.chars().take(240).collect(),
+            ))
+        } else if conflict || (executable.is_none() && raw_present && !helper_candidate) {
+            Some(SteamDetectionIssue::AmbiguousProcesses)
+        } else if executable.is_none() && helper_candidate {
+            Some(SteamDetectionIssue::HelperOnly)
+        } else if super::super::steam_pending::steam_detection_overdue(&configured.rule_id, app_id)
+        {
+            Some(SteamDetectionIssue::NotDetected)
+        } else {
+            None
+        }
     } else {
-        apps.steam_unresolved.remove(&configured.rule_id);
+        None
+    };
+    let unresolved = issue.is_some();
+    let previous = apps.steam_unresolved.remove(&configured.rule_id);
+    outcome.changed |= previous != issue;
+    if let Some(issue) = issue {
+        apps.steam_unresolved
+            .insert(configured.rule_id.clone(), issue);
     }
-    outcome.changed |= unresolved != previous_unresolved;
     if primary.is_empty() {
         if apps.apps.remove(key).is_some() {
             outcome.changed = true;
