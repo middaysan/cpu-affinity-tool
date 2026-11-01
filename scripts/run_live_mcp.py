@@ -12,6 +12,10 @@ from live_mcp_fixture import Fixture, assert_diagnostic_exe, sha256
 from live_mcp_scenarios import configuration, connect, execution, history, telemetry, upgrade, steam_selection, correction_denial, installed_read_only
 
 
+def owned_workload_paths(root, stamp, *roles):
+    return tuple(root / ('owned-' + role + '-' + stamp + '.exe') for role in roles)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", type=pathlib.Path, required=True)
@@ -70,7 +74,7 @@ def main():
         case("R1-diagnostic-start", start_case)
         report["app_version"] = client.tool("get_capabilities")["app_version"]
         stamp = uuid.uuid4().hex[:10]
-        primary, helper = root / ("owned-main-" + stamp + ".exe"), root / ("owned-helper-" + stamp + ".exe")
+        primary, helper = owned_workload_paths(root, stamp, 'main', 'helper')
         shutil.copy2(workload, primary)
         shutil.copy2(workload, helper)
         ids = case("C1-configuration-receipts-restart", lambda: configuration(fixture, client, primary, helper))
@@ -104,7 +108,7 @@ def main():
         fixtures.append(access_fixture)
         access_fixture.start()
         access_client = connect(access_fixture)
-        denied_main, denied_helper = access_fixture.root / 'owned-denied.exe', access_fixture.root / 'owned-readable.exe'
+        denied_main, denied_helper = owned_workload_paths(access_fixture.root, stamp, 'denied', 'readable')
         shutil.copy2(workload, denied_main)
         shutil.copy2(workload, denied_helper)
         case('D1-denied-correction-retry-telemetry', lambda: correction_denial(access_fixture, access_client, denied_main, denied_helper))

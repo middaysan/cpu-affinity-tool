@@ -32,6 +32,7 @@ const WINDOW: Duration = Duration::from_secs(300);
 #[derive(Default)]
 struct Launches {
     intents: HashMap<(RuleId, LaunchIdentity), Intent>,
+    detection: HashMap<(RuleId, u32), Detection>,
     next: u64,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,14 +47,17 @@ struct Intent {
     main_seen: bool,
     confirmed: HashSet<(u32, u64)>,
 }
+struct Detection {
+    at: Instant,
+    generation: u64,
+}
 impl Launches {
     fn detection_overdue(&self, rule: &RuleId, id: u32, now: Instant) -> bool {
         // A diagnostic can outlive the scheduling intent; it grants no initial writes.
-        self.intents
-            .get(&(rule.clone(), LaunchIdentity::Steam(id)))
-            .is_some_and(|intent| {
-                !intent.main_seen
-                    && now.saturating_duration_since(intent.at) >= Duration::from_secs(30)
+        self.detection
+            .get(&(rule.clone(), id))
+            .is_some_and(|detection| {
+                now.saturating_duration_since(detection.at) >= Duration::from_secs(30)
             })
     }
     fn begin(
@@ -71,10 +75,24 @@ impl Launches {
         if self.intents.len() >= 128 && !self.intents.contains_key(&key) {
             return SteamLaunchBegin::Busy;
         }
+        if let LaunchIdentity::Steam(id) = key.1 {
+            if self.detection.len() >= 4096 && !self.detection.contains_key(&(rule.clone(), id)) {
+                return SteamLaunchBegin::Busy;
+            }
+        }
         let Some(generation) = self.next.checked_add(1) else {
             return SteamLaunchBegin::Busy;
         };
         self.next = generation;
+        if let LaunchIdentity::Steam(id) = key.1 {
+            self.detection.insert(
+                (rule.clone(), id),
+                Detection {
+                    at: now,
+                    generation,
+                },
+            );
+        }
         self.intents.insert(
             key,
             Intent {
@@ -88,6 +106,16 @@ impl Launches {
     }
     fn cancel(&mut self, rule: &RuleId, id: impl Into<LaunchIdentity>, generation: u64) {
         let key = (rule.clone(), id.into());
+        if let LaunchIdentity::Steam(id) = key.1 {
+            let detection = (rule.clone(), id);
+            if self
+                .detection
+                .get(&detection)
+                .is_some_and(|d| d.generation == generation)
+            {
+                self.detection.remove(&detection);
+            }
+        }
         if self
             .intents
             .get(&key)
@@ -100,6 +128,15 @@ impl Launches {
         self.intents
             .get(&(rule.clone(), id.into()))
             .filter(|i| now.saturating_duration_since(i.at) < WINDOW)
+    }
+    fn detected(&mut self, rule: &RuleId, id: u32) {
+        self.detection.remove(&(rule.clone(), id));
+        if let Some(intent) = self
+            .intents
+            .get_mut(&(rule.clone(), LaunchIdentity::Steam(id)))
+        {
+            intent.main_seen = true;
+        }
     }
 }
 fn launches() -> &'static Mutex<Launches> {
@@ -132,6 +169,7 @@ pub(crate) fn mark_steam_launch(rule: &RuleId, id: u32) -> bool {
 pub(crate) fn finish_steam_launch(rule: &RuleId, id: u32) {
     if let Ok(mut l) = launches().lock() {
         l.intents.remove(&(rule.clone(), LaunchIdentity::Steam(id)));
+        l.detection.remove(&(rule.clone(), id));
     }
 }
 pub(crate) fn initial_apply(
@@ -156,10 +194,15 @@ pub(crate) fn confirm_instance(
 ) {
     if let Some(id) = id {
         if let Ok(mut l) = launches().lock() {
-            if let Some(i) = l.intents.get_mut(&(rule.clone(), id)) {
+            if let Some(i) = l.intents.get_mut(&(rule.clone(), id.clone())) {
                 if i.at.elapsed() < WINDOW && i.confirmed.len() < 4096 {
                     i.confirmed.insert((pid, token));
                     i.main_seen |= main;
+                    if main {
+                        if let LaunchIdentity::Steam(id) = id {
+                            l.detection.remove(&(rule.clone(), id));
+                        }
+                    }
                 }
             }
         }
@@ -173,6 +216,16 @@ pub(crate) fn steam_detection_overdue(rule: &RuleId, id: u32) -> bool {
         .lock()
         .ok()
         .is_some_and(|l| l.detection_overdue(rule, id, Instant::now()))
+}
+pub(crate) fn retain_steam_diagnostics(rules: &HashSet<(RuleId, u32)>) {
+    if let Ok(mut l) = launches().lock() {
+        l.detection.retain(|key, _| rules.contains(key));
+    }
+}
+pub(crate) fn steam_process_detected(rule: &RuleId, id: u32) {
+    if let Ok(mut l) = launches().lock() {
+        l.detected(rule, id);
+    }
 }
 pub(crate) fn begin_steam_launch(rule: &RuleId, id: u32) -> SteamLaunchBegin {
     begin_launch(rule, LaunchIdentity::Steam(id))
@@ -215,10 +268,12 @@ mod tests {
         assert!(l.detection_overdue(&rule, 570, now + Duration::from_secs(30)));
         assert!(l.detection_overdue(&rule, 570, now + WINDOW));
         assert!(!l.detection_overdue(&rule, 571, now + WINDOW));
-        l.intents
-            .get_mut(&(rule.clone(), 570u32.into()))
-            .unwrap()
-            .main_seen = true;
+        let _ = l.begin(&RuleId("another-game".into()), 571u32, now + WINDOW);
+        assert!(
+            l.detection_overdue(&rule, 570, now + WINDOW),
+            "another launch must not clear this game's warning"
+        );
+        l.detected(&rule, 570);
         assert!(!l.detection_overdue(&rule, 570, now + WINDOW));
     }
     #[test]
@@ -243,8 +298,10 @@ mod tests {
         assert_ne!(first, second);
         l.cancel(&rule, 570u32, first);
         assert_eq!(l.get(&rule, 570u32, now).unwrap().generation, second);
+        assert!(l.detection_overdue(&rule, 570, now + Duration::from_secs(30)));
         l.cancel(&rule, 570u32, second);
         assert!(l.get(&rule, 570u32, now).is_none());
+        assert!(!l.detection_overdue(&rule, 570, now + WINDOW));
     }
     #[test]
     fn s103_parallel_launch_admission_has_exactly_one_dispatch_owner() {

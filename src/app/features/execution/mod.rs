@@ -1,4 +1,5 @@
 pub(crate) mod control;
+pub(crate) mod correction;
 pub(crate) mod launch;
 #[cfg(all(target_os = "windows", feature = "windows"))]
 pub(crate) mod managed_runs;

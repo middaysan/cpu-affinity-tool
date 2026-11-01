@@ -284,10 +284,16 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
     os: &mut O,
 ) -> ProcessSettingsIterationOutcome {
     let scheduling = apps.scheduling.clone();
+    let corrections = apps.correction_denials.clone();
     let control = apps.control.clone();
     let Ok(_observation) = control.observation(generation, Some(monitoring_enabled)) else {
         return ProcessSettingsIterationOutcome::default();
     };
+    corrections.observe(apps.apps.values().flat_map(|app| {
+        app.pid_instance_tokens
+            .iter()
+            .map(|(&pid, &token)| (pid, token))
+    }));
     apps.mutate_membership(|apps| {
         let mut outcome = ProcessSettingsIterationOutcome::default();
 
@@ -304,7 +310,7 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
                         all_matched = false;
                         continue;
                     };
-                    if apps.correction_denials.get(&(pid, instance_token)).is_some_and(|count| *count >= 3) {
+                    if corrections.count((pid, instance_token)) >= 3 {
                         access_limited = true;
                         all_matched = false;
                         continue;
@@ -340,45 +346,31 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
                             let fields = scheduling
                                 .select(pid, instance_token, goal.fields, write)
                                 .map_err(|error| format!("{error:?}"))?;
-                            let applied = os
-                                .apply_process_fields_if_instance(
-                                    pid,
-                                    instance_token,
-                                    goal.mask,
-                                    goal.priority,
-                                    fields,
-                                    write,
-                                )
+                            let correcting = write && (fields.affinity || fields.priority);
+                            let applied = corrections
+                                .attempt((pid, instance_token), correcting, true, || {
+                                    os.apply_process_fields_if_instance(
+                                        pid,
+                                        instance_token,
+                                        goal.mask,
+                                        goal.priority,
+                                        fields,
+                                        write,
+                                    )
+                                })
                                 .inspect_err(|error| {
-                                    access_limited |= error.access_denied;
-                                    let instance = (pid, instance_token);
-                                    let correcting = write && (fields.affinity || fields.priority);
-                                    if correcting {
-                                        if error.access_denied {
-                                            let count = apps.correction_denials.entry(instance).or_default();
-                                            *count = count.saturating_add(1).min(3);
-                                        } else {
-                                            apps.correction_denials.remove(&instance);
-                                        }
-                                    }
-                                    // Only a native correction attempt is an error. Observers and
-                                    // unresolved ownership remain read-only, without warning spam.
-                                    if correcting {
-                                        let message = if apps.correction_denials.get(&instance) == Some(&3) {
-                                            format!("{error}. Automatic correction paused after 3 access denials; use Retry to try again.")
-                                        } else { error.to_string() };
+                                    access_limited |= error.access_limited;
+                                    if correcting && !error.paused {
                                         outcome.failures.push(Failure::new(
                                             rule,
                                             name,
                                             pid,
                                             instance_token,
-                                            &message,
+                                            &error.message,
                                         ));
                                     }
-                                }).map_err(|error| error.to_string())?;
-                            if write && (fields.affinity || fields.priority) {
-                                apps.correction_denials.remove(&(pid, instance_token));
-                            }
+                                })
+                                .map_err(|error| error.to_string())?;
                             Ok((applied, fields, write))
                         };
                     let guarded = if initial {
@@ -1027,7 +1019,7 @@ mod tests {
         });
         os.tokens.insert(89, token);
         assert!(
-            !apps.correction_denials.contains_key(&(89, token - 1)),
+            apps.correction_denials.count((89, token - 1)) == 0,
             "old lifetime state must be released"
         );
         os.failures.remove(&89);

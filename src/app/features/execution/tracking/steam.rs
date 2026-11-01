@@ -264,13 +264,13 @@ pub(super) fn update_steam_rule<O: RunningAppsOs>(
         None
     };
     let unresolved = issue.is_some();
-    let previous = apps.steam_unresolved.remove(&configured.rule_id);
-    outcome.changed |= previous != issue;
-    if let Some(issue) = issue {
-        apps.steam_unresolved
-            .insert(configured.rule_id.clone(), issue);
-    }
     if primary.is_empty() {
+        let previous = apps.steam_unresolved.remove(&configured.rule_id);
+        outcome.changed |= previous != issue;
+        if let Some(issue) = issue {
+            apps.steam_unresolved
+                .insert(configured.rule_id.clone(), issue);
+        }
         if apps.apps.remove(key).is_some() {
             outcome.changed = true;
             outcome.notifications.push(format!(
@@ -312,6 +312,8 @@ pub(super) fn update_steam_rule<O: RunningAppsOs>(
         outcome.changed |= was_tracked;
         return;
     }
+    outcome.changed |= apps.steam_unresolved.remove(&configured.rule_id).is_some();
+    super::super::steam_pending::steam_process_detected(&configured.rule_id, app_id);
     outcome.changed |= old.as_ref() != Some(&app.pid_instance_tokens);
     if !was_tracked {
         outcome

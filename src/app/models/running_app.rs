@@ -44,8 +44,9 @@ pub struct RunningApps {
     pub(crate) control: std::sync::Arc<crate::app::features::execution::control::Authority>,
     /// Map of application keys to RunningApp instances
     pub apps: HashMap<AppRuntimeKey, RunningApp>,
-    /// Consecutive automatic write denials, bounded to current exact tracked lifetimes.
-    pub(crate) correction_denials: HashMap<(u32, ProcessInstanceToken), u8>,
+    /// Shared automatic write denials for tracked lifetimes and bounded pending launches.
+    pub(crate) correction_denials:
+        std::sync::Arc<crate::app::features::execution::correction::CorrectionState>,
     /// Runtime-only two-field handoff shared with the registered scheduling modules.
     pub(crate) scheduling:
         std::sync::Arc<crate::app::features::system_tweaks::tweaks::scheduling::SchedulingHandoff>,
@@ -61,7 +62,7 @@ impl Default for RunningApps {
         Self {
             control: Default::default(),
             apps: HashMap::new(),
-            correction_denials: HashMap::new(),
+            correction_denials: Default::default(),
             scheduling: Default::default(),
             steam_helpers: HashMap::new(),
             steam_evidence: HashMap::new(),
@@ -116,11 +117,11 @@ impl RunningApps {
                         .map(|(&pid, &token)| (pid, token))
                 })
                 .collect();
-            self.correction_denials
-                .retain(|instance, _| current.contains(instance));
-            if self.correction_denials.is_empty() {
-                self.correction_denials = HashMap::new();
-            }
+            let previous = before
+                .values()
+                .flat_map(|(_, _, _, tokens)| tokens.iter().copied())
+                .collect();
+            self.correction_denials.retain_members(&current, &previous);
         }
         self.membership_generation = if changed {
             previous.and_then(|generation| generation.checked_add(1))

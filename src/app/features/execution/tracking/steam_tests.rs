@@ -72,6 +72,29 @@ fn steam_warning_explains_helper_only_and_ambiguous_candidates_without_admitting
 }
 
 #[test]
+fn steam_expired_main_cannot_clear_a_process_selection_warning() {
+    use crate::app::features::execution::steam_detection::SteamDetectionIssue;
+    let mut state = steam_state(570);
+    let game = s103_candidate(2, r"C:\Game\game.exe");
+    state.groups[0].programs[0].launch_target = crate::app::models::LaunchTarget::Steam {
+        app_id: 570,
+        executable: Some(game.path.clone()),
+    };
+    let configured = collect_configured_programs(&state).remove(0);
+    let mut apps = RunningApps::default();
+    apps.steam_unresolved.insert(configured.rule_id.clone(), SteamDetectionIssue::NotDetected);
+    let os = s103_os(570, vec![game.clone()]);
+    // The candidate is live during observation, then replaced before final publication.
+    os.token_reads.borrow_mut().insert(2, [2, 2, 999].into());
+    let snapshot = os.snapshot.as_ref().unwrap();
+    let mut outcome = super::RunningAppsIterationOutcome::default();
+    super::update_steam_rule(&mut apps, &configured, 570, Some(&game.path), Ok(r"C:\Game".into()), vec![game.clone()], &HashMap::new(), snapshot, &HashMap::new(), &os, &mut outcome);
+    assert!(apps.apps.is_empty());
+    assert_eq!(apps.steam_unresolved.get(&configured.rule_id), Some(&SteamDetectionIssue::NotDetected), "failed final lifetime validation cannot withdraw the existing selection reason");
+    assert!(os.token_reads.borrow()[&2].is_empty());
+}
+
+#[test]
 fn s103_windowed_helper_cannot_reseed_main_after_game_exit() {
     let mut state = steam_state(570);
     state.groups[0].programs[0].additional_processes = vec!["helper.exe".into()];

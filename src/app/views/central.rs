@@ -672,7 +672,7 @@ fn render_groups(
                                     let running = app.runtime.running_apps_handle();
                                     let denied = running.try_read().ok().and_then(|running| {
                                         let member = running.apps.get(&program.runtime_key)?;
-                                        Some(member.pid_instance_tokens.iter().filter_map(|(&pid, &token)| running.correction_denials.get(&(pid, token))).copied().max().unwrap_or(0))
+                                        Some(member.pid_instance_tokens.iter().map(|(&pid, &token)| running.correction_denials.count((pid, token))).max().unwrap_or(0))
                                     }).unwrap_or(0);
                                     crate::app::features::diagnostics::debug_mcp::rect_control(
                                         ui.ctx(), format!("app.status.{}", program.rule_id.0), status_response.rect, true,

@@ -6,9 +6,16 @@ from pathlib import Path
 from live_mcp_client import decode_reply, validate_endpoint
 from live_mcp_fixture import synthetic_state, validate_state
 from live_mcp_scenarios import assert_unions
+from run_live_mcp import owned_workload_paths
 
 
 class HarnessGuards(unittest.TestCase):
+    def test_concurrent_enforcement_workloads_have_disjoint_basenames(self):
+        first = owned_workload_paths(Path('first-run'), 'session-one', 'denied', 'readable')
+        second = owned_workload_paths(Path('second-run'), 'session-two', 'denied', 'readable')
+        self.assertTrue({p.name.lower() for p in first}.isdisjoint(p.name.lower() for p in second),
+                        'Explicit name matching is global; separate directories do not isolate enforcement')
+
     def test_reply_requires_the_matching_id_and_bounds_sse(self):
         reply = {"jsonrpc": "2.0", "id": 7, "result": {"ok": True}}
         for content_type, payload in [

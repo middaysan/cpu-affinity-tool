@@ -41,3 +41,8 @@ captured scenes contains that condition; their existing row geometry, normal
 status labels, metrics and navigation remain representative. The new state was
 inspected separately in actual dark/light MCP frames. The original capture
 source, images and provenance above have not been relabeled as a fresh capture.
+
+The subsequent correction/admission review fixes change runtime eligibility,
+denial bookkeeping and Steam warning retention. They do not alter the geometry,
+copy or normal data shown in these eight non-Steam scenes. Existing captures
+remain representative; this review is not a new capture.

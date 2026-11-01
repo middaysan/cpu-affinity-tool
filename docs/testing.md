@@ -89,6 +89,8 @@ privilege so it cannot bypass that DACL. The original DACL and privilege flags
 are restored before cleanup; no account privilege or Windows policy is changed.
 The native access-denied preflight is mandatory, and readable metrics are checked
 through the same app/group snapshots while correction is paused.
+All C1/D1 workload basenames include the run's unique stamp: explicit helper-name
+matching cannot admit another concurrent runner's owned processes.
 
 The optional `-ReadOnlyInstalledAumid 'Publisher.Package!App'` adds D2 in a separate
 fresh profile when real-app observation is authorized. Enforcement stays Off;
