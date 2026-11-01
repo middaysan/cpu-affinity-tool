@@ -91,6 +91,9 @@ The native access-denied preflight is mandatory, and readable metrics are checke
 through the same app/group snapshots while correction is paused.
 All C1/D1 workload basenames include the run's unique stamp: explicit helper-name
 matching cannot admit another concurrent runner's owned processes.
+S1 checks its retained child's liveness, refreshes the request-driven picker when needed
+and scrolls overlapping list views before clicking the owned row; process count
+and viewport position must not determine whether selection succeeds.
 
 The optional `-ReadOnlyInstalledAumid 'Publisher.Package!App'` adds D2 in a separate
 fresh profile when real-app observation is authorized. Enforcement stays Off;

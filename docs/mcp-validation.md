@@ -301,3 +301,12 @@ The normal EXE (SHA-256
 and matching PDB passed artifact/manifest checks. These diagnostic checks do not
 certify interactive real-game behavior, the shipping UI or real background
 services. No working rules, real services or Windows settings were changed.
+
+The earlier Windows CI live run on `3f11cb2` timed out selecting the owned
+Steam row. The scenario waited for a visible row without navigating the list.
+A script-only follow-up now refreshes the one-shot chooser when needed and
+scrolls overlapping views before clicking; a sixth Python guard protects clipped
+rows, wheel direction and skipped rows. Both reviewers rechecked this follow-up.
+The standard live pack passed again with successful cleanup and helper exit 0
+(`target/lm-b227d1a5/evidence/result.json`); optional E1/D2 were not requested in
+that repeat and retain the preceding run's evidence. No Rust or binary changed.

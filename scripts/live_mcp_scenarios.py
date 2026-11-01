@@ -128,6 +128,28 @@ def controls(state):
     return {row["id"]: row["extra"] for row in state["controls"]}
 
 
+def select_owned_steam_process(fixture, process):
+    target = 'steam.process.' + str(process.pid)
+    def visible():
+        assert process.poll() is None, 'Owned Steam workload exited during selection'
+        rows = {row['id']: row for row in fixture.state()['controls']}
+        if rows.get(target, {}).get('enabled'):
+            return True
+        if target not in rows:
+            # The chooser is a request-driven snapshot, not a process watcher.
+            fixture.click('steam.choose_process')
+            fixture.click('steam.choose_process')
+        else:
+            rendered = [key for key, row in rows.items()
+                        if key.startswith('steam.process.') and row['enabled']]
+            if rendered:
+                # Overlap successive views of the 160-point list instead of skipping rows.
+                fixture.call('input', target=rendered[len(rendered) // 2], kind='scroll', delta=80)
+        return False
+    wait_until('visible owned Steam process', visible, bool)
+    fixture.click(target)
+
+
 def steam_selection(fixture, client, workload):
     """Missing Steam metadata must open the existing chooser, never launch Steam."""
     cpu = available_cpus()[-1]
@@ -164,7 +186,7 @@ def steam_selection(fixture, client, workload):
     process = subprocess.Popen([str(workload), str(stop)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     fixture.children.append((process, stop))
     fixture.click(select)
-    fixture.click('steam.process.' + str(process.pid))
+    select_owned_steam_process(fixture, process)
     assert fixture.state_path.read_bytes() == original, 'Choosing a draft process saved prematurely'
     fixture.call('input', target='steam.choose_process', kind='scroll', delta=700)
     assert fixture.call('wait', condition='ui_settled', timeout_ms=6000)['satisfied']

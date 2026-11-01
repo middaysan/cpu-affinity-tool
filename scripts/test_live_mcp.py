@@ -5,11 +5,41 @@ from pathlib import Path
 
 from live_mcp_client import decode_reply, validate_endpoint
 from live_mcp_fixture import synthetic_state, validate_state
-from live_mcp_scenarios import assert_unions
+from live_mcp_scenarios import assert_unions, select_owned_steam_process
 from run_live_mcp import owned_workload_paths
 
 
 class HarnessGuards(unittest.TestCase):
+    def test_owned_steam_choice_scrolls_before_clicking_a_clipped_row(self):
+        class Picker:
+            offset = 0
+            clicked = False
+            def state(self):
+                return {'controls': [
+                    {'id': 'steam.process.' + str(42 if index == 9 else index + 1),
+                     'enabled': index * 20 < self.offset + 160 and (index + 1) * 20 > self.offset}
+                    for index in range(30)]}
+            def call(self, action, **arguments):
+                current = {row['id']: row for row in self.state()['controls']}
+                if (action != 'input' or not current[arguments['target']]['enabled']
+                        or arguments.get('kind') != 'scroll' or arguments.get('delta', 0) <= 0):
+                    raise AssertionError('The debug input API needs positive delta to reveal a lower row')
+                self.offset = min(440, self.offset + arguments['delta'])
+                if self.offset >= 200:
+                    raise AssertionError('Scrolling skipped the owned row completely')
+            def click(self, target):
+                current = {row['id']: row for row in self.state()['controls']}
+                if not current[target]['enabled']:
+                    raise AssertionError('Owned row is clipped, not ready for a click')
+                self.clicked = target
+        class Child:
+            pid = 42
+            def poll(self):
+                return None
+        picker = Picker()
+        select_owned_steam_process(picker, Child())
+        self.assertEqual(picker.clicked, 'steam.process.42')
+
     def test_concurrent_enforcement_workloads_have_disjoint_basenames(self):
         first = owned_workload_paths(Path('first-run'), 'session-one', 'denied', 'readable')
         second = owned_workload_paths(Path('second-run'), 'session-two', 'denied', 'readable')
