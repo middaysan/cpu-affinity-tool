@@ -337,7 +337,7 @@ fn native_known_app_launch_focus_affinity_cpu_ram() {
         source.clone(),
     ));
     collector.set_history_seconds(30);
-    collector.configure(true, false);
+    collector.configure(true);
     let targets: Vec<_> = rules
         .iter()
         .map(|rule| RuleTarget {
@@ -416,7 +416,7 @@ fn native_known_app_launch_focus_affinity_cpu_ram() {
         );
         focused.push(true);
     }
-    collector.configure(false, false);
+    collector.configure(false);
     let until = Instant::now() + Duration::from_secs(5);
     while !collector.snapshot().cpus.is_empty() && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(25));

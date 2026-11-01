@@ -580,7 +580,6 @@ mod tests {
         ctx.set_fonts(ui_font_definitions());
         let mut groups = GroupFormSession {
             editing_group_id: None,
-            editing_selection: None,
             core_selection: vec![is_selected; 20],
             group_name: String::new(),
             run_all_enabled: false,

@@ -72,7 +72,7 @@ checked publication. CI validates committed assets without taking screenshots.
 | C1 | Real durable receipts; groups/rules/additional names; incomplete replacement and stale revision refused; reorder/move; stable IDs and unchanged saved values after restart |
 | U1 | Real schema-13 file, no eager write on notice, actual read-only-file failure and retry, schema-14 readback, group/list retention and restart, both themes |
 | E1, interactive opt-in | Ordinary managed launch, independent exact-handle affinity/priority readback, bounded output/EOF, wrong creation-token refusal, actual Focus acknowledgement |
-| T1 | Two owned workloads, extra process, identical overlapping rule sets in two groups; three fresh coherent CPU/RAM union samples; helper after primary exit; graph opening and Off/On |
+| T1 | Two owned workloads, extra process, identical overlapping rule sets in two groups; three fresh coherent CPU/RAM union samples; helper after primary exit; saved app/group metadata changes in an open graph without losing history/CPU selection; Off/On |
 | T2 | Original system history, bounded UTF-8 CSV cursor download and parsing, retained immutable export after Off, foreign history epoch refused |
 | S1 | Deliberately uninstalled synthetic Steam AppID, actionable warning in both themes, direct reason/chooser, no premature draft save, exact owned-process selection/measurement and unchanged helper list; never launches Steam |
 | D1 | Three native scheduling access denials on an exact owned child, paused correction with readable app/group CPU/RAM, Limited access in both themes, explicit Retry/native affinity readback, and exact process-DACL restoration |
@@ -144,3 +144,15 @@ Consolidation has no test-count target.
 The CPU union scenario also verifies group-capacity units against the same original app history interval through HTTP, changes one/two-CPU masks, and excludes owned busy work outside a temporary mask. Graph windows are opened separately because an opaque modal hides the main list. Group fields are preserved and the synthetic mask is restored before subsequent cases. The denial case accepts measured zero CPU while its owned children are outside the selected group mask; readable telemetry must remain complete through refused writes.
 
 Diagnostic denial counts are nullable when a nonblocking observation is busy. D1 requires at least three qualified pause observations and rejects any known reset; an unavailable read is never treated as zero. Completed fixtures are cleaned up before the next fixture starts. Cleanup failures retain the synthetic fixture label and bounded stage codes without paths, inventories or exception contents.
+
+The first simplification slice removes only the retired test-only module editor,
+its self-tests and unconstructed internal background-toolbar requests. Current
+compact Apply/options/unknown-value tests, typed configuration validation,
+controller/recovery/conditional Undo and background role admission checks remain.
+The roster regression covers both launch-key transition and scoped runtime keys;
+the graph regression uses actual rendered labels on successful and refused saves.
+Theme selection reuses the gated writer fixture for no-op/invalid input, pending
+publication and save failure rather than adding a separate persistence mock suite.
+Normal README scenes retain their existing layout and copy: the graph change is
+observable only after editing an already open source. Existing capture provenance
+is retained; the live metadata case exercises that conditional update separately.

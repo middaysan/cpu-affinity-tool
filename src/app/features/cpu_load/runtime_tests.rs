@@ -665,7 +665,7 @@ fn memory_snapshot_rejects_stale_control_revisions_and_monitoring_off() {
         ..Default::default()
     });
     assert!(runtime.snapshot().group_memory.is_some());
-    runtime.configure(false, false);
+    runtime.configure(false);
     assert!(runtime.snapshot().process_memory.is_empty());
     assert!(runtime.snapshot().group_memory.is_none());
 }
@@ -959,7 +959,7 @@ fn native_continuous_history_cost_and_lifecycle() {
         )
     }
     let baseline = measure(10);
-    runtime.configure(true, false);
+    runtime.configure(true);
     std::thread::sleep(Duration::from_secs(5));
     let before = runtime.snapshot();
     assert!(before.error.is_none(), "{:?}", before.error);
@@ -1103,7 +1103,7 @@ fn native_continuous_history_cost_and_lifecycle() {
     );
     let recorded_samples = runtime.series(Some(&first), 0).points.len();
     runtime.close();
-    runtime.configure(true, false);
+    runtime.configure(true);
     let original = runtime.snapshot().history_bytes;
     {
         let mut source = source.write().unwrap();
@@ -1144,7 +1144,7 @@ fn native_continuous_history_cost_and_lifecycle() {
         runtime.series(Some(&first), 0).points.len() >= 20,
         "other histories survive app changes"
     );
-    runtime.configure(false, false);
+    runtime.configure(false);
     let until = Instant::now() + Duration::from_secs(8);
     while runtime.history.read().unwrap().reserved_bytes() != 0 && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(50));
@@ -1161,7 +1161,7 @@ fn native_continuous_history_cost_and_lifecycle() {
         source.groups.clear();
         source.rule_identities.as_mut().unwrap().groups.clear();
     }
-    runtime.configure(true, false);
+    runtime.configure(true);
     let until = Instant::now() + Duration::from_secs(8);
     let mut ready = false;
     while Instant::now() < until {
@@ -1195,7 +1195,7 @@ fn native_continuous_history_cost_and_lifecycle() {
         "CONTRIBUTORS empty_saved_set=true retained={}",
         empty.contributor_identities
     );
-    runtime.configure(false, false);
+    runtime.configure(false);
     runtime.shutdown();
     let until = Instant::now() + Duration::from_secs(8);
     while !runtime.is_stopped() && Instant::now() < until {
@@ -1230,20 +1230,20 @@ fn native_continuous_history_cost_and_lifecycle() {
 #[test]
 fn closing_and_tray_leave_continuous_collection_enabled_without_revision_change() {
     let mut runtime = runtime();
-    runtime.configure(true, true);
+    runtime.configure(true);
     let revision = runtime.control.0.lock().unwrap().revision;
     runtime.open(GraphTarget::Process {
         target: target(),
         name: "Game".into(),
     });
-    runtime.configure(true, true);
-    runtime.configure(true, false);
+    runtime.configure(true);
+    runtime.configure(true);
     runtime.close();
     assert_eq!(runtime.control.0.lock().unwrap().revision, revision);
     assert!(runtime.control.0.lock().unwrap().enabled);
     runtime.set_history_seconds(30);
     assert_eq!(runtime.control.0.lock().unwrap().revision, revision);
-    runtime.configure(false, true);
+    runtime.configure(false);
     assert!(!runtime.control.0.lock().unwrap().enabled);
     assert!(runtime.graph.is_none());
     assert!(runtime.worker.is_none());
@@ -1273,7 +1273,7 @@ fn reopening_graph_reads_preexisting_history_and_reuses_series_capacity() {
         Some(25.0)
     );
     runtime.close();
-    runtime.configure(true, false);
+    runtime.configure(true);
     assert_eq!(
         runtime.series(Some(&target()), 0).points[0].value,
         Some(25.0)
@@ -1333,7 +1333,7 @@ fn estimate_changes_with_app_count_retention_and_current_processes() {
 #[test]
 fn stale_revision_and_stale_time_are_never_displayed() {
     let mut runtime = runtime();
-    runtime.configure(true, true);
+    runtime.configure(true);
     let old = Snapshot {
         revision: runtime.control.0.lock().unwrap().revision,
         at: Instant::now() - Duration::from_secs(5),

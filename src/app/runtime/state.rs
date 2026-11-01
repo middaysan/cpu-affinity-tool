@@ -867,9 +867,9 @@ impl AppState {
             return MoveRuleToGroupOutcome::LockFailed;
         }
         let message = if source_group_index == target_group_index {
-            format!("Reordered app '{moving_name}' in group '{target_group_name}'")
+            format!("Queued reorder of app '{moving_name}' in group '{target_group_name}'")
         } else {
-            format!("Moved app '{moving_name}' to group '{target_group_name}'")
+            format!("Queued move of app '{moving_name}' to group '{target_group_name}'")
         };
         self.log_manager.add_entry(message);
         MoveRuleToGroupOutcome::Moved
@@ -1041,6 +1041,11 @@ impl AppState {
         self.persistent_state.read().unwrap().theme_index
     }
 
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn configuration_revision(&self) -> u64 {
+        self.tuning_adopted_revision
+    }
+
     pub fn start_app_with_autorun(&mut self) {
         execution::start_app_with_autorun(
             &self.persistent_state,
@@ -1050,12 +1055,24 @@ impl AppState {
     }
 
     pub fn set_theme_index(&mut self, theme_index: usize) {
-        let Some((draft, revision)) = self.base_draft() else {
+        if theme_index > 2
+            || self
+                .persistent_state
+                .try_read()
+                .map_or(true, |saved| saved.theme_index == theme_index)
+        {
             return;
-        };
-        if preferences::set_theme_index(&draft, theme_index) {
-            let _ = self.persist_draft(draft, revision, self.rules.clone(), None);
         }
+        let _ = self.enqueue_legacy(
+            TuningRequest::UpdatePreferences {
+                patch: preferences::PreferencePatch {
+                    theme_index: Some(theme_index),
+                    ..Default::default()
+                },
+                expected_revision: self.tuning_adopted_revision,
+            },
+            None,
+        );
     }
 
     pub fn toggle_process_monitoring(&mut self) {
@@ -1594,7 +1611,7 @@ impl AppState {
         // Disabling takes effect now, even if persistence is unavailable.
         if !enabled {
             self.cpu_load.preference_override = Some(false);
-            self.cpu_load.configure(false, false);
+            self.cpu_load.configure(false);
         }
         let (draft, revision) = self
             .base_draft()
@@ -1611,7 +1628,7 @@ impl AppState {
     }
 
     #[cfg(all(target_os = "windows", feature = "windows"))]
-    pub(crate) fn poll_cpu_load(&mut self, visible: bool) {
+    pub(crate) fn poll_cpu_load(&mut self) {
         if self.pending_legacy.is_none() {
             if let Some(wanted) = self.cpu_load.preference_override {
                 let saved = self
@@ -1641,7 +1658,7 @@ impl AppState {
         let enabled = self.cpu_load_enabled();
         let history_seconds = self.cpu_load_history_seconds();
         self.cpu_load.set_history_seconds(history_seconds);
-        self.cpu_load.configure(enabled, visible);
+        self.cpu_load.configure(enabled);
     }
 
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -1708,6 +1725,7 @@ impl AppState {
         }
         let central = self.build_central_panel_snapshot();
         let handle = self.runtime.running_apps_handle();
+        let control = self.runtime.control_handle();
         let instances = {
             let Ok(running) = handle.try_read() else {
                 return None;
@@ -1715,7 +1733,7 @@ impl AppState {
             let mut instances = Vec::new();
             for group in central.groups {
                 for program in group.programs {
-                    let Some(app) = running.apps.get(&program.app_key) else {
+                    let Some((_, app)) = control.member(&running, &program.runtime_key) else {
                         continue;
                     };
                     if app.group_id != group.group_id || app.rule_id != program.rule_id {
@@ -2365,6 +2383,58 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn failed_move_never_reports_completed_success() {
+        use crate::app::features::system_tweaks::{
+            service::{SavedState, StatePersistence},
+            SaveError, TuningRuntime,
+        };
+        struct RefusedSave;
+        impl StatePersistence for RefusedSave {
+            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                Err(SaveError::Storage)
+            }
+        }
+        let mut app = sample_state();
+        add_empty_group(&mut app, "Background");
+        let original = app.persistent_state.read().unwrap().clone();
+        let runtime = TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(original, Box::new(RefusedSave))
+                .without_modules(),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        assert_eq!(
+            app.move_rule_to_group_at(group_id(&app, 0), rule_id(&app, 0, 0), group_id(&app, 1), 0),
+            MoveRuleToGroupOutcome::Moved
+        );
+        assert!(
+            app.log_manager
+                .entries
+                .iter()
+                .any(|entry| entry.message.starts_with("Queued")),
+            "Queue admission must be explicit"
+        );
+        assert!(
+            !app.log_manager
+                .entries
+                .iter()
+                .any(|entry| entry.message.starts_with("Moved app")
+                    || entry.message.starts_with("Reordered app")),
+            "Acceptance must not claim a durable move"
+        );
+        app.wait_for_test_save();
+        let saved = app.persistent_state.read().unwrap();
+        assert_eq!(saved.groups[0].programs.len(), 1);
+        assert!(saved.groups[1].programs.is_empty());
+        assert!(app
+            .log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("not saved")));
+    }
+
+    #[test]
     fn s116_gui_save_completion_survives_unrelated_request_churn() {
         use crate::app::features::system_tweaks::{
             service::{SavedState, StatePersistence},
@@ -2506,16 +2576,14 @@ mod tests {
                 app.runtime.running_apps_handle(),
             );
             app.replace_tuning_for_test(runtime, Default::default());
-            let mut candidate = original.clone();
-            candidate.theme_index = 2;
-            let accepted = app.enqueue_legacy(
-                super::TuningRequest::SaveBase {
-                    gui_import: false,
-                    candidate: Box::new(candidate),
-                    expected_revision: 0,
-                },
-                None,
+            app.set_theme_index(original.theme_index);
+            app.set_theme_index(3);
+            assert!(
+                app.pending_legacy.is_none(),
+                "No-op and invalid themes must not save"
             );
+            app.set_theme_index(2);
+            let accepted = app.pending_legacy.is_some();
             entered_rx
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .unwrap();
@@ -3512,6 +3580,8 @@ mod tests {
 
     #[test]
     fn test_select_theme_saves_only_valid_changes_and_monitoring_still_saves() {
+        use super::{preferences, TuningRequest};
+        use crate::app::features::system_tweaks::{SaveError, TuningOperationState};
         let mut app = sample_state();
 
         app.set_theme_index(2);
@@ -3533,6 +3603,50 @@ mod tests {
         app.wait_for_test_save();
         assert!(app.is_process_monitoring_enabled());
         assert_eq!(app.save_count(), 3);
+
+        // Another request completes before the GUI adopts its revision.
+        let revision = app.tuning_adopted_revision;
+        app.request_tuning(TuningRequest::UpdatePreferences {
+            patch: preferences::PreferencePatch {
+                start_minimized: Some(true),
+                ..Default::default()
+            },
+            expected_revision: revision,
+        })
+        .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.tuning_snapshot().revision == revision
+            || matches!(
+                app.tuning_snapshot().operation,
+                TuningOperationState::Pending { .. }
+            )
+        {
+            assert!(std::time::Instant::now() < until);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.set_theme_index(2);
+        assert!(
+            app.pending_legacy.is_some(),
+            "The stale request must reach revision admission"
+        );
+        app.wait_for_test_save();
+        assert!(matches!(
+            app.tuning_snapshot().operation,
+            TuningOperationState::Refused {
+                error: SaveError::Invalid,
+                ..
+            }
+        ));
+        assert_eq!(
+            app.get_theme_index(),
+            0,
+            "A stale GUI theme intent must be refused"
+        );
+        assert!(app.start_minimized());
+        assert_eq!(app.save_count(), 4, "Only the earlier request may save");
+        app.set_theme_index(2);
+        app.wait_for_test_save();
+        assert_eq!(app.get_theme_index(), 2, "Retry after adoption may save");
     }
 
     #[test]
@@ -3944,54 +4058,62 @@ mod tests {
 
     #[test]
     fn tracked_process_snapshot_uses_only_the_runtime_rule_owner() {
-        let mut app = sample_state();
-        {
-            let mut storage = app.persistent_state.write().unwrap();
+        for scoped in [false, true] {
+            let seed = sample_state();
+            let mut storage = seed.persistent_state.read().unwrap().clone();
             let mut second = storage.groups[0].clone();
             second.name = "Background".into();
             let duplicate = second.programs[0].clone();
             second.programs.push(duplicate);
             storage.groups.push(second);
-        }
-        let central = app.build_central_panel_snapshot();
-        let owner_group = &central.groups[1];
-        // Own the second duplicate rule, not the first matching configured key.
-        let owner = &owner_group.programs[1];
-        assert!(app.runtime.add_running_app_with_token(
-            &owner.app_key,
-            701,
-            1001,
-            owner_group.group_id.clone(),
-            owner.rule_id.clone(),
-        ));
-        let mut inspections = 0;
-        let rows = app
-            .tracked_processes_snapshot_with_inspector(|pid| {
-                inspections += 1;
-                assert_eq!(pid, 701);
-                Ok((PathBuf::from("sample.exe"), 1001))
-            })
-            .unwrap();
-        assert_eq!(
-            rows,
-            vec![TrackedProcessSnapshot {
-                group_name: "Background".into(),
-                process_name: "sample.exe".into(),
-                pid: 701,
-            }]
-        );
-        assert_eq!(inspections, 1);
+            storage.rule_identities = None;
+            let mut app = AppState::new_for_test(Arc::new(RwLock::new(storage)), 4);
+            let central = app.build_central_panel_snapshot();
+            let owner_group = &central.groups[1];
+            // Own the second duplicate rule, not the first matching configured key.
+            let owner = &owner_group.programs[1];
+            assert_ne!(owner.app_key, owner.runtime_key);
+            let key = if scoped {
+                &owner.runtime_key
+            } else {
+                &owner.app_key
+            };
+            assert!(app.runtime.add_running_app_with_token(
+                key,
+                701,
+                1001,
+                owner_group.group_id.clone(),
+                owner.rule_id.clone(),
+            ));
+            let mut inspections = 0;
+            let rows = app
+                .tracked_processes_snapshot_with_inspector(|pid| {
+                    inspections += 1;
+                    assert_eq!(pid, 701);
+                    Ok((PathBuf::from("sample.exe"), 1001))
+                })
+                .unwrap();
+            assert_eq!(
+                rows,
+                vec![TrackedProcessSnapshot {
+                    group_name: "Background".into(),
+                    process_name: "sample.exe".into(),
+                    pid: 701,
+                }]
+            );
+            assert_eq!(inspections, 1);
 
-        // A removed owner must not be relabeled as another rule with the same key.
-        app.persistent_state.write().unwrap().groups[1]
-            .programs
-            .pop();
-        assert!(app
-            .tracked_processes_snapshot_with_inspector(|_| {
-                panic!("stale runtime ownership must not be inspected")
-            })
-            .unwrap()
-            .is_empty());
+            // A removed owner must not be relabeled as another rule with the same key.
+            app.persistent_state.write().unwrap().groups[1]
+                .programs
+                .pop();
+            assert!(app
+                .tracked_processes_snapshot_with_inspector(|_| {
+                    panic!("stale runtime ownership must not be inspected")
+                })
+                .unwrap()
+                .is_empty());
+        }
     }
 
     #[test]

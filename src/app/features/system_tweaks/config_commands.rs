@@ -7,6 +7,7 @@ use crate::app::{
 impl HeadlessTuning {
     pub(crate) fn configure_base(&mut self, command: BaseCommand) -> Result<(), SaveError> {
         match command {
+            BaseCommand::Preferences(patch) => return self.configure_preferences(patch),
             BaseCommand::RemoveGroup { group } => return self.remove_group(&group),
             BaseCommand::RemoveRule { group, rule } => return self.remove_rule(&group, &rule),
             BaseCommand::MoveRule {
@@ -92,9 +93,6 @@ impl HeadlessTuning {
                 candidate.groups[index].programs.push(*app);
                 identities.append_rules_to_group(index, 1);
             }
-            BaseCommand::Preferences(patch) => patch
-                .apply(&mut candidate)
-                .map_err(|_| SaveError::Invalid)?,
             _ => unreachable!("Handled structural operations above"),
         }
         self.publish(candidate, identities)

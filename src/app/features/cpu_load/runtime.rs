@@ -163,7 +163,7 @@ impl CpuLoadRuntime {
         self.show_processes = false;
         self.inspection = Default::default();
     }
-    pub fn configure(&mut self, enabled: bool, _visible: bool) {
+    pub fn configure(&mut self, enabled: bool) {
         if !enabled {
             self.current_frame = None;
             self.close();

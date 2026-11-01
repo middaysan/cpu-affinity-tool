@@ -452,11 +452,42 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
     set_mask([cpu])
     wait_until('capacity recovers after mask restoration', fixture.state,
                lambda state: matches_history(state, [cpu]), seconds=20)
+    fixture.click('monitor.open')
+    fixture.click('monitor.tab.processes')
+    peer_name = next(row['name'] for row in client.tool('list_groups')['rows'] if row['group_id'] == peer_group)
+    wait_until('scoped duplicate launch rules remain in the Process monitor roster', fixture.state,
+               lambda state: all(any(row['pid'] == child.pid and row['group'] == peer_name
+                                    for row in controls(state).get('table.tracked', {}).get('entries', []))
+                                 for child, _ in workloads))
+    fixture.click('monitor.close')
     fixture.call('open_graph', group_id=group, rule_id=rule_id)
-    assert fixture.state()['graph'], 'App graph did not open'
+    wait_until('initial rendered app metadata', fixture.state,
+               lambda s: controls(s).get('graph.metadata', {}).get('name') == 'Renamed owned rule')
+    fixture.call('select_cpu', cpu=cpu)
+    original = next(row for row in reversed(client.tool('read_cpu_history', {'source': 'system', 'cpu': cpu, 'limit': 256})['rows']) if row['delivery'] == 'completed' and row['load'] is not None)
+    saved_rule = next(row['app'] for row in client.tool('list_rules', {'group_id': group})['rows']
+                      if row['rule_id'] == rule_id)
+    edited = {'name': 'Live updated app', 'path': str(main), 'args': saved_rule['args'],
+              'tracked_process_names': [helper.name, main.name], 'manage_descendants': True,
+              'autorun': False, 'priority': saved_rule['priority']}
+    client.mutate('update_rule', {'group_id': group, 'rule_id': rule_id, 'rule': edited})
+    def refreshed(state):
+        rendered = controls(state).get('graph.metadata', {})
+        return (rendered.get('name') == edited['name']
+                and rendered.get('scope') == 'Tracks: ' + ', '.join(edited['tracked_process_names']) + ' + descendants'
+                and rendered.get('cpus') == [cpu]
+                and state['graph']['selected_cpu'] == cpu)
+    wait_until('committed metadata updates without closing the graph', fixture.state, refreshed)
+    retained = client.tool('read_cpu_history', {'source': 'system', 'cpu': cpu, 'limit': 256})['rows']
+    assert any(row['seconds'] == original['seconds'] and row['load'] == original['load'] and row['unix_ms'] == original['unix_ms'] for row in retained), 'Metadata edit erased numeric history'
     fixture.call('close_graph')
     fixture.call("open_graph", group_id=group)
     graph = fixture.state()["graph"]
+    renamed_group = saved_group['name'] + ' updated'
+    client.mutate('update_group', {'group_id': group, 'name': renamed_group,
+                  'run_all': saved_group['run_all'], 'hidden': saved_group['hidden'], 'cpus': [cpu]})
+    wait_until('committed group graph title', fixture.state,
+               lambda s: controls(s).get('graph.metadata', {}).get('name') == renamed_group)
     fixture.call("close_graph")
     # Stop root: an explicitly added helper must keep both rule and group measured.
     process, stop = workloads[0]
@@ -475,7 +506,7 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
     wait_until("current values recover after On", fixture.state,
                lambda s: controls(s).get("meter.rule." + rule_id, {}).get("measured") == 1)
     return {"fresh_union_samples": len(seen), "graph_opened": bool(graph), "cpu": cpu,
-            'selected_capacity_matches_history': True, 'outside_mask_excluded': True, 'mask_edits_verified': True}
+            'selected_capacity_matches_history': True, 'outside_mask_excluded': True, 'mask_edits_verified': True, 'open_graph_metadata_updated': True, 'duplicate_roster_verified': True}
 
 
 def history(fixture, client, cpu, helper):

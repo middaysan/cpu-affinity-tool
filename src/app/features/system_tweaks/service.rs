@@ -550,6 +550,13 @@ impl HeadlessTuning {
         })
     }
 
+    pub(crate) fn configure_preferences(
+        &mut self,
+        patch: crate::app::features::preferences::PreferencePatch,
+    ) -> Result<(), SaveError> {
+        self.save_base(|candidate| patch.apply(candidate).map_err(|_| SaveError::Invalid))
+    }
+
     pub(crate) fn save_base(
         &mut self,
         edit: impl FnOnce(&mut AppStateStorage) -> Result<(), SaveError>,

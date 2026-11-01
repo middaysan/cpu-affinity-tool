@@ -28,18 +28,6 @@ use std::{
 pub(crate) enum TuningRequest {
     UpdateSavedSettings,
     CheckSavedSettings,
-    // Retained for internal compatibility/fixtures; the rule editor saves atomically.
-    #[allow(dead_code)]
-    ConfigureBackground {
-        enabled: bool,
-        config: Box<super::tweaks::background_workload::Config>,
-    },
-    #[allow(dead_code)]
-    InspectBackground,
-    #[allow(dead_code)]
-    PreviewBackground,
-    #[allow(dead_code)]
-    UndoBackground,
     #[cfg(all(target_os = "windows", feature = "windows"))]
     ActivateSelectedManual {
         profile: ProfileId,
@@ -121,6 +109,10 @@ pub(crate) enum TuningRequest {
         feature: FeatureId,
         target: TargetIdentity,
     },
+    UpdatePreferences {
+        patch: crate::app::features::preferences::PreferencePatch,
+        expected_revision: u64,
+    },
     SaveBase {
         gui_import: bool,
         candidate: Box<AppStateStorage>,
@@ -158,6 +150,7 @@ impl TuningRequest {
         matches!(
             self,
             Self::SaveBase { .. }
+                | Self::UpdatePreferences { .. }
                 | Self::RemoveRule { .. }
                 | Self::RemoveGroup { .. }
                 | Self::MoveRule { .. }
@@ -364,6 +357,9 @@ impl TuningClient {
         let id = admission.next.ok_or(SaveError::Invalid)?;
         let revision = match &request {
             TuningRequest::SaveBase {
+                expected_revision, ..
+            }
+            | TuningRequest::UpdatePreferences {
                 expected_revision, ..
             } => *expected_revision,
             _ => expected.unwrap_or_else(|| self.shared.latest.lock().unwrap().revision),
@@ -890,15 +886,6 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
     match request {
         TuningRequest::UpdateSavedSettings => service.update_saved_settings(),
         TuningRequest::CheckSavedSettings => service.prepare_settings_check(),
-        TuningRequest::ConfigureBackground { enabled, config } => {
-            service.configure_background(enabled, *config)
-        }
-        TuningRequest::InspectBackground => {
-            service.background.request_inspect();
-            Ok(())
-        }
-        TuningRequest::PreviewBackground => service.preview_background(),
-        TuningRequest::UndoBackground => service.undo_background(),
         #[cfg(all(target_os = "windows", feature = "windows"))]
         TuningRequest::RefreshModuleCards => Ok(()),
         #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -970,6 +957,7 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             feature,
             target,
         } => service.activate_manual(profile, feature, target),
+        TuningRequest::UpdatePreferences { patch, .. } => service.configure_preferences(patch),
         TuningRequest::SaveBase {
             candidate,
             gui_import,
@@ -2924,9 +2912,6 @@ mod card_tests {
         }
         fn accepts_config(&self, config: &ModuleEnvelope) -> bool {
             self.0.accepts_config(config)
-        }
-        fn show(&self, _: &mut eframe::egui::Ui, _: &mut ModuleEnvelope) -> Result<bool, ()> {
-            Ok(false)
         }
         fn format_baseline(&self, fields: &[(ResourceId, Vec<u8>)]) -> Option<String> {
             fields

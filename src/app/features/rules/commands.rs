@@ -1,5 +1,5 @@
 use crate::app::{
-    models::{AppStateStorage, AppToRun, LaunchTarget},
+    models::{AppToRun, LaunchTarget},
     shared::ids::{GroupId, RuleId},
 };
 use os_api::PriorityClass;
@@ -121,37 +121,7 @@ pub(crate) fn validate_group(
     super::service::validate_group_values(name, cpus, total)
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct PreferencePatch {
-    pub theme_index: Option<usize>,
-    pub process_monitoring_enabled: Option<bool>,
-    pub cpu_load_monitoring_enabled: Option<bool>,
-    pub cpu_load_history_seconds: Option<u32>,
-    pub start_minimized: Option<bool>,
-    pub windows_event_log_diagnostics_enabled: Option<bool>,
-}
-impl PreferencePatch {
-    pub fn apply(&self, state: &mut AppStateStorage) -> Result<(), String> {
-        if self.theme_index.is_some_and(|theme| theme > 2)
-            || self
-                .cpu_load_history_seconds
-                .is_some_and(|seconds| ![30, 300, 1800].contains(&seconds))
-        {
-            return Err("Unsupported theme or history duration".into());
-        }
-        macro_rules! update { ($($field:ident),*) => { $(if let Some(value) = self.$field { state.$field = value; })* }; }
-        update!(
-            theme_index,
-            process_monitoring_enabled,
-            cpu_load_monitoring_enabled,
-            cpu_load_history_seconds,
-            start_minimized,
-            windows_event_log_diagnostics_enabled
-        );
-        Ok(())
-    }
-}
+pub(crate) use crate::app::features::preferences::PreferencePatch;
 #[derive(Clone, Debug)]
 pub(crate) enum BaseCommand {
     CreateGroup {

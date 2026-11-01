@@ -1,18 +1,38 @@
 use crate::app::models::AppStateStorage;
+use serde::Deserialize;
 use std::sync::{Arc, RwLock};
 
-pub fn set_theme_index(
-    persistent_state: &Arc<RwLock<AppStateStorage>>,
-    theme_index: usize,
-) -> bool {
-    let mut state = persistent_state.write().unwrap();
-    if theme_index > 2 || state.theme_index == theme_index {
-        return false;
-    }
-    state.theme_index = theme_index;
-    true
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct PreferencePatch {
+    pub theme_index: Option<usize>,
+    pub process_monitoring_enabled: Option<bool>,
+    pub cpu_load_monitoring_enabled: Option<bool>,
+    pub cpu_load_history_seconds: Option<u32>,
+    pub start_minimized: Option<bool>,
+    pub windows_event_log_diagnostics_enabled: Option<bool>,
 }
-
+impl PreferencePatch {
+    pub fn apply(&self, state: &mut AppStateStorage) -> Result<(), String> {
+        if self.theme_index.is_some_and(|theme| theme > 2)
+            || self
+                .cpu_load_history_seconds
+                .is_some_and(|seconds| ![30, 300, 1800].contains(&seconds))
+        {
+            return Err("Unsupported theme or history duration".into());
+        }
+        macro_rules! update { ($($field:ident),*) => { $(if let Some(value) = self.$field { state.$field = value; })* }; }
+        update!(
+            theme_index,
+            process_monitoring_enabled,
+            cpu_load_monitoring_enabled,
+            cpu_load_history_seconds,
+            start_minimized,
+            windows_event_log_diagnostics_enabled
+        );
+        Ok(())
+    }
+}
 pub fn toggle_process_monitoring(persistent_state: &Arc<RwLock<AppStateStorage>>) {
     let mut state = persistent_state.write().unwrap();
     state.process_monitoring_enabled = !state.process_monitoring_enabled;
@@ -34,7 +54,7 @@ pub fn set_windows_event_log_diagnostics(
 mod tests {
     #[cfg(any(target_os = "windows", feature = "windows"))]
     use super::set_windows_event_log_diagnostics;
-    use super::{set_theme_index, toggle_process_monitoring};
+    use super::{toggle_process_monitoring, PreferencePatch};
     use crate::app::models::{AppStateStorage, CpuSchema};
     use std::sync::{Arc, RwLock};
 
@@ -60,12 +80,25 @@ mod tests {
     #[test]
     fn test_theme_selection_preserves_index_contract() {
         let state = sample_state();
-        assert!(set_theme_index(&state, 1));
-        assert_eq!(state.read().unwrap().theme_index, 1);
-        assert!(set_theme_index(&state, 2));
-        assert_eq!(state.read().unwrap().theme_index, 2);
-        assert!(set_theme_index(&state, 0));
-        assert_eq!(state.read().unwrap().theme_index, 0);
+        let mut state = state.write().unwrap();
+        for theme in [1, 2, 0] {
+            PreferencePatch {
+                theme_index: Some(theme),
+                ..Default::default()
+            }
+            .apply(&mut state)
+            .unwrap();
+            assert_eq!(state.theme_index, theme);
+        }
+        assert!(PreferencePatch {
+            theme_index: Some(3),
+            start_minimized: Some(true),
+            ..Default::default()
+        }
+        .apply(&mut state)
+        .is_err());
+        assert_eq!(state.theme_index, 0);
+        assert!(!state.start_minimized, "Invalid patches must be atomic");
     }
 
     #[test]

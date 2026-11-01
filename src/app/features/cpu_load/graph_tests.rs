@@ -1085,7 +1085,7 @@ fn expired_pin_stays_unavailable_and_other_controls_still_work() {
         .rect;
     click(&mut app, &ctx, plot.center());
     assert!(app.cpu_load.inspection.pinned.is_some());
-    app.cpu_load.configure(false, true);
+    app.cpu_load.configure(false);
     assert!(
         app.cpu_load.inspection.pinned.is_none(),
         "turning monitoring off clears inspection state"

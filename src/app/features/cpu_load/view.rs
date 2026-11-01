@@ -540,12 +540,6 @@ pub(crate) fn process_indicator(
     }
 }
 
-fn current_group_cpus(app: &AppState, id: &GroupId) -> Option<Vec<usize>> {
-    let index = app.rules.group_index_for_id(id)?;
-    let state = app.persistent_state.try_read().ok()?;
-    state.groups.get(index).map(|group| group.cores.clone())
-}
-
 fn contributor_table(
     ui: &mut egui::Ui,
     view: &super::contributors::ContributorView,
@@ -755,31 +749,71 @@ fn filter_chip(ui: &mut egui::Ui, selected: &mut bool, label: &str) -> egui::Res
     response
 }
 
-fn process_scope(app: &AppState, ctx: &egui::Context, target: &RuleTarget) -> std::sync::Arc<str> {
-    type Scope = (RuleTarget, std::sync::Arc<str>);
-    let id = egui::Id::new("app-process-scope");
-    if let Some((_, text)) = ctx
-        .data(|d| d.get_temp::<Scope>(id))
-        .filter(|(key, _)| key == target)
+#[derive(Clone)]
+struct GraphMetadata {
+    target: GraphTarget,
+    revision: u64,
+    name: String,
+    mask: Option<Vec<usize>>,
+    scope: Option<std::sync::Arc<str>>,
+}
+
+fn graph_metadata(
+    app: &AppState,
+    ctx: &egui::Context,
+    target: &GraphTarget,
+) -> std::sync::Arc<GraphMetadata> {
+    let id = egui::Id::new("cpu-graph-metadata");
+    let revision = app.configuration_revision();
+    if let Some(cached) = ctx
+        .data(|d| d.get_temp::<std::sync::Arc<GraphMetadata>>(id))
+        .filter(|cached| cached.target == *target && cached.revision == revision)
     {
-        return text;
+        return cached;
     }
-    let value = (|| {
-        let g = app.rules.group_index_for_id(&target.group)?;
-        let r = app.rules.rule_index_for_id(g, &target.rule)?;
-        let state = app.persistent_state.try_read().ok()?;
-        let app = state.groups.get(g)?.programs.get(r)?;
-        Some(scope_text(
-            &app.additional_processes,
-            app.manage_descendants,
-        ))
-    })();
-    let Some(value) = value else {
-        return "Tracked process names unavailable".into();
+    let mut metadata = GraphMetadata {
+        target: target.clone(),
+        revision,
+        name: match target {
+            GraphTarget::System => "All CPUs".into(),
+            GraphTarget::Group { name, .. } | GraphTarget::Process { name, .. } => name.clone(),
+        },
+        mask: match target {
+            GraphTarget::Group { cpus, .. } => Some(cpus.clone()),
+            _ => None,
+        },
+        scope: matches!(target, GraphTarget::Process { .. })
+            .then(|| "Tracked process names unavailable".into()),
     };
-    let text: std::sync::Arc<str> = value.into();
-    ctx.data_mut(|d| d.insert_temp(id, (target.clone(), text.clone())));
-    text
+    let resolved = (|| {
+        let group_id = match target {
+            GraphTarget::System => return Some(()),
+            GraphTarget::Group { id, .. } => id,
+            GraphTarget::Process { target, .. } => &target.group,
+        };
+        let g = app.rules.group_index_for_id(group_id)?;
+        let state = app.persistent_state.try_read().ok()?;
+        let group = state.groups.get(g)?;
+        metadata.mask = Some(group.cores.clone());
+        match target {
+            GraphTarget::Process { target, .. } => {
+                let r = app.rules.rule_index_for_id(g, &target.rule)?;
+                let rule = group.programs.get(r)?;
+                metadata.name = rule.name.clone();
+                metadata.scope =
+                    Some(scope_text(&rule.additional_processes, rule.manage_descendants).into());
+            }
+            _ => metadata.name = group.name.clone(),
+        }
+        Some(())
+    })()
+    .is_some();
+    let metadata = std::sync::Arc::new(metadata);
+    // Retry unavailable reads; only committed configuration belongs in the cache.
+    if resolved {
+        ctx.data_mut(|d| d.insert_temp(id, metadata.clone()));
+    }
+    metadata
 }
 fn scope_text(names: &[String], descendants: bool) -> String {
     let names = if names.is_empty() {
@@ -878,7 +912,7 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
             d.remove::<super::process_list::CurrentOrder>(
                 egui::Id::new("current-process-sort").with("cache"),
             );
-            d.remove::<(RuleTarget, std::sync::Arc<str>)>(egui::Id::new("app-process-scope"));
+            d.remove::<std::sync::Arc<GraphMetadata>>(egui::Id::new("cpu-graph-metadata"));
         });
         ctx.data_mut(|d| {
             d.remove::<crate::app::shell::presenters::process_table::Order>(
@@ -888,66 +922,38 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
         return;
     };
     crate::render_profile_scope!(CpuModal);
-    let app_scope = if let GraphTarget::Process { target, .. } = &target {
-        Some(process_scope(app, ctx, target))
-    } else {
-        None
-    };
+    let metadata = graph_metadata(app, ctx, &target);
     let snapshot = app.cpu_load.snapshot();
     let mut tracked_only = app.cpu_load.tracked_only();
     let system = matches!(target, GraphTarget::System);
-    let (name, live_values, error, rule, mask): (&str, _, _, _, _) = match &target {
-        GraphTarget::System => (
-            "All CPUs",
-            if tracked_only {
-                snapshot.tracked_cpus.as_slice()
-            } else {
-                snapshot.cpus.as_slice()
-            },
-            if tracked_only {
-                snapshot.detail_error.as_ref().or(snapshot.error.as_ref())
-            } else {
-                snapshot
-                    .collector_error
-                    .as_ref()
-                    .or(snapshot.error.as_ref())
-            },
-            None,
-            None,
-        ),
-        GraphTarget::Group { id, name, cpus } => (
-            name,
-            if tracked_only {
-                snapshot.tracked_cpus.as_slice()
-            } else {
-                snapshot.cpus.as_slice()
-            },
-            if tracked_only {
-                snapshot.detail_error.as_ref().or(snapshot.error.as_ref())
-            } else {
-                snapshot
-                    .collector_error
-                    .as_ref()
-                    .or(snapshot.error.as_ref())
-            },
-            None,
-            Some(current_group_cpus(app, id).unwrap_or_else(|| cpus.clone())),
-        ),
-        GraphTarget::Process { name, target } => {
-            let values = snapshot
-                .process_cpus
-                .get(target)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            (
-                name,
-                values,
-                snapshot.detail_error.as_ref(),
-                Some(target),
-                current_group_cpus(app, &target.group),
-            )
-        }
+    let rule = match &target {
+        GraphTarget::Process { target, .. } => Some(target),
+        _ => None,
     };
+    let (live_values, error) = if let Some(rule) = rule {
+        (
+            snapshot
+                .process_cpus
+                .get(rule)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+            snapshot.detail_error.as_ref(),
+        )
+    } else if tracked_only {
+        (
+            snapshot.tracked_cpus.as_slice(),
+            snapshot.detail_error.as_ref().or(snapshot.error.as_ref()),
+        )
+    } else {
+        (
+            snapshot.cpus.as_slice(),
+            snapshot
+                .collector_error
+                .as_ref()
+                .or(snapshot.error.as_ref()),
+        )
+    };
+    let mask = &metadata.mask;
     let process = rule.is_some();
     let live_partial: &[Option<f32>] = if let Some(rule) = rule {
         snapshot
@@ -1011,13 +1017,18 @@ pub(crate) fn draw_modal(app: &mut AppState, ctx: &egui::Context) {
         let modal_top = ui.cursor().top();
         ui.set_width((ctx.content_rect().width() - 36.0).clamp(200.0, 356.0));
         ui.set_height(modal_inner_height(ctx));
-        close = modal_header(ui, name, process, system);
+        close = modal_header(ui, &metadata.name, process, system);
         let subtitle = if tracked_only {
             if show_all {"Tracked apps on all logical CPUs"} else {"Tracked apps on this group's logical CPUs"}
         } else if show_all {"All system processes on all logical CPUs"}
         else {"All system processes on this group's logical CPUs"};
-        if let Some(scope) = &app_scope {scope_label(ui, scope);}
+        if let Some(scope) = &metadata.scope {scope_label(ui, scope);}
         else {ui.label(RichText::new(subtitle).small().weak());}
+        #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+        crate::app::features::diagnostics::debug_mcp::rect_control(
+            ui.ctx(), "graph.metadata", ui.min_rect(), false,
+            serde_json::json!({"name":metadata.name,"scope":metadata.scope.as_deref(),"cpus":metadata.mask,"revision":metadata.revision}),
+        );
         ui.horizontal(|ui| {
             ui.set_min_height(18.0);
             ui.spacing_mut().item_spacing.x = 5.0;
@@ -1393,6 +1404,160 @@ mod tests {
             "Tracks: chrome.exe, helper.exe + descendants"
         );
         assert_eq!(scope_text(&[], false), "Tracks: managed launches");
+    }
+
+    #[test]
+    fn open_graph_metadata_follows_only_committed_rule_changes() {
+        use crate::app::{
+            features::system_tweaks::{
+                service::{SavedState, StatePersistence},
+                SaveError, Tuning, TuningOperationState, TuningRequest, TuningRuntime,
+            },
+            models::{AppToRun, CoreGroup},
+        };
+        struct Save(bool);
+        impl StatePersistence for Save {
+            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                if self.0 {
+                    Err(SaveError::Storage)
+                } else {
+                    Ok(SavedState::Unavailable)
+                }
+            }
+        }
+        fn labels(ctx: &egui::Context, app: &mut AppState) -> Vec<String> {
+            let mut result = Vec::new();
+            for _ in 0..3 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 900.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| draw_modal(app, ui.ctx()),
+                );
+                result = output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                        _ => None,
+                    })
+                    .collect();
+                output.textures_delta.clear();
+            }
+            result
+        }
+        for fail in [true, false] {
+            let mut program = AppToRun::new_path(
+                "C:\\Before.exe".into(),
+                vec![],
+                "C:\\Before.exe".into(),
+                os_api::PriorityClass::Normal,
+                false,
+            );
+            program.name = "Before app".into();
+            program.additional_processes = vec!["before.exe".into()];
+            program.manage_descendants = false;
+            let saved = AppStateStorage::test_fixture(|state| {
+                state.groups = vec![CoreGroup {
+                    name: "Group".into(),
+                    cores: vec![0, 1],
+                    programs: vec![program.clone()],
+                    is_hidden: false,
+                    run_all_button: false,
+                }]
+            });
+            let mut app = AppState::new_for_test(Arc::new(RwLock::new(saved)), 2);
+            let original = app.persistent_state.read().unwrap().clone();
+            let writer = TuningRuntime::start(
+                Tuning::from_registry(Default::default())
+                    .headless(original, Box::new(Save(fail)))
+                    .without_modules(),
+                app.runtime.running_apps_handle(),
+            );
+            app.replace_tuning_for_test(writer, Default::default());
+            let target = RuleTarget {
+                group: app.rules.group_id_for_index(0).unwrap(),
+                rule: app.rules.rule_id_for_index(0, 0).unwrap(),
+            };
+            app.cpu_load.open(GraphTarget::Process {
+                target: target.clone(),
+                name: program.name.clone(),
+            });
+            app.cpu_load.selected_cpu = Some(1);
+            {
+                let mut history = app.cpu_load.history.write().unwrap();
+                history.configure(2, 30, &[target.clone()]).unwrap();
+                history.push(
+                    1.0,
+                    std::time::UNIX_EPOCH,
+                    &[Some(12.5), Some(0.0)],
+                    &[],
+                    &Default::default(),
+                );
+            }
+            let ctx = egui::Context::default();
+            assert!(labels(&ctx, &mut app)
+                .iter()
+                .any(|text| text == "Tracks: before.exe"));
+            program.name = "After app".into();
+            program.additional_processes = vec!["after.exe".into(), "extra.exe".into()];
+            program.manage_descendants = true;
+            app.request_tuning(TuningRequest::EditOwnedRule {
+                group: target.group.clone(),
+                rule: target.rule.clone(),
+                app: Box::new(program),
+                background: None,
+                choices: vec![],
+            })
+            .unwrap();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while matches!(
+                app.tuning_snapshot().operation,
+                TuningOperationState::Pending { .. }
+            ) {
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            app.poll_tuning();
+            let rendered = labels(&ctx, &mut app);
+            let expected_name = if fail {
+                "Before app · Application CPU"
+            } else {
+                "After app · Application CPU"
+            };
+            assert!(
+                rendered.iter().any(|text| text == expected_name),
+                "saved title is stale: {rendered:?}"
+            );
+            let expected_scope = if fail {
+                "Tracks: before.exe"
+            } else {
+                "Tracks: after.exe, extra.exe + descendants"
+            };
+            assert!(
+                rendered.iter().any(|text| text == expected_scope),
+                "saved scope is stale: {rendered:?}"
+            );
+            assert_eq!(app.cpu_load.selected_cpu, Some(1));
+            let history = app
+                .cpu_load
+                .history
+                .read()
+                .unwrap()
+                .api_query(
+                    "read_cpu_history",
+                    serde_json::json!({"source":"system","cpu":0}),
+                )
+                .unwrap();
+            assert_eq!(
+                history["rows"][0]["load"], 12.5,
+                "metadata updates must retain numeric history"
+            );
+        }
     }
 
     #[test]

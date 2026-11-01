@@ -48,3 +48,9 @@ tested separately; these demonstration scenes show normal process access.
 A later diagnostic-only correction distinguishes an unavailable denial-count
 read from zero and improves live-test cleanup reporting. It changes no visible
 controls, layout or demonstrated metric; the capture provenance remains original.
+
+The subsequent writer/metadata simplification preserves these normal scenes.
+It updates graph labels after an already open source is edited, fixes duplicate
+entries in the separate Process monitor roster and distinguishes queued moves
+in Logs. Those conditional paths are checked separately; no existing frame is
+presented as a new capture.

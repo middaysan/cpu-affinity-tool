@@ -1515,7 +1515,6 @@ mod tests {
         .unwrap();
         wait_saved(&mut app);
         let profile = app.tuning_snapshot().profiles[0].id;
-        app.ui.tuning.selected_profile = Some(profile);
         (app, setting, fail, profile)
     }
     fn wait_saved(app: &mut AppState) {

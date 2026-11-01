@@ -318,14 +318,6 @@ impl ModuleEditor for DiagnosticModule {
     fn accepts_config(&self, config: &ModuleEnvelope) -> bool {
         self.codec.decode(config).is_ok()
     }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()> {
-        if !self.accepts_config(config) {
-            return Err(());
-        }
-        ui.label(self.kind.guidance());
-        Ok(false)
-    }
 }
 
 fn display_summary() -> Result<String, DiagnosticError> {
