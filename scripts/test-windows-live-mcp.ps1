@@ -4,6 +4,7 @@ param(
     [string]$ExePath,
     [switch]$InteractiveLaunch,
     [switch]$CaptureReadme,
+    [string]$ReadOnlyInstalledAumid,
     [switch]$SkipBuild
 )
 
@@ -31,6 +32,7 @@ try {
     $runnerArguments = @((Join-Path $PSScriptRoot 'run_live_mcp.py'), '--exe', $ExePath, '--workload', $workload, '--output', (Join-Path $runRoot 'evidence'))
     if ($InteractiveLaunch) { $runnerArguments += '--interactive-launch' }
     if ($CaptureReadme) { $runnerArguments += '--capture-readme' }
+    if ($ReadOnlyInstalledAumid) { $runnerArguments += @('--read-only-installed-aumid', $ReadOnlyInstalledAumid) }
     $resultPath = if ($CaptureReadme) { 'evidence/screenshots/capture.json' } else { 'evidence/result.json' }
     & $Python @runnerArguments
     if ($LASTEXITCODE -ne 0) { throw "Live MCP run failed. Evidence: $runRoot/$resultPath" }

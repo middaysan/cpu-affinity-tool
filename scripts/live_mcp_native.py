@@ -96,3 +96,113 @@ class OwnedProcess:
         if self.handle:
             self.kernel.CloseHandle(self.handle)
             self.handle = None
+
+
+class DeniedScheduling:
+    """Temporarily deny SET_INFORMATION on one retained Popen child; restore its DACL."""
+    def __init__(self, child):
+        assert isinstance(child, subprocess.Popen) and child.poll() is None
+        self.handle = wintypes.HANDLE(int(child._handle))  # Exact CreateProcess handle, not a PID open.
+        self.api = ctypes.WinDLL('advapi32', use_last_error=True)
+        self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        self.kernel.LocalFree.argtypes = [ctypes.c_void_p]
+        self.api.GetKernelObjectSecurity.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p,
+                                                     wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        self.api.SetKernelObjectSecurity.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p]
+        self.api.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [ctypes.c_void_p,
+            wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+        self.api.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [wintypes.LPCWSTR,
+            wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+        size = wintypes.DWORD()
+        self.api.GetKernelObjectSecurity(self.handle, 4, None, 0, ctypes.byref(size))
+        assert 20 <= size.value <= 65536, 'Cannot bound owned process DACL'
+        self.original = ctypes.create_string_buffer(size.value)
+        assert self.api.GetKernelObjectSecurity(self.handle, 4, self.original, size, ctypes.byref(size))
+        self.original_text = self.text(self.original)
+        assert self.original_text.startswith('D:') and '(' in self.original_text
+        pos = self.original_text.index('(')
+        text = self.original_text[:pos] + '(D;;0x0200;;;WD)' + self.original_text[pos:]
+        denied = ctypes.c_void_p()
+        assert self.api.ConvertStringSecurityDescriptorToSecurityDescriptorW(text, 1, ctypes.byref(denied), None)
+        self.active = False
+        try:
+            assert self.api.SetKernelObjectSecurity(self.handle, 4, denied), 'Cannot deny owned scheduling'
+            self.active = True
+        finally:
+            self.kernel.LocalFree(denied)
+
+    def text(self, descriptor):
+        pointer = ctypes.c_void_p()
+        assert self.api.ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, 4,
+                                                                            ctypes.byref(pointer), None)
+        try:
+            return ctypes.wstring_at(pointer)
+        finally:
+            self.kernel.LocalFree(pointer)
+
+    def restore(self):
+        if self.active:
+            assert self.api.SetKernelObjectSecurity(self.handle, 4, self.original), 'Owned DACL restore failed'
+            self.active = False
+            size = wintypes.DWORD(len(self.original))
+            current = ctypes.create_string_buffer(size.value)
+            assert self.api.GetKernelObjectSecurity(self.handle, 4, current, size, ctypes.byref(size))
+            assert self.text(current) == self.original_text, 'Owned DACL readback changed'
+
+
+class ScopedDebugPrivilege:
+    """Disable debug bypass only on this runner/its retained diagnostic child; restore it."""
+    class Luid(ctypes.Structure):
+        _fields_ = [('low', wintypes.DWORD), ('high', wintypes.LONG)]
+
+    def __init__(self, child=None):
+        self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        self.kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        self.kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.api = ctypes.WinDLL('advapi32', use_last_error=True)
+        self.api.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        self.api.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                                wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        self.api.LookupPrivilegeValueW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.POINTER(self.Luid)]
+        self.api.AdjustTokenPrivileges.argtypes = [wintypes.HANDLE, wintypes.BOOL, ctypes.c_void_p,
+                                                  wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p]
+        assert child is None or isinstance(child, subprocess.Popen) and child.poll() is None
+        handle = self.kernel.GetCurrentProcess() if child is None else wintypes.HANDLE(int(child._handle))
+        self.token = wintypes.HANDLE()
+        assert self.api.OpenProcessToken(handle, 0x20 | 0x8, ctypes.byref(self.token))
+        self.changed = False
+        try:
+            luid = self.Luid()
+            assert self.api.LookupPrivilegeValueW(None, 'SeDebugPrivilege', ctypes.byref(luid))
+            self.luid = luid
+            size = wintypes.DWORD()
+            self.api.GetTokenInformation(self.token, 3, None, 0, ctypes.byref(size))
+            assert 4 <= size.value <= 65536
+            data = ctypes.create_string_buffer(size.value)
+            assert self.api.GetTokenInformation(self.token, 3, data, size, ctypes.byref(size))
+            count, = struct.unpack_from('<I', data.raw)
+            assert 4 + count * 12 <= size.value
+            self.previous = next((flags for low, high, flags in
+                                  (struct.unpack_from('<IiI', data.raw, 4 + i * 12) for i in range(count))
+                                  if (low, high) == (luid.low, luid.high)), None)
+            self.was_enabled = self.previous is not None and bool(self.previous & 2)
+            if self.was_enabled:
+                self.set_flags(self.previous & ~2)
+                self.changed = True
+        except BaseException:
+            self.kernel.CloseHandle(self.token)
+            raise
+
+    def set_flags(self, flags):
+        state = ctypes.create_string_buffer(struct.pack('<IIiI', 1, self.luid.low, self.luid.high, flags))
+        ctypes.set_last_error(0)
+        assert self.api.AdjustTokenPrivileges(self.token, False, state, 0, None, None)
+        assert ctypes.get_last_error() == 0, 'Owned debug privilege update failed'
+
+    def restore(self):
+        try:
+            if self.changed:
+                self.set_flags(self.previous)
+                self.changed = False
+        finally:
+            self.kernel.CloseHandle(self.token)

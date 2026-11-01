@@ -232,6 +232,7 @@ fn app_status_label(status: AppStatus) -> &'static str {
         AppStatus::Running => "Running · protected",
         AppStatus::SettingsMismatch => "Running · correction needed",
         AppStatus::NotRunning => "Stopped",
+        AppStatus::LimitedAccess => "Limited access",
     }
 }
 
@@ -239,7 +240,7 @@ fn app_status_tone(status: AppStatus) -> AppStatusTone {
     match status {
         AppStatus::NotRunning => AppStatusTone::Neutral,
         AppStatus::Running => AppStatusTone::Success,
-        AppStatus::SettingsMismatch => AppStatusTone::Warning,
+        AppStatus::SettingsMismatch | AppStatus::LimitedAccess => AppStatusTone::Warning,
     }
 }
 
@@ -261,6 +262,11 @@ fn app_action_presentation(status: AppStatus, focus_supported: bool) -> AppActio
         AppStatus::SettingsMismatch => AppActionPresentation {
             label: "Fix",
             hover_text: "Reapply the assigned affinity and priority",
+            action: Some(AppRowAction::Fix),
+        },
+        AppStatus::LimitedAccess => AppActionPresentation {
+            label: "Retry",
+            hover_text: "Retry affinity and priority correction. Windows denied access to a tracked process; automatic correction pauses after three denials. Readable CPU and RAM are still counted.",
             action: Some(AppRowAction::Fix),
         },
         AppStatus::Running if focus_supported => AppActionPresentation {
@@ -581,6 +587,9 @@ fn render_groups(
                             if let Some(issue) = &steam_issue {
                                 status_tooltip = format!("{}\n\n{}", issue.reason(), issue.guidance());
                             }
+                            if app_status == AppStatus::LimitedAccess {
+                                status_tooltip.push_str("\nWindows denied access to one or more tracked processes. Automatic correction pauses after three denials. Readable CPU/RAM remains included. Use Retry to resume correction.");
+                            }
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 #[cfg(not(all(target_os = "windows", feature = "windows")))]
@@ -658,6 +667,18 @@ fn render_groups(
                                 )
                                 .inner
                                 .on_hover_text(&status_tooltip);
+                                #[cfg(all(target_os = "windows", debug_assertions, feature = "debug-mcp"))]
+                                {
+                                    let running = app.runtime.running_apps_handle();
+                                    let denied = running.try_read().ok().and_then(|running| {
+                                        let member = running.apps.get(&program.runtime_key)?;
+                                        Some(member.pid_instance_tokens.iter().filter_map(|(&pid, &token)| running.correction_denials.get(&(pid, token))).copied().max().unwrap_or(0))
+                                    }).unwrap_or(0);
+                                    crate::app::features::diagnostics::debug_mcp::rect_control(
+                                        ui.ctx(), format!("app.status.{}", program.rule_id.0), status_response.rect, true,
+                                        serde_json::json!({"status": app_status_label(app_status), "denials": denied}),
+                                    );
+                                }
                                 if needs_selection {
                                     crate::debug_mcp_control!(format!("steam.warning.{}", program.rule_id.0), status_response);
                                     if !choose_owner && status_response.clicked() {
@@ -697,7 +718,7 @@ fn render_groups(
                                     )
                                 } else if action_presentation.action == Some(AppRowAction::Run) {
                                     app_run_button(ui, [action_width, 21.0], button)
-                                } else if needs_selection || app_status == AppStatus::SettingsMismatch {
+                                } else if needs_selection || matches!(app_status, AppStatus::SettingsMismatch | AppStatus::LimitedAccess) {
                                     toned_sized_button(
                                         ui,
                                         [action_width, 21.0],
@@ -708,6 +729,7 @@ fn render_groups(
                                     ui.add(button.min_size(egui::vec2(action_width, 21.0)))
                                 }
                                 .on_hover_text(action_presentation.hover_text);
+                                crate::debug_mcp_control!(format!("app.action.{}", program.rule_id.0), action_response);
                                 if needs_selection { crate::debug_mcp_control!(format!("steam.select.{}", program.rule_id.0), action_response); }
                                 if action_response.clicked() {
                                     if choose_owner { actions.push(CentralAction::OpenAppRunSettings{group_id:group_id.clone(),rule_id:program.rule_id.clone()}); }

@@ -9,7 +9,7 @@ use crate::app::shared::ids::{GroupId, RuleId};
 use crate::app::shell::events::ShellEvent;
 use failures::{Failure, FailureLog};
 use os_api::gaming::ProcessSettingsFields;
-use os_api::{PriorityClass, ProcessSettingsApplyOutcome, OS};
+use os_api::{PriorityClass, ProcessSettingsApplyOutcome, ProcessSettingsError, OS};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
@@ -59,7 +59,7 @@ trait ProcessSettingsOs {
         priority: PriorityClass,
         fields: ProcessSettingsFields,
         apply_changes: bool,
-    ) -> Result<ProcessSettingsApplyOutcome, String>;
+    ) -> Result<ProcessSettingsApplyOutcome, ProcessSettingsError>;
 }
 
 struct RealProcessSettingsOs;
@@ -80,15 +80,30 @@ impl ProcessSettingsOs for RealProcessSettingsOs {
         priority: PriorityClass,
         fields: ProcessSettingsFields,
         apply_changes: bool,
-    ) -> Result<ProcessSettingsApplyOutcome, String> {
-        OS::apply_process_fields_if_instance(
-            pid,
-            expected_instance_token,
-            mask,
-            priority,
-            fields,
-            apply_changes,
-        )
+    ) -> Result<ProcessSettingsApplyOutcome, ProcessSettingsError> {
+        #[cfg(target_os = "windows")]
+        {
+            OS::inspect_or_apply_process_fields_if_instance(
+                pid,
+                expected_instance_token,
+                mask,
+                priority,
+                fields,
+                apply_changes,
+            )
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            OS::apply_process_fields_if_instance(
+                pid,
+                expected_instance_token,
+                mask,
+                priority,
+                fields,
+                apply_changes,
+            )
+            .map_err(Into::into)
+        }
     }
 }
 
@@ -161,7 +176,12 @@ fn record_confirmed_match_statuses(apps: &RunningApps, statuses: &RunningAppStat
     let mut statuses = statuses.write().unwrap();
     let mut changed = false;
     for (app_key, app) in &apps.apps {
-        if app.settings_matched && statuses.get(app_key) == Some(&AppStatus::SettingsMismatch) {
+        if app.settings_matched
+            && matches!(
+                statuses.get(app_key),
+                Some(AppStatus::SettingsMismatch | AppStatus::LimitedAccess)
+            )
+        {
             statuses.insert(app_key.clone(), AppStatus::Running);
             changed = true;
         }
@@ -277,12 +297,18 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
                 app.rule_id = settings.rule_id.clone();
 
                 let mut all_matched = !app.pids.is_empty();
+                let mut access_limited = false;
 
                 for &pid in &app.pids {
                     let Some(&instance_token) = app.pid_instance_tokens.get(&pid) else {
                         all_matched = false;
                         continue;
                     };
+                    if apps.correction_denials.get(&(pid, instance_token)).is_some_and(|count| *count >= 3) {
+                        access_limited = true;
+                        all_matched = false;
+                        continue;
+                    }
 
                     let initial = super::steam_pending::initial_apply(
                         &settings.rule_id,
@@ -324,18 +350,35 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
                                     write,
                                 )
                                 .inspect_err(|error| {
+                                    access_limited |= error.access_denied;
+                                    let instance = (pid, instance_token);
+                                    let correcting = write && (fields.affinity || fields.priority);
+                                    if correcting {
+                                        if error.access_denied {
+                                            let count = apps.correction_denials.entry(instance).or_default();
+                                            *count = count.saturating_add(1).min(3);
+                                        } else {
+                                            apps.correction_denials.remove(&instance);
+                                        }
+                                    }
                                     // Only a native correction attempt is an error. Observers and
                                     // unresolved ownership remain read-only, without warning spam.
-                                    if write && (fields.affinity || fields.priority) {
+                                    if correcting {
+                                        let message = if apps.correction_denials.get(&instance) == Some(&3) {
+                                            format!("{error}. Automatic correction paused after 3 access denials; use Retry to try again.")
+                                        } else { error.to_string() };
                                         outcome.failures.push(Failure::new(
                                             rule,
                                             name,
                                             pid,
                                             instance_token,
-                                            error,
+                                            &message,
                                         ));
                                     }
-                                })?;
+                                }).map_err(|error| error.to_string())?;
+                            if write && (fields.affinity || fields.priority) {
+                                apps.correction_denials.remove(&(pid, instance_token));
+                            }
                             Ok((applied, fields, write))
                         };
                     let guarded = if initial {
@@ -411,6 +454,10 @@ fn reconcile_settings_with_os<O: ProcessSettingsOs>(
                     app.settings_matched = all_matched;
                     outcome.changed = true;
                 }
+                if app.settings_access_limited != access_limited {
+                    app.settings_access_limited = access_limited;
+                    outcome.changed = true;
+                }
             }
         }
 
@@ -428,12 +475,13 @@ mod tests {
         AppStateStorage, AppStatus, AppToRun, CoreGroup, CpuSchema, RunningApps,
     };
     use crate::app::shared::ids::{GroupId, RuleId};
-    use os_api::{PriorityClass, ProcessSettingsApplyOutcome};
+    use os_api::{PriorityClass, ProcessSettingsApplyOutcome, ProcessSettingsError};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
 
     struct FakeProcessSettingsOs {
+        calls: Vec<(u32, u64, bool)>,
         affinity: HashMap<u32, usize>,
         priority: HashMap<u32, PriorityClass>,
         tokens: HashMap<u32, u64>,
@@ -445,6 +493,7 @@ mod tests {
     impl FakeProcessSettingsOs {
         fn new(affinity: HashMap<u32, usize>, priority: HashMap<u32, PriorityClass>) -> Self {
             Self {
+                calls: Vec::new(),
                 affinity,
                 priority,
                 tokens: HashMap::new(),
@@ -464,12 +513,17 @@ mod tests {
             priority: PriorityClass,
             fields: os_api::gaming::ProcessSettingsFields,
             apply_changes: bool,
-        ) -> Result<ProcessSettingsApplyOutcome, String> {
+        ) -> Result<ProcessSettingsApplyOutcome, ProcessSettingsError> {
+            self.calls
+                .push((pid, expected_instance_token, apply_changes));
             if self.tokens.get(&pid).copied() != Some(expected_instance_token) {
-                return Err("process instance no longer matches the tracked PID".to_string());
+                return Err("process instance no longer matches the tracked PID".into());
             }
             if let Some(error) = self.failures.get(&pid) {
-                return Err(error.clone());
+                return Err(ProcessSettingsError {
+                    message: error.clone(),
+                    access_denied: error.contains("0x80070005"),
+                });
             }
             let previous_affinity = self
                 .affinity
@@ -916,6 +970,74 @@ mod tests {
             off.failures.is_empty(),
             "read-only inspection is not a failed correction"
         );
+    }
+
+    #[test]
+    fn s131_three_denials_pause_only_that_lifetime_and_preserve_membership() {
+        let state = sample_state();
+        let key = state.groups[1].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        let mut os = FakeProcessSettingsOs::new(
+            HashMap::from([(89, 1), (90, 1)]),
+            HashMap::from([(89, PriorityClass::Normal), (90, PriorityClass::Normal)]),
+        );
+        apps.add_app(&key, 89, group_id(1), rule_id(0));
+        apps.apps.get_mut(&key).unwrap().pids.push(90);
+        for pid in [89, 90] {
+            seed_tracked_instance(&mut apps, &key, pid, &mut os);
+        }
+        os.failures
+            .insert(89, "Access is denied. (0x80070005)".into());
+        for _ in 0..6 {
+            process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
+        }
+        assert_eq!(
+            os.calls
+                .iter()
+                .filter(|(pid, _, write)| *pid == 89 && *write)
+                .count(),
+            3
+        );
+        assert_eq!(
+            apps.apps[&key].pids,
+            vec![89, 90],
+            "write denial must not remove CPU/RAM membership"
+        );
+        assert!(apps.apps[&key].settings_access_limited);
+        let attempts = os.calls.len();
+        process_settings_iteration_with_os(&mut apps, &state, false, &mut os);
+        assert_eq!(
+            os.calls[attempts..]
+                .iter()
+                .filter(|(pid, _, _)| *pid == 89)
+                .count(),
+            0
+        );
+        assert_eq!(
+            os.affinity[&90], 6,
+            "a denied sibling must not block correction"
+        );
+        let token = apps.apps[&key].pid_instance_tokens[&89] + 1;
+        apps.mutate_membership(|apps| {
+            apps.apps
+                .get_mut(&key)
+                .unwrap()
+                .pid_instance_tokens
+                .insert(89, token);
+        });
+        os.tokens.insert(89, token);
+        assert!(
+            !apps.correction_denials.contains_key(&(89, token - 1)),
+            "old lifetime state must be released"
+        );
+        os.failures.remove(&89);
+        process_settings_iteration_with_os(&mut apps, &state, true, &mut os);
+        assert!(
+            os.calls.contains(&(89, token, true)),
+            "a reused PID starts a fresh episode"
+        );
+        assert_eq!(os.affinity[&89], 6);
+        assert!(!apps.apps[&key].settings_access_limited);
     }
 
     #[test]

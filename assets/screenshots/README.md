@@ -34,3 +34,10 @@ No working user rules, published executable, real services or Windows settings
 were changed. The app, workloads, listener, ticket and temporary keys were
 cleaned up successfully. Refresh affected scenes alongside visible UI changes
 using [the capture and publication workflow](../../docs/readme-screenshots.md).
+
+Reviewed for the 2026-11-01 access-denial fix: the new **Limited access / Retry**
+state occurs only when Windows refuses scheduling access. None of the eight
+captured scenes contains that condition; their existing row geometry, normal
+status labels, metrics and navigation remain representative. The new state was
+inspected separately in actual dark/light MCP frames. The original capture
+source, images and provenance above have not been relabeled as a fresh capture.

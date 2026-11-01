@@ -73,6 +73,9 @@ struct RunningAppsIterationOutcome {
 }
 
 trait RunningAppsOs {
+    fn current_logon_instance(&self, _pid: u32, _token: u64) -> bool {
+        false
+    }
     fn observed_image(&self, _pid: u32, _token: u64) -> Option<PathBuf> {
         None
     }
@@ -124,6 +127,17 @@ struct RealRunningAppsOs {
 }
 
 impl RunningAppsOs for RealRunningAppsOs {
+    fn current_logon_instance(&self, pid: u32, token: u64) -> bool {
+        let cached = self.known_checks.borrow().get(&(pid, token)).copied();
+        cached.unwrap_or_else(|| {
+            let allowed = os_api::app_identity::verify_current_instance(pid, token);
+            let mut cache = self.known_checks.borrow_mut();
+            if cache.len() < 4096 {
+                cache.insert((pid, token), allowed);
+            }
+            allowed
+        })
+    }
     fn observed_image(&self, pid: u32, token: u64) -> Option<PathBuf> {
         self.images.borrow().get(&(pid, token)).cloned()
     }
@@ -416,6 +430,9 @@ fn build_aumid_to_seed_pids<O: RunningAppsOs>(
 
     for &pid in snapshot.names.keys() {
         if let Ok((Some(aumid), token)) = os.get_process_app_user_model_id_and_instance_token(pid) {
+            if !os.current_logon_instance(pid, token) {
+                continue;
+            }
             aumid_to_pids
                 .entry(aumid.to_lowercase())
                 .or_default()
@@ -525,6 +542,9 @@ fn collect_package_local_pid_candidates<O: RunningAppsOs>(
         if !path_is_under_root_case_insensitive(&image_path, install_root) {
             continue;
         }
+        if !os.current_logon_instance(pid, path_token) {
+            continue;
+        }
 
         let (aumid, aumid_token) = os.get_process_app_user_model_id_and_instance_token(pid)?;
         if path_token != aumid_token {
@@ -610,14 +630,16 @@ fn is_known_auto_managed_installed_pid(snapshot: &ProcessSnapshot, pid: u32) -> 
         .is_some_and(|name| !is_excluded_installed_auto_process(name))
 }
 
-fn retain_auto_managed_installed_pids(
+fn retain_auto_managed_installed_pids<O: RunningAppsOs>(
     snapshot: &ProcessSnapshot,
     tracked_pids: &mut Vec<BoundProcessInstance>,
     explicit_pids: &HashSet<u32>,
+    os: &O,
 ) {
     tracked_pids.retain(|candidate| {
         explicit_pids.contains(&candidate.pid)
-            || is_auto_managed_installed_pid(snapshot, candidate.pid)
+            || (is_auto_managed_installed_pid(snapshot, candidate.pid)
+                && os.current_logon_instance(candidate.pid, candidate.token))
     });
 }
 
@@ -989,6 +1011,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                             snapshot,
                             &mut managed_pids,
                             &explicit_pid_set,
+                            os,
                         );
                         if configured.manage_descendants {
                             extend_with_descendants(snapshot, &mut managed_pids, os);
@@ -1000,6 +1023,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                             snapshot,
                             &mut managed_pids,
                             &explicit_pid_set,
+                            os,
                         );
                         replace_with_current_process_instances(app, managed_pids, snapshot, os);
                     }
@@ -1080,6 +1104,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                         snapshot,
                         &mut detected_pids,
                         &explicit_pid_set,
+                        os,
                     );
                     if configured.manage_descendants {
                         extend_with_descendants(snapshot, &mut detected_pids, os);
@@ -1091,6 +1116,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                         snapshot,
                         &mut detected_pids,
                         &explicit_pid_set,
+                        os,
                     );
                 }
                 ConfiguredProgramMatcher::Steam { .. } | ConfiguredProgramMatcher::Known { .. } => {
@@ -1162,6 +1188,7 @@ mod tests {
     use std::sync::{Arc, RwLock};
 
     struct FakeRunningAppsOs {
+        foreign_logon_pids: HashSet<u32>,
         denied_tokens: HashSet<u32>,
         denied_steam: HashSet<u32>,
         steam: HashMap<u32, Vec<os_api::steam::GameProcess>>,
@@ -1184,6 +1211,7 @@ mod tests {
     impl Default for FakeRunningAppsOs {
         fn default() -> Self {
             Self {
+                foreign_logon_pids: HashSet::new(),
                 denied_tokens: HashSet::new(),
                 denied_steam: HashSet::new(),
                 steam: Default::default(),
@@ -1205,6 +1233,9 @@ mod tests {
     }
 
     impl RunningAppsOs for FakeRunningAppsOs {
+        fn current_logon_instance(&self, pid: u32, _token: u64) -> bool {
+            !self.foreign_logon_pids.contains(&pid)
+        }
         fn known_instance_role(
             &self,
             pid: u32,
@@ -1914,6 +1945,69 @@ mod tests {
     }
 
     #[test]
+    fn s131_installed_foreign_service_cannot_seed_or_keep_app_alive() {
+        let mut state = sample_installed_program_state();
+        state.groups[0].programs[0].additional_processes.clear();
+        let key = state.groups[0].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        let aumid = "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify";
+        let mut os = FakeRunningAppsOs {
+            foreign_logon_pids: HashSet::from([21, 23]),
+            snapshot: Ok(ProcessSnapshot {
+                names: HashMap::from([(21, "service.exe".into())]),
+                ..Default::default()
+            }),
+            aumids: HashMap::from([(21, aumid.into())]),
+            installed_package_infos: HashMap::from([(
+                aumid.to_lowercase(),
+                Ok(InstalledPackageRuntimeInfo {
+                    aumid: aumid.into(),
+                    package_family_name: "SpotifyAB.SpotifyMusic_zpdnekdrzrea0".into(),
+                    install_root: PathBuf::from(r"C:\Package"),
+                }),
+            )]),
+            ..Default::default()
+        };
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert!(apps.apps.is_empty(), "a service cannot seed a GUI app");
+
+        os.snapshot.as_mut().unwrap().names.extend([
+            (20, "spotify.exe".into()),
+            (22, "helper.exe".into()),
+            (23, "another-service.exe".into()),
+        ]);
+        os.aumids.insert(20, aumid.into());
+        for (pid, name) in [
+            (20, "spotify"),
+            (21, "service"),
+            (22, "helper"),
+            (23, "another-service"),
+        ] {
+            os.image_paths
+                .insert(pid, PathBuf::from(format!(r"C:\Package\{name}.exe")));
+        }
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        let mut pids = apps.apps[&key].pids.clone();
+        pids.sort_unstable();
+        assert_eq!(
+            pids,
+            vec![20, 22],
+            "only interactive package members belong"
+        );
+
+        os.snapshot
+            .as_mut()
+            .unwrap()
+            .names
+            .retain(|pid, _| [21, 23].contains(pid));
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert!(
+            apps.apps.is_empty(),
+            "persistent services cannot keep the row running"
+        );
+    }
+
+    #[test]
     fn test_installed_background_host_seed_does_not_create_tracking_entry() {
         let state = sample_installed_program_state();
         let configured = collect_configured_programs(&state);
@@ -2102,6 +2196,7 @@ mod tests {
             image_instance_tokens: HashMap::new(),
             denied_tokens: HashSet::new(),
             denied_steam: HashSet::new(),
+            foreign_logon_pids: HashSet::new(),
             steam: Default::default(),
             steam_root: None,
             steam_directory_error: None,

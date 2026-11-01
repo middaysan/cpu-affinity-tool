@@ -8,9 +8,120 @@ import math
 import socket
 import subprocess
 import time
+from contextlib import ExitStack
 
 from live_mcp_client import Client, wait_until
-from live_mcp_native import OwnedProcess, available_cpus, listener_pid, pin_workload
+from live_mcp_native import DeniedScheduling, ScopedDebugPrivilege, OwnedProcess, available_cpus, listener_pid, pin_workload
+
+
+def correction_denial(fixture, client, main, helper):
+    """A denied write pauses after three refusals without losing readable CPU/RAM."""
+    cpus = available_cpus()
+    assert len(cpus) >= 2, 'This case requires two available CPUs'
+    cpu, initial = cpus[-2], cpus[-1]
+    group = client.mutate('create_group', {'name': 'Access test', 'cpus': [cpu]})['group_id']
+    rule = {'name': 'Owned denied app', 'path': str(main), 'args': [],
+            'tracked_process_names': [main.name, helper.name], 'manage_descendants': False,
+            'autorun': False, 'priority': 'Normal'}
+    rule_id = client.mutate('create_rule', {'group_id': group, 'rule': rule})['rule_id']
+    children = []
+    for path in [main, helper]:
+        stop = fixture.root / (path.stem + '.stop')
+        child = subprocess.Popen([str(path), str(stop)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fixture.children.append((child, stop))
+        children.append(child)
+        pin_workload(child, initial)
+    client.mutate('update_preferences', {'preferences': {'cpu_load_monitoring_enabled': True}})
+    status = 'app.status.' + rule_id
+
+    def measured(state):
+        rows = controls(state)
+        values = [rows.get('meter.' + scope, {}) for scope in ['rule.' + rule_id, 'group.' + group]]
+        memory = [rows.get('memory.' + scope, {}) for scope in ['rule.' + rule_id, 'group.' + group]]
+        return (all(v.get('instances') == 2 and v.get('measured') == 2
+                    and (v.get('cpu_percent') or 0) > 0 for v in values)
+                and values[0]['sample_unix_ms'] == values[1]['sample_unix_ms']
+                and abs(values[0]['cpu_percent'] - values[1]['cpu_percent']) < .001
+                and all(m.get('instances') == 2 and m.get('measured') == 2
+                        and (m.get('private_bytes') or 0) > 0 for m in memory)
+                and memory[0]['private_bytes'] == memory[1]['private_bytes'])
+
+    wait_until('owned pair CPU/RAM', fixture.state, measured, seconds=25)
+    with ExitStack() as undo:
+        runner_debug = ScopedDebugPrivilege()
+        undo.callback(runner_debug.restore)
+        app_debug = ScopedDebugPrivilege(fixture.process)
+        undo.callback(app_debug.restore)
+        denial = DeniedScheduling(children[0])
+        undo.callback(denial.restore)
+        # Verify the intended native failure before claiming coverage from a GUI poll.
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        ctypes.set_last_error(0)
+        opened = kernel.OpenProcess(0x200, False, children[0].pid)
+        error = ctypes.get_last_error()
+        if opened:
+            kernel.CloseHandle(opened)
+        assert not opened and error == 5, 'Owned DACL did not actually deny scheduling'
+        client.mutate('update_preferences', {'preferences': {'process_monitoring_enabled': True}})
+        wait_until('three denied automatic corrections', fixture.state,
+                   lambda s: controls(s).get(status, {}).get('denials') == 3
+                   and controls(s)[status]['status'] == 'Limited access', seconds=20)
+        observed = time.monotonic()
+        while time.monotonic() - observed < 7:
+            state = fixture.state()
+            assert controls(state)[status]['denials'] == 3
+            assert measured(state), 'Denied writes lost readable rule/group telemetry'
+            time.sleep(.5)
+        for theme, index in [('dark', 2), ('light', 1)]:
+            client.mutate('update_preferences', {'preferences': {'theme_index': index}})
+            image = fixture.rpc({'action': 'screenshot'})
+            assert image.get('image')
+            (fixture.root / ('limited-access-' + theme + '.png')).write_bytes(base64.b64decode(image['image']))
+    # Restored access alone must not silently resume the suspended write episode.
+    assert controls(fixture.state())[status]['denials'] == 3
+    fixture.click('app.action.' + rule_id)
+    wait_until('explicit Retry clears Limited access', fixture.state,
+               lambda s: controls(s).get(status, {}).get('status') == 'Running · protected'
+               and controls(s)[status]['denials'] == 0, seconds=10)
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.GetProcessAffinityMask.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)]
+    for child in children:
+        process, system = ctypes.c_size_t(), ctypes.c_size_t()
+        assert kernel.GetProcessAffinityMask(ctypes.c_void_p(int(child._handle)), ctypes.byref(process), ctypes.byref(system))
+        assert process.value == 1 << cpu, 'Owned scheduling readback disagrees with saved group'
+    wait_until('CPU/RAM remains measured after Retry', fixture.state, measured)
+    client.mutate('update_preferences', {'preferences': {'process_monitoring_enabled': False}})
+    return {'three_denials_paused': True, 'readable_cpu_ram_preserved': True,
+            'retry_resumed': True, 'both_processes_native_readback': True, 'owned_dacl_restored': True}
+
+
+def installed_read_only(fixture, client, aumid):
+    """Explicit optional real-app observation; never enables enforcement or launches it."""
+    assert client.tool('get_app_state')['preferences']['process_monitoring_enabled'] is False
+    group = client.mutate('create_group', {'name': 'Read-only installed observation', 'cpus': available_cpus()})['group_id']
+    rule = {'name': 'Read-only installed app', 'aumid': aumid, 'args': [],
+            'tracked_process_names': [], 'manage_descendants': False, 'autorun': False, 'priority': 'Normal'}
+    rule_id = client.mutate('create_rule', {'group_id': group, 'rule': rule})['rule_id']
+    client.mutate('update_preferences', {'preferences': {'cpu_load_monitoring_enabled': True}})
+    rows = wait_until('installed interactive processes discovered',
+                      lambda: client.tool('read_cpu_current', {'limit': 256})['current_processes'],
+                      lambda rows: any(p['rule_id'] == rule_id for p in rows), seconds=25)
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.ProcessIdToSessionId.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
+    session = ctypes.c_uint32()
+    assert kernel.ProcessIdToSessionId(fixture.process.pid, ctypes.byref(session)) and session.value != 0
+    members = [p for p in rows if p['rule_id'] == rule_id]
+    for member in members:
+        actual = ctypes.c_uint32()
+        assert kernel.ProcessIdToSessionId(member['pid'], ctypes.byref(actual))
+        assert actual.value == session.value, 'Automatic Installed membership admitted a service/foreign session'
+    assert client.tool('get_app_state')['preferences']['process_monitoring_enabled'] is False
+    assert json.loads(fixture.state_path.read_bytes())['process_monitoring_enabled'] is False
+    return {'interactive_members': len(members), 'all_in_current_nonzero_session': True,
+            'enforcement_remained_off': True, 'real_app_launch_or_mutation': False}
 
 
 def controls(state):

@@ -75,12 +75,26 @@ checked publication. CI validates committed assets without taking screenshots.
 | T1 | Two owned workloads, extra process, identical overlapping rule sets in two groups; three fresh coherent CPU/RAM union samples; helper after primary exit; graph opening and Off/On |
 | T2 | Original system history, bounded UTF-8 CSV cursor download and parsing, retained immutable export after Off, foreign history epoch refused |
 | S1 | Deliberately uninstalled synthetic Steam AppID, actionable warning in both themes, direct reason/chooser, no premature draft save, exact owned-process selection/measurement and unchanged helper list; never launches Steam |
+| D1 | Three native scheduling access denials on an exact owned child, paused correction with readable app/group CPU/RAM, Limited access in both themes, explicit Retry/native affinity readback, and exact process-DACL restoration |
 
 The opt-in E1 requires a real same-logon Explorer broker; CI does not pretend to
 certify that interactive path. Windows may refuse foreground activation; the
 acknowledgement is recorded, not represented as a foreground guarantee. Real
 Steam/Discord/game acceptance, DPI/tray/login, PNG save dialogs and shipping
 bootstrap remain in the [release smoke matrix](release-smoke-matrix.md).
+
+D1 temporarily changes only an exact owned workload's process DACL. If enabled,
+the runner and its retained diagnostic app temporarily disable their own debug
+privilege so it cannot bypass that DACL. The original DACL and privilege flags
+are restored before cleanup; no account privilege or Windows policy is changed.
+The native access-denied preflight is mandatory, and readable metrics are checked
+through the same app/group snapshots while correction is paused.
+
+The optional `-ReadOnlyInstalledAumid 'Publisher.Package!App'` adds D2 in a separate
+fresh profile when real-app observation is authorized. Enforcement stays Off;
+it never launches that application or changes its scheduling. It requires an
+already running app and checks automatic members belong to the current nonzero
+Windows session. This does not qualify real services for mutation.
 
 ### Isolation and evidence
 

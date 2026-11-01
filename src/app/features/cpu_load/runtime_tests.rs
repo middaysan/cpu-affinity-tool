@@ -886,6 +886,7 @@ fn native_continuous_history_cost_and_lifecycle() {
                 rule_id: rule.clone(),
                 created_at: SystemTime::now(),
                 settings_matched: true,
+                settings_access_limited: false,
             },
         );
     }

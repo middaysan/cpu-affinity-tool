@@ -9,7 +9,7 @@ import time
 import uuid
 
 from live_mcp_fixture import Fixture, assert_diagnostic_exe, sha256
-from live_mcp_scenarios import configuration, connect, execution, history, telemetry, upgrade, steam_selection
+from live_mcp_scenarios import configuration, connect, execution, history, telemetry, upgrade, steam_selection, correction_denial, installed_read_only
 
 
 def main():
@@ -19,12 +19,13 @@ def main():
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--interactive-launch", action="store_true", help="Also require a real interactive Explorer broker for ordinary managed launch")
     parser.add_argument("--capture-readme", action="store_true", help="Capture the fixed README scenes instead of the acceptance pack")
+    parser.add_argument('--read-only-installed-aumid', help='Separately inspect one real installed app with enforcement always Off')
     args = parser.parse_args()
     if os.name != "nt":
         parser.error("These scenarios require a Windows desktop")
     exe, workload, root = args.exe.resolve(strict=True), args.workload.resolve(strict=True), args.output.resolve()
     if args.capture_readme:
-        if args.interactive_launch:
+        if args.interactive_launch or args.read_only_installed_aumid:
             parser.error('README capture and interactive acceptance are separate modes')
         from readme_screenshots import capture
         capture(exe, workload, root)
@@ -99,6 +100,20 @@ def main():
         steam_workload = steam_fixture.root / 'owned-steam-game.exe'
         shutil.copy2(workload, steam_workload)
         case('S1-steam-warning-selection', lambda: steam_selection(steam_fixture, steam_client, steam_workload))
+        access_fixture = Fixture(exe, root / 'access-denial')
+        fixtures.append(access_fixture)
+        access_fixture.start()
+        access_client = connect(access_fixture)
+        denied_main, denied_helper = access_fixture.root / 'owned-denied.exe', access_fixture.root / 'owned-readable.exe'
+        shutil.copy2(workload, denied_main)
+        shutil.copy2(workload, denied_helper)
+        case('D1-denied-correction-retry-telemetry', lambda: correction_denial(access_fixture, access_client, denied_main, denied_helper))
+        if args.read_only_installed_aumid:
+            installed_fixture = Fixture(exe, root / 'installed-read-only')
+            fixtures.append(installed_fixture)
+            installed_fixture.start()
+            installed_client = connect(installed_fixture)
+            case('D2-installed-read-only-session-membership', lambda: installed_read_only(installed_fixture, installed_client, args.read_only_installed_aumid))
         report["status"] = "pass"
     except Exception:
         report["status"] = "fail"

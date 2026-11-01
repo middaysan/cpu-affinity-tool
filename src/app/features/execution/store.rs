@@ -190,7 +190,9 @@ impl ExecutionStore {
     pub fn get_app_status_sync(&mut self, app_key: &AppRuntimeKey) -> AppStatus {
         if let Ok(apps) = self.running_apps.try_read() {
             let canonical_status = if let Some((_, app)) = self.control.member(&apps, app_key) {
-                if app.settings_matched {
+                if app.settings_access_limited {
+                    AppStatus::LimitedAccess
+                } else if app.settings_matched {
                     AppStatus::Running
                 } else {
                     AppStatus::SettingsMismatch
@@ -293,6 +295,24 @@ impl ExecutionStore {
         self.set_running_app_settings_state(app_key, RunningAppSettingsState::Matched)
     }
 
+    pub(crate) fn retry_correction(&self, app_key: &AppRuntimeKey) -> bool {
+        let Ok(mut apps) = self.running_apps.try_write() else {
+            return false;
+        };
+        let Some((_, app)) = self.control.member(&apps, app_key) else {
+            return false;
+        };
+        let instances: Vec<_> = app
+            .pid_instance_tokens
+            .iter()
+            .map(|(&pid, &token)| (pid, token))
+            .collect();
+        for instance in instances {
+            apps.correction_denials.remove(&instance);
+        }
+        true
+    }
+
     pub(crate) fn mark_running_app_settings_mismatched(
         &mut self,
         app_key: &AppRuntimeKey,
@@ -350,6 +370,9 @@ impl ExecutionStore {
                 match key.as_ref().and_then(|key| apps.apps.get_mut(key)) {
                     Some(app) => {
                         app.settings_matched = settings_matched;
+                        if settings_matched {
+                            app.settings_access_limited = false;
+                        }
                         RunningAppSettingsUpdate::Updated
                     }
                     None => RunningAppSettingsUpdate::NotFound,

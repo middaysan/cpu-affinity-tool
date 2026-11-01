@@ -531,6 +531,11 @@ fn reapply_existing_app_settings<O: LaunchOs>(
             return LaunchDispatchOutcome::Rejected(message);
         }
     };
+    if !runtime.store.retry_correction(&app_key) {
+        return LaunchDispatchOutcome::Rejected(
+            "Running app state is temporarily busy; try again".into(),
+        );
+    }
     let (failures, shared) = apply_settings_for_instances(
         os,
         &instances,
@@ -1587,9 +1592,10 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
     } else {
         // Retaining a PID from an earlier poll never grants a new lifetime.
         seed_pids.retain(|pid| {
-            seed_tokens
-                .get(pid)
-                .is_some_and(|token| os.get_process_instance_token(*pid).ok() == Some(*token))
+            seed_tokens.get(pid).is_some_and(|token| {
+                os.get_process_instance_token(*pid).ok() == Some(*token)
+                    && os.current_logon_instance(*pid, *token)
+            })
         });
     }
 
@@ -1652,7 +1658,7 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
             || package_tokens
                 .get(&pid)
                 .is_some_and(|token| *token != instance_token)
-            || (acknowledged && !os.current_logon_instance(pid, instance_token))
+            || !os.current_logon_instance(pid, instance_token)
         {
             return false;
         }
@@ -1695,7 +1701,7 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
             || seed_tokens
                 .get(&pid)
                 .is_some_and(|token| *token != instance_token)
-            || (acknowledged && !os.current_logon_instance(pid, instance_token))
+            || !os.current_logon_instance(pid, instance_token)
         {
             return false;
         }
@@ -2222,6 +2228,35 @@ mod tests {
             saw_identity_seed: true,
             instance_tokens: HashMap::from([(42, 1042), (43, 1043)]),
         }
+    }
+
+    #[test]
+    fn s131_returned_installed_pid_cannot_admit_a_foreign_service() {
+        let os = FakeLaunchOs {
+            snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                names: HashMap::from([(42, "service.exe".into())]),
+                ..Default::default()
+            })),
+            process_aumids: HashMap::from([(42, "Example!Main".into())]),
+            foreign_logon_pids: HashSet::from([42]),
+            ..Default::default()
+        };
+        let mut seeds = vec![42];
+        let outcome = super::post_launch_correction_poll_with_os(
+            &os,
+            "Example!Main",
+            &mut seeds,
+            &[0],
+            PriorityClass::Normal,
+            None,
+            &HashSet::new(),
+            false,
+        )
+        .unwrap();
+        assert!(outcome.seed_pids.is_empty());
+        assert!(outcome.managed_pids.is_empty());
+        assert!(!outcome.saw_identity_seed);
+        assert!(os.affinity_calls.borrow().is_empty());
     }
 
     #[test]
@@ -2908,6 +2943,20 @@ mod tests {
         assert!(runtime.add_running_app_with_token(&app_key, 41, 1041, group_id(0), rule_id(0)));
         assert!(runtime.add_pid_to_existing_app_with_token(&app_key, 42, 1042));
         set_settings_matched(&runtime, &app, false);
+        {
+            let running = runtime.running_apps_handle();
+            let mut running = running.blocking_write();
+            running.correction_denials.insert((41, 1041), 3);
+            running
+                .apps
+                .get_mut(&app_key)
+                .unwrap()
+                .settings_access_limited = true;
+        }
+        assert_eq!(
+            runtime.get_app_status_sync(&app_key),
+            AppStatus::LimitedAccess
+        );
         let mut log_manager = LogManager::default();
         let os = FakeLaunchOs {
             focus_results: HashMap::from([(41, true)]),
@@ -2932,6 +2981,11 @@ mod tests {
         assert!(os.run_calls.borrow().is_empty());
         assert!(os.activate_calls.borrow().is_empty());
         assert_eq!(runtime.get_app_status_sync(&app_key), AppStatus::Running);
+        assert!(runtime
+            .running_apps_handle()
+            .blocking_read()
+            .correction_denials
+            .is_empty());
     }
 
     #[test]
