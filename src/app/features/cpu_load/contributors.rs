@@ -364,6 +364,7 @@ impl ContributorHistory {
         let missing = || super::process_list::ProcessList {
             group: true,
             time: Some(time.wall),
+            original_time: Some(time),
             cpu_count: selected.len(),
             ..Default::default()
         };
@@ -405,7 +406,7 @@ impl ContributorHistory {
             included.then(|| (identity.process.clone(), cpu, entry.load))
         });
         super::process_list::ProcessList::from_contributions(
-            time.wall,
+            time,
             selected.len(),
             known,
             partial,
@@ -573,6 +574,7 @@ mod tests {
         let tracked = history.process_list(time, &[0, 1], ContributorScope::Tracked, 2);
         assert!(tracked.ready && !tracked.partial);
         assert_eq!(tracked.time, Some(time.wall));
+        assert_eq!(tracked.displayed_time(false), Some(time));
         assert_eq!(tracked.rows.len(), 2);
         let shared = tracked.rows.iter().find(|r| r.token == 100).unwrap();
         assert_eq!(shared.total, Some(30.0));

@@ -706,6 +706,7 @@ fn render_groups(
                                     app_status != AppStatus::NotRunning,
                                     color,
                                     &status_tooltip,
+                                    &group.cores,
                                 );
 
                                 let button = egui::Button::new(

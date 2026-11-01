@@ -632,6 +632,7 @@ fn history_tick_targets<'a>(
 fn saved_targets(
     source: &Arc<RwLock<AppStateStorage>>,
     targets: &mut Vec<RuleTarget>,
+    masks: &mut HashMap<crate::app::shared::ids::GroupId, Vec<usize>>,
 ) -> Result<bool, String> {
     let state = source
         .try_read()
@@ -648,9 +649,16 @@ fn saved_targets(
                 .map(move |r| (&g.id, r))
         })
     };
-    if iter().eq(targets.iter().map(|t| (&t.group, &t.rule))) {
+    let observed_masks = ids
+        .groups
+        .iter()
+        .zip(&state.groups)
+        .map(|(g, saved)| (g.id.clone(), super::capacity::normalized_mask(&saved.cores)))
+        .collect();
+    if iter().eq(targets.iter().map(|t| (&t.group, &t.rule))) && *masks == observed_masks {
         return Ok(false);
     }
+    *masks = observed_masks;
     *targets = iter()
         .map(|(g, r)| RuleTarget {
             group: g.clone(),
@@ -752,6 +760,7 @@ fn run(
     let mut pid_totals: HashMap<(u32, u64), Option<f32>> = HashMap::new();
     let mut tracking: Option<TrackingSnapshot> = None;
     let mut targets = Vec::new();
+    let mut masks = HashMap::new();
     let mut run_targets = HashMap::new();
     let mut all = Vec::new();
     let mut history_fallback = Vec::new();
@@ -791,6 +800,7 @@ fn run(
             tracking = None;
             all.clear();
             targets.clear();
+            masks.clear();
             run_targets.clear();
             event_history = EventHistory::default();
             identities.clear();
@@ -815,7 +825,8 @@ fn run(
             .unwrap_or_else(|| run_targets.clone());
         let runs_changed = observed_runs != run_targets;
         run_targets = observed_runs;
-        let configuration_changed = match saved_targets(&source, &mut targets) {
+        let mut masks_current = true;
+        let configuration_changed = match saved_targets(&source, &mut targets, &mut masks) {
             Ok(changed) => {
                 changed
                     || count != configured_cpus
@@ -823,6 +834,7 @@ fn run(
                     || !previous.enabled
             }
             Err(error) => {
+                masks_current = false;
                 snapshot.error = Some(error);
                 false
             }
@@ -1147,6 +1159,10 @@ fn run(
         }
         event_history.publish(&mut snapshot);
         live_processes.record_cores(count, event_history.samples());
+        let capacity_time = tracked
+            .filter(|_| masks_current)
+            .and_then(|tracked| event_history.capacity_time(tracked.generation));
+        live_processes.record_capacity(&masks, event_history.samples(), capacity_time);
         if tracked.is_none_or(|tracked| !membership_matches(&running, tracked.generation)) {
             snapshot.processes.clear();
             snapshot.process_memory.clear();

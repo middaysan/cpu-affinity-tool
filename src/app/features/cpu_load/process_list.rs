@@ -63,11 +63,13 @@ impl ProcessRow {
 
 #[derive(Default)]
 pub(super) struct ProcessList {
+    pub capacity: super::capacity::CapacityTotals,
     pub rows: Vec<ProcessRow>,
     pub rule_totals: HashMap<RuleTarget, CpuTotal>,
     pub group_totals: HashMap<GroupId, CpuTotal>,
     pub ready: bool,
     pub time: Option<SystemTime>,
+    pub original_time: Option<super::history::SampleTime>,
     pub group: bool,
     pub partial: bool,
     pub cpu_count: usize,
@@ -93,6 +95,82 @@ impl CpuTotal {
 }
 
 impl ProcessList {
+    pub fn displayed_time(&self, capacity_valid: bool) -> Option<super::history::SampleTime> {
+        if self.group {
+            self.original_time
+        } else if capacity_valid {
+            self.capacity.time
+        } else {
+            None
+        }
+    }
+    pub fn displayed_total(&self, row: &ProcessRow, capacity_valid: bool) -> Option<f32> {
+        if self.group {
+            row.total
+        } else {
+            self.capacity_value(row, capacity_valid)
+                .and_then(|v| v.value)
+        }
+    }
+    pub fn displayed_partial(&self, row: &ProcessRow, capacity_valid: bool) -> bool {
+        if self.group {
+            row.partial
+        } else {
+            self.capacity_value(row, capacity_valid)
+                .is_none_or(|v| !v.complete)
+        }
+    }
+    fn capacity_value(
+        &self,
+        row: &ProcessRow,
+        valid: bool,
+    ) -> Option<&super::capacity::CapacityValue> {
+        if !valid {
+            return None;
+        }
+        row.target.as_ref().and_then(|t| {
+            self.capacity
+                .values
+                .get(&(t.group.clone(), row.pid, row.token))
+        })
+    }
+    pub fn record_capacity(
+        &mut self,
+        masks: &HashMap<GroupId, Vec<usize>>,
+        samples: &[os_api::cpu_load::ProcessCpuSample],
+        time: Option<super::history::SampleTime>,
+    ) {
+        self.capacity = super::capacity::CapacityTotals::build(
+            self.rows
+                .iter()
+                .filter_map(|r| r.target.as_ref().map(|t| (t, r.pid, r.token))),
+            masks,
+            samples,
+            time,
+            self.cpu_count,
+        );
+    }
+    pub fn rule_capacity_total(&self, target: &RuleTarget, mask: &[usize]) -> CpuTotal {
+        self.capacity_total(
+            self.capacity.rules.get(target).copied(),
+            &target.group,
+            mask,
+        )
+    }
+    pub fn group_capacity_total(&self, group: &GroupId, mask: &[usize]) -> CpuTotal {
+        self.capacity_total(self.capacity.groups.get(group).copied(), group, mask)
+    }
+    fn capacity_total(&self, total: Option<CpuTotal>, group: &GroupId, mask: &[usize]) -> CpuTotal {
+        let total = total.unwrap_or_default();
+        if self.ready && !self.group && self.capacity.matches(group, mask) {
+            total
+        } else {
+            CpuTotal {
+                instances: total.instances,
+                ..Default::default()
+            }
+        }
+    }
     pub fn from_tracking(
         targets: &HashMap<RuleTarget, Vec<(u32, u64)>>,
         totals: &HashMap<(u32, u64), Option<f32>>,
@@ -162,7 +240,7 @@ impl ProcessList {
     }
 
     pub fn from_contributions(
-        time: SystemTime,
+        time: super::history::SampleTime,
         cpu_count: usize,
         known_cores: usize,
         partial: bool,
@@ -170,7 +248,8 @@ impl ProcessList {
     ) -> Self {
         let mut list = Self {
             ready: true,
-            time: Some(time),
+            time: Some(time.wall),
+            original_time: Some(time),
             group: true,
             partial,
             cpu_count,
@@ -215,6 +294,7 @@ impl ProcessList {
         list
     }
     pub fn record_cores(&mut self, count: usize, samples: &[os_api::cpu_load::ProcessCpuSample]) {
+        self.cpu_count = count;
         for row in &mut self.rows {
             row.cores.clear();
             row.known_cores = 0;
@@ -238,6 +318,7 @@ impl ProcessList {
     }
     pub fn invalidate(&mut self) {
         self.ready = false;
+        self.capacity = Default::default();
         self.rule_totals.clear();
         self.group_totals.clear();
         for row in &mut self.rows {
@@ -249,7 +330,8 @@ impl ProcessList {
         }
     }
     pub fn reserved_bytes(&self) -> usize {
-        self.rows.capacity() * std::mem::size_of::<ProcessRow>()
+        self.capacity.reserved_bytes()
+            + self.rows.capacity() * std::mem::size_of::<ProcessRow>()
             + self.rule_totals.capacity() * std::mem::size_of::<(RuleTarget, CpuTotal)>()
             + self.group_totals.capacity() * std::mem::size_of::<(GroupId, CpuTotal)>()
             + self
@@ -278,6 +360,7 @@ impl ProcessList {
     }
 
     /// The exact member union uses the same current counters as application rows.
+    #[cfg(test)]
     pub fn group_cpu_total(&self, group: &GroupId) -> CpuTotal {
         if !self.ready || self.group {
             return CpuTotal::default();
@@ -289,6 +372,7 @@ impl ProcessList {
     }
 
     /// Current process-time coverage, independent of per-CPU ETW mapping.
+    #[cfg(test)]
     pub fn rule_cpu_total(&self, target: &RuleTarget) -> CpuTotal {
         if !self.ready || self.group {
             return CpuTotal::default();
@@ -301,6 +385,7 @@ impl ProcessList {
 pub(super) struct CurrentOrder {
     source: Option<Arc<ProcessList>>,
     target: Option<RuleTarget>,
+    capacity_valid: bool,
     revision: u64,
     order: crate::app::shell::presenters::process_table::Order,
 }
@@ -310,6 +395,7 @@ pub(super) fn draw(
     list: &Arc<ProcessList>,
     target: Option<&RuleTarget>,
     available_height: f32,
+    mask: &[usize],
 ) {
     crate::render_profile_scope!(CurrentProcesses);
 
@@ -319,20 +405,24 @@ pub(super) fn draw(
     use eframe::egui::{self, RichText};
     let colors = *palette(ui);
     let top = ui.cursor().top();
+    let capacity_valid =
+        list.ready && target.is_some_and(|t| list.capacity.matches(&t.group, mask));
+    let mapping_current = list.group || (capacity_valid && list.capacity.time.is_some());
     let rows = || {
         list.rows
             .iter()
             .filter(|row| target.is_none_or(|target| row.target.as_ref() == Some(target)))
     };
     let count = rows().count();
-    let mapped = rows().filter(|r| !r.mapping_partial()).count();
+    let partial = list.partial || rows().any(|r| list.displayed_partial(r, capacity_valid));
     let clock = list
-        .time
+        .displayed_time(capacity_valid)
+        .map(|t| t.wall)
         .map(os_api::cpu_load::sample_clock_label)
         .unwrap_or_else(|| "—".into());
     ui.label(
         RichText::new(format!(
-            "{count} {} · Live · {clock}",
+            "{count} {} · Latest · {clock}",
             if list.group {
                 "processes"
             } else {
@@ -353,11 +443,19 @@ pub(super) fn draw(
             "Process data unavailable for this interval".into()
         }
     } else if list.ready {
-        format!("CPU mapping: {mapped}/{count} processes")
+        let total = target
+            .map(|t| list.rule_capacity_total(t, mask))
+            .unwrap_or_default();
+        format!(
+            "{} group CPUs · {}/{} processes complete",
+            super::capacity::normalized_mask(mask).len(),
+            total.measured,
+            total.instances
+        )
     } else {
         "Updating tracked processes…".into()
     };
-    ui.label(RichText::new(status).small().color(if !list.ready||list.partial||mapped<count {colors.warning.fg}else{colors.text_secondary}))
+    ui.label(RichText::new(status).small().color(if !list.ready||partial {colors.warning.fg}else{colors.text_secondary}))
         .on_hover_text(if list.group {"Measured work on the displayed CPUs in the latest completed graph interval. Idle processes have no measured CPU location. Partial means some data is missing; an empty list is not a complete process roster."} else {"The Process monitor roster and this table use tracked exact PID/creation-token instances. Refresh times can differ. This current table includes idle and unavailable instances; graph contributors include only measured work on the selected CPU/time. The app-row CPU value shows a measured subtotal with * when a sibling is unavailable; its complete aggregate remains unknown."});
     let widths = [(ui.available_width() - 202.0).max(46.0), 46.0, 46.0, 86.0];
     use crate::app::shell::presenters::process_table::{self as table, Column, Sort};
@@ -376,26 +474,27 @@ pub(super) fn draw(
             let response=if i<3 {table::heading(ui,widths[i],title,[Column::Name,Column::Pid,Column::Load][i], &mut order)} else {cell(ui,RichText::new(*title).small().weak(),widths[i],false)};
             #[cfg(all(debug_assertions, feature = "debug-mcp"))]
             crate::app::features::diagnostics::debug_mcp::control(format!("sort.processes.{i}"), &response);
-            if i==2 {response.on_hover_text(if list.group {"This process's measured share of the displayed CPUs. 100% means all displayed CPUs fully busy. Only work on these CPUs is counted; * marks a measured subtotal with missing data. Uses the same original interval as the graphs."} else {"Process CPU time relative to the whole machine, sampled once per second with GetProcessTimes. This can remain available when scheduler/per-core attribution is unavailable. Its interval is not identical to Task Manager or the per-CPU trace."});}
+            if i==2 {response.on_hover_text(if list.group {"This process's measured share of the displayed CPUs. 100% means all displayed CPUs fully busy. Only work on these CPUs is counted; * marks a measured subtotal with missing data. Uses the same original interval as the graphs."} else {"This process's measured share of the group's selected CPU capacity, using the same completed scheduler interval as the app/group meters. 100% means all selected CPUs fully busy. Work outside the mask is excluded; * marks incomplete selected-CPU coverage. Raw whole-host counters remain separate in the MCP API."});}
             else if i==3 {response.on_hover_text("Logical CPUs with measured positive work in the latest scheduler interval. A process can run on several CPUs; this is not a single instantaneous location or its allowed affinity. Idle means a complete measured zero interval; Unavailable and * preserve missing/partial data.");}
         });
         let indices = ui.ctx().data_mut(|d| {
             let cache = d.get_temp_mut_or_default::<CurrentOrder>(id.with("cache"));
-            if cache.source.as_ref().is_none_or(|old| !Arc::ptr_eq(old,list)) || cache.target.as_ref()!=target {
+            if cache.source.as_ref().is_none_or(|old| !Arc::ptr_eq(old,list)) || cache.target.as_ref()!=target || cache.capacity_valid!=capacity_valid {
+                cache.capacity_valid=capacity_valid;
                 cache.source=Some(list.clone()); cache.target=target.cloned(); cache.revision=cache.revision.wrapping_add(1);
             }
             cache.order.sort=order.sort;
             let sort=order.sort.unwrap_or(Sort{column:Column::Pid,descending:false});
             cache.order.prepare(cache.revision,list.rows.len(),|i| target.is_none_or(|target| list.rows[i].target.as_ref()==Some(target)),|a,b| {
                 let (a,b)=(&list.rows[a],&list.rows[b]);
-                let primary=match sort.column {Column::Name=>sort.compare(table::name_cmp(a.name(),b.name())),Column::Load=>sort.load(a.total,b.total),_=>sort.compare(a.pid.cmp(&b.pid))};
+                let primary=match sort.column {Column::Name=>sort.compare(table::name_cmp(a.name(),b.name())),Column::Load=>sort.load(list.displayed_total(a,capacity_valid),list.displayed_total(b,capacity_valid)),_=>sort.compare(a.pid.cmp(&b.pid))};
                 primary.then(a.pid.cmp(&b.pid)).then(a.token.cmp(&b.token))
             });
             cache.order.rows.clone()
         });
         ui.ctx().data_mut(|d| d.insert_temp(id,order));
         #[cfg(all(debug_assertions, feature = "debug-mcp"))]
-        super::debug_api::record_processes(ui.ctx(), list, &indices);
+        super::debug_api::record_processes(ui.ctx(), list, &indices, capacity_valid);
         ui.separator();
         let height=(available_height-(ui.cursor().top()-top)).max(60.0);
         let scroll = egui::ScrollArea::vertical().id_salt("cpu-process-list").min_scrolled_height(height).max_height(height).auto_shrink([false,false]).show_rows(ui,COMPACT_TABLE_ROW_HEIGHT,count,|ui,range| {
@@ -405,11 +504,12 @@ pub(super) fn draw(
                 let row_response = ui.push_id((row.pid,row.token),|ui|ui.horizontal(|ui| {
                     cell(ui,RichText::new(row.name()).small(),widths[0],false).on_hover_text(row.name());
                     cell(ui,RichText::new(row.pid_text()).small(),widths[1],true);
-                    cell(ui,RichText::new(row.load_text()).small(),widths[2],true);
-                    let complete=row.cpu_count>0&&row.known_cores==row.cpu_count&&!row.partial;
-                    cell(ui,RichText::new(row.cores_text()).small().color(if complete{colors.text_primary}else{colors.warning.fg}),widths[3],false).on_hover_ui(|ui| {
+                    let text = if list.group {row.load_text()} else {list.capacity_value(row,capacity_valid).map_or("—",|v|v.text.as_str())};
+                    cell(ui,RichText::new(text).small(),widths[2],true);
+                    let complete=mapping_current&&row.cpu_count>0&&row.known_cores==row.cpu_count&&!row.partial;
+                    cell(ui,RichText::new(if mapping_current {row.cores_text()} else {"Unavailable"}).small().color(if complete{colors.text_primary}else{colors.warning.fg}),widths[3],false).on_hover_ui(|ui| {
                         ui.label(format!("CPU mapping: {}/{} logical CPUs measured",row.known_cores,row.cpu_count));
-                        for &(cpu,load) in &row.cores {ui.label(format!("CPU{cpu}: {}",super::view::percent(Some(load))));}
+                        if mapping_current { for &(cpu,load) in &row.cores {ui.label(format!("CPU{cpu}: {}",super::view::percent(Some(load))));} }
                     });
                 }));
                 table_row_separator(ui, row_response.inner.response.rect);
@@ -426,6 +526,141 @@ pub(super) fn draw(
 mod tests {
     use super::*;
     use crate::app::shared::ids::{GroupId, RuleId};
+
+    #[test]
+    fn s135_capacity_counts_selected_cpus_and_exact_group_union() {
+        let one = RuleTarget {
+            group: GroupId("g".into()),
+            rule: RuleId("one".into()),
+        };
+        let shared = RuleTarget {
+            rule: RuleId("shared".into()),
+            ..one.clone()
+        };
+        let other = RuleTarget {
+            group: GroupId("other".into()),
+            ..one.clone()
+        };
+        let targets = HashMap::from([
+            (one.clone(), vec![(1, 10), (2, 20), (2, 20)]),
+            (shared.clone(), vec![(2, 20)]),
+            (other.clone(), vec![(1, 10), (2, 20)]),
+        ]);
+        let raw = HashMap::from([((1, 10), Some(11.0)), ((2, 20), Some(8.0))]);
+        let mut list = ProcessList::from_tracking(&targets, &raw, &Default::default());
+        let mut main = vec![None; 20];
+        let mut helper = vec![None; 20];
+        main[..6].fill(Some(20.0));
+        helper[..6].fill(Some(10.0));
+        main[18] = Some(0.0);
+        main[19] = Some(100.0);
+        helper[18] = Some(100.0);
+        helper[19] = Some(0.0);
+        let samples = [
+            os_api::cpu_load::ProcessCpuSample {
+                pid: 1,
+                token: 10,
+                cpus: main,
+            },
+            os_api::cpu_load::ProcessCpuSample {
+                pid: 2,
+                token: 20,
+                cpus: helper,
+            },
+        ];
+        let masks = HashMap::from([
+            (one.group.clone(), (0..6).collect()),
+            (other.group.clone(), vec![18, 19]),
+        ]);
+        list.record_cores(20, &samples);
+        list.record_capacity(
+            &masks,
+            &samples,
+            Some(super::super::history::SampleTime {
+                seconds: 1.0,
+                wall: SystemTime::UNIX_EPOCH,
+            }),
+        );
+        assert_eq!(
+            list.rule_capacity_total(&one, &[0, 1, 2, 3, 4, 5]),
+            CpuTotal {
+                value: Some(30.0),
+                measured: 2,
+                instances: 2
+            }
+        );
+        assert_eq!(
+            list.rule_capacity_total(&shared, &[0, 1, 2, 3, 4, 5]).value,
+            Some(10.0)
+        );
+        assert_eq!(
+            list.group_capacity_total(&one.group, &[0, 1, 2, 3, 4, 5])
+                .value,
+            Some(30.0),
+            "the helper shared by two rules must count once"
+        );
+        assert_eq!(
+            list.group_capacity_total(&other.group, &[18, 19]).value,
+            Some(100.0)
+        );
+        assert_eq!(
+            list.rows[0].total,
+            Some(11.0),
+            "explicit whole-host API counters must retain their units"
+        );
+    }
+
+    #[test]
+    fn s135_capacity_preserves_unknown_selected_cells_lifetimes_and_mask_edits() {
+        let target = RuleTarget {
+            group: GroupId("g".into()),
+            rule: RuleId("r".into()),
+        };
+        let mut list = ProcessList::from_tracking(
+            &HashMap::from([(target.clone(), vec![(1, 10), (1, 11)])]),
+            &HashMap::from([((1, 10), Some(90.0)), ((1, 11), Some(80.0))]),
+            &Default::default(),
+        );
+        let samples = [os_api::cpu_load::ProcessCpuSample {
+            pid: 1,
+            token: 10,
+            cpus: vec![Some(60.0), None, Some(100.0)],
+        }];
+        let mut masks = HashMap::from([(target.group.clone(), vec![0, 1])]);
+        let time = Some(super::super::history::SampleTime {
+            seconds: 1.0,
+            wall: SystemTime::UNIX_EPOCH,
+        });
+        list.record_cores(3, &samples);
+        list.record_capacity(&masks, &samples, time);
+        let partial = list.rule_capacity_total(&target, &[1, 0, 0]);
+        assert_eq!(
+            partial.value,
+            Some(30.0),
+            "unknown selected CPUs keep the full denominator"
+        );
+        assert_eq!((partial.measured, partial.instances), (0, 2));
+        assert!(partial.partial());
+        assert_eq!(
+            list.rule_capacity_total(&target, &[0]).value,
+            None,
+            "a changed saved mask cannot reuse another scope"
+        );
+        masks.insert(target.group.clone(), vec![2]);
+        list.record_capacity(&masks, &samples, time);
+        assert_eq!(list.rule_capacity_total(&target, &[2]).value, Some(100.0));
+        list.record_capacity(&masks, &[], None);
+        assert_eq!(
+            list.rule_capacity_total(&target, &[2]).value,
+            None,
+            "trace loss must not fall back to raw whole-host percentages"
+        );
+        masks.insert(target.group.clone(), vec![]);
+        list.record_capacity(&masks, &samples, time);
+        assert_eq!(list.group_capacity_total(&target.group, &[]).value, None);
+        list.invalidate();
+        assert_eq!(list.rule_capacity_total(&target, &[2]).value, None);
+    }
 
     #[test]
     fn cached_cpu_subtotals_deduplicate_exact_owners_and_expire_with_the_snapshot() {
@@ -582,7 +817,7 @@ mod tests {
                     )),
                     ..Default::default()
                 },
-                |ui| draw(ui, &list, Some(&target), 330.0),
+                |ui| draw(ui, &list, Some(&target), 330.0, &[0, 1]),
             );
             output.textures_delta.clear();
         }

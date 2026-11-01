@@ -1,5 +1,6 @@
 //! Read-only Windows CPU graphs. Independent of process settings enforcement.
 mod api;
+mod capacity;
 mod chart;
 pub(crate) use api::CpuReadHandle;
 mod contributors;

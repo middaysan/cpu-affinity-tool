@@ -48,7 +48,7 @@ Child-process management is an explicit per-rule option and starts off for new r
 
 **CPU load** records CPU and process activity independently of Process monitor. Recording continues with graphs closed or the app in the tray. History stays in RAM: choose 30 seconds, 5 minutes (default), or 30 minutes.
 
-Application and group CPU meters show current usage as a percentage of the whole processor. Each group counts its running processes once, including configured helpers shared by several rules. Detailed graphs show scheduler time on individual logical CPUs, with their own scale and sample time.
+Application and group CPU meters use the group's selected logical CPUs as 100% of its capacity. Only work on those CPUs is counted, including configured helpers; shared processes count once per group. Missing scheduler data stays unavailable or explicitly partial. The header CPU meter covers the whole processor. Detailed graphs show scheduler time on each logical CPU, with its own 100% scale and original sample time.
 
 Open a system, group, or application graph to inspect individual logical CPUs, their sampled parking state, and the processes contributing at a selected time. Group graphs start with your tracked apps; **All system processes** expands the scope. The **Processes** tab has sortable columns.
 

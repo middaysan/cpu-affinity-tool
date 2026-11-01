@@ -209,6 +209,8 @@ def steam_selection(fixture, client, workload):
 def assert_unions(rows, group, first, second):
     cpu = [rows["meter." + key] for key in ["group." + group, "rule." + first, "rule." + second]]
     assert cpu[0]["sample_unix_ms"] and len({r["sample_unix_ms"] for r in cpu}) == 1, "Mixed current CPU samples"
+    assert all(r['cpu_percent_basis'] == 'group_cpu_capacity' for r in cpu)
+    assert cpu[0]['sample_seconds'] is not None and len({r['sample_seconds'] for r in cpu}) == 1, 'Mixed scheduler intervals'
     values = [r["cpu_percent"] for r in cpu]
     assert all(v is not None and math.isfinite(v) for v in values), "Unavailable CPU is not zero"
     assert max(values) - min(values) < 0.001, "Shared process CPU was double counted"
@@ -365,6 +367,48 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
             seen.add(rows["meter.group." + group]["sample_unix_ms"])
         return len(seen)
     wait_until("three independent CPU/RAM union samples", samples, lambda n: n >= 3, seconds=15)
+    # Verify the meter against the same original per-CPU cut, not a later host counter.
+    def matches_graph(state):
+        rows = controls(state)
+        meter = rows.get('meter.rule.' + rule_id, {})
+        graph = state.get('rendered_graph') or {}
+        tiles = graph.get('tiles', [])
+        if (not tiles or meter.get('sample_seconds') is None
+                or meter['sample_seconds'] != graph.get('sample_seconds')
+                or any(tile.get('load') is None for tile in tiles)
+                or meter.get('measured') != 2):
+            return False
+        expected = sum(tile['load'] for tile in tiles) / len(tiles)
+        assert abs(meter['cpu_percent'] - expected) < 0.01, 'Meter differs from selected-CPU scheduler work'
+        assert meter['selected_cpu_count'] == len(tiles)
+        assert_unions(rows, group, rule_id, shared)
+        return True
+    fixture.call('open_graph', group_id=group, rule_id=rule_id)
+    wait_until('one-CPU capacity equals the original graph cut', fixture.state, matches_graph, seconds=20)
+    spare = next(c for c in available_cpus() if c != cpu)
+    saved_group = next(row for row in client.tool('list_groups')['rows'] if row['group_id'] == group)
+    def set_mask(cpus):
+        client.mutate('update_group', {'group_id': group, 'name': saved_group['name'],
+                      'run_all': saved_group['run_all'], 'hidden': saved_group['hidden'], 'cpus': cpus})
+    set_mask([cpu, spare])
+    wait_until('two-CPU capacity uses the full selected denominator', fixture.state,
+               lambda state: controls(state).get('meter.rule.' + rule_id, {}).get('selected_cpu_count') == 2 and matches_graph(state), seconds=20)
+    previous_cut = controls(fixture.state())['meter.rule.' + rule_id]['sample_seconds']
+    set_mask([spare])
+    def outside_excluded(state):
+        rows = controls(state)
+        meter = rows.get('meter.rule.' + rule_id, {})
+        if (meter.get('sample_seconds') is None or meter['sample_seconds'] <= previous_cut
+                or meter.get('measured') != 2 or meter.get('cpu_percent') != 0):
+            return False
+        assert_unions(rows, group, rule_id, shared)
+        assert rows['meter.group.' + group]['cpu_percent'] == 0
+        assert rows['meter.group.' + peer_group]['cpu_percent'] > 0, 'The owned children must still be busy outside this mask'
+        return True
+    wait_until('busy outside-mask work is excluded', fixture.state, outside_excluded, seconds=20)
+    set_mask([cpu])
+    wait_until('capacity recovers after mask restoration', fixture.state, matches_graph, seconds=20)
+    fixture.call('close_graph')
     fixture.call("open_graph", group_id=group)
     graph = fixture.state()["graph"]
     fixture.call("close_graph")
@@ -384,7 +428,8 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
     fixture.call("monitor", enabled=True)
     wait_until("current values recover after On", fixture.state,
                lambda s: controls(s).get("meter.rule." + rule_id, {}).get("measured") == 1)
-    return {"fresh_union_samples": len(seen), "graph_opened": bool(graph), "cpu": cpu}
+    return {"fresh_union_samples": len(seen), "graph_opened": bool(graph), "cpu": cpu,
+            'selected_capacity_matches_graph': True, 'outside_mask_excluded': True, 'mask_edits_verified': True}
 
 
 def history(fixture, client, cpu, helper):

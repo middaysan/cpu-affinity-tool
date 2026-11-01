@@ -84,7 +84,7 @@ class HarnessGuards(unittest.TestCase):
         for kind, value in [("meter", 2.0), ("memory", 100)]:
             field = "cpu_percent" if kind == "meter" else "private_bytes"
             for scope in ["group.g", "rule.a", "rule.b"]:
-                controls[f"{kind}.{scope}"] = {field: value, "sample_unix_ms": "1"}
+                controls[f"{kind}.{scope}"] = {field: value, "sample_unix_ms": "1", 'sample_seconds': 1.0, 'cpu_percent_basis': 'group_cpu_capacity'}
         assert_unions(controls, "g", "a", "b")
         controls["meter.group.g"]["cpu_percent"] = 4.0
         with self.assertRaises(AssertionError):

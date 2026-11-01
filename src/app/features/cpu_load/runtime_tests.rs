@@ -29,6 +29,32 @@ fn debug_disabled_acknowledgement_requires_the_worker_release_revision() {
 use crate::app::shared::ids::{GroupId, RuleId};
 
 #[test]
+fn s135_saved_mask_edits_change_the_sampling_configuration() {
+    let mut state = AppStateStorage::test_fixture(|s| {
+        s.groups = vec![crate::app::models::CoreGroup {
+            name: "Mask test".into(),
+            cores: vec![0, 1],
+            programs: vec![],
+            is_hidden: false,
+            run_all_button: false,
+        }]
+    });
+    state.rule_identities = Some(
+        crate::app::features::rules::RulesContext::from_storage(&state).to_persisted_identities(),
+    );
+    let source = Arc::new(RwLock::new(state));
+    let mut targets = Vec::new();
+    let mut masks = HashMap::new();
+    assert!(saved_targets(&source, &mut targets, &mut masks).unwrap());
+    assert!(!saved_targets(&source, &mut targets, &mut masks).unwrap());
+    source.write().unwrap().groups[0].cores = vec![1];
+    assert!(
+        saved_targets(&source, &mut targets, &mut masks).unwrap(),
+        "cores-only edits must invalidate the saved CPU configuration"
+    );
+}
+
+#[test]
 fn transient_membership_race_does_not_erase_the_next_valid_cpu_target_set() {
     let expected = vec![(10, 100), (20, 200), (30, 300)];
     let all = expected.clone();

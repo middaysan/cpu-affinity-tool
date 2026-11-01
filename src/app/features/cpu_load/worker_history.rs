@@ -186,6 +186,12 @@ mod tests {
             seconds: 2.0,
             wall: tick(1).timestamp,
         };
+        assert_eq!(events.capacity_time(0), Some(time));
+        assert_eq!(
+            events.capacity_time(1),
+            None,
+            "a new roster cannot reuse an old roster's ETW cut"
+        );
         let mut view = ContributorView::default();
         store.contributors.copy(time, 0, Some(&old.rule), &mut view);
         assert_eq!(view.rows[0].process.instance, 10);
@@ -201,8 +207,42 @@ mod tests {
         events.apply(&frame, &mut store);
         store.copy_sample(Some(&new), 3.0, &mut sample);
         assert_eq!(sample.values, [Some(75.0)]);
+        for id in 3..=6 {
+            events
+                .enqueue(
+                    tick(id),
+                    OwnerInput {
+                        generation: Some(1),
+                        targets: Some(&new_targets),
+                        names: &names,
+                        rules: &rules,
+                        runs: &HashMap::new(),
+                        changed: false,
+                    },
+                    &[],
+                    &mut store,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            events.capacity_time(1),
+            None,
+            "fresh worker publications cannot refresh a four-second-old scheduler cut"
+        );
+        assert!(
+            !events.samples().is_empty(),
+            "history samples remain retained independently of current-meter freshness"
+        );
+        frame.id = 6;
+        events.apply(&frame, &mut store);
+        assert_eq!(
+            events.capacity_time(1).map(|t| t.seconds),
+            Some(7.0),
+            "a newly completed cut restores the capacity meter"
+        );
         events.fail(&mut store);
         assert!(events.samples().is_empty());
+        assert_eq!(events.capacity_time(2), None);
     }
 }
 pub(super) struct OwnerInput<'a> {
@@ -223,6 +263,9 @@ pub(super) struct EventHistory {
     captured: Arc<Ownership>,
     current: Arc<Ownership>,
     samples: Vec<ProcessCpuSample>,
+    sample_time: Option<SampleTime>,
+    sample_generation: Option<u64>,
+    latest_tick: Option<SampleTime>,
     sample_count: usize,
     snapshot: Snapshot,
     inputs: Vec<Contribution>,
@@ -235,6 +278,9 @@ impl Default for EventHistory {
             captured: Arc::default(),
             current: Arc::default(),
             samples: Vec::new(),
+            sample_time: None,
+            sample_generation: None,
+            latest_tick: None,
             sample_count: 0,
             snapshot: Snapshot::default(),
             inputs: Vec::new(),
@@ -282,6 +328,7 @@ impl EventHistory {
             seconds: tick.seconds,
             wall: tick.timestamp,
         };
+        self.latest_tick = Some(time);
         store.push_pending(time, parking);
         self.pending.push_back(PendingInterval {
             id: tick.id,
@@ -305,6 +352,8 @@ impl EventHistory {
     }
     fn clear_values(&mut self) {
         self.sample_count = 0;
+        self.sample_time = None;
+        self.sample_generation = None;
         self.snapshot.tracked_cpus.fill(None);
         for values in self
             .snapshot
@@ -344,6 +393,8 @@ impl EventHistory {
             return;
         }
         let cpus = frame.cpus.len();
+        self.sample_time = Some(time);
+        self.sample_generation = owners.generation;
         while self.samples.len() < frame.targets.len() {
             self.samples.push(ProcessCpuSample {
                 pid: 0,
@@ -534,6 +585,12 @@ impl EventHistory {
     }
     pub fn samples(&self) -> &[ProcessCpuSample] {
         &self.samples[..self.sample_count]
+    }
+    pub fn capacity_time(&self, generation: u64) -> Option<SampleTime> {
+        let time = self.sample_time?;
+        let age = self.latest_tick?.seconds - time.seconds;
+        (self.sample_generation == Some(generation) && age.is_finite() && (0.0..4.0).contains(&age))
+            .then_some(time)
     }
     pub fn bookkeeping_bytes(&self) -> usize {
         // Shared owner snapshots are counted once, including old memberships

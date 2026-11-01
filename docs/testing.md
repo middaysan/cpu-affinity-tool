@@ -140,3 +140,5 @@ remain covered elsewhere.
 No identity/ownership/CPU/RAM/Undo/persistence/revocation/shutdown tests are moved
 to GUI polling. Build-contract parser tests remain while that parser exists.
 Consolidation has no test-count target.
+
+The CPU union scenario also verifies group-capacity units against the same original app graph interval, changes one/two-CPU masks, and excludes owned busy work outside a temporary mask. Group fields are preserved and the synthetic mask is restored before subsequent cases.
