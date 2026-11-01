@@ -3,7 +3,7 @@
 These images show the current Windows interface with synthetic rules and owned
 demonstration processes. They were captured through the existing diagnostic MCP
 renderer using package version **1.7.2**. Capture-time source was
-`974de6fc23fdac8743e025125ed1bd8be04dfdb7`; the diagnostic EXE's SHA-256, UTC time,
+`5bd9ab9beabb581bdf1723f92c3f0d7f07e45f3e`; the diagnostic EXE's SHA-256, UTC time,
 scale, scene/frame identities and original PNG hashes are in
 [`capture.json`](capture.json). This is documentation capture, not certification
 of a published executable or a performance benchmark.
@@ -30,19 +30,17 @@ the repository's bounded test workload. CPU activity is measured by the normal
 collector, not injected or redrawn. CPU selections and current Windows settings
 reflect the capture host and are not universal recommendations.
 
+Application and group meters count work on the group's selected logical CPUs,
+whose combined capacity is 100%. The matching group/application values in the
+demo share the same measured interval and exact process union. Per-CPU graphs
+retain their own 100% scale; the header meter covers the whole processor.
+
 No working user rules, published executable, real services or Windows settings
 were changed. The app, workloads, listener, ticket and temporary keys were
 cleaned up successfully. Refresh affected scenes alongside visible UI changes
 using [the capture and publication workflow](../../docs/readme-screenshots.md).
 
-Reviewed for the 2026-11-01 access-denial fix: the new **Limited access / Retry**
-state occurs only when Windows refuses scheduling access. None of the eight
-captured scenes contains that condition; their existing row geometry, normal
-status labels, metrics and navigation remain representative. The new state was
-inspected separately in actual dark/light MCP frames. The original capture
-source, images and provenance above have not been relabeled as a fresh capture.
-
-The subsequent correction/admission review fixes change runtime eligibility,
-denial bookkeeping and Steam warning retention. They do not alter the geometry,
-copy or normal data shown in these eight non-Steam scenes. Existing captures
-remain representative; this review is not a new capture.
+All eight scenes were refreshed on 2026-11-01 after the CPU-capacity change.
+The original full-size frames and the lead image at README display width were
+visually reviewed. **Limited access / Retry** and Steam detection warnings were
+tested separately; these demonstration scenes show normal process access.
