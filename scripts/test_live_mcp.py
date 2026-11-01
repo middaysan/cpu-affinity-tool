@@ -5,11 +5,25 @@ from pathlib import Path
 
 from live_mcp_client import decode_reply, validate_endpoint
 from live_mcp_fixture import synthetic_state, validate_state
-from live_mcp_scenarios import assert_unions, select_owned_steam_process
+from live_mcp_scenarios import assert_capacity_cut, assert_unions, select_owned_steam_process
 from run_live_mcp import owned_workload_paths
 
 
 class HarnessGuards(unittest.TestCase):
+    def test_capacity_oracle_requires_original_time_complete_selected_cpus(self):
+        meter = {'sample_seconds': 5.0, 'sample_unix_ms': '5000',
+                 'selected_cpu_count': 2, 'cpu_percent': 30.0}
+        def page(cpu, load, seconds=5.0):
+            return {'cpu': cpu, 'rows': [{'seconds': seconds, 'unix_ms': '5000',
+                    'delivery': 'completed', 'load_quality': 'complete', 'load': load}]}
+        assert_capacity_cut(meter, [2, 3], [page(2, 60.0), page(3, 0.0)])
+        for pages in [[page(2, 60.0, 4.0), page(3, 0.0)],
+                      [page(2, 60.0), page(3, None)],
+                      [page(2, 60.0), page(2, 0.0)],
+                      [page(2, 30.0), page(3, 0.0)]]:
+            with self.assertRaises(AssertionError):
+                assert_capacity_cut(meter, [2, 3], pages)
+
     def test_owned_steam_choice_scrolls_before_clicking_a_clipped_row(self):
         class Picker:
             offset = 0

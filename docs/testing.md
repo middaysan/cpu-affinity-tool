@@ -141,4 +141,4 @@ No identity/ownership/CPU/RAM/Undo/persistence/revocation/shutdown tests are mov
 to GUI polling. Build-contract parser tests remain while that parser exists.
 Consolidation has no test-count target.
 
-The CPU union scenario also verifies group-capacity units against the same original app graph interval, changes one/two-CPU masks, and excludes owned busy work outside a temporary mask. Group fields are preserved and the synthetic mask is restored before subsequent cases.
+The CPU union scenario also verifies group-capacity units against the same original app history interval through HTTP, changes one/two-CPU masks, and excludes owned busy work outside a temporary mask. Graph windows are opened separately because an opaque modal hides the main list. Group fields are preserved and the synthetic mask is restored before subsequent cases. The denial case accepts measured zero CPU while its owned children are outside the selected group mask; readable telemetry must remain complete through refused writes.

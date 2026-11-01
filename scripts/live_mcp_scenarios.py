@@ -39,7 +39,7 @@ def correction_denial(fixture, client, main, helper):
         values = [rows.get('meter.' + scope, {}) for scope in ['rule.' + rule_id, 'group.' + group]]
         memory = [rows.get('memory.' + scope, {}) for scope in ['rule.' + rule_id, 'group.' + group]]
         return (all(v.get('instances') == 2 and v.get('measured') == 2
-                    and (v.get('cpu_percent') or 0) > 0 for v in values)
+                    and v.get('cpu_percent') is not None and v['cpu_percent'] >= 0 for v in values)
                 and values[0]['sample_unix_ms'] == values[1]['sample_unix_ms']
                 and abs(values[0]['cpu_percent'] - values[1]['cpu_percent']) < .001
                 and all(m.get('instances') == 2 and m.get('measured') == 2
@@ -92,7 +92,12 @@ def correction_denial(fixture, client, main, helper):
         process, system = ctypes.c_size_t(), ctypes.c_size_t()
         assert kernel.GetProcessAffinityMask(ctypes.c_void_p(int(child._handle)), ctypes.byref(process), ctypes.byref(system))
         assert process.value == 1 << cpu, 'Owned scheduling readback disagrees with saved group'
-    wait_until('CPU/RAM remains measured after Retry', fixture.state, measured)
+    readback = wait_until('complete CPU cut at native readback', fixture.state, measured)
+    readback_cut = controls(readback)['meter.rule.' + rule_id]['sample_seconds']
+    wait_until('fresh in-mask CPU/RAM recovers after Retry', fixture.state,
+               lambda state: measured(state)
+               and controls(state)['meter.rule.' + rule_id]['sample_seconds'] > readback_cut
+               and controls(state)['meter.rule.' + rule_id]['cpu_percent'] > 0)
     client.mutate('update_preferences', {'preferences': {'process_monitoring_enabled': False}})
     return {'three_denials_paused': True, 'readable_cpu_ram_preserved': True,
             'retry_resumed': True, 'both_processes_native_readback': True, 'owned_dacl_restored': True}
@@ -126,6 +131,19 @@ def installed_read_only(fixture, client, aumid):
 
 def controls(state):
     return {row["id"]: row["extra"] for row in state["controls"]}
+
+
+def assert_capacity_cut(meter, cpus, pages):
+    """Compare the visible meter with complete history at its exact original time."""
+    assert meter['selected_cpu_count'] == len(cpus) == len(pages)
+    loads = []
+    for cpu, page in zip(cpus, pages):
+        assert page['cpu'] == cpu, 'History returned a different logical CPU'
+        row = next((row for row in page['rows'] if row['seconds'] == meter['sample_seconds']), None)
+        assert row and row['unix_ms'] == meter['sample_unix_ms'], 'History must use the same original cut'
+        assert row['delivery'] == 'completed' and row['load_quality'] == 'complete' and row['load'] is not None
+        loads.append(row['load'])
+    assert abs(meter['cpu_percent'] - sum(loads) / len(cpus)) < 0.01, 'Meter differs from selected-CPU scheduler work'
 
 
 def select_owned_steam_process(fixture, process):
@@ -380,24 +398,29 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
             seen.add(rows["meter.group." + group]["sample_unix_ms"])
         return len(seen)
     wait_until("three independent CPU/RAM union samples", samples, lambda n: n >= 3, seconds=15)
-    # Verify the meter against the same original per-CPU cut, not a later host counter.
-    def matches_graph(state):
+    # The modal hides the main list. Read its original-time history through HTTP
+    # while the meter is visible, then exercise graph navigation separately.
+    def matches_history(state, cpus):
         rows = controls(state)
         meter = rows.get('meter.rule.' + rule_id, {})
-        graph = state.get('rendered_graph') or {}
-        tiles = graph.get('tiles', [])
-        if (not tiles or meter.get('sample_seconds') is None
-                or meter['sample_seconds'] != graph.get('sample_seconds')
-                or any(tile.get('load') is None for tile in tiles)
-                or meter.get('measured') != 2):
+        if (meter.get('sample_seconds') is None or meter.get('measured') != 2
+                or meter.get('selected_cpu_count') != len(cpus)):
             return False
-        expected = sum(tile['load'] for tile in tiles) / len(tiles)
-        assert abs(meter['cpu_percent'] - expected) < 0.01, 'Meter differs from selected-CPU scheduler work'
-        assert meter['selected_cpu_count'] == len(tiles)
+        pages = []
+        for selected in cpus:
+            query = {'source': 'rule', 'group_id': group, 'rule_id': rule_id, 'cpu': selected, 'limit': 256}
+            page = client.tool('read_cpu_history', query)
+            if page['total_retained'] > 256:
+                page = client.tool('read_cpu_history', dict(query, offset=page['total_retained'] - 256))
+            row = next((r for r in page['rows'] if r['seconds'] == meter['sample_seconds']), None)
+            if row is None or row['delivery'] != 'completed' or row['load'] is None:
+                return False
+            pages.append(page)
+        assert_capacity_cut(meter, cpus, pages)
         assert_unions(rows, group, rule_id, shared)
         return True
-    fixture.call('open_graph', group_id=group, rule_id=rule_id)
-    wait_until('one-CPU capacity equals the original graph cut', fixture.state, matches_graph, seconds=20)
+    wait_until('one-CPU capacity equals original history', fixture.state,
+               lambda state: matches_history(state, [cpu]), seconds=20)
     spare = next(c for c in available_cpus() if c != cpu)
     saved_group = next(row for row in client.tool('list_groups')['rows'] if row['group_id'] == group)
     def set_mask(cpus):
@@ -405,7 +428,7 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
                       'run_all': saved_group['run_all'], 'hidden': saved_group['hidden'], 'cpus': cpus})
     set_mask([cpu, spare])
     wait_until('two-CPU capacity uses the full selected denominator', fixture.state,
-               lambda state: controls(state).get('meter.rule.' + rule_id, {}).get('selected_cpu_count') == 2 and matches_graph(state), seconds=20)
+               lambda state: matches_history(state, [cpu, spare]), seconds=20)
     previous_cut = controls(fixture.state())['meter.rule.' + rule_id]['sample_seconds']
     set_mask([spare])
     def outside_excluded(state):
@@ -420,7 +443,10 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
         return True
     wait_until('busy outside-mask work is excluded', fixture.state, outside_excluded, seconds=20)
     set_mask([cpu])
-    wait_until('capacity recovers after mask restoration', fixture.state, matches_graph, seconds=20)
+    wait_until('capacity recovers after mask restoration', fixture.state,
+               lambda state: matches_history(state, [cpu]), seconds=20)
+    fixture.call('open_graph', group_id=group, rule_id=rule_id)
+    assert fixture.state()['graph'], 'App graph did not open'
     fixture.call('close_graph')
     fixture.call("open_graph", group_id=group)
     graph = fixture.state()["graph"]
@@ -442,7 +468,7 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
     wait_until("current values recover after On", fixture.state,
                lambda s: controls(s).get("meter.rule." + rule_id, {}).get("measured") == 1)
     return {"fresh_union_samples": len(seen), "graph_opened": bool(graph), "cpu": cpu,
-            'selected_capacity_matches_graph': True, 'outside_mask_excluded': True, 'mask_edits_verified': True}
+            'selected_capacity_matches_history': True, 'outside_mask_excluded': True, 'mask_edits_verified': True}
 
 
 def history(fixture, client, cpu, helper):
