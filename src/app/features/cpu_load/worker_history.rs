@@ -27,6 +27,89 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     #[test]
+    fn unordered_native_targets_keep_their_exact_loads_for_binary_search_consumers() {
+        let target = RuleTarget {
+            group: GroupId("g".into()),
+            rule: RuleId("r".into()),
+        };
+        let targets = HashMap::from([(target.clone(), vec![(10, 100), (20, 200)])]);
+        let names = HashMap::new();
+        let rules = HashMap::from([(target.clone(), Arc::new(target.rule.clone()))]);
+        let runs = HashMap::new();
+        let mut store = HistoryStore::default();
+        store
+            .configure(2, 30, std::slice::from_ref(&target))
+            .unwrap();
+        let mut events = EventHistory::default();
+        for id in 0..=2 {
+            events
+                .enqueue(
+                    CpuHistoryTick {
+                        id,
+                        seconds: id as f64 + 1.0,
+                        timestamp: SystemTime::UNIX_EPOCH + Duration::from_secs(id),
+                    },
+                    OwnerInput {
+                        generation: Some(1),
+                        targets: Some(&targets),
+                        names: &names,
+                        rules: &rules,
+                        runs: &runs,
+                        changed: false,
+                    },
+                    &[],
+                    &mut store,
+                )
+                .unwrap();
+        }
+        let mut frame = CpuHistoryFrame::new(2).unwrap();
+        frame.id = 1;
+        frame.available = true;
+        frame.cpus = vec![Some(20.0), Some(40.0)];
+        frame.targets = vec![
+            CpuHistoryTarget {
+                pid: 20,
+                token: 200,
+            },
+            CpuHistoryTarget {
+                pid: 10,
+                token: 100,
+            },
+        ];
+        frame.coverage = vec![3, 3];
+        frame.tracked = vec![
+            CpuHistoryValue {
+                target: 0,
+                cpu: 1,
+                load: 40.0,
+            },
+            CpuHistoryValue {
+                target: 1,
+                cpu: 0,
+                load: 20.0,
+            },
+        ];
+        events.apply(&frame, &mut store);
+        assert_eq!(
+            events
+                .samples()
+                .iter()
+                .map(|s| (s.pid, s.token))
+                .collect::<Vec<_>>(),
+            [(10, 100), (20, 200)]
+        );
+        assert_eq!(
+            events.samples()[0].cpus,
+            [Some(20.0), Some(0.0)],
+            "sorting must follow indexed native load assignment"
+        );
+        assert_eq!(
+            events.snapshot.process_cpus[&target],
+            [Some(20.0), Some(40.0)]
+        );
+    }
+
+    #[test]
     fn delayed_run_work_uses_original_run_and_does_not_enter_saved_tracked_union() {
         let mut store = HistoryStore::default();
         store.configure(1, 30, &[]).unwrap();
@@ -427,6 +510,8 @@ impl EventHistory {
                 }
             }
         }
+        // Native target indices are assigned before sorting for exact-instance lookups.
+        self.samples[..self.sample_count].sort_unstable_by_key(|s| (s.pid, s.token));
         let samples = &self.samples[..self.sample_count];
         self.snapshot.cpus.clone_from(&frame.cpus);
         self.snapshot.tracked_cpus.resize(cpus, None);

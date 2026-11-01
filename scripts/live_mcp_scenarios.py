@@ -356,7 +356,20 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
                    and rows.get("memory." + key, {}).get("measured") == 2
                    for key in ["group." + group, "rule." + rule_id, "rule." + shared,
                                "group." + peer_group, "rule." + peer])
-    wait_until("root/helper measured", fixture.state, measured, seconds=25)
+    try:
+        wait_until("root/helper measured", fixture.state, measured, seconds=25)
+    except AssertionError:
+        current = fixture.state()
+        scopes = ['group.' + group, 'rule.' + rule_id, 'rule.' + shared,
+                  'group.' + peer_group, 'rule.' + peer]
+        # Only known synthetic metric controls, never a process inventory or credentials.
+        view = controls(current)
+        (fixture.root / 'capacity-failure.json').write_text(json.dumps({
+            'meters': {scope: view.get('meter.' + scope) for scope in scopes},
+            'memory': {scope: view.get('memory.' + scope) for scope in scopes},
+            'collector': {key: (current.get('graph') or {}).get(key) for key in ['error', 'detail_error']},
+        }, indent=2), encoding='utf-8')
+        raise
     seen = set()
     def samples():
         state = fixture.state()

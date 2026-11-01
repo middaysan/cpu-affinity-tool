@@ -18,6 +18,7 @@
     "src/app/features/cpu_load/controls.rs",
     "src/app/features/cpu_load/export_ui.rs",
     "src/app/features/cpu_load/process_list.rs",
+    "src/app/features/cpu_load/capacity.rs",
     "src/app/features/mcp/view.rs",
     "src/app/features/mcp/activity_view.rs",
     "src/app/features/system_tweaks/view.rs",
