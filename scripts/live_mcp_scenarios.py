@@ -70,9 +70,14 @@ def correction_denial(fixture, client, main, helper):
                    lambda s: controls(s).get(status, {}).get('denials') == 3
                    and controls(s)[status]['status'] == 'Limited access', seconds=20)
         observed = time.monotonic()
-        while time.monotonic() - observed < 7:
+        qualified = 0
+        while time.monotonic() - observed < 7 or qualified < 3:
+            assert time.monotonic() - observed < 15, 'Insufficient qualified observations of the denial pause'
             state = fixture.state()
-            assert controls(state)[status]['denials'] == 3
+            count = controls(state)[status]['denials']
+            if count is not None:
+                assert count == 3, 'A qualified denial counter changed during pause'
+                qualified += 1
             assert measured(state), 'Denied writes lost readable rule/group telemetry'
             time.sleep(.5)
         for theme, index in [('dark', 2), ('light', 1)]:
@@ -81,7 +86,9 @@ def correction_denial(fixture, client, main, helper):
             assert image.get('image')
             (fixture.root / ('limited-access-' + theme + '.png')).write_bytes(base64.b64decode(image['image']))
     # Restored access alone must not silently resume the suspended write episode.
-    assert controls(fixture.state())[status]['denials'] == 3
+    restored = wait_until('qualified denial readback after DACL restoration', fixture.state,
+                          lambda state: controls(state)[status]['denials'] is not None)
+    assert controls(restored)[status]['denials'] == 3
     fixture.click('app.action.' + rule_id)
     wait_until('explicit Retry clears Limited access', fixture.state,
                lambda s: controls(s).get(status, {}).get('status') == 'Running · protected'

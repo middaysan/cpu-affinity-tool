@@ -44,3 +44,7 @@ All eight scenes were refreshed on 2026-11-01 after the CPU-capacity change.
 The original full-size frames and the lead image at README display width were
 visually reviewed. **Limited access / Retry** and Steam detection warnings were
 tested separately; these demonstration scenes show normal process access.
+
+A later diagnostic-only correction distinguishes an unavailable denial-count
+read from zero and improves live-test cleanup reporting. It changes no visible
+controls, layout or demonstrated metric; the capture provenance remains original.

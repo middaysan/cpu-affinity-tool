@@ -16,6 +16,16 @@ def owned_workload_paths(root, stamp, *roles):
     return tuple(root / ('owned-' + role + '-' + stamp + '.exe') for role in roles)
 
 
+def retire_fixture(fixture, fixtures, failures):
+    try:
+        fixture.cleanup()
+    except Exception as error:
+        failures.append({'fixture': fixture.root.name, 'failure_type': type(error).__name__,
+                         'codes': getattr(error, 'codes', ['unclassified_cleanup_failure'])})
+        raise
+    fixtures.remove(fixture)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", type=pathlib.Path, required=True)
@@ -39,6 +49,7 @@ def main():
     report = {"artifact_sha256": sha256(exe), "artifact_kind": "diagnostic-dev",
               "shipping_certified": False, "cases": [], "cleanup": "pending"}
     fixtures = []
+    failures = []
 
     def save():
         (root / "result.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -89,7 +100,7 @@ def main():
         case("T1-extra-shared-cpu-ram", lambda: telemetry(fixture, client, primary, helper, group, first, rule, cpu))
         case("T2-history-csv-off", lambda: history(fixture, client, cpu, helper))
         old = json.loads(fixture.state_path.read_bytes())
-        fixture.close()
+        retire_fixture(fixture, fixtures, failures)
         for theme, index in [("dark", 2), ("light", 1)]:
             state = dict(old, version=13, theme_index=index, cpu_load_monitoring_enabled=False)
             state.pop("process_control", None)  # This metadata did not exist in schema 13.
@@ -97,6 +108,7 @@ def main():
             fixtures.append(migration)
             migration.start()
             case("U1-upgrade-retry-" + theme, lambda: upgrade(migration))
+            retire_fixture(migration, fixtures, failures)
         steam_fixture = Fixture(exe, root / 'steam-selection')
         fixtures.append(steam_fixture)
         steam_fixture.start()
@@ -104,6 +116,7 @@ def main():
         steam_workload = steam_fixture.root / 'owned-steam-game.exe'
         shutil.copy2(workload, steam_workload)
         case('S1-steam-warning-selection', lambda: steam_selection(steam_fixture, steam_client, steam_workload))
+        retire_fixture(steam_fixture, fixtures, failures)
         access_fixture = Fixture(exe, root / 'access-denial')
         fixtures.append(access_fixture)
         access_fixture.start()
@@ -123,12 +136,11 @@ def main():
         report["status"] = "fail"
         raise
     finally:
-        failures = []
-        for fixture in reversed(fixtures):
+        for fixture in reversed(fixtures[:]):
             try:
-                fixture.cleanup()
-            except Exception as error:
-                failures.append(type(error).__name__)
+                retire_fixture(fixture, fixtures, failures)
+            except Exception:
+                pass  # The first failure stays recorded even if a later cleanup retry succeeds.
         report["cleanup"] = "fail" if failures else "pass"
         report["cleanup_failures"] = failures
         if failures:

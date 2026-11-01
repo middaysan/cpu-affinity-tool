@@ -142,3 +142,5 @@ to GUI polling. Build-contract parser tests remain while that parser exists.
 Consolidation has no test-count target.
 
 The CPU union scenario also verifies group-capacity units against the same original app history interval through HTTP, changes one/two-CPU masks, and excludes owned busy work outside a temporary mask. Graph windows are opened separately because an opaque modal hides the main list. Group fields are preserved and the synthetic mask is restored before subsequent cases. The denial case accepts measured zero CPU while its owned children are outside the selected group mask; readable telemetry must remain complete through refused writes.
+
+Diagnostic denial counts are nullable when a nonblocking observation is busy. D1 requires at least three qualified pause observations and rejects any known reset; an unavailable read is never treated as zero. Completed fixtures are cleaned up before the next fixture starts. Cleanup failures retain the synthetic fixture label and bounded stage codes without paths, inventories or exception contents.

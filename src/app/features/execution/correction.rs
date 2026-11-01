@@ -41,6 +41,17 @@ impl std::fmt::Display for CorrectionFailure {
 }
 
 impl CorrectionState {
+    #[cfg(all(debug_assertions, feature = "debug-mcp"))]
+    pub fn debug_count(&self, instances: impl Iterator<Item = Instance>) -> Option<u8> {
+        let denied = self.denied.try_lock().ok()?;
+        Some(
+            instances
+                .map(|instance| denied.get(&instance).map_or(0, |entry| entry.count))
+                .max()
+                .unwrap_or(0),
+        )
+    }
+
     /// Called inside the existing Authority write gate. No native work holds this mutex.
     pub fn attempt<T>(
         &self,
@@ -151,5 +162,29 @@ impl CorrectionState {
         if denied.is_empty() {
             *denied = HashMap::new();
         }
+    }
+}
+
+#[cfg(all(test, debug_assertions, feature = "debug-mcp"))]
+mod debug_mcp_tests {
+    use super::*;
+
+    #[test]
+    fn busy_denial_observation_is_not_a_counter_reset() {
+        let state = CorrectionState::default();
+        let mut denied = state.denied.lock().unwrap();
+        denied.insert(
+            (42, 7),
+            Denial {
+                count: 3,
+                observed: true,
+                at: Instant::now(),
+            },
+        );
+        assert_eq!(state.debug_count([(42, 7)].into_iter()), None);
+        drop(denied);
+        assert_eq!(state.debug_count([(42, 7), (43, 8)].into_iter()), Some(3));
+        state.reset([(42, 7)]).unwrap();
+        assert_eq!(state.debug_count([(42, 7)].into_iter()), Some(0));
     }
 }

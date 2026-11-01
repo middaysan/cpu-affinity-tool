@@ -2,14 +2,61 @@
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from live_mcp_client import decode_reply, validate_endpoint
-from live_mcp_fixture import synthetic_state, validate_state
+from live_mcp_fixture import Fixture, FixtureCleanupError, synthetic_state, validate_state
 from live_mcp_scenarios import assert_capacity_cut, assert_unions, select_owned_steam_process
-from run_live_mcp import owned_workload_paths
+from run_live_mcp import owned_workload_paths, retire_fixture
 
 
 class HarnessGuards(unittest.TestCase):
+    def test_cleanup_retry_does_not_reuse_a_closed_owned_process_handle(self):
+        class Child:
+            closed = False
+            waits = 0
+            def wait(self, timeout):
+                if self.closed:
+                    raise AssertionError('Owned handle already closed')
+                self.waits += 1
+                return 0
+            def close(self):
+                self.closed = True
+        class Stop:
+            def write_text(self, *args, **kwargs):
+                pass
+        child = Child()
+        fixture = Fixture.__new__(Fixture)
+        fixture.root, fixture.process, fixture.streams = Path('synthetic-fixture'), None, []
+        fixture.children = [(child, Stop())]
+        def failed_close():
+            raise AssertionError('Synthetic app shutdown failure')
+        fixture.close = failed_close
+        with patch.object(Path, 'unlink'), patch.object(Path, 'exists', return_value=False):
+            with self.assertRaises(FixtureCleanupError):
+                fixture.cleanup()
+            fixture.close = lambda: None
+            fixture.cleanup()
+        self.assertTrue(child.closed)
+        self.assertEqual(child.waits, 1)
+
+    def test_forced_cleanup_failure_survives_a_successful_final_retry(self):
+        class FailedOnce:
+            root = Path('synthetic-fixture')
+            calls = 0
+            def cleanup(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise FixtureCleanupError(['workload required forced cleanup'])
+        fixture = FailedOnce()
+        fixtures, failures = [fixture], []
+        with self.assertRaises(FixtureCleanupError):
+            retire_fixture(fixture, fixtures, failures)
+        retire_fixture(fixture, fixtures, failures)
+        self.assertFalse(fixtures)
+        self.assertEqual(len(failures), 1, 'Successful retry must not turn forced cleanup into a pass')
+        self.assertEqual(failures[0]['codes'], ['workload required forced cleanup'])
+
     def test_capacity_oracle_requires_original_time_complete_selected_cpus(self):
         meter = {'sample_seconds': 5.0, 'sample_unix_ms': '5000',
                  'selected_cpu_count': 2, 'cpu_percent': 30.0}
