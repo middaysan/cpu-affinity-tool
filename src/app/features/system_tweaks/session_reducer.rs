@@ -109,6 +109,10 @@ pub(crate) enum TuningRequest {
         feature: FeatureId,
         target: TargetIdentity,
     },
+    EditGroup {
+        edit: crate::app::features::rules::GroupEdit,
+        expected_revision: u64,
+    },
     UpdatePreferences {
         patch: crate::app::features::preferences::PreferencePatch,
         expected_revision: u64,
@@ -151,6 +155,7 @@ impl TuningRequest {
             self,
             Self::SaveBase { .. }
                 | Self::UpdatePreferences { .. }
+                | Self::EditGroup { .. }
                 | Self::RemoveRule { .. }
                 | Self::RemoveGroup { .. }
                 | Self::MoveRule { .. }
@@ -360,6 +365,9 @@ impl TuningClient {
                 expected_revision, ..
             }
             | TuningRequest::UpdatePreferences {
+                expected_revision, ..
+            }
+            | TuningRequest::EditGroup {
                 expected_revision, ..
             } => *expected_revision,
             _ => expected.unwrap_or_else(|| self.shared.latest.lock().unwrap().revision),
@@ -957,6 +965,7 @@ fn apply(service: &mut HeadlessTuning, request: TuningRequest) -> Result<(), Sav
             feature,
             target,
         } => service.activate_manual(profile, feature, target),
+        TuningRequest::EditGroup { edit, .. } => service.edit_group(edit),
         TuningRequest::UpdatePreferences { patch, .. } => service.configure_preferences(patch),
         TuningRequest::SaveBase {
             candidate,

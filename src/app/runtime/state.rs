@@ -1091,58 +1091,59 @@ impl AppState {
     }
 
     pub fn commit_group_form_session(&mut self) {
-        let Some((draft, revision)) = self.base_draft() else {
+        if self.persistent_state.try_read().is_err() {
             return;
+        }
+        if self
+            .ui
+            .group_form
+            .editing_group_id
+            .clone()
+            .as_ref()
+            .is_some_and(|id| self.group_index_for_id(id).is_none())
+        {
+            self.cancel_group_form_session();
+            return;
+        }
+        let form = &self.ui.group_form;
+        let cpus: Vec<_> = form
+            .core_selection
+            .iter()
+            .enumerate()
+            .filter_map(|(cpu, &selected)| selected.then_some(cpu))
+            .collect();
+        // Keep immediate validation feedback; the writer rechecks current bounds.
+        let (name, cpus) = match rules::validate_group_values(
+            &form.group_name,
+            &cpus,
+            form.core_selection.len(),
+        ) {
+            Ok(values) => values,
+            Err(error) => {
+                self.log_manager.add_entry(error);
+                return;
+            }
+        };
+        let edit = rules::GroupEdit {
+            group: form.editing_group_id.clone(),
+            name,
+            cpus,
+            run_all: form.run_all_enabled,
+            hidden: None,
         };
         let completion = LegacyCompletion::Group(
-            self.ui.group_form.editing_group_id.clone(),
-            self.ui.group_form.group_name.clone(),
-            self.ui.group_form.core_selection.clone(),
-            self.ui.group_form.run_all_enabled,
+            form.editing_group_id.clone(),
+            form.group_name.clone(),
+            form.core_selection.clone(),
+            form.run_all_enabled,
         );
-        let should_save = if let Some(group_id) = self.ui.group_form.editing_group_id.clone() {
-            let Some(index) = self.group_index_for_id(&group_id) else {
-                self.ui.reset_group_form();
-                self.ui
-                    .set_current_window(WindowRoute::Groups(GroupRoute::List));
-                return;
-            };
-
-            match rules::update_group_properties(
-                &draft,
-                index,
-                self.ui.group_form.group_name.clone(),
-                &self.ui.group_form.core_selection,
-                self.ui.group_form.run_all_enabled,
-            ) {
-                Ok(updated) => updated,
-                Err(err) => {
-                    self.log_manager.add_entry(err);
-                    false
-                }
-            }
-        } else {
-            match rules::create_group(
-                &draft,
-                &self.ui.group_form.group_name,
-                &self.ui.group_form.core_selection,
-                self.ui.group_form.run_all_enabled,
-            ) {
-                Ok(()) => true,
-                Err(err) => {
-                    self.log_manager.add_entry(err);
-                    false
-                }
-            }
-        };
-
-        if should_save {
-            let mut identities = self.rules.clone();
-            if self.ui.group_form.editing_group_id.is_none() {
-                identities.append_group();
-            }
-            let _ = self.persist_draft(draft, revision, identities, Some(completion));
-        }
+        let _ = self.enqueue_legacy(
+            TuningRequest::EditGroup {
+                edit,
+                expected_revision: self.tuning_adopted_revision,
+            },
+            Some(completion),
+        );
     }
 
     pub fn delete_current_group_form_target(&mut self) {
@@ -2557,75 +2558,155 @@ mod tests {
                 }
             }
         }
-        for fail in [false, true] {
-            let mut app = sample_state();
-            let original = app.persistent_state.read().unwrap().clone();
-            let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-            let (release_tx, release_rx) = mpsc::sync_channel(1);
-            let runtime = TuningRuntime::start(
-                crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
-                    .headless(
-                        original.clone(),
-                        Box::new(GatedSave {
-                            entered: entered_tx,
-                            release: release_rx,
-                            fail,
-                        }),
-                    )
-                    .without_modules(),
-                app.runtime.running_apps_handle(),
-            );
-            app.replace_tuning_for_test(runtime, Default::default());
-            app.set_theme_index(original.theme_index);
-            app.set_theme_index(3);
-            assert!(
-                app.pending_legacy.is_none(),
-                "No-op and invalid themes must not save"
-            );
-            app.set_theme_index(2);
-            let accepted = app.pending_legacy.is_some();
-            entered_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap();
-            let pending = matches!(
-                app.tuning_snapshot().operation,
-                TuningOperationState::Pending { .. }
-            );
-            let before = app.persistent_state.read().unwrap().theme_index;
-            let _ = release_tx.send(());
-            assert!(
-                accepted,
-                "acceptance is independent of persistence completion"
-            );
-            assert!(
-                pending,
-                "the gated save must still be pending after enqueue returns"
-            );
-            assert_eq!(before, original.theme_index);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while matches!(
-                app.tuning_snapshot().operation,
-                TuningOperationState::Pending { .. }
-            ) {
-                assert!(std::time::Instant::now() < deadline);
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            app.poll_tuning();
-            assert_eq!(
-                app.get_theme_index(),
-                if fail { original.theme_index } else { 2 }
-            );
-            assert!(app.pending_legacy.is_none());
-            assert_eq!(
-                matches!(
-                    app.tuning_snapshot().operation,
-                    TuningOperationState::Refused {
-                        error: SaveError::Storage,
-                        ..
+        for case in 0..3 {
+            for fail in [false, true] {
+                let mut app = sample_state();
+                if case == 2 {
+                    app.persistent_state.write().unwrap().groups[0].is_hidden = true;
+                    rebase_sample_fixture(&mut app);
+                }
+                let original = app.persistent_state.read().unwrap().clone();
+                let original_ids = app.rules.to_persisted_identities();
+                let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+                let (release_tx, release_rx) = mpsc::sync_channel(1);
+                let runtime = TuningRuntime::start(
+                    crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                        .headless(
+                            original.clone(),
+                            Box::new(GatedSave {
+                                entered: entered_tx,
+                                release: release_rx,
+                                fail,
+                            }),
+                        )
+                        .without_modules(),
+                    app.runtime.running_apps_handle(),
+                );
+                app.replace_tuning_for_test(runtime, Default::default());
+                if case == 0 {
+                    app.set_theme_index(original.theme_index);
+                    app.set_theme_index(3);
+                    assert!(
+                        app.pending_legacy.is_none(),
+                        "No-op and invalid themes must not save"
+                    );
+                    app.set_theme_index(2);
+                } else {
+                    if case == 1 {
+                        app.start_creating_group();
+                    } else {
+                        app.start_editing_group(group_id(&app, 0));
                     }
-                ),
-                fail
-            );
+                    app.ui.group_form.group_name = if case == 1 {
+                        " New group "
+                    } else {
+                        " Edited group "
+                    }
+                    .into();
+                    app.ui.group_form.core_selection = vec![true, true, false, false];
+                    app.ui.group_form.run_all_enabled = true;
+                    app.commit_group_form_session();
+                }
+                let accepted = app.pending_legacy.is_some();
+                entered_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+                let pending = matches!(
+                    app.tuning_snapshot().operation,
+                    TuningOperationState::Pending { .. }
+                );
+                let before = serde_json::to_value(&*app.persistent_state.read().unwrap()).unwrap();
+                let ids_before_completion = app.rules.to_persisted_identities();
+                if case != 0 {
+                    assert!(!app.ui.group_form.group_name.is_empty());
+                }
+                let _ = release_tx.send(());
+                assert!(
+                    accepted,
+                    "acceptance is independent of persistence completion"
+                );
+                assert!(
+                    pending,
+                    "the gated save must still be pending after enqueue returns"
+                );
+                assert_eq!(
+                    before,
+                    serde_json::to_value(&original).unwrap(),
+                    "Pending edits cannot publish optimistically"
+                );
+                assert_eq!(ids_before_completion, original_ids);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while matches!(
+                    app.tuning_snapshot().operation,
+                    TuningOperationState::Pending { .. }
+                ) {
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                app.poll_tuning();
+                if case == 0 {
+                    assert_eq!(
+                        app.get_theme_index(),
+                        if fail { original.theme_index } else { 2 }
+                    );
+                } else {
+                    let saved = app.persistent_state.read().unwrap();
+                    let ids = app.rules.to_persisted_identities();
+                    if fail {
+                        assert_eq!(
+                            serde_json::to_value(&*saved).unwrap(),
+                            serde_json::to_value(&original).unwrap()
+                        );
+                        assert_eq!(ids, original_ids);
+                        assert!(
+                            !app.ui.group_form.group_name.is_empty(),
+                            "Failed save must retain the draft"
+                        );
+                    } else {
+                        let i = usize::from(case == 1);
+                        assert_eq!(
+                            saved.groups[i].name,
+                            if case == 1 {
+                                "New group"
+                            } else {
+                                "Edited group"
+                            }
+                        );
+                        assert_eq!(saved.groups[i].cores, vec![0, 1]);
+                        assert!(saved.groups[i].run_all_button);
+                        assert_eq!(
+                            ids.groups[0], original_ids.groups[0],
+                            "Existing group/rule IDs must survive"
+                        );
+                        assert_eq!(saved.groups[0].programs, original.groups[0].programs);
+                        assert_eq!(saved.groups[0].is_hidden, original.groups[0].is_hidden);
+                        assert_eq!(
+                            ids.groups.len(),
+                            original_ids.groups.len() + usize::from(case == 1)
+                        );
+                        assert_eq!(saved.rule_identities.as_ref(), Some(&ids));
+                        assert!(
+                            app.ui.group_form.group_name.is_empty(),
+                            "Only completed saves may close the form"
+                        );
+                        assert!(matches!(
+                            app.ui.current_window,
+                            WindowRoute::Groups(GroupRoute::List)
+                        ));
+                    }
+                }
+                assert!(app.pending_legacy.is_none());
+                assert_eq!(
+                    matches!(
+                        app.tuning_snapshot().operation,
+                        TuningOperationState::Refused {
+                            error: SaveError::Storage,
+                            ..
+                        }
+                    ),
+                    fail
+                );
+            }
         }
     }
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -3305,6 +3386,20 @@ mod tests {
             app.log_manager.entries[0].message,
             "Group name cannot be empty"
         );
+        app.ui.group_form.group_name = "Valid".into();
+        app.ui.group_form.core_selection[0] = true;
+        let projection = app.persistent_state.clone();
+        let held = projection.write().unwrap();
+        app.commit_group_form_session();
+        assert!(
+            app.pending_legacy.is_none(),
+            "An unavailable GUI projection must not queue a save"
+        );
+        assert_eq!(app.ui.group_form.group_name, "Valid");
+        drop(held);
+        app.commit_group_form_session();
+        app.wait_for_test_save();
+        assert_eq!(app.persistent_state.read().unwrap().groups.len(), 2);
     }
 
     #[test]
@@ -3770,10 +3865,93 @@ mod tests {
     }
 
     #[test]
+    fn group_save_rejects_stale_projection_and_retains_draft_for_retry() {
+        use super::{rules, TuningRequest};
+        use crate::app::features::system_tweaks::{SaveError, TuningOperationState};
+        for create in [true, false] {
+            let mut app = sample_state();
+            let original_ids = app.rules.to_persisted_identities();
+            if create {
+                app.start_creating_group();
+            } else {
+                app.start_editing_group(group_id(&app, 0));
+            }
+            app.ui.group_form.group_name = "GUI group".into();
+            app.ui.group_form.core_selection = vec![true, false, false, false];
+            let revision = app.tuning_adopted_revision;
+            app.request_tuning(TuningRequest::EditGroup {
+                edit: rules::GroupEdit {
+                    group: None,
+                    name: "External group".into(),
+                    cpus: vec![0],
+                    run_all: false,
+                    hidden: None,
+                },
+                expected_revision: revision,
+            })
+            .unwrap();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while app.tuning_snapshot().revision == revision
+                || matches!(
+                    app.tuning_snapshot().operation,
+                    TuningOperationState::Pending { .. }
+                )
+            {
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let external = app.tuning_snapshot();
+            app.commit_group_form_session();
+            assert!(
+                app.pending_legacy.is_some(),
+                "Stale request must reach revision admission"
+            );
+            app.wait_for_test_save();
+            assert!(matches!(
+                app.tuning_snapshot().operation,
+                TuningOperationState::Refused {
+                    error: SaveError::Invalid,
+                    ..
+                }
+            ));
+            assert_eq!(
+                serde_json::to_value(&*app.persistent_state.read().unwrap()).unwrap(),
+                serde_json::to_value(&*external.state).unwrap()
+            );
+            assert_eq!(
+                app.rules.to_persisted_identities(),
+                external.rules.to_persisted_identities()
+            );
+            assert_eq!(app.ui.group_form.group_name, "GUI group");
+            assert!(!matches!(
+                app.ui.current_window,
+                WindowRoute::Groups(GroupRoute::List)
+            ));
+            assert!(app.pending_legacy.is_none());
+            app.commit_group_form_session();
+            app.wait_for_test_save();
+            assert_eq!(app.tuning_snapshot().revision, external.revision + 1);
+            let ids = app.rules.to_persisted_identities();
+            assert_eq!(
+                &ids.groups[..2],
+                &external.rules.to_persisted_identities().groups[..]
+            );
+            assert_eq!(ids.groups[0], original_ids.groups[0]);
+            let state = app.persistent_state.read().unwrap();
+            assert_eq!(state.groups[1].name, "External group");
+            assert_eq!(state.groups[if create { 2 } else { 0 }].name, "GUI group");
+            assert!(matches!(
+                app.ui.current_window,
+                WindowRoute::Groups(GroupRoute::List)
+            ));
+        }
+    }
+
+    #[test]
     fn test_successful_group_create_and_delete_save_once_each() {
         let mut app = sample_state();
         app.ui.group_form.group_name = "Work".to_string();
-        app.ui.group_form.core_selection[2] = true;
+        app.ui.group_form.core_selection[0] = true;
 
         app.commit_group_form_session();
         app.wait_for_test_save();

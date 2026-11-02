@@ -550,6 +550,18 @@ impl HeadlessTuning {
         })
     }
 
+    pub(crate) fn edit_group(&mut self, edit: rules::GroupEdit) -> Result<(), SaveError> {
+        let mut candidate = self.state.clone();
+        let mut identities = self.rules.clone();
+        edit.apply(
+            &mut candidate,
+            &mut identities,
+            crate::app::models::effective_total_threads(),
+        )
+        .map_err(|_| SaveError::Invalid)?;
+        self.publish(candidate, identities)
+    }
+
     pub(crate) fn configure_preferences(
         &mut self,
         patch: crate::app::features::preferences::PreferencePatch,

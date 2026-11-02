@@ -69,7 +69,7 @@ checked publication. CI validates committed assets without taking screenshots.
 | Case | Evidence |
 | --- | --- |
 | R1 | Selected artifact hash, actual child PID, synthetic monitoring Off, orderly exit |
-| C1 | Real durable receipts; groups/rules/additional names; incomplete replacement and stale revision refused; reorder/move; stable IDs and unchanged saved values after restart |
+| C1 | Real durable receipts; groups/rules/additional names; incomplete replacement and stale revision refused; reorder/move; GUI group edit after HTTP update with visibility/peer-field and logical-ID retention; stable IDs and unchanged saved values after restart |
 | U1 | Real schema-13 file, no eager write on notice, actual read-only-file failure and retry, schema-14 readback, group/list retention and restart, both themes |
 | E1, interactive opt-in | Ordinary managed launch, independent exact-handle affinity/priority readback, bounded output/EOF, wrong creation-token refusal, actual Focus acknowledgement |
 | T1 | Two owned workloads, extra process, identical overlapping rule sets in two groups; three fresh coherent CPU/RAM union samples; helper after primary exit; saved app/group metadata changes in an open graph without losing history/CPU selection; Off/On |
@@ -156,3 +156,12 @@ publication and save failure rather than adding a separate persistence mock suit
 Normal README scenes retain their existing layout and copy: the graph change is
 observable only after editing an already open source. Existing capture provenance
 is retained; the live metadata case exercises that conditional update separately.
+
+Group create/edit unification extends the existing gated writer fixture with
+pending/success/refused GUI saves and retains field/identity checks. A stale GUI
+projection must refuse its admitted request, retain the draft and newer external
+group, then permit retry after adoption. The MCP-specific create limit stays
+at its adapter. C1 uses the existing pointer input to edit a real group form after
+an HTTP edit, checks unrelated fields/IDs, and verifies restart persistence.
+GUI creation is covered by deterministic state fixtures; no text-input RPC or
+new testing framework is introduced for this refactor.

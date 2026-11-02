@@ -305,6 +305,28 @@ def configuration(fixture, client, main, helper):
     assert saved["app"]["additional_processes"] == rule["tracked_process_names"]
     assert saved["app"]["priority"] == "Normal" and saved["app"]["args"] == []
     assert client.tool("list_groups")["rows"][0]["group_id"] == second
+    # The pointer-only debug adapter exercises the real GUI form; creation and
+    # failed saves have deterministic state-level coverage without a text RPC.
+    baseline = client.tool('list_groups')['rows']
+    selected = next(row for row in baseline if row['group_id'] == second)
+    client.mutate('update_group', {'group_id': second, 'name': selected['name'],
+                  'cpus': [cpu], 'run_all': True, 'hidden': True})
+    revision = client.tool('get_app_state')['configuration_revision']
+    fixture.click('group.edit.' + second)
+    fixture.click('group.form.run_all')
+    fixture.click('group.form.save')
+    wait_until('GUI group edit durable receipt', lambda: client.tool('get_app_state'),
+               lambda state: state['configuration_revision'] != revision)
+    wait_until('GUI group form closes after its own save', fixture.state,
+               lambda state: 'group.form.close' not in controls(state))
+    edited = next(row for row in client.tool('list_groups')['rows'] if row['group_id'] == second)
+    assert edited['name'] == selected['name'] and edited['cpus'] == [cpu]
+    assert edited['hidden'] is True and edited['run_all'] is False, 'GUI edit changed unrelated saved fields'
+    assert client.tool('list_rules', {'group_id': second})['rows'][0]['rule_id'] == rule_id
+    assert next(row for row in client.tool('list_groups')['rows'] if row['group_id'] == first) == next(row for row in baseline if row['group_id'] == first)
+    # Restore visibility so subsequent telemetry assertions inspect actual rows.
+    client.mutate('update_group', {'group_id': second, 'name': edited['name'],
+                  'cpus': edited['cpus'], 'run_all': edited['run_all'], 'hidden': False})
     durable = json.loads(fixture.state_path.read_bytes())
     fixture.close()
     fixture.start()

@@ -113,29 +113,10 @@ fn validate_name(name: &str) -> Result<(), String> {
     }
     Ok(())
 }
-pub(crate) fn validate_group(
-    name: &str,
-    cpus: &[usize],
-    total: usize,
-) -> Result<(String, Vec<usize>), String> {
-    super::service::validate_group_values(name, cpus, total)
-}
-
 pub(crate) use crate::app::features::preferences::PreferencePatch;
 #[derive(Clone, Debug)]
 pub(crate) enum BaseCommand {
-    CreateGroup {
-        name: String,
-        cpus: Vec<usize>,
-        run_all: bool,
-    },
-    UpdateGroup {
-        group: GroupId,
-        name: String,
-        cpus: Vec<usize>,
-        run_all: bool,
-        hidden: Option<bool>,
-    },
+    Group(super::GroupEdit),
     RemoveGroup {
         group: GroupId,
     },
@@ -168,6 +149,7 @@ pub(crate) enum BaseCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::features::rules::validate_group_values as validate_group;
     #[test]
     fn agent_rule_input_cannot_persist_realtime_priority_for_later_enforcement() {
         let input: RuleInput = serde_json::from_value(serde_json::json!({"name":"Example","path":"C:\\Tools\\example.exe","priority":"Realtime"})).unwrap();

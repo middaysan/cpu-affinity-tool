@@ -54,3 +54,8 @@ It updates graph labels after an already open source is edited, fixes duplicate
 entries in the separate Process monitor roster and distinguishes queued moves
 in Logs. Those conditional paths are checked separately; no existing frame is
 presented as a new capture.
+
+The subsequent group create/edit unification changes saved-state handling only.
+The form layout, labels, controls and normal demonstration scenes stay the same;
+diagnostic selectors add no rendered elements. Existing capture provenance is
+retained, and the real GUI/HTTP save interaction is checked separately in C1.
