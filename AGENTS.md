@@ -92,8 +92,8 @@ Repository binaries:
 
 Current platform reality:
 - Windows is the primary released and explicitly supported platform
-- Linux code exists as a CI build/test/clippy validated desktop beta path from source for `x86_64` `glibc`; desktop sessions on `X11` or `Wayland` are covered by manual beta smoke validation
-- Linux also has a separate beta prerelease artifact contract under `linux-beta-v*` tags, but it is not part of the stable release contract
+- Linux source is retained, but development, support, local validation and prereleases are paused until the Windows work is complete and the user explicitly resumes Linux. Earlier x86_64 glibc/X11/Wayland evidence is historical; do not run Linux builds, tests, Clippy or desktop smoke as current gates.
+- The separate `linux-beta-v*` prerelease workflow and the Linux CI job are retained with job-level `if: ${{ false }}`; they do not build or publish while paused. Windows stable CI and publishing remain active.
 - System Tweaks is Windows-only. Linux has no tuning route or rule-profile controls, no registered modules, recovery lease, native module actions or execution/foreground observations. The existing background queue remains only for ordinary state/rule saves; persisted tuning data is retained without interpretation or association edits.
 - the project must not be described as a fully cross-platform desktop app
 
@@ -159,7 +159,7 @@ Important root files:
 - `docs/comparison.md` - comparison with Task Manager, Process Lasso, and CLI workflows
 - `docs/why.md` - rationale, limits, and non-goals of affinity management
 - `docs/release-checklist.md` - manual checklist for the current Windows-only release contract
-- `docs/linux-beta-release-checklist.md` - manual checklist for the Linux beta prerelease contract
+- `docs/linux-beta-release-checklist.md` - archived checklist for the paused Linux beta prerelease contract
 - `docs/release-process.md` - current tag-based stable Windows release flow plus Linux beta prerelease flow and release-notes template
 - `docs/release-smoke-matrix.md` - compact manual smoke reference subordinate to the release checklist
 - `docs/dependency-advisories.md` - reviewed RustSec findings that remain in resolved dependencies, including reachability and re-evaluation conditions
@@ -174,6 +174,8 @@ Important root files:
 
 ## Runtime architecture
 
+CPU/RAM continuity uses the existing sampling thread and immutable snapshots. Only that dedicated thread waits for roster/configuration readers; the GUI never waits on the roster. The next ETW interval admits one refreshed exact roster for both native targets and original ownership. A final real membership change rescopes current counters from the same pass's exact-instance readings, retaining unavailable new members and partial RAM without repeat native queries. Completed capacity is qualified independently against each rule's exact membership and each group's deduplicated union; unrelated changes cannot invalidate stable scopes. The most recent completed owners share an existing bounded Arc, included in bookkeeping. Current CPU cut age is checked against a fresh QPC read after roster waits; publication retains the collection-start time. A GUI-only Arc cache reuses a still-fresh matching-control snapshot during brief publication contention, without extending its four-second expiry or surviving Off. Actual loss, identity/configuration uncertainty and unsupported counters remain unknown; no historical gap filling, new sampler, watcher or persisted field is added.
+
 Automatic Installed-app discovery admits only exact processes from the current interactive logon, at AUMID seeds, package helpers and final automatic membership; automatic Session 0 services cannot keep a closed GUI app running. The same restriction applies to installed post-launch correction, including the immediate returned activation PID before its first write and publication. Explicit saved process-name lists are retained and keep their deliberate matching semantics, including a matching-AUMID process on a cold start. Runtime-only `execution/correction.rs` shares exact PID/creation denial state between periodic and initial correction under the existing Authority gate. Its short cache lock never encloses native work; observed entries retire with membership, and pre-publication entries have a five-minute lifetime and a 4096-instance bound. Three consecutive native access-denied automatic corrections pause that instance until explicit Retry or a new lifetime; other failures do not count as access denial. Limited access is distinct from a confirmed settings mismatch. Retry uses the existing guarded Fix path; readable CPU/RAM and ownership are retained independently. Native read-only settings inspection requests no SET_INFORMATION right. Steam detection warnings have a separate bounded rule/AppID diagnostic lifetime, so scheduling-intent cleanup for another launch cannot erase an unresolved warning or extend native-write authority. No additional worker, inventory, sampler, persisted field or service privilege is introduced.
 
 Shared process observation and scheduling ownership are separate. The same exact PID/creation can contribute to several saved rules and groups; CPU/RAM keep their existing per-rule and union deduplication. Classic Run/Fix/autorun, reconciliation, installed post-launch correction and production MCP scheduling use one shared Authority. Existing rules win new overlaps in persisted insertion order. Legacy rules with conflicting effective fields require an explicit owner; equal settings select one quiet writer. A preferred logical RuleId is bound to a canonical executable image and participates only when it claims that instance; removing it permits eligible fallback. The Application rule editor shows potential duplicate names separately from actual shared-process conflicts, stages Take control here/owner selection until Save and discards them on Cancel. Staged ownership choices mark the editor dirty on both desktop paths. Process-name lists are never pruned by arbitration. Conflicting rows offer Resolve; observation-only rows do not offer an endless Fix. Same semantic launch keys in separate groups retain independent logical runtime entries and rekeying preserves lifetime evidence.
@@ -187,6 +189,8 @@ State schema14 retains bounded `process_control` metadata (format2 order/legacy/
 Ordinary group create/edit intents live in platform-neutral `features/rules/group.rs`. GUI form saves and MCP group commands share one candidate mutation of fields and logical identities, then the existing writer publishes durably. GUI submits the adopted revision and retains its exact draft receipt; immediate validation feedback uses the same pure validator. The MCP adapter keeps its existing 256-group create limit. Other group operations and GUI rule/import saves retain their existing paths.
 
 Ordinary preference patches live in the platform-neutral `features/preferences` module. GUI theme selection and Windows MCP preferences use the same existing writer mutation, retaining revision admission and durable publication; the GUI submits a typed patch rather than a cloned full state. Other classic GUI edits retain their existing candidate path. CPU-modal metadata is cached by logical target and adopted saved revision, refreshing current names, process scope and selected CPU mask without resetting numeric history or inspection. The Process monitor roster resolves logical runtime members through the existing Authority, including namespace transitions, before fresh native identity checks. Move/reorder admission is logged as queued, not as a completed save.
+
+Leaving or replacing a group/rule editor detaches only its pending automatic-close action. Accepted writes and the exact pinned GUI receipt consumer remain alive; completion also checks the current editor route and unchanged draft before closing. A late save cannot steal Logs navigation or close a reopened equal-value editor.
 
 GUI save completion is identified by its own request receipt on both desktop paths, rather than the most recent worker operation. The existing worker retains at most64terminal receipts, pinning at most one GUI result until its draft owner adopts the corresponding revision. Normal dispatch and orderly shutdown use the same revision/revocation admission; revoked queued MCP work cannot become a shutdown save.
 
@@ -633,15 +637,15 @@ Do not invent dependency purpose just because a crate appears in `Cargo.toml`.
 
 The root package requires Rust 1.95 or newer, matching the `eframe` / `egui` 0.36 desktop stack. CI and release workflows use the stable toolchain.
 
-The Windows CI verification job has a 60-minute budget, matching the stable Windows release build job, so cold optimized application/test builds and final cache compression can finish the existing gates. Linux CI retains its 30-minute budget.
+The Windows CI verification job has a 60-minute budget, matching the stable Windows release build job, so cold optimized application/test builds and final cache compression can finish the existing gates. The disabled Linux CI job retains its former 30-minute budget for later resumption.
 
 The root package alone overrides the test profile to opt-level 1 and limited debug information. Dependency/dev/release profiles, debug assertions and arithmetic behavior remain unchanged. `scripts/measure-test-build.ps1` records alternating root-only rebuild/test timings with cached dependencies; it does not measure a cold full CI job. `docs/testing.md` records the deterministic/live coverage split and consolidation limits.
 
 `scripts/test-windows-live-mcp.ps1` runs synthetic built-app acceptance against a separate nonshipping debug-MCP/diagnostics executable: real UI input, production HTTP configuration/receipts/restart, schema-upgrade failure/retry, extra/shared CPU/RAM unions, history/CSV and Steam warning/selection. It requires elevation for protected diagnostic authority and ETW, owns fresh sidecars/keys/processes and treats forced cleanup as failure. Ordinary launch/native readback/Focus is an explicit interactive opt-in; shipping bootstrap and real vendor/VM smoke remain distinct. Windows CI reuses the crash probe's diagnostic build via `-WithDebugMcp`, then runs the default live pack and uploads only sanitized result JSON for seven days. Stable release gates remain unchanged.
 
-The same runner's optional `-CaptureReadme` mode uses the fixed eight-scene contract and owned measured workloads for documentation only. It is separate from the default acceptance pack. Windows and Linux CI check the committed PNG set, checksums, composition metadata and cleanup provenance without launching a capture or updating assets.
+The same runner's optional `-CaptureReadme` mode uses the fixed eight-scene contract and owned measured workloads for documentation only. It is separate from the default acceptance pack. Windows CI checks the committed PNG set, checksums, composition metadata and cleanup provenance without launching a capture or updating assets.
 
-Local verification commands:
+Current local verification commands (Windows only while Linux is paused):
 - `cargo test --manifest-path libs/os_api/Cargo.toml`
 - `cargo test --features windows --bin cpu-affinity-tool`
 - Windows CI additionally runs the local Winit library's `dpi_` rectangle-policy regressions with `rwh_06` and no default features, using a temporary standalone lock seeded from the root lock.
@@ -652,9 +656,6 @@ Local verification commands:
 - `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe`
 - `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-crash-reports.ps1`
 - `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-tuning-recovery.ps1`
-- `cargo test --features linux --bin cpu-affinity-tool-linux`
-- `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`
-- `cargo build --release --features linux --bin cpu-affinity-tool-linux`
 
 `cargo make`:
 - local developer automation wrapper around tasks like `fmt`, `lint`, `build-release`, `check`, and `release`
@@ -664,9 +665,9 @@ Local verification commands:
 Current CI facts:
 - runners:
   - `windows-latest` for the Windows release-path job
-  - `ubuntu-24.04` for the Linux desktop beta job
-- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, tests local eframe frame-deferral predicates/deadlines and epaint hinting regressions with temporary locks seeded from the root lock, runs feature-gated real-binary crash probes and isolated forced-process tuning recovery probes, reproduces the stable line-table release build, verifies the built EXE/PDB identity and manifest resource, and verifies the Linux beta binary on `ubuntu-24.04`
-- tests are part of the committed CI contract for `ci.yml`; both jobs require committed lockfiles to remain unchanged after compilation/tests, and the Windows release build reports EXE/PDB byte sizes. The Windows job also runs the MCP launcher's filesystem isolation self-test without launching an app or requesting elevation.
+  - the retained Linux beta job is disabled; it allocates no runner while paused
+- `.github/workflows/ci.yml` cancels superseded runs per branch or PR, restores Rust build cache, keeps the Windows release-path checks on `windows-latest`, tests local eframe frame-deferral predicates/deadlines and epaint hinting regressions with temporary locks seeded from the root lock, runs feature-gated real-binary crash probes and isolated forced-process tuning recovery probes, reproduces the stable line-table release build, verifies the built EXE/PDB identity and manifest resource, and skips the disabled Linux beta job
+- tests are part of the committed CI contract for `ci.yml`; the active Windows job requires committed lockfiles to remain unchanged after compilation/tests, and the Windows release build reports EXE/PDB byte sizes. The Windows job also runs the MCP launcher's filesystem isolation self-test without launching an app or requesting elevation.
 - the Windows CI job validates the feature-gated Windows binary path explicitly with `cargo clippy --features windows --bin cpu-affinity-tool -- -D warnings`, `cargo test --features windows --bin cpu-affinity-tool`, `scripts/build-windows-release.ps1`, `scripts/test-windows-pdb-verifier.ps1`, and `scripts/assert-windows-release-manifest.ps1` against the built release EXE/PDB pair
 
 Current release facts:
@@ -676,16 +677,16 @@ Current release facts:
 - the stable release publish job runs on `ubuntu-24.04` and publishes `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb`; missing declared release files fail the publish step
 - `windows-release-artifacts` is a temporary handoff between the stable Windows build and publish jobs with explicit 7-day retention; GitHub Release assets retain the published EXE/PDB. After the handoff expires, a failed publication requires rerunning all jobs to rebuild and upload it.
 - stable release target: `x86_64-pc-windows-msvc`
-- Linux beta prerelease workflow reacts to pushed tags matching `linux-beta-v*`
-- the Linux beta prerelease workflow runs on `ubuntu-24.04`, installs the Linux GUI build dependencies, runs `cargo fmt --all -- --check`, `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features linux --bin cpu-affinity-tool-linux`, and then builds `cpu-affinity-tool-linux`
-- the Linux beta prerelease workflow validates that `Cargo.toml` version matches the `X.Y.Z` part of the tag and that `changelogs/linux-beta-vX.Y.Z-N.txt` exists
-- the Linux beta prerelease workflow publishes `cpu-affinity-tool-linux-x86_64`, `cpu-affinity-tool-linux-x86_64.tar.gz`, and `SHA256SUMS.txt` with `prerelease: true`
+- The retained Linux beta workflow matches `linux-beta-v*` tags but its job is disabled; no Linux validation or publishing occurs until explicitly resumed.
+- when resumed, the retained Linux beta job runs on `ubuntu-24.04`, installs the Linux GUI build dependencies, runs `cargo fmt --all -- --check`, `cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings`, `cargo test --manifest-path libs/os_api/Cargo.toml`, `cargo test --features linux --bin cpu-affinity-tool-linux`, and then builds `cpu-affinity-tool-linux`
+- the retained Linux beta steps validate that `Cargo.toml` version matches the `X.Y.Z` part of the tag and that `changelogs/linux-beta-vX.Y.Z-N.txt` exists
+- after resumption, the Linux beta publication step publishes `cpu-affinity-tool-linux-x86_64`, `cpu-affinity-tool-linux-x86_64.tar.gz`, and `SHA256SUMS.txt` with `prerelease: true`
 - installer packaging, AppImage, Flatpak, code signing, winget, choco, and similar distribution steps are currently absent
 
 Additional release facts:
 - `changelogs/*.txt` are maintained manually
 - the stable GitHub Release workflow uses `changelogs/vX.Y.Z.txt` as the release body for the matching tag
-- the Linux beta prerelease workflow uses `changelogs/linux-beta-vX.Y.Z-N.txt` as the prerelease body for the matching tag
+- the retained Linux beta publication step uses `changelogs/linux-beta-vX.Y.Z-N.txt` as the prerelease body for the matching tag
 - release notes no longer rely on `generate_release_notes: true`
 - `scripts/build-windows-release.ps1` sets `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` for the Windows production build; the shared release profile plus the Linux beta artifact set and debug-information policy are unchanged
 - `scripts/assert-windows-pdb-matches.ps1` uses the Windows `dbghelp` API to require the expected PDB basename and matching EXE/PDB CodeView GUID and age before publishing
@@ -693,7 +694,7 @@ Additional release facts:
 - `scripts/test-windows-crash-reports.ps1` builds a debug binary with the non-shipping `diagnostics-test-controls` feature and verifies pre-Tokio main-thread panic plus synthetic native-loop-error report ordering, completion markers, event kinds, and exit codes
 - `scripts/test-windows-tuning-recovery.ps1` uses nonshipping `tuning-test-controls`, requires the three named recovery tests to exist, and runs the isolated native subprocess suite serially. Its Rust fixtures own temporary metadata and scalar targets; it does not certify canonical ProgramData, elevated cross-user or boot continuity.
 - manual pre-release validation lives in `docs/release-checklist.md` and its subordinate `docs/release-smoke-matrix.md`
-- manual Linux beta pre-release validation lives in `docs/linux-beta-release-checklist.md`
+- archived Linux beta pre-release validation for later resumption lives in `docs/linux-beta-release-checklist.md`
 - `docs/release-process.md` documents the current automated stable tag-release flow, Linux beta prerelease flow, and their current artifact limits
 - version truth is split across Git tag, `Cargo.toml`, its local package entry in `Cargo.lock`, and `changelogs/`
 - that version sync is still manual before tagging, then the stable and Linux beta workflows validate the relevant tag, `Cargo.toml`, and changelog inputs

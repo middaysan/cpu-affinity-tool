@@ -59,3 +59,12 @@ The subsequent group create/edit unification changes saved-state handling only.
 The form layout, labels, controls and normal demonstration scenes stay the same;
 diagnostic selectors add no rendered elements. Existing capture provenance is
 retained, and the real GUI/HTTP save interaction is checked separately in C1.
+
+The late editor-completion correction changes only what a finished save may do
+after leaving or reopening an editor. Normal scenes, labels and layout remain
+representative; capture provenance stays original. Controlled persistence tests
+cover the delayed navigation paths separately.
+
+The CPU/RAM continuity correction changes data admission during contention and
+unrelated process churn, with no new labels, geometry or normal scene layout.
+The original captures remain representative; their provenance is unchanged.

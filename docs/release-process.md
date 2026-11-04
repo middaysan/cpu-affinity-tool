@@ -2,12 +2,14 @@
 
 This document describes the current release contract for CPU Affinity Tool.
 
+Linux development, support, local validation and beta publication are paused while Windows work is completed. The retained Linux CI and beta-release jobs are disabled. Linux instructions below are reference for explicit future resumption; current release gates are Windows-only.
+
 It is intentionally narrow and truthful:
 
 - stable releases are Windows-only
 - Windows stable tags publish `cpu-affinity-tool.exe` and its matching `cpu_affinity_tool.pdb`
-- Linux beta prerelease tags publish a raw Linux binary, a `tar.gz`, and `SHA256SUMS.txt`
-- CI validates the Linux beta build/test/clippy path from source on pinned Ubuntu runners; desktop-session smoke remains manual beta validation
+- After resumption, Linux beta prerelease tags publish a raw Linux binary, a `tar.gz`, and `SHA256SUMS.txt`
+- Current CI validates Windows; the retained Linux beta build/test/clippy and manual desktop checks are inactive
 - there is no installer, AppImage, Flatpak, code signing, or winget package in the current release contract
 
 ## Source of truth
@@ -32,10 +34,7 @@ Use these files together:
 
 Release publishing is tag-based.
 
-Normal branch and pull-request CI runs both:
-
-- the Windows release-path validation job
-- the Linux beta build/test validation job on `ubuntu-24.04`
+Normal branch and pull-request CI runs the Windows release-path validation job. The Linux beta job is retained but skipped while paused.
 
 Stable Windows publishing and Linux beta publishing are separate workflows with separate tag namespaces.
 
@@ -50,7 +49,7 @@ When a stable tag matching `v*` is pushed:
 7. the workflow uploads `cpu-affinity-tool.exe` and its matching `cpu_affinity_tool.pdb`
 8. a publish job on `ubuntu-24.04` creates the GitHub Release with the body from `changelogs/vX.Y.Z.txt`
 
-When a Linux beta tag matching `linux-beta-v*` is pushed:
+Archived Linux beta flow (disabled until explicitly resumed):
 
 1. GitHub Actions runs the Linux beta prerelease job on `ubuntu-24.04`
 2. the workflow validates the tag format against `linux-beta-vX.Y.Z-N`
@@ -73,7 +72,7 @@ Before pushing a stable Windows tag, align:
 - release-facing docs if platform or process truth changed
 - configuration compatibility: current explicit saves upgrade older supported state to schema `v14`. Loading pre-`v6` state writes an additional `state.json.pre-v6*` backup before that save; `v6` and later do not create that particular backup. Missing pre-`v10` descendant-management values retain the prior enabled behavior, while missing values in `v10` or later and newly created rules default to off. Downgrading after a current-schema save is unsupported.
 
-Before pushing a Linux beta tag, align:
+After explicit resumption, before pushing a Linux beta tag, align:
 
 - Git tag: `linux-beta-vX.Y.Z-N`
 - `Cargo.toml` version: `X.Y.Z`
@@ -87,11 +86,11 @@ Before pushing a Linux beta tag, align:
 2. Create or update `changelogs/vX.Y.Z.txt`.
 3. Run the release checklist in `docs/release-checklist.md`.
 4. Run the manual smoke from `docs/release-smoke-matrix.md`.
-5. Push the release commit and require green Windows/Linux pull-request CI, then merge the reviewed head into the default branch.
+5. Push the release commit and require green Windows pull-request CI, then merge the reviewed head into the default branch.
 6. Verify the merged tree and push the stable tag `vX.Y.Z` on that default-branch commit.
 7. Confirm the GitHub Release workflow succeeded and published `cpu-affinity-tool.exe` plus `cpu_affinity_tool.pdb`.
 
-## Recommended Linux beta release steps
+## Archived Linux beta release steps (paused)
 
 1. Confirm `Cargo.toml` already contains the target base version `X.Y.Z`.
 2. Create or update `changelogs/linux-beta-vX.Y.Z-N.txt`.

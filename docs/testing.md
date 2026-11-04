@@ -1,5 +1,7 @@
 # Testing without another test platform
 
+Current validation targets Windows. Linux support, local builds/tests/Clippy and CI are paused while Windows work is completed; the source and disabled jobs are retained for explicit future resumption.
+
 The fast Rust tests and built-app MCP scenarios answer different questions. Keep
 deterministic tests for identity, ownership, stale generations, failed saves,
 conditional Undo, CPU/RAM unions, unknown data and shutdown. A successful GUI poll
@@ -72,7 +74,7 @@ checked publication. CI validates committed assets without taking screenshots.
 | C1 | Real durable receipts; groups/rules/additional names; incomplete replacement and stale revision refused; reorder/move; GUI group edit after HTTP update with visibility/peer-field and logical-ID retention; stable IDs and unchanged saved values after restart |
 | U1 | Real schema-13 file, no eager write on notice, actual read-only-file failure and retry, schema-14 readback, group/list retention and restart, both themes |
 | E1, interactive opt-in | Ordinary managed launch, independent exact-handle affinity/priority readback, bounded output/EOF, wrong creation-token refusal, actual Focus acknowledgement |
-| T1 | Two owned workloads, extra process, identical overlapping rule sets in two groups; three fresh coherent CPU/RAM union samples; helper after primary exit; saved app/group metadata changes in an open graph without losing history/CPU selection; Off/On |
+| T1 | Two owned workloads, extra process, identical overlapping rule sets in two groups; three fresh coherent CPU/RAM union samples; two unrelated owned-process start/exit cycles with stable app/group CPU/RAM throughout; helper after primary exit; saved app/group metadata changes in an open graph without losing history/CPU selection; Off/On |
 | T2 | Original system history, bounded UTF-8 CSV cursor download and parsing, retained immutable export after Off, foreign history epoch refused |
 | S1 | Deliberately uninstalled synthetic Steam AppID, actionable warning in both themes, direct reason/chooser, no premature draft save, exact owned-process selection/measurement and unchanged helper list; never launches Steam |
 | D1 | Three native scheduling access denials on an exact owned child, paused correction with readable app/group CPU/RAM, Limited access in both themes, explicit Retry/native affinity readback, and exact process-DACL restoration |
@@ -165,3 +167,9 @@ at its adapter. C1 uses the existing pointer input to edit a real group form aft
 an HTTP edit, checks unrelated fields/IDs, and verifies restart persistence.
 GUI creation is covered by deterministic state fixtures; no text-input RPC or
 new testing framework is introduced for this refactor.
+
+Delayed editor completion is covered by the existing gated persistence fixture:
+leave for Logs, cancel/reopen the same values, reopen directly, and edit the draft
+while a save is pending. Both group and rule cases preserve the accepted save,
+exact receipt consumption and subsequent GUI-save admission. Navigation only
+detaches stale UI-close effects; it never revokes an already accepted write.

@@ -3,7 +3,7 @@ use super::history::{GapReason, HistoryStore, SampleTime};
 use super::model::{RuleTarget, Snapshot};
 use crate::app::shared::ids::RuleId;
 use os_api::cpu_load::{CpuHistoryFrame, CpuHistoryTick, CpuProcess, ProcessCpuSample};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 const PENDING: usize = 16;
@@ -269,11 +269,36 @@ mod tests {
             seconds: 2.0,
             wall: tick(1).timestamp,
         };
-        assert_eq!(events.capacity_time(0), Some(time));
+        assert_eq!(events.capacity_time(time.seconds), Some(time));
         assert_eq!(
-            events.capacity_time(1),
+            events.capacity_time(time.seconds + 4.0),
             None,
-            "a new roster cannot reuse an old roster's ETW cut"
+            "waiting after a tick cannot refresh the original scheduler cut"
+        );
+        let masks = HashMap::from([(old.group.clone(), vec![0])]);
+        let mut current = super::super::process_list::ProcessList::from_tracking(
+            &new_targets,
+            &HashMap::new(),
+            &names,
+        );
+        current.record_cores(1, events.samples());
+        current.record_capacity(&masks, events.samples(), events.capacity_time(time.seconds));
+        events.qualify_capacity(&mut current, &new_targets);
+        assert_eq!(
+            current.rule_capacity_total(&new, &[0]).value,
+            None,
+            "a new owner/lifetime cannot reuse an old rule's ETW cut"
+        );
+        let empty = HashMap::new();
+        let mut removed =
+            super::super::process_list::ProcessList::from_tracking(&empty, &HashMap::new(), &names);
+        removed.record_cores(1, events.samples());
+        removed.record_capacity(&masks, events.samples(), events.capacity_time(time.seconds));
+        events.qualify_capacity(&mut removed, &empty);
+        assert_eq!(
+            removed.group_capacity_total(&old.group, &[0]).value,
+            None,
+            "removing all claims changes the group union even without a remaining rule to reject"
         );
         let mut view = ContributorView::default();
         store.contributors.copy(time, 0, Some(&old.rule), &mut view);
@@ -308,7 +333,7 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            events.capacity_time(1),
+            events.capacity_time(tick(6).seconds),
             None,
             "fresh worker publications cannot refresh a four-second-old scheduler cut"
         );
@@ -319,13 +344,13 @@ mod tests {
         frame.id = 6;
         events.apply(&frame, &mut store);
         assert_eq!(
-            events.capacity_time(1).map(|t| t.seconds),
+            events.capacity_time(tick(6).seconds).map(|t| t.seconds),
             Some(7.0),
             "a newly completed cut restores the capacity meter"
         );
         events.fail(&mut store);
         assert!(events.samples().is_empty());
-        assert_eq!(events.capacity_time(2), None);
+        assert_eq!(events.capacity_time(tick(6).seconds), None);
     }
 }
 pub(super) struct OwnerInput<'a> {
@@ -347,8 +372,7 @@ pub(super) struct EventHistory {
     current: Arc<Ownership>,
     samples: Vec<ProcessCpuSample>,
     sample_time: Option<SampleTime>,
-    sample_generation: Option<u64>,
-    latest_tick: Option<SampleTime>,
+    sample_owners: Arc<Ownership>,
     sample_count: usize,
     snapshot: Snapshot,
     inputs: Vec<Contribution>,
@@ -362,8 +386,7 @@ impl Default for EventHistory {
             current: Arc::default(),
             samples: Vec::new(),
             sample_time: None,
-            sample_generation: None,
-            latest_tick: None,
+            sample_owners: Arc::default(),
             sample_count: 0,
             snapshot: Snapshot::default(),
             inputs: Vec::new(),
@@ -411,7 +434,6 @@ impl EventHistory {
             seconds: tick.seconds,
             wall: tick.timestamp,
         };
-        self.latest_tick = Some(time);
         store.push_pending(time, parking);
         self.pending.push_back(PendingInterval {
             id: tick.id,
@@ -436,7 +458,7 @@ impl EventHistory {
     fn clear_values(&mut self) {
         self.sample_count = 0;
         self.sample_time = None;
-        self.sample_generation = None;
+        self.sample_owners = Arc::default();
         self.snapshot.tracked_cpus.fill(None);
         for values in self
             .snapshot
@@ -477,7 +499,7 @@ impl EventHistory {
         }
         let cpus = frame.cpus.len();
         self.sample_time = Some(time);
-        self.sample_generation = owners.generation;
+        self.sample_owners = owners.clone();
         while self.samples.len() < frame.targets.len() {
             self.samples.push(ProcessCpuSample {
                 pid: 0,
@@ -671,20 +693,51 @@ impl EventHistory {
     pub fn samples(&self) -> &[ProcessCpuSample] {
         &self.samples[..self.sample_count]
     }
-    pub fn capacity_time(&self, generation: u64) -> Option<SampleTime> {
+    pub fn capacity_time(&self, now: f64) -> Option<SampleTime> {
         let time = self.sample_time?;
-        let age = self.latest_tick?.seconds - time.seconds;
-        (self.sample_generation == Some(generation) && age.is_finite() && (0.0..4.0).contains(&age))
+        let age = now - time.seconds;
+        (self.sample_owners.generation.is_some() && age.is_finite() && (0.0..4.0).contains(&age))
             .then_some(time)
+    }
+    pub fn qualify_capacity(
+        &self,
+        list: &mut super::process_list::ProcessList,
+        targets: &HashMap<RuleTarget, Vec<(u32, u64)>>,
+    ) {
+        // Global roster changes cannot relabel an old interval. Only exact
+        // unchanged rule memberships may reuse that completed interval.
+        let unions = |targets: &HashMap<RuleTarget, Vec<(u32, u64)>>| {
+            let mut groups = HashMap::<_, HashSet<_>>::new();
+            for (target, members) in targets {
+                for &member in members {
+                    groups
+                        .entry(target.group.clone())
+                        .or_default()
+                        .insert(member);
+                }
+            }
+            groups
+        };
+        let previous_groups = unions(&self.sample_owners.targets);
+        let current_groups = unions(targets);
+        list.qualify_capacity(
+            |target| {
+                targets
+                    .get(target)
+                    .is_some_and(|members| self.sample_owners.targets.get(target) == Some(members))
+            },
+            |group| current_groups.get(group) == previous_groups.get(group),
+        );
     }
     pub fn bookkeeping_bytes(&self) -> usize {
         // Shared owner snapshots are counted once, including old memberships
         // retained only while their original intervals await delivery.
-        let mut seen = [std::ptr::null(); PENDING + 2];
+        let mut seen = [std::ptr::null(); PENDING + 3];
         let mut count = 0;
         let mut owners_bytes = 0;
         for owners in std::iter::once(&self.captured)
             .chain(std::iter::once(&self.current))
+            .chain(std::iter::once(&self.sample_owners))
             .chain(self.pending.iter().map(|p| &p.owners))
         {
             let pointer = Arc::as_ptr(owners);

@@ -669,6 +669,111 @@ fn memory_snapshot_rejects_stale_control_revisions_and_monitoring_off() {
     assert!(runtime.snapshot().process_memory.is_empty());
     assert!(runtime.snapshot().group_memory.is_none());
 }
+
+#[test]
+fn s143_publication_contention_keeps_only_fresh_matching_cpu_and_ram() {
+    let mut runtime = runtime();
+    runtime.configure(true);
+    let revision = runtime.control.0.lock().unwrap().revision;
+    let rule = target();
+    let usage = super::super::memory::MemoryUsage {
+        bytes: Some(64 * 1024 * 1024),
+        measured: 1,
+        instances: 1,
+    };
+    let measured = Arc::new(Snapshot {
+        revision,
+        cpus: vec![Some(25.0)],
+        process_memory: HashMap::from([(rule.clone(), usage)]),
+        group_memory: Some(HashMap::from([(rule.group.clone(), usage)])),
+        ..Default::default()
+    });
+    *runtime.published.write().unwrap() = measured.clone();
+    assert!(Arc::ptr_eq(&runtime.snapshot(), &measured));
+    {
+        let _busy = runtime.published.write().unwrap();
+        let retained = runtime.snapshot();
+        assert!(
+            Arc::ptr_eq(&retained, &measured),
+            "busy publication must not invent an empty measurement"
+        );
+        assert_eq!(retained.process_memory[&rule].bytes, usage.bytes);
+        assert_eq!(
+            retained.at, measured.at,
+            "reuse cannot refresh measurement time"
+        );
+    }
+    *runtime.published.write().unwrap() = Arc::new(Snapshot {
+        revision,
+        at: Instant::now() - Duration::from_secs(5),
+        ..(*measured).clone()
+    });
+    assert!(runtime.snapshot().process_memory.is_empty());
+    {
+        let _busy = runtime.published.write().unwrap();
+        assert!(
+            runtime.snapshot().process_memory.is_empty(),
+            "observed expiry must retire the cached value"
+        );
+    }
+    *runtime.published.write().unwrap() = measured;
+    assert!(runtime.snapshot().process_memory.contains_key(&rule));
+    runtime.configure(false);
+    let _busy = runtime.published.write().unwrap();
+    assert!(
+        runtime.snapshot().process_memory.is_empty(),
+        "Off must invalidate cached measurements immediately"
+    );
+}
+
+#[test]
+fn s143_sampler_waits_for_unchanged_roster_instead_of_losing_measurements() {
+    let (_state, apps) = crate::app::features::execution::known_tracking_fixture();
+    let running = Arc::new(TokioRwLock::new(apps));
+    let original = tracked_instances(&running).unwrap();
+    let busy = running.try_write().unwrap();
+    let worker_running = running.clone();
+    let (send, receive) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let observed = tracked_instances(&worker_running);
+        let matches = membership_matches(&worker_running, original.generation);
+        send.send((observed, matches)).unwrap();
+    });
+    let early = receive.recv_timeout(Duration::from_millis(30));
+    drop(busy);
+    let waited = early.is_err();
+    let (observed, matches) =
+        early.unwrap_or_else(|_| receive.recv_timeout(Duration::from_secs(2)).unwrap());
+    worker.join().unwrap();
+    assert!(
+        waited,
+        "a busy writer is not evidence of invalid membership"
+    );
+    let observed = observed.unwrap();
+    assert_eq!(observed.generation, original.generation);
+    assert_eq!(observed.targets, original.targets);
+    assert!(matches);
+    {
+        let mut current = running.try_write().unwrap();
+        current.mutate_membership(|apps| {
+            let app = apps.apps.values_mut().next().unwrap();
+            app.pids.push(999);
+            app.pid_instance_tokens.insert(999, 999);
+        });
+    }
+    let saved = original.targets.keys().cloned().collect::<Vec<_>>();
+    let admitted = refresh_tracking(&running, Some(&original), &saved)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        admitted.targets,
+        tracked_instances(&running).unwrap().targets,
+        "the next interval must admit the refreshed roster, not the native-read roster"
+    );
+    assert!(
+        normalized_instances(admitted.targets.values().flatten().copied()).contains(&(999, 999))
+    );
+}
 #[test]
 fn graph_contributors_follow_exact_hover_cpu_and_never_fall_back_to_live_rows() {
     let mut runtime = runtime();
@@ -1368,7 +1473,7 @@ fn s107_catalog_members_feed_app_group_and_system_cpu_and_unique_ram() {
     let (_state, apps) = crate::app::features::execution::known_tracking_fixture();
     let running = Arc::new(TokioRwLock::new(apps));
     let tracking = tracked_instances(&running).unwrap();
-    let targets = tracking.targets;
+    let mut targets = tracking.targets;
     assert_eq!(targets.len(), 2);
     assert!(targets.values().all(|members| members == &[(1, 1), (2, 2)]));
     let mut reads = 0;
@@ -1392,6 +1497,11 @@ fn s107_catalog_members_feed_app_group_and_system_cpu_and_unique_ram() {
         .values()
         .all(|usage| usage.bytes == Some(3 * 1024 * 1024)));
     assert_eq!(ram_reads, 2);
+    let peer = RuleTarget {
+        group: GroupId("isolated-peer".into()),
+        rule: RuleId("peer".into()),
+    };
+    targets.insert(peer.clone(), vec![(1, 1), (2, 2)]);
     let all = normalized_instances(targets.values().flatten().copied());
     let names: HashMap<_, _> = all
         .iter()
@@ -1489,4 +1599,86 @@ fn s107_catalog_members_feed_app_group_and_system_cpu_and_unique_ram() {
             Some(30.0)
         );
     }
+    let mut keys = targets
+        .keys()
+        .filter(|t| **t != peer)
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort_by(|a, b| (&a.group.0, &a.rule.0).cmp(&(&b.group.0, &b.rule.0)));
+    let stable = &keys[0];
+    let changed = &keys[1];
+    let mut next_targets = targets.clone();
+    next_targets.get_mut(changed).unwrap().push((999, 999));
+    let masks = targets
+        .keys()
+        .map(|t| (t.group.clone(), vec![0, 1]))
+        .collect();
+    let mut list = super::super::process_list::ProcessList::from_tracking(
+        &next_targets,
+        &HashMap::new(),
+        &names,
+    );
+    list.record_cores(2, events.samples());
+    list.record_capacity(&masks, events.samples(), events.capacity_time(time.seconds));
+    events.qualify_capacity(&mut list, &next_targets);
+    assert_eq!(list.rule_capacity_total(stable, &[0, 1]).value, Some(30.0));
+    assert_eq!(list.rule_capacity_total(changed, &[0, 1]).value, None);
+    assert_eq!(
+        list.group_capacity_total(&peer.group, &[0, 1]).value,
+        Some(30.0)
+    );
+    assert_eq!(
+        list.group_capacity_total(&changed.group, &[0, 1]).value,
+        None
+    );
+    let unknown = list.rule_capacity_total(changed, &[0, 1]);
+    assert_eq!((unknown.measured, unknown.instances), (0, 3));
+    assert!(unknown.partial());
+    let unknown_group = list.group_capacity_total(&changed.group, &[0, 1]);
+    assert_eq!((unknown_group.measured, unknown_group.instances), (0, 3));
+    assert!(
+        list.rows
+            .iter()
+            .filter(|row| row.target.as_ref() == Some(changed))
+            .all(|row| list.displayed_total(row, true).is_none()),
+        "shared PID evidence must not leak from an eligible rule into a changed rule's table"
+    );
+    let next_ram = super::super::memory::tracked_memory(&next_targets, |pid, token| {
+        ram.readings.get(&(pid, token)).copied().flatten()
+    });
+    assert_eq!(next_ram.rules[stable].bytes, ram.rules[stable].bytes);
+    assert_eq!(next_ram.groups[&changed.group].measured, 2);
+    assert_eq!(next_ram.groups[&changed.group].instances, 3);
+    // Changed rule claims, but unchanged exact group union: keep group CPU.
+    let mut same_union = targets.clone();
+    same_union.get_mut(changed).unwrap().pop();
+    let mut shared_list = super::super::process_list::ProcessList::from_tracking(
+        &same_union,
+        &HashMap::new(),
+        &names,
+    );
+    shared_list.record_cores(2, events.samples());
+    shared_list.record_capacity(&masks, events.samples(), events.capacity_time(time.seconds));
+    events.qualify_capacity(&mut shared_list, &same_union);
+    assert_eq!(
+        shared_list.rule_capacity_total(changed, &[0, 1]).value,
+        None
+    );
+    assert_eq!(
+        shared_list
+            .group_capacity_total(&stable.group, &[0, 1])
+            .value,
+        Some(30.0)
+    );
+    // A reused PID in the same logical rule must also wait for fresh ownership.
+    next_targets.get_mut(stable).unwrap()[0].1 += 1;
+    list = super::super::process_list::ProcessList::from_tracking(
+        &next_targets,
+        &HashMap::new(),
+        &names,
+    );
+    list.record_cores(2, events.samples());
+    list.record_capacity(&masks, events.samples(), events.capacity_time(time.seconds));
+    events.qualify_capacity(&mut list, &next_targets);
+    assert_eq!(list.rule_capacity_total(stable, &[0, 1]).value, None);
 }

@@ -17,6 +17,8 @@ env:
 
 jobs:
   build-and-release-linux-beta:
+    # Linux support and validation are paused while Windows work is completed.
+    if: ${{ false }}
     name: Check, Build, and Publish Linux Beta Prerelease
     runs-on: ubuntu-24.04
     timeout-minutes: 45

@@ -1,4 +1,6 @@
-# Linux Beta Release Checklist
+# Linux Beta Release Checklist (Paused)
+
+This is an archived reference for later explicit resumption. Linux support, local validation, CI and prerelease publication are currently paused; do not execute this checklist until Windows work is complete and Linux has been resumed.
 
 This checklist covers the Linux desktop beta prerelease path.
 Stable Windows releases continue to use `docs/release-checklist.md` and `.github/workflows/release.yml`.

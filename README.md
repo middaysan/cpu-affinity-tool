@@ -85,7 +85,7 @@ An agent can manage groups and rules, change monitoring settings, launch program
 ## Platforms and data
 
 - **Windows x64** is the stable release platform. The current renderer uses DirectX 12, and the release requires administrator approval. Saved-rule shortcuts may show the same UAC prompt.
-- **Linux** has a separate desktop beta for x86_64 glibc, with X11/Wayland sessions and [beta prereleases](https://github.com/middaysan/cpu-affinity-tool/releases). CPU recording, System Tweaks and production MCP are Windows-only; Linux does not have full Windows feature parity. macOS is unsupported.
+- **Linux** source is retained, but support, development, CI and beta releases are paused while the Windows work is completed. It is not a currently supported or validated target. macOS is unsupported.
 - New Windows configurations use `%LOCALAPPDATA%\CpuAffinityTool\state.json`. An existing `state.json` beside the EXE keeps its legacy location. **Logs → Data folder** opens the active directory.
 - Versions 1.7.1 and 1.7.2 save configuration as schema v14 (Steam game targets, built-in helper provenance and process-control ownership); 1.7.0 used v11. Keep a backup before upgrading; loading an older format alone does not rewrite it, but an explicit save upgrades it. Downgrading after a current-format save is unsupported.
 - Logs and available crash reports stay local and are not uploaded automatically. Review them before sharing. CPU history is retained in memory and saved to a file only when you export it.
@@ -100,11 +100,6 @@ pwsh -NoProfile -File scripts/build-windows-release.ps1
 ```
 
 The executable is written to `target/release/cpu-affinity-tool.exe`.
-
-```sh
-# Linux desktop beta
-cargo run --features linux --bin cpu-affinity-tool-linux
-```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for dependencies and validation commands, and the [release process](docs/release-process.md) for packaging.
 

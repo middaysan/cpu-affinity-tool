@@ -453,7 +453,8 @@ impl AppState {
             if receipt.result.is_ok() && receipt.revision >= pending.revision {
                 match pending.completion {
                     Some(LegacyCompletion::Rule(target, draft, background, choices))
-                        if self.ui.app_edit_state.target.as_ref() == Some(&target)
+                        if matches!(self.ui.current_window, WindowRoute::AppRunSettings)
+                            && self.ui.app_edit_state.target.as_ref() == Some(&target)
                             && self.ui.app_edit_state.current_edit == draft
                             && self.ui.app_edit_state.background == background
                             && self.ui.app_edit_state.control_choices == choices =>
@@ -461,7 +462,11 @@ impl AppState {
                         self.close_app_run_settings()
                     }
                     Some(LegacyCompletion::Group(target, name, selection, run_all))
-                        if self.ui.group_form.editing_group_id == target
+                        if matches!(
+                            (&target, &self.ui.current_window),
+                            (None, WindowRoute::Groups(GroupRoute::Create))
+                                | (Some(_), WindowRoute::Groups(GroupRoute::Edit))
+                        ) && self.ui.group_form.editing_group_id == target
                             && self.ui.group_form.group_name == name
                             && self.ui.group_form.core_selection == selection
                             && self.ui.group_form.run_all_enabled == run_all =>
@@ -1161,7 +1166,21 @@ impl AppState {
         }
     }
 
+    fn detach_editor_completion(&mut self) {
+        if let Some(pending) = self.pending_legacy.as_mut() {
+            if matches!(
+                pending.completion.as_ref(),
+                Some(LegacyCompletion::Group(..) | LegacyCompletion::Rule(..))
+            ) {
+                // Keep the accepted save and its exact pinned receipt consumer.
+                // Only its automatic close action belongs to the old editor.
+                pending.completion = None;
+            }
+        }
+    }
+
     pub fn cancel_group_form_session(&mut self) {
+        self.detach_editor_completion();
         self.ui.reset_group_form();
         self.ui
             .set_current_window(WindowRoute::Groups(GroupRoute::List));
@@ -1179,6 +1198,18 @@ impl AppState {
         let leaving_app_run_settings =
             matches!(self.ui.current_window, WindowRoute::AppRunSettings)
                 && !matches!(window, WindowRoute::AppRunSettings);
+        let leaving_group_form = match self.ui.current_window {
+            WindowRoute::Groups(GroupRoute::Create) => {
+                !matches!(window, WindowRoute::Groups(GroupRoute::Create))
+            }
+            WindowRoute::Groups(GroupRoute::Edit) => {
+                !matches!(window, WindowRoute::Groups(GroupRoute::Edit))
+            }
+            _ => false,
+        };
+        if leaving_group_form {
+            self.detach_editor_completion();
+        }
         #[cfg(all(target_os = "windows", feature = "windows"))]
         let leaving_crash_reports = matches!(self.ui.current_window, WindowRoute::CrashReports)
             && !matches!(window, WindowRoute::CrashReports);
@@ -1202,6 +1233,7 @@ impl AppState {
     }
 
     pub fn start_creating_group(&mut self) {
+        self.detach_editor_completion();
         self.ui.reset_group_form();
         self.set_current_window(WindowRoute::Groups(GroupRoute::Create));
     }
@@ -1212,6 +1244,7 @@ impl AppState {
         };
 
         if let Some(group) = rules::load_group_for_edit(&self.persistent_state, group_index) {
+            self.detach_editor_completion();
             let total_cores = self.ui.group_form.core_selection.len();
             let mut selection = vec![false; total_cores];
             for core in group.selected_cores {
@@ -1971,6 +2004,7 @@ impl AppState {
     }
 
     pub fn open_app_run_settings(&mut self, group_id: GroupId, rule_id: RuleId) {
+        self.detach_editor_completion();
         self.ui.app_edit_state.process_names.request_refresh();
         self.ui.app_edit_state.current_edit = None;
         self.ui.app_edit_state.control_choices.clear();
@@ -2367,6 +2401,7 @@ impl AppState {
     }
 
     fn reset_app_run_settings_session(&mut self) {
+        self.detach_editor_completion();
         self.ui.app_edit_state.steam_picker.reset_view();
         self.ui.app_edit_state.current_edit = None;
         self.ui.app_edit_state.control_choices.clear();
@@ -2383,6 +2418,32 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use crate::app::features::system_tweaks::{
+        service::{SavedState, StatePersistence},
+        SaveError,
+    };
+    use std::sync::mpsc;
+    struct GatedSave {
+        entered: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+        fail: bool,
+    }
+    impl StatePersistence for GatedSave {
+        fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+            self.entered.send(()).unwrap();
+            if self
+                .release
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_err()
+                || self.fail
+            {
+                Err(SaveError::Storage)
+            } else {
+                Ok(SavedState::Unavailable)
+            }
+        }
+    }
+
     #[test]
     fn failed_move_never_reports_completed_success() {
         use crate::app::features::system_tweaks::{
@@ -2532,32 +2593,152 @@ mod tests {
     }
 
     #[test]
-    fn followup_classic_save_reports_acceptance_before_gated_completion() {
-        use crate::app::features::system_tweaks::{
-            service::{SavedState, StatePersistence},
-            SaveError, TuningOperationState, TuningRuntime,
-        };
-        use std::sync::mpsc;
-        struct GatedSave {
-            entered: mpsc::SyncSender<()>,
-            release: mpsc::Receiver<()>,
-            fail: bool,
-        }
-        impl StatePersistence for GatedSave {
-            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
-                self.entered.send(()).unwrap();
-                if self
-                    .release
-                    .recv_timeout(std::time::Duration::from_secs(1))
-                    .is_err()
-                    || self.fail
-                {
-                    Err(SaveError::Storage)
+    fn delayed_editor_save_preserves_navigation_and_reopened_drafts() {
+        use crate::app::features::system_tweaks::{Tuning, TuningRuntime};
+        for rule_editor in [false, true] {
+            for transition in ["logs", "cancel_reopen", "reopen", "changed_draft"] {
+                let mut app = sample_state();
+                app.persistent_state.write().unwrap().groups[0].cores = vec![0];
+                rebase_sample_fixture(&mut app);
+                let original = app.persistent_state.read().unwrap().clone();
+                let identities = app.rules.to_persisted_identities();
+                let group = group_id(&app, 0);
+                let rule = rule_id(&app, 0, 0);
+                let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+                let (release_tx, release_rx) = mpsc::sync_channel(1);
+                let runtime = TuningRuntime::start(
+                    Tuning::from_registry(Default::default())
+                        .headless(
+                            original.clone(),
+                            Box::new(GatedSave {
+                                entered: entered_tx,
+                                release: release_rx,
+                                fail: false,
+                            }),
+                        )
+                        .without_modules(),
+                    app.runtime.running_apps_handle(),
+                );
+                app.replace_tuning_for_test(runtime, Default::default());
+                if rule_editor {
+                    app.open_app_run_settings(group.clone(), rule.clone());
+                    assert!(app.ensure_current_edit_loaded());
+                    app.commit_current_app_edit_session();
                 } else {
-                    Ok(SavedState::Unavailable)
+                    app.start_editing_group(group.clone());
+                    app.commit_group_form_session();
                 }
+                entered_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+                let pending = app.pending_legacy.as_ref().unwrap();
+                let receipt_owner = (pending.id, pending.revision);
+                if transition == "logs" {
+                    app.set_current_window(WindowRoute::Logs);
+                } else if transition == "changed_draft" {
+                    if rule_editor {
+                        app.ui
+                            .app_edit_state
+                            .current_edit
+                            .as_mut()
+                            .unwrap()
+                            .name
+                            .push_str(" fresh");
+                    } else {
+                        app.ui.group_form.group_name.push_str(" fresh");
+                    }
+                } else {
+                    if transition == "cancel_reopen" {
+                        if rule_editor {
+                            app.close_app_run_settings();
+                        } else {
+                            app.cancel_group_form_session();
+                        }
+                    }
+                    if rule_editor {
+                        app.open_app_run_settings(group.clone(), rule.clone());
+                        assert!(app.ensure_current_edit_loaded());
+                    } else {
+                        app.start_editing_group(group.clone());
+                    }
+                }
+                let pending = app
+                    .pending_legacy
+                    .as_ref()
+                    .expect("Navigation cannot discard the receipt consumer");
+                assert_eq!((pending.id, pending.revision), receipt_owner);
+                let group_draft = (
+                    app.ui.group_form.editing_group_id.clone(),
+                    app.ui.group_form.group_name.clone(),
+                    app.ui.group_form.core_selection.clone(),
+                    app.ui.group_form.run_all_enabled,
+                );
+                let rule_draft = (
+                    app.ui.app_edit_state.target.clone(),
+                    app.ui.app_edit_state.current_edit.clone(),
+                );
+                release_tx.send(()).unwrap();
+                app.wait_for_test_save();
+                assert_eq!(
+                    app.tuning_snapshot().revision,
+                    1,
+                    "Leaving the editor must not revoke an accepted save"
+                );
+                assert_eq!(
+                    serde_json::to_value(&app.persistent_state.read().unwrap().groups).unwrap(),
+                    serde_json::to_value(&original.groups).unwrap()
+                );
+                assert_eq!(app.rules.to_persisted_identities(), identities);
+                assert!(app.pending_legacy.is_none());
+                if transition == "logs" {
+                    assert!(
+                        matches!(app.ui.current_window, WindowRoute::Logs),
+                        "A late completion stole Logs navigation (rule={rule_editor})"
+                    );
+                } else if rule_editor {
+                    assert!(
+                        matches!(app.ui.current_window, WindowRoute::AppRunSettings),
+                        "A late completion closed a newer rule draft: {transition}"
+                    );
+                    assert_eq!(
+                        (
+                            app.ui.app_edit_state.target.clone(),
+                            app.ui.app_edit_state.current_edit.clone()
+                        ),
+                        rule_draft
+                    );
+                } else {
+                    assert!(
+                        matches!(app.ui.current_window, WindowRoute::Groups(GroupRoute::Edit)),
+                        "A late completion closed a newer group draft: {transition}"
+                    );
+                    assert_eq!(
+                        (
+                            app.ui.group_form.editing_group_id.clone(),
+                            app.ui.group_form.group_name.clone(),
+                            app.ui.group_form.core_selection.clone(),
+                            app.ui.group_form.run_all_enabled
+                        ),
+                        group_draft
+                    );
+                }
+                // The exact old GUI receipt must be consumed, permitting another save.
+                app.set_theme_index(2);
+                assert!(
+                    app.pending_legacy.is_some(),
+                    "Editor exit must not leak a pinned GUI receipt"
+                );
+                release_tx.send(()).unwrap();
+                app.wait_for_test_save();
+                assert_eq!(app.get_theme_index(), 2);
             }
         }
+    }
+
+    #[test]
+    fn followup_classic_save_reports_acceptance_before_gated_completion() {
+        use crate::app::features::system_tweaks::{SaveError, TuningOperationState, TuningRuntime};
+        use std::sync::mpsc;
         for case in 0..3 {
             for fail in [false, true] {
                 let mut app = sample_state();

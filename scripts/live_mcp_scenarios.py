@@ -5,6 +5,7 @@ import ctypes
 import io
 import json
 import math
+import shutil
 import socket
 import subprocess
 import time
@@ -427,6 +428,40 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
             seen.add(rows["meter.group." + group]["sample_unix_ms"])
         return len(seen)
     wait_until("three independent CPU/RAM union samples", samples, lambda n: n >= 3, seconds=15)
+    # Actual discovery churn in a different group must not blank stable meters.
+    churn_path = fixture.root / ('owned-churn-' + main.name)
+    shutil.copy2(main, churn_path)
+    churn_rule = client.mutate('create_rule', {'group_id': peer_group, 'rule': {
+        'name': 'Owned unrelated churn', 'path': str(churn_path), 'args': [],
+        'tracked_process_names': [churn_path.name], 'manage_descendants': False,
+        'autorun': False, 'priority': 'Normal'}})['rule_id']
+    stable_cuts = set()
+    churn_cpu = next(c for c in available_cpus() if c != cpu)
+
+    def observe_churn(predicate):
+        deadline = time.monotonic() + 15
+        while True:
+            rows = controls(fixture.state())
+            assert_unions(rows, group, rule_id, shared)
+            stable_cuts.add(rows['meter.rule.' + rule_id]['sample_seconds'])
+            if predicate(rows):
+                return
+            assert time.monotonic() < deadline, 'Unrelated churn was not observed'
+            time.sleep(.2)
+
+    for cycle in range(2):
+        stop = fixture.root / ('churn-' + str(cycle) + '.stop')
+        child = subprocess.Popen([str(churn_path), str(stop)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fixture.children.append((child, stop))
+        pin_workload(child, churn_cpu)
+        observe_churn(lambda rows: rows.get('meter.rule.' + churn_rule, {}).get('instances') == 1)
+        cuts_before = len(stable_cuts)
+        observe_churn(lambda rows: len(stable_cuts) >= cuts_before + 2)
+        stop.write_text('stop', encoding='utf-8')
+        assert child.wait(timeout=5) == 0
+        observe_churn(lambda rows: rows.get('meter.rule.' + churn_rule, {}).get('instances') == 0)
+    client.mutate('delete_rule', {'group_id': peer_group, 'rule_id': churn_rule})
+    wait_until('peer union after churn cleanup', fixture.state, measured, seconds=20)
     # The modal hides the main list. Read its original-time history through HTTP
     # while the meter is visible, then exercise graph navigation separately.
     def matches_history(state, cpus):
@@ -527,7 +562,7 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
     fixture.call("monitor", enabled=True)
     wait_until("current values recover after On", fixture.state,
                lambda s: controls(s).get("meter.rule." + rule_id, {}).get("measured") == 1)
-    return {"fresh_union_samples": len(seen), "graph_opened": bool(graph), "cpu": cpu,
+    return {"fresh_union_samples": len(seen), "unrelated_churn_cycles": 2, "stable_churn_cuts": len(stable_cuts), "graph_opened": bool(graph), "cpu": cpu,
             'selected_capacity_matches_history': True, 'outside_mask_excluded': True, 'mask_edits_verified': True, 'open_graph_metadata_updated': True, 'duplicate_roster_verified': True}
 
 

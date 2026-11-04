@@ -128,11 +128,19 @@ impl ProcessList {
         if !valid {
             return None;
         }
-        row.target.as_ref().and_then(|t| {
-            self.capacity
-                .values
-                .get(&(t.group.clone(), row.pid, row.token))
-        })
+        row.target
+            .as_ref()
+            .filter(|t| {
+                self.capacity
+                    .rules
+                    .get(t)
+                    .is_some_and(|total| total.value.is_some())
+            })
+            .and_then(|t| {
+                self.capacity
+                    .values
+                    .get(&(t.group.clone(), row.pid, row.token))
+            })
     }
     pub fn record_capacity(
         &mut self,
@@ -156,6 +164,24 @@ impl ProcessList {
             &target.group,
             mask,
         )
+    }
+    pub fn qualify_capacity(
+        &mut self,
+        mut rule_eligible: impl FnMut(&RuleTarget) -> bool,
+        mut group_eligible: impl FnMut(&GroupId) -> bool,
+    ) {
+        for (target, total) in &mut self.capacity.rules {
+            if !rule_eligible(target) {
+                total.value = None;
+                total.measured = 0;
+            }
+        }
+        for (group, total) in &mut self.capacity.groups {
+            if !group_eligible(group) {
+                total.value = None;
+                total.measured = 0;
+            }
+        }
     }
     pub fn group_capacity_total(&self, group: &GroupId, mask: &[usize]) -> CpuTotal {
         self.capacity_total(self.capacity.groups.get(group).copied(), group, mask)

@@ -1,5 +1,7 @@
 # Support
 
+Support currently targets Windows. Linux development, validation and prereleases are paused while Windows work is completed; retained Linux details below are archival reference.
+
 ## Where to ask for help
 
 Use the repository issue templates:
