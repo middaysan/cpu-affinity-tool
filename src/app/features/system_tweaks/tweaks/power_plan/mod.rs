@@ -21,20 +21,6 @@ struct Config {
 pub(crate) struct PowerPlan {
     schemes: RwLock<Vec<PowerScheme>>,
 }
-impl PowerPlan {
-    #[cfg(test)]
-    fn name(&self, scheme: Option<GuidValue>) -> String {
-        match scheme {
-            None => "Keep current plan".into(),
-            Some(id) => self
-                .schemes
-                .read()
-                .ok()
-                .and_then(|schemes| schemes.iter().find(|s| s.id == id).map(|s| s.name.clone()))
-                .unwrap_or_else(|| format!("Scheme {:032x}", u128::from_be_bytes(id.0))),
-        }
-    }
-}
 impl ModuleEditor for PowerPlan {
     fn feature(&self) -> FeatureId {
         feature(ID)
@@ -44,27 +30,6 @@ impl ModuleEditor for PowerPlan {
     }
     fn accepts_config(&self, config: &ModuleEnvelope) -> bool {
         decode::<Config>(ID, config).is_ok()
-    }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()> {
-        let mut value: Config = decode(ID, config).map_err(|_| ())?;
-        let before = value.scheme;
-        eframe::egui::ComboBox::from_id_salt(ID)
-            .selected_text(self.name(value.scheme))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut value.scheme, None, "Keep current plan");
-                if let Ok(schemes) = self.schemes.read() {
-                    for scheme in schemes.iter() {
-                        ui.selectable_value(&mut value.scheme, Some(scheme.id), &scheme.name);
-                    }
-                }
-            });
-        ui.small("Choose a Windows power plan. Your original plan is restored when this module is turned off.");
-        let changed = before != value.scheme;
-        if changed {
-            *config = envelope(ID, &value);
-        }
-        Ok(changed)
     }
 }
 impl Module for PowerPlan {

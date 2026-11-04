@@ -3,7 +3,7 @@
 These images show the current Windows interface with synthetic rules and owned
 demonstration processes. They were captured through the existing diagnostic MCP
 renderer using package version **1.7.2**. Capture-time source was
-`974de6fc23fdac8743e025125ed1bd8be04dfdb7`; the diagnostic EXE's SHA-256, UTC time,
+`5bd9ab9beabb581bdf1723f92c3f0d7f07e45f3e`; the diagnostic EXE's SHA-256, UTC time,
 scale, scene/frame identities and original PNG hashes are in
 [`capture.json`](capture.json). This is documentation capture, not certification
 of a published executable or a performance benchmark.
@@ -30,7 +30,41 @@ the repository's bounded test workload. CPU activity is measured by the normal
 collector, not injected or redrawn. CPU selections and current Windows settings
 reflect the capture host and are not universal recommendations.
 
+Application and group meters count work on the group's selected logical CPUs,
+whose combined capacity is 100%. The matching group/application values in the
+demo share the same measured interval and exact process union. Per-CPU graphs
+retain their own 100% scale; the header meter covers the whole processor.
+
 No working user rules, published executable, real services or Windows settings
 were changed. The app, workloads, listener, ticket and temporary keys were
 cleaned up successfully. Refresh affected scenes alongside visible UI changes
 using [the capture and publication workflow](../../docs/readme-screenshots.md).
+
+All eight scenes were refreshed on 2026-11-01 after the CPU-capacity change.
+The original full-size frames and the lead image at README display width were
+visually reviewed. **Limited access / Retry** and Steam detection warnings were
+tested separately; these demonstration scenes show normal process access.
+
+A later diagnostic-only correction distinguishes an unavailable denial-count
+read from zero and improves live-test cleanup reporting. It changes no visible
+controls, layout or demonstrated metric; the capture provenance remains original.
+
+The subsequent writer/metadata simplification preserves these normal scenes.
+It updates graph labels after an already open source is edited, fixes duplicate
+entries in the separate Process monitor roster and distinguishes queued moves
+in Logs. Those conditional paths are checked separately; no existing frame is
+presented as a new capture.
+
+The subsequent group create/edit unification changes saved-state handling only.
+The form layout, labels, controls and normal demonstration scenes stay the same;
+diagnostic selectors add no rendered elements. Existing capture provenance is
+retained, and the real GUI/HTTP save interaction is checked separately in C1.
+
+The late editor-completion correction changes only what a finished save may do
+after leaving or reopening an editor. Normal scenes, labels and layout remain
+representative; capture provenance stays original. Controlled persistence tests
+cover the delayed navigation paths separately.
+
+The CPU/RAM continuity correction changes data admission during contention and
+unrelated process churn, with no new labels, geometry or normal scene layout.
+The original captures remain representative; their provenance is unchanged.

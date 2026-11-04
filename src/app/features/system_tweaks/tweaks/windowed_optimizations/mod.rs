@@ -32,12 +32,6 @@ impl ModuleEditor for WindowedOptimizations {
     fn accepts_config(&self, envelope: &ModuleEnvelope) -> bool {
         config(ID, envelope, false).is_ok()
     }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, envelope: &mut ModuleEnvelope) -> Result<bool, ()> {
-        config(ID, envelope, false).map_err(|_| ())?;
-        ui.label(spec().help);
-        Ok(false)
-    }
     fn tweak_ready(&self, target: &TargetIdentity) -> Result<bool, ModuleError> {
         native_api::read_windowed_optimizations(&account_user(target)?)
             .map(|stored| stored.as_deref() == Some("1"))

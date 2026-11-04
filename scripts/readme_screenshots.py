@@ -156,7 +156,11 @@ def capture(exe, workload, output):
         def ready():
             current = controls(fixture.state())
             group = current.get('meter.group.' + first, {})
-            if group.get('instances') != 2 or group.get('measured') != 2 or (group.get('cpu_percent') or 0) <= 0:
+            if (group.get('instances') != 2 or group.get('measured') != 2
+                    or (group.get('cpu_percent') or 0) <= 0
+                    or group.get('cpu_percent_basis') != 'group_cpu_capacity'
+                    or group.get('sample_seconds') is None
+                    or group.get('selected_cpu_count') != len(foreground)):
                 return False
             history = client.tool('read_cpu_history', {'source': 'system', 'cpu': target_cpu, 'limit': 60})
             return sum(row['delivery'] == 'completed' for row in history.get('rows', [])) >= 18

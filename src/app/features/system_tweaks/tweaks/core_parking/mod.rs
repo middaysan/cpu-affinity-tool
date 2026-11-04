@@ -223,11 +223,6 @@ impl ModuleEditor for CoreParking {
             fields.len()
         ))
     }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()> {
-        self.show_tweak_options(ui, config);
-        Ok(false)
-    }
 }
 
 type CardRead = (

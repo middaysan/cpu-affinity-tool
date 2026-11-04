@@ -9,7 +9,21 @@ import time
 import uuid
 
 from live_mcp_fixture import Fixture, assert_diagnostic_exe, sha256
-from live_mcp_scenarios import configuration, connect, execution, history, telemetry, upgrade
+from live_mcp_scenarios import configuration, connect, execution, history, telemetry, upgrade, steam_selection, correction_denial, installed_read_only
+
+
+def owned_workload_paths(root, stamp, *roles):
+    return tuple(root / ('owned-' + role + '-' + stamp + '.exe') for role in roles)
+
+
+def retire_fixture(fixture, fixtures, failures):
+    try:
+        fixture.cleanup()
+    except Exception as error:
+        failures.append({'fixture': fixture.root.name, 'failure_type': type(error).__name__,
+                         'codes': getattr(error, 'codes', ['unclassified_cleanup_failure'])})
+        raise
+    fixtures.remove(fixture)
 
 
 def main():
@@ -19,12 +33,13 @@ def main():
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--interactive-launch", action="store_true", help="Also require a real interactive Explorer broker for ordinary managed launch")
     parser.add_argument("--capture-readme", action="store_true", help="Capture the fixed README scenes instead of the acceptance pack")
+    parser.add_argument('--read-only-installed-aumid', help='Separately inspect one real installed app with enforcement always Off')
     args = parser.parse_args()
     if os.name != "nt":
         parser.error("These scenarios require a Windows desktop")
     exe, workload, root = args.exe.resolve(strict=True), args.workload.resolve(strict=True), args.output.resolve()
     if args.capture_readme:
-        if args.interactive_launch:
+        if args.interactive_launch or args.read_only_installed_aumid:
             parser.error('README capture and interactive acceptance are separate modes')
         from readme_screenshots import capture
         capture(exe, workload, root)
@@ -34,6 +49,7 @@ def main():
     report = {"artifact_sha256": sha256(exe), "artifact_kind": "diagnostic-dev",
               "shipping_certified": False, "cases": [], "cleanup": "pending"}
     fixtures = []
+    failures = []
 
     def save():
         (root / "result.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -69,7 +85,7 @@ def main():
         case("R1-diagnostic-start", start_case)
         report["app_version"] = client.tool("get_capabilities")["app_version"]
         stamp = uuid.uuid4().hex[:10]
-        primary, helper = root / ("owned-main-" + stamp + ".exe"), root / ("owned-helper-" + stamp + ".exe")
+        primary, helper = owned_workload_paths(root, stamp, 'main', 'helper')
         shutil.copy2(workload, primary)
         shutil.copy2(workload, helper)
         ids = case("C1-configuration-receipts-restart", lambda: configuration(fixture, client, primary, helper))
@@ -84,7 +100,7 @@ def main():
         case("T1-extra-shared-cpu-ram", lambda: telemetry(fixture, client, primary, helper, group, first, rule, cpu))
         case("T2-history-csv-off", lambda: history(fixture, client, cpu, helper))
         old = json.loads(fixture.state_path.read_bytes())
-        fixture.close()
+        retire_fixture(fixture, fixtures, failures)
         for theme, index in [("dark", 2), ("light", 1)]:
             state = dict(old, version=13, theme_index=index, cpu_load_monitoring_enabled=False)
             state.pop("process_control", None)  # This metadata did not exist in schema 13.
@@ -92,17 +108,39 @@ def main():
             fixtures.append(migration)
             migration.start()
             case("U1-upgrade-retry-" + theme, lambda: upgrade(migration))
+            retire_fixture(migration, fixtures, failures)
+        steam_fixture = Fixture(exe, root / 'steam-selection')
+        fixtures.append(steam_fixture)
+        steam_fixture.start()
+        steam_client = connect(steam_fixture)
+        steam_workload = steam_fixture.root / 'owned-steam-game.exe'
+        shutil.copy2(workload, steam_workload)
+        case('S1-steam-warning-selection', lambda: steam_selection(steam_fixture, steam_client, steam_workload))
+        retire_fixture(steam_fixture, fixtures, failures)
+        access_fixture = Fixture(exe, root / 'access-denial')
+        fixtures.append(access_fixture)
+        access_fixture.start()
+        access_client = connect(access_fixture)
+        denied_main, denied_helper = owned_workload_paths(access_fixture.root, stamp, 'denied', 'readable')
+        shutil.copy2(workload, denied_main)
+        shutil.copy2(workload, denied_helper)
+        case('D1-denied-correction-retry-telemetry', lambda: correction_denial(access_fixture, access_client, denied_main, denied_helper))
+        if args.read_only_installed_aumid:
+            installed_fixture = Fixture(exe, root / 'installed-read-only')
+            fixtures.append(installed_fixture)
+            installed_fixture.start()
+            installed_client = connect(installed_fixture)
+            case('D2-installed-read-only-session-membership', lambda: installed_read_only(installed_fixture, installed_client, args.read_only_installed_aumid))
         report["status"] = "pass"
     except Exception:
         report["status"] = "fail"
         raise
     finally:
-        failures = []
-        for fixture in reversed(fixtures):
+        for fixture in reversed(fixtures[:]):
             try:
-                fixture.cleanup()
-            except Exception as error:
-                failures.append(type(error).__name__)
+                retire_fixture(fixture, fixtures, failures)
+            except Exception:
+                pass  # The first failure stays recorded even if a later cleanup retry succeeds.
         report["cleanup"] = "fail" if failures else "pass"
         report["cleanup_failures"] = failures
         if failures:

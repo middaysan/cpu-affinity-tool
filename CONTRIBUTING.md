@@ -2,7 +2,7 @@
 
 Thanks for your interest in improving CPU Affinity Tool.
 
-Windows is the primary stable release platform. Linux has a separate x86_64 glibc desktop beta, with CI build/test coverage and manual X11/Wayland smoke checks. CPU recording, System Tweaks and production MCP remain Windows-only.
+Windows is the current development, support and validation target. Linux source is retained, but Linux CI, prereleases and local support/validation are paused until Windows work is complete and Linux is explicitly resumed. CPU recording, System Tweaks and production MCP remain Windows-only.
 
 ## Build basics
 
@@ -18,14 +18,14 @@ For a Windows development session:
 cargo run --features windows --bin cpu-affinity-tool
 ```
 
-For the Linux desktop beta:
+Archived Linux build commands (reference for later resumption; not current validation):
 
 ```sh
 cargo run --features linux --bin cpu-affinity-tool-linux
 cargo build --release --features linux --bin cpu-affinity-tool-linux
 ```
 
-Debian/Ubuntu-like systems may need `libclang-dev libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev`. Linux CI and beta prerelease builds use pinned Ubuntu 24.04 runners. Tray, taskbar and focus behavior does not have full Windows parity.
+Debian/Ubuntu-like systems may need `libclang-dev libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev`. The retained Linux CI and beta prerelease jobs are disabled. Tray, taskbar and focus behavior does not have full Windows parity.
 
 ## Validation
 
@@ -46,7 +46,7 @@ pwsh -NoProfile -File scripts/test-windows-pdb-verifier.ps1 -ExePath target/rele
 pwsh -NoProfile -File scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe
 ```
 
-On Linux:
+Archived Linux validation commands (do not run while support is paused):
 
 ```sh
 cargo clippy --features linux --bin cpu-affinity-tool-linux -- -D warnings
@@ -54,7 +54,7 @@ cargo test --features linux --bin cpu-affinity-tool-linux
 cargo build --release --features linux --bin cpu-affinity-tool-linux
 ```
 
-The [release checklist](docs/release-checklist.md) adds native crash/recovery probes, dependency audits, vendor regressions and manual Windows smoke. The [Linux beta checklist](docs/linux-beta-release-checklist.md) covers its separate prerelease path. See [release process](docs/release-process.md) for version, tag and artifact requirements.
+The [release checklist](docs/release-checklist.md) adds native crash/recovery probes, dependency audits, vendor regressions and manual Windows smoke. The [Linux beta checklist](docs/linux-beta-release-checklist.md) is retained for resuming the currently paused prerelease path. See [release process](docs/release-process.md) for version, tag and artifact requirements.
 
 See [testing](docs/testing.md) for comparable test-build measurements and the
 synthetic built-app MCP suite. Live scenarios supplement the deterministic

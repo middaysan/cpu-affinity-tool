@@ -29,6 +29,32 @@ fn debug_disabled_acknowledgement_requires_the_worker_release_revision() {
 use crate::app::shared::ids::{GroupId, RuleId};
 
 #[test]
+fn s135_saved_mask_edits_change_the_sampling_configuration() {
+    let mut state = AppStateStorage::test_fixture(|s| {
+        s.groups = vec![crate::app::models::CoreGroup {
+            name: "Mask test".into(),
+            cores: vec![0, 1],
+            programs: vec![],
+            is_hidden: false,
+            run_all_button: false,
+        }]
+    });
+    state.rule_identities = Some(
+        crate::app::features::rules::RulesContext::from_storage(&state).to_persisted_identities(),
+    );
+    let source = Arc::new(RwLock::new(state));
+    let mut targets = Vec::new();
+    let mut masks = HashMap::new();
+    assert!(saved_targets(&source, &mut targets, &mut masks).unwrap());
+    assert!(!saved_targets(&source, &mut targets, &mut masks).unwrap());
+    source.write().unwrap().groups[0].cores = vec![1];
+    assert!(
+        saved_targets(&source, &mut targets, &mut masks).unwrap(),
+        "cores-only edits must invalidate the saved CPU configuration"
+    );
+}
+
+#[test]
 fn transient_membership_race_does_not_erase_the_next_valid_cpu_target_set() {
     let expected = vec![(10, 100), (20, 200), (30, 300)];
     let all = expected.clone();
@@ -639,9 +665,114 @@ fn memory_snapshot_rejects_stale_control_revisions_and_monitoring_off() {
         ..Default::default()
     });
     assert!(runtime.snapshot().group_memory.is_some());
-    runtime.configure(false, false);
+    runtime.configure(false);
     assert!(runtime.snapshot().process_memory.is_empty());
     assert!(runtime.snapshot().group_memory.is_none());
+}
+
+#[test]
+fn s143_publication_contention_keeps_only_fresh_matching_cpu_and_ram() {
+    let mut runtime = runtime();
+    runtime.configure(true);
+    let revision = runtime.control.0.lock().unwrap().revision;
+    let rule = target();
+    let usage = super::super::memory::MemoryUsage {
+        bytes: Some(64 * 1024 * 1024),
+        measured: 1,
+        instances: 1,
+    };
+    let measured = Arc::new(Snapshot {
+        revision,
+        cpus: vec![Some(25.0)],
+        process_memory: HashMap::from([(rule.clone(), usage)]),
+        group_memory: Some(HashMap::from([(rule.group.clone(), usage)])),
+        ..Default::default()
+    });
+    *runtime.published.write().unwrap() = measured.clone();
+    assert!(Arc::ptr_eq(&runtime.snapshot(), &measured));
+    {
+        let _busy = runtime.published.write().unwrap();
+        let retained = runtime.snapshot();
+        assert!(
+            Arc::ptr_eq(&retained, &measured),
+            "busy publication must not invent an empty measurement"
+        );
+        assert_eq!(retained.process_memory[&rule].bytes, usage.bytes);
+        assert_eq!(
+            retained.at, measured.at,
+            "reuse cannot refresh measurement time"
+        );
+    }
+    *runtime.published.write().unwrap() = Arc::new(Snapshot {
+        revision,
+        at: Instant::now() - Duration::from_secs(5),
+        ..(*measured).clone()
+    });
+    assert!(runtime.snapshot().process_memory.is_empty());
+    {
+        let _busy = runtime.published.write().unwrap();
+        assert!(
+            runtime.snapshot().process_memory.is_empty(),
+            "observed expiry must retire the cached value"
+        );
+    }
+    *runtime.published.write().unwrap() = measured;
+    assert!(runtime.snapshot().process_memory.contains_key(&rule));
+    runtime.configure(false);
+    let _busy = runtime.published.write().unwrap();
+    assert!(
+        runtime.snapshot().process_memory.is_empty(),
+        "Off must invalidate cached measurements immediately"
+    );
+}
+
+#[test]
+fn s143_sampler_waits_for_unchanged_roster_instead_of_losing_measurements() {
+    let (_state, apps) = crate::app::features::execution::known_tracking_fixture();
+    let running = Arc::new(TokioRwLock::new(apps));
+    let original = tracked_instances(&running).unwrap();
+    let busy = running.try_write().unwrap();
+    let worker_running = running.clone();
+    let (send, receive) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let observed = tracked_instances(&worker_running);
+        let matches = membership_matches(&worker_running, original.generation);
+        send.send((observed, matches)).unwrap();
+    });
+    let early = receive.recv_timeout(Duration::from_millis(30));
+    drop(busy);
+    let waited = early.is_err();
+    let (observed, matches) =
+        early.unwrap_or_else(|_| receive.recv_timeout(Duration::from_secs(2)).unwrap());
+    worker.join().unwrap();
+    assert!(
+        waited,
+        "a busy writer is not evidence of invalid membership"
+    );
+    let observed = observed.unwrap();
+    assert_eq!(observed.generation, original.generation);
+    assert_eq!(observed.targets, original.targets);
+    assert!(matches);
+    {
+        let mut current = running.try_write().unwrap();
+        current.mutate_membership(|apps| {
+            let app = apps.apps.values_mut().next().unwrap();
+            app.pids.push(999);
+            app.pid_instance_tokens.insert(999, 999);
+        });
+    }
+    let saved = original.targets.keys().cloned().collect::<Vec<_>>();
+    let admitted = refresh_tracking(&running, Some(&original), &saved)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        admitted.targets,
+        tracked_instances(&running).unwrap().targets,
+        "the next interval must admit the refreshed roster, not the native-read roster"
+    );
+    assert!(
+        normalized_instances(admitted.targets.values().flatten().copied()).contains(&(999, 999))
+    );
 }
 #[test]
 fn graph_contributors_follow_exact_hover_cpu_and_never_fall_back_to_live_rows() {
@@ -886,6 +1017,7 @@ fn native_continuous_history_cost_and_lifecycle() {
                 rule_id: rule.clone(),
                 created_at: SystemTime::now(),
                 settings_matched: true,
+                settings_access_limited: false,
             },
         );
     }
@@ -932,7 +1064,7 @@ fn native_continuous_history_cost_and_lifecycle() {
         )
     }
     let baseline = measure(10);
-    runtime.configure(true, false);
+    runtime.configure(true);
     std::thread::sleep(Duration::from_secs(5));
     let before = runtime.snapshot();
     assert!(before.error.is_none(), "{:?}", before.error);
@@ -1076,7 +1208,7 @@ fn native_continuous_history_cost_and_lifecycle() {
     );
     let recorded_samples = runtime.series(Some(&first), 0).points.len();
     runtime.close();
-    runtime.configure(true, false);
+    runtime.configure(true);
     let original = runtime.snapshot().history_bytes;
     {
         let mut source = source.write().unwrap();
@@ -1117,7 +1249,7 @@ fn native_continuous_history_cost_and_lifecycle() {
         runtime.series(Some(&first), 0).points.len() >= 20,
         "other histories survive app changes"
     );
-    runtime.configure(false, false);
+    runtime.configure(false);
     let until = Instant::now() + Duration::from_secs(8);
     while runtime.history.read().unwrap().reserved_bytes() != 0 && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(50));
@@ -1134,7 +1266,7 @@ fn native_continuous_history_cost_and_lifecycle() {
         source.groups.clear();
         source.rule_identities.as_mut().unwrap().groups.clear();
     }
-    runtime.configure(true, false);
+    runtime.configure(true);
     let until = Instant::now() + Duration::from_secs(8);
     let mut ready = false;
     while Instant::now() < until {
@@ -1168,7 +1300,7 @@ fn native_continuous_history_cost_and_lifecycle() {
         "CONTRIBUTORS empty_saved_set=true retained={}",
         empty.contributor_identities
     );
-    runtime.configure(false, false);
+    runtime.configure(false);
     runtime.shutdown();
     let until = Instant::now() + Duration::from_secs(8);
     while !runtime.is_stopped() && Instant::now() < until {
@@ -1203,20 +1335,20 @@ fn native_continuous_history_cost_and_lifecycle() {
 #[test]
 fn closing_and_tray_leave_continuous_collection_enabled_without_revision_change() {
     let mut runtime = runtime();
-    runtime.configure(true, true);
+    runtime.configure(true);
     let revision = runtime.control.0.lock().unwrap().revision;
     runtime.open(GraphTarget::Process {
         target: target(),
         name: "Game".into(),
     });
-    runtime.configure(true, true);
-    runtime.configure(true, false);
+    runtime.configure(true);
+    runtime.configure(true);
     runtime.close();
     assert_eq!(runtime.control.0.lock().unwrap().revision, revision);
     assert!(runtime.control.0.lock().unwrap().enabled);
     runtime.set_history_seconds(30);
     assert_eq!(runtime.control.0.lock().unwrap().revision, revision);
-    runtime.configure(false, true);
+    runtime.configure(false);
     assert!(!runtime.control.0.lock().unwrap().enabled);
     assert!(runtime.graph.is_none());
     assert!(runtime.worker.is_none());
@@ -1246,7 +1378,7 @@ fn reopening_graph_reads_preexisting_history_and_reuses_series_capacity() {
         Some(25.0)
     );
     runtime.close();
-    runtime.configure(true, false);
+    runtime.configure(true);
     assert_eq!(
         runtime.series(Some(&target()), 0).points[0].value,
         Some(25.0)
@@ -1306,7 +1438,7 @@ fn estimate_changes_with_app_count_retention_and_current_processes() {
 #[test]
 fn stale_revision_and_stale_time_are_never_displayed() {
     let mut runtime = runtime();
-    runtime.configure(true, true);
+    runtime.configure(true);
     let old = Snapshot {
         revision: runtime.control.0.lock().unwrap().revision,
         at: Instant::now() - Duration::from_secs(5),
@@ -1341,7 +1473,7 @@ fn s107_catalog_members_feed_app_group_and_system_cpu_and_unique_ram() {
     let (_state, apps) = crate::app::features::execution::known_tracking_fixture();
     let running = Arc::new(TokioRwLock::new(apps));
     let tracking = tracked_instances(&running).unwrap();
-    let targets = tracking.targets;
+    let mut targets = tracking.targets;
     assert_eq!(targets.len(), 2);
     assert!(targets.values().all(|members| members == &[(1, 1), (2, 2)]));
     let mut reads = 0;
@@ -1365,6 +1497,11 @@ fn s107_catalog_members_feed_app_group_and_system_cpu_and_unique_ram() {
         .values()
         .all(|usage| usage.bytes == Some(3 * 1024 * 1024)));
     assert_eq!(ram_reads, 2);
+    let peer = RuleTarget {
+        group: GroupId("isolated-peer".into()),
+        rule: RuleId("peer".into()),
+    };
+    targets.insert(peer.clone(), vec![(1, 1), (2, 2)]);
     let all = normalized_instances(targets.values().flatten().copied());
     let names: HashMap<_, _> = all
         .iter()
@@ -1462,4 +1599,86 @@ fn s107_catalog_members_feed_app_group_and_system_cpu_and_unique_ram() {
             Some(30.0)
         );
     }
+    let mut keys = targets
+        .keys()
+        .filter(|t| **t != peer)
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort_by(|a, b| (&a.group.0, &a.rule.0).cmp(&(&b.group.0, &b.rule.0)));
+    let stable = &keys[0];
+    let changed = &keys[1];
+    let mut next_targets = targets.clone();
+    next_targets.get_mut(changed).unwrap().push((999, 999));
+    let masks = targets
+        .keys()
+        .map(|t| (t.group.clone(), vec![0, 1]))
+        .collect();
+    let mut list = super::super::process_list::ProcessList::from_tracking(
+        &next_targets,
+        &HashMap::new(),
+        &names,
+    );
+    list.record_cores(2, events.samples());
+    list.record_capacity(&masks, events.samples(), events.capacity_time(time.seconds));
+    events.qualify_capacity(&mut list, &next_targets);
+    assert_eq!(list.rule_capacity_total(stable, &[0, 1]).value, Some(30.0));
+    assert_eq!(list.rule_capacity_total(changed, &[0, 1]).value, None);
+    assert_eq!(
+        list.group_capacity_total(&peer.group, &[0, 1]).value,
+        Some(30.0)
+    );
+    assert_eq!(
+        list.group_capacity_total(&changed.group, &[0, 1]).value,
+        None
+    );
+    let unknown = list.rule_capacity_total(changed, &[0, 1]);
+    assert_eq!((unknown.measured, unknown.instances), (0, 3));
+    assert!(unknown.partial());
+    let unknown_group = list.group_capacity_total(&changed.group, &[0, 1]);
+    assert_eq!((unknown_group.measured, unknown_group.instances), (0, 3));
+    assert!(
+        list.rows
+            .iter()
+            .filter(|row| row.target.as_ref() == Some(changed))
+            .all(|row| list.displayed_total(row, true).is_none()),
+        "shared PID evidence must not leak from an eligible rule into a changed rule's table"
+    );
+    let next_ram = super::super::memory::tracked_memory(&next_targets, |pid, token| {
+        ram.readings.get(&(pid, token)).copied().flatten()
+    });
+    assert_eq!(next_ram.rules[stable].bytes, ram.rules[stable].bytes);
+    assert_eq!(next_ram.groups[&changed.group].measured, 2);
+    assert_eq!(next_ram.groups[&changed.group].instances, 3);
+    // Changed rule claims, but unchanged exact group union: keep group CPU.
+    let mut same_union = targets.clone();
+    same_union.get_mut(changed).unwrap().pop();
+    let mut shared_list = super::super::process_list::ProcessList::from_tracking(
+        &same_union,
+        &HashMap::new(),
+        &names,
+    );
+    shared_list.record_cores(2, events.samples());
+    shared_list.record_capacity(&masks, events.samples(), events.capacity_time(time.seconds));
+    events.qualify_capacity(&mut shared_list, &same_union);
+    assert_eq!(
+        shared_list.rule_capacity_total(changed, &[0, 1]).value,
+        None
+    );
+    assert_eq!(
+        shared_list
+            .group_capacity_total(&stable.group, &[0, 1])
+            .value,
+        Some(30.0)
+    );
+    // A reused PID in the same logical rule must also wait for fresh ownership.
+    next_targets.get_mut(stable).unwrap()[0].1 += 1;
+    list = super::super::process_list::ProcessList::from_tracking(
+        &next_targets,
+        &HashMap::new(),
+        &names,
+    );
+    list.record_cores(2, events.samples());
+    list.record_capacity(&masks, events.samples(), events.capacity_time(time.seconds));
+    events.qualify_capacity(&mut list, &next_targets);
+    assert_eq!(list.rule_capacity_total(stable, &[0, 1]).value, None);
 }

@@ -372,13 +372,18 @@ pub(super) fn record_processes(
     ctx: &egui::Context,
     list: &super::process_list::ProcessList,
     order: &[usize],
+    capacity_valid: bool,
 ) {
     let Some((offset, limit)) = debug_mcp::table_page(ctx, "processes") else {
         return;
     };
     let rows = || order.iter().map(|&i| &list.rows[i]);
+    let partial = !list.ready
+        || list.partial
+        || (!list.group && rows().any(|r| list.displayed_partial(r, capacity_valid)));
+    let time = list.displayed_time(capacity_valid);
     debug_mcp::table_capture(
         ctx,
-        json!({"kind":"processes","ready":list.ready,"partial":list.partial,"scope":if list.group{"displayed_cpus"}else{"application"},"cpu_percent_basis":if list.group{"displayed_cpu_capacity"}else{"whole_machine"},"total":rows().count(),"offset":offset,"rows":rows().skip(offset).take(limit).map(|r|json!({"name":r.name(),"pid":r.pid,"instance":r.token,"cpu_percent":r.total,"partial":r.partial,"cpus":r.cores,"known_cpus":r.known_cores,"cpu_count":r.cpu_count})).collect::<Vec<_>>()}),
+        json!({"kind":"processes","ready":list.ready,"partial":partial,"scope":if list.group{"displayed_cpus"}else{"application_group_cpus"},"cpu_percent_basis":if list.group{"displayed_cpu_capacity"}else{"group_cpu_capacity"},"total":rows().count(),"offset":offset,"sample_seconds":time.map(|t|t.seconds),"rows":rows().skip(offset).take(limit).map(|r|json!({"name":r.name(),"pid":r.pid,"instance":r.token,"cpu_percent":list.displayed_total(r,capacity_valid),"partial":list.displayed_partial(r,capacity_valid),"cpus":r.cores,"known_cpus":r.known_cores,"cpu_count":r.cpu_count})).collect::<Vec<_>>()}),
     );
 }

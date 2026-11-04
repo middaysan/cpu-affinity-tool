@@ -385,7 +385,11 @@ pub fn launch(_app_id: u32) -> Result<(), String> {
 pub use crate::windows::steam::{game_processes, launch, process_choices};
 
 #[cfg(target_os = "windows")]
-pub use crate::windows::steam::game_directory;
+pub use crate::windows::steam::{game_directory, game_directory_result};
+#[cfg(not(target_os = "windows"))]
+pub fn game_directory_result(_app_id: u32) -> Result<PathBuf, String> {
+    Err("Steam game detection is available on Windows only.".into())
+}
 #[cfg(not(target_os = "windows"))]
 pub fn game_directory(_app_id: u32) -> Option<PathBuf> {
     None
@@ -564,6 +568,17 @@ mod tests {
             resolve_directory(&root, 570).unwrap(),
             other.join("steamapps/common/Valid").canonicalize().unwrap(),
             "Stale invalid first manifest must not hide a valid library"
+        );
+        std::fs::write(
+            root.join("steamapps/appmanifest_570.acf"),
+            r#""AppState" { "appid" "570" "StateFlags" "4" "installdir" "Game" }"#,
+        )
+        .unwrap();
+        assert!(
+            resolve_directory(&root, 570)
+                .unwrap_err()
+                .contains("multiple Steam libraries"),
+            "Two valid installations must retain an actionable ambiguity, not choose an arbitrary root"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

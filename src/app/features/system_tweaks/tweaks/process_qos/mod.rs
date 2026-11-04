@@ -35,14 +35,6 @@ impl Policy {
             },
         }
     }
-    #[cfg(test)]
-    fn label(self) -> &'static str {
-        match self {
-            Self::SystemManaged => "Use Windows default",
-            Self::EcoQos => "Prefer power saving",
-            Self::DisableThrottling => "Turn off game power saving",
-        }
-    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,28 +57,6 @@ impl ModuleEditor for ProcessQos {
     }
     fn accepts_config(&self, config: &ModuleEnvelope) -> bool {
         decode::<Config>(ID, config).is_ok()
-    }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()> {
-        let mut value: Config = decode(ID, config).map_err(|_| ())?;
-        let before = value.policy;
-        eframe::egui::ComboBox::from_id_salt(ID)
-            .selected_text(value.policy.label())
-            .show_ui(ui, |ui| {
-                for policy in [
-                    Policy::SystemManaged,
-                    Policy::DisableThrottling,
-                    Policy::EcoQos,
-                ] {
-                    ui.selectable_value(&mut value.policy, policy, policy.label());
-                }
-            });
-        ui.small("Applies to games linked to this profile. Power saving may reduce performance; compare results before keeping a change.");
-        let changed = before != value.policy;
-        if changed {
-            *config = envelope(ID, &value);
-        }
-        Ok(changed)
     }
 }
 impl Module for ProcessQos {

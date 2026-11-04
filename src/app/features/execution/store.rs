@@ -11,6 +11,7 @@ pub(crate) type RunningAppStatusCache = Arc<RwLock<HashMap<AppRuntimeKey, AppSta
 pub struct ExecutionStore {
     control: Arc<super::control::Authority>,
     running_apps: Arc<TokioRwLock<RunningApps>>,
+    corrections: Arc<super::correction::CorrectionState>,
     installed_package_tracking: Arc<RwLock<InstalledPackageTrackingState>>,
     running_apps_statuses: RunningAppStatusCache,
     status_read_pending: bool,
@@ -80,6 +81,7 @@ impl ExecutionStore {
         let scheduling = running_apps.scheduling.clone();
         Self {
             control: running_apps.control.clone(),
+            corrections: running_apps.correction_denials.clone(),
             running_apps: Arc::new(TokioRwLock::new(running_apps)),
             installed_package_tracking: Arc::new(RwLock::new(
                 InstalledPackageTrackingState::default(),
@@ -190,7 +192,9 @@ impl ExecutionStore {
     pub fn get_app_status_sync(&mut self, app_key: &AppRuntimeKey) -> AppStatus {
         if let Ok(apps) = self.running_apps.try_read() {
             let canonical_status = if let Some((_, app)) = self.control.member(&apps, app_key) {
-                if app.settings_matched {
+                if app.settings_access_limited {
+                    AppStatus::LimitedAccess
+                } else if app.settings_matched {
                     AppStatus::Running
                 } else {
                     AppStatus::SettingsMismatch
@@ -293,6 +297,21 @@ impl ExecutionStore {
         self.set_running_app_settings_state(app_key, RunningAppSettingsState::Matched)
     }
 
+    pub(crate) fn retry_correction(&self, app_key: &AppRuntimeKey) -> bool {
+        let Ok(apps) = self.running_apps.try_write() else {
+            return false;
+        };
+        let Some((_, app)) = self.control.member(&apps, app_key) else {
+            return false;
+        };
+        let instances: Vec<_> = app
+            .pid_instance_tokens
+            .iter()
+            .map(|(&pid, &token)| (pid, token))
+            .collect();
+        apps.correction_denials.reset(instances).is_ok()
+    }
+
     pub(crate) fn mark_running_app_settings_mismatched(
         &mut self,
         app_key: &AppRuntimeKey,
@@ -349,7 +368,22 @@ impl ExecutionStore {
                     .map(|(key, _)| key.clone());
                 match key.as_ref().and_then(|key| apps.apps.get_mut(key)) {
                     Some(app) => {
+                        if settings_matched
+                            && self
+                                .corrections
+                                .reset(
+                                    app.pid_instance_tokens
+                                        .iter()
+                                        .map(|(&pid, &token)| (pid, token)),
+                                )
+                                .is_err()
+                        {
+                            return RunningAppSettingsUpdate::Busy;
+                        }
                         app.settings_matched = settings_matched;
+                        if settings_matched {
+                            app.settings_access_limited = false;
+                        }
                         RunningAppSettingsUpdate::Updated
                     }
                     None => RunningAppSettingsUpdate::NotFound,
@@ -398,6 +432,10 @@ impl RuntimeRegistry {
         &self,
     ) -> Arc<crate::app::features::system_tweaks::tweaks::scheduling::SchedulingHandoff> {
         self.store.scheduling.clone()
+    }
+
+    pub(crate) fn correction_handle(&self) -> Arc<super::correction::CorrectionState> {
+        self.store.corrections.clone()
     }
 
     pub(crate) fn set_wake(&mut self, wake: MonitorWake) {
@@ -488,12 +526,15 @@ impl RuntimeRegistry {
     ) -> RunningAppInstancesLookup {
         self.store.lookup_focus_instances(key, steam)
     }
-    pub(crate) fn steam_needs_selection(&self, rule: &RuleId) -> bool {
+    pub(crate) fn steam_detection_issue(
+        &self,
+        rule: &RuleId,
+    ) -> Option<super::steam_detection::SteamDetectionIssue> {
         self.store
             .running_apps
             .try_read()
             .ok()
-            .is_some_and(|a| a.steam_unresolved.contains(rule))
+            .and_then(|a| a.steam_unresolved.get(rule).cloned())
     }
     pub(crate) fn lookup_running_app_instances(
         &self,

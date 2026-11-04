@@ -59,6 +59,7 @@ pub(crate) struct CpuLoadRuntime {
     control: Arc<(Mutex<Control>, Condvar)>,
     pub(super) published: Arc<RwLock<Arc<Snapshot>>>,
     pub(super) history: Arc<RwLock<HistoryStore>>,
+    last_snapshot: Mutex<Option<Arc<Snapshot>>>,
     current_frame: Option<(u64, Arc<Snapshot>)>,
     series_cache: Series,
     series_key: Option<(Option<RuleTarget>, usize)>,
@@ -97,6 +98,7 @@ impl CpuLoadRuntime {
             control: Default::default(),
             published: Arc::new(RwLock::new(Arc::new(Snapshot::default()))),
             history: Default::default(),
+            last_snapshot: Default::default(),
             current_frame: None,
             series_cache: Series::default(),
             series_key: None,
@@ -163,14 +165,16 @@ impl CpuLoadRuntime {
         self.show_processes = false;
         self.inspection = Default::default();
     }
-    pub fn configure(&mut self, enabled: bool, _visible: bool) {
+    pub fn configure(&mut self, enabled: bool) {
         if !enabled {
             self.current_frame = None;
+            *self.last_snapshot.lock().unwrap() = None;
             self.close();
         }
         if let Ok(mut control) = self.control.0.lock() {
             if control.enabled != enabled {
                 self.current_frame = None;
+                *self.last_snapshot.lock().unwrap() = None;
                 control.enabled = enabled;
                 control.revision = control.revision.saturating_add(1);
                 self.control.1.notify_one();
@@ -222,13 +226,23 @@ impl CpuLoadRuntime {
             .lock()
             .map(|c| (c.revision, c.enabled))
             .unwrap_or((u64::MAX, true));
-        self.published
-            .try_read()
-            .ok()
-            .filter(|s| {
-                s.revision == revision && (!enabled || s.at.elapsed() < Duration::from_secs(4))
-            })
-            .map(|s| s.clone())
+        let valid = |s: &Arc<Snapshot>| {
+            s.revision == revision && (!enabled || s.at.elapsed() < Duration::from_secs(4))
+        };
+        // Only the UI owns this small Arc cache. A busy publication cannot
+        // refresh its timestamp or hide an already observed invalid snapshot.
+        let mut cached = self.last_snapshot.lock().unwrap();
+        match self.published.try_read() {
+            Ok(snapshot) => *cached = Some(snapshot.clone()).filter(valid),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if cached.as_ref().is_some_and(|snapshot| !valid(snapshot)) {
+                    *cached = None;
+                }
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => *cached = None,
+        }
+        cached
+            .clone()
             .unwrap_or_else(|| Arc::new(Snapshot::default()))
     }
     /// Keep current group and app summaries coherent through one GUI frame.
@@ -551,9 +565,9 @@ fn collection_reset_required(current: &Control, previous: &Control) -> bool {
     !current.enabled || current.revision != previous.revision
 }
 fn tracked_instances(running: &Arc<TokioRwLock<RunningApps>>) -> Result<TrackingSnapshot, String> {
-    let running = running
-        .try_read()
-        .map_err(|_| "Waiting for tracked processes")?;
+    // Dedicated sampler thread only: wait for the writer, never turn ordinary
+    // lock contention into missing process measurements. No native work here.
+    let running = running.blocking_read();
     let generation = running
         .membership_generation()
         .ok_or("Tracked process membership is uncertain")?;
@@ -608,9 +622,20 @@ fn inspect_process_identity(pid: u32, token: u64) -> Option<Arc<os_api::cpu_load
     }))
 }
 fn membership_matches(running: &Arc<TokioRwLock<RunningApps>>, generation: u64) -> bool {
-    running
-        .try_read()
-        .is_ok_and(|current| current.membership_generation() == Some(generation))
+    running.blocking_read().membership_generation() == Some(generation)
+}
+fn refresh_tracking(
+    running: &Arc<TokioRwLock<RunningApps>>,
+    tracked: Option<&TrackingSnapshot>,
+    saved: &[RuleTarget],
+) -> Result<Option<TrackingSnapshot>, String> {
+    if tracked.is_none_or(|t| membership_matches(running, t.generation)) {
+        return Ok(None);
+    }
+    tracked_instances(running).map(|mut current| {
+        current.targets.retain(|target, _| saved.contains(target));
+        Some(current)
+    })
 }
 fn history_tick_targets<'a>(
     all: &'a [(u32, u64)],
@@ -632,10 +657,9 @@ fn history_tick_targets<'a>(
 fn saved_targets(
     source: &Arc<RwLock<AppStateStorage>>,
     targets: &mut Vec<RuleTarget>,
+    masks: &mut HashMap<crate::app::shared::ids::GroupId, Vec<usize>>,
 ) -> Result<bool, String> {
-    let state = source
-        .try_read()
-        .map_err(|_| "Waiting for saved CPU rules")?;
+    let state = source.read().map_err(|_| "Saved CPU rules lock failed")?;
     let ids = state
         .rule_identities
         .as_ref()
@@ -648,9 +672,16 @@ fn saved_targets(
                 .map(move |r| (&g.id, r))
         })
     };
-    if iter().eq(targets.iter().map(|t| (&t.group, &t.rule))) {
+    let observed_masks = ids
+        .groups
+        .iter()
+        .zip(&state.groups)
+        .map(|(g, saved)| (g.id.clone(), super::capacity::normalized_mask(&saved.cores)))
+        .collect();
+    if iter().eq(targets.iter().map(|t| (&t.group, &t.rule))) && *masks == observed_masks {
         return Ok(false);
     }
+    *masks = observed_masks;
     *targets = iter()
         .map(|(g, r)| RuleTarget {
             group: g.clone(),
@@ -752,6 +783,7 @@ fn run(
     let mut pid_totals: HashMap<(u32, u64), Option<f32>> = HashMap::new();
     let mut tracking: Option<TrackingSnapshot> = None;
     let mut targets = Vec::new();
+    let mut masks = HashMap::new();
     let mut run_targets = HashMap::new();
     let mut all = Vec::new();
     let mut history_fallback = Vec::new();
@@ -791,6 +823,7 @@ fn run(
             tracking = None;
             all.clear();
             targets.clear();
+            masks.clear();
             run_targets.clear();
             event_history = EventHistory::default();
             identities.clear();
@@ -815,7 +848,8 @@ fn run(
             .unwrap_or_else(|| run_targets.clone());
         let runs_changed = observed_runs != run_targets;
         run_targets = observed_runs;
-        let configuration_changed = match saved_targets(&source, &mut targets) {
+        let mut masks_current = true;
+        let configuration_changed = match saved_targets(&source, &mut targets, &mut masks) {
             Ok(changed) => {
                 changed
                     || count != configured_cpus
@@ -823,6 +857,7 @@ fn run(
                     || !previous.enabled
             }
             Err(error) => {
+                masks_current = false;
                 snapshot.error = Some(error);
                 false
             }
@@ -916,6 +951,7 @@ fn run(
             previous = current;
             continue;
         }
+        let sampled_at = Instant::now();
         snapshot.error = None;
         crate::render_profile_scope!(CpuSampling);
         snapshot.detail_error = None;
@@ -944,19 +980,23 @@ fn run(
             && tracking
                 .as_ref()
                 .is_some_and(|t| membership_matches(&running, t.generation));
-        if !unchanged {
+        let tracking_valid = if !unchanged {
             match tracked_instances(&running) {
                 Ok(mut current) => {
                     // Deleted saved rules must release their native samplers,
                     // even before execution rediscovery publishes membership.
                     current.targets.retain(|target, _| targets.contains(target));
                     tracking = Some(current);
+                    true
                 }
                 Err(error) => {
                     snapshot.detail_error = Some(error);
+                    false
                 }
             }
-        }
+        } else {
+            true
+        };
         if configuration_changed || !unchanged || runs_changed {
             all.clear();
             if let Some(tracked) = &tracking {
@@ -987,9 +1027,8 @@ fn run(
         snapshot.process_memory.clear();
         snapshot.group_memory = None;
         pid_totals.clear();
-        let tracked = tracking
-            .as_ref()
-            .filter(|t| membership_matches(&running, t.generation));
+        let tracked = tracking.as_ref().filter(|_| tracking_valid);
+        let mut memory_readings = HashMap::new();
         {
             crate::render_profile_scope!(ProcessTimes);
             for &(pid, token) in &all {
@@ -1023,26 +1062,15 @@ fn run(
                 });
                 snapshot.process_memory = memory.rules;
                 snapshot.group_memory = Some(memory.groups);
+                memory_readings = memory.readings;
             }
             snapshot.run_totals = run_targets
                 .iter()
                 .map(|(id, instance)| (id.clone(), pid_totals.get(instance).copied().flatten()))
                 .collect();
         }
-        let mut live_processes = tracking
-            .as_ref()
-            .map(|tracked| {
-                super::process_list::ProcessList::from_tracking(
-                    &tracked.targets,
-                    &pid_totals,
-                    &identities,
-                )
-            })
-            .unwrap_or_default();
-        if tracked.is_none() {
-            live_processes.invalidate();
-        }
         let mut trace_error = None;
+        let mut boundary_refresh = Ok(None);
         if trace.is_none() && Instant::now() >= retry {
             match DetailedTrace::start_history() {
                 Ok(active) => trace = Some(active),
@@ -1079,23 +1107,39 @@ fn run(
                         }
                     }
                 }
-                let valid =
-                    tracked.filter(|tracked| membership_matches(&running, tracked.generation));
-                let tick = {
-                    crate::render_profile_scope!(TraceTick);
-                    active.history_tick(history_tick_targets(
+                // One fresh roster supplies both native targets and ownership
+                // for the interval beginning here; closed intervals keep theirs.
+                boundary_refresh = refresh_tracking(&running, tracked, &targets);
+                let boundary_tracked = match &boundary_refresh {
+                    Ok(Some(current)) => Some(current),
+                    Ok(None) => tracked,
+                    Err(_) => None,
+                };
+                let tick_targets = if let Ok(Some(current)) = &boundary_refresh {
+                    history_fallback.clear();
+                    history_fallback.extend(current.targets.values().flatten().copied());
+                    history_fallback.extend(run_targets.values().copied());
+                    history_fallback.sort_unstable();
+                    history_fallback.dedup();
+                    history_fallback.as_slice()
+                } else {
+                    history_tick_targets(
                         &all,
-                        valid.is_some(),
+                        boundary_tracked.is_some(),
                         &run_targets,
                         &mut history_fallback,
-                    ))
+                    )
+                };
+                let tick = {
+                    crate::render_profile_scope!(TraceTick);
+                    active.history_tick(tick_targets)
                 };
                 match tick {
                     Ok(tick) => {
                         if let Ok(mut store) = history.write() {
                             let input = OwnerInput {
-                                generation: valid.map(|t| t.generation),
-                                targets: valid.map(|t| &t.targets),
+                                generation: boundary_tracked.map(|t| t.generation),
+                                targets: boundary_tracked.map(|t| &t.targets),
                                 names: &identities,
                                 rules: &contributor_rules,
                                 runs: &run_targets,
@@ -1146,8 +1190,52 @@ fn run(
             }
         }
         event_history.publish(&mut snapshot);
+        // Historical ownership stays attached to its original interval. Current
+        // counters use a fresh roster when a real change happened during reads.
+        let boundary_tracked = match &boundary_refresh {
+            Ok(Some(current)) => Some(current),
+            Ok(None) => tracked,
+            Err(_) => None,
+        };
+        let refreshed = refresh_tracking(&running, boundary_tracked, &targets);
+        let current_tracking = match &refreshed {
+            Ok(Some(current)) => Some(current),
+            Ok(None) => boundary_tracked,
+            Err(_) => None,
+        };
+        if let Some(current) =
+            current_tracking.filter(|t| tracked.is_none_or(|old| t.generation != old.generation))
+        {
+            snapshot.processes = process_totals(&current.targets, |pid, token| {
+                pid_totals.get(&(pid, token)).copied().flatten()
+            });
+            let memory = super::memory::tracked_memory(&current.targets, |pid, token| {
+                memory_readings.get(&(pid, token)).copied().flatten()
+            });
+            snapshot.process_memory = memory.rules;
+            snapshot.group_memory = Some(memory.groups);
+        }
+        let mut live_processes = current_tracking
+            .map(|current| {
+                super::process_list::ProcessList::from_tracking(
+                    &current.targets,
+                    &pid_totals,
+                    &identities,
+                )
+            })
+            .unwrap_or_default();
         live_processes.record_cores(count, event_history.samples());
-        if tracked.is_none_or(|tracked| !membership_matches(&running, tracked.generation)) {
+        let capacity_time = masks_current
+            .then(|| {
+                os_api::cpu_load::history_clock()
+                    .ok()
+                    .and_then(|(seconds, _)| event_history.capacity_time(seconds))
+            })
+            .flatten();
+        live_processes.record_capacity(&masks, event_history.samples(), capacity_time);
+        if let Some(current) = current_tracking {
+            event_history.qualify_capacity(&mut live_processes, &current.targets);
+        } else {
             snapshot.processes.clear();
             snapshot.process_memory.clear();
             snapshot.group_memory = None;
@@ -1172,7 +1260,7 @@ fn run(
             snapshot.contributor_identities = store.contributors.metadata_count();
         }
         snapshot.revision = current.revision;
-        snapshot.at = Instant::now();
+        snapshot.at = sampled_at;
         if cleanup_error.is_some() {
             snapshot.error = cleanup_error.clone();
         }

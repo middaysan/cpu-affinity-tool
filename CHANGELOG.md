@@ -6,6 +6,10 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Steam games now show an actionable **Select game** warning when installation metadata is missing or ambiguous, candidates conflict, or the main EXE is listed as a helper. The warning explains the reason and opens the process chooser directly. Undetected launches offer selection after 30 seconds while keeping the existing five-minute initial-settings limit. Choosing the main EXE preserves helper lists.
+
 ## [1.7.2] - 2026-10-28
 
 ### Fixed

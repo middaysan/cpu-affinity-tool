@@ -1,8 +1,10 @@
 #[cfg(all(target_os = "windows", feature = "windows"))]
 pub(crate) mod commands;
+mod group;
 pub(crate) mod known_apps;
 pub(crate) mod process_names;
 mod service;
+pub(crate) use group::{validate_group_values, GroupEdit};
 pub(crate) mod steam_picker;
 
 use crate::app::models::AppStateStorage;
@@ -11,8 +13,8 @@ use crate::app::shared::ids::{GroupId, RuleId};
 use serde::{Deserialize, Serialize};
 
 pub use service::{
-    add_apps_to_group, add_installed_app_to_group, create_group, load_group_for_edit, load_rule,
-    move_group_to_index, move_rule_between_groups_at, set_group_is_hidden, update_group_properties,
+    add_apps_to_group, add_installed_app_to_group, load_group_for_edit, load_rule,
+    move_group_to_index, move_rule_between_groups_at, set_group_is_hidden,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

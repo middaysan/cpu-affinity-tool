@@ -153,6 +153,8 @@ jobs:
         run: ./scripts/assert-windows-release-manifest.ps1 -Path target/release/cpu-affinity-tool.exe
 
   linux-beta-check:
+    # Linux support and validation are paused while Windows work is completed.
+    if: ${{ false }}
     name: Linux Beta Check and Build
     runs-on: ubuntu-24.04
     timeout-minutes: 30

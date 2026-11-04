@@ -106,22 +106,6 @@ impl ModuleEditor for AccessibilityHotkeys {
     fn accepts_config(&self, config: &ModuleEnvelope) -> bool {
         decode::<Config>(ID, config).is_ok()
     }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()> {
-        let mut value: Config = decode(ID, config).map_err(|_| ())?;
-        let before = value.clone();
-        ui.checkbox(&mut value.sticky, "Block Sticky Keys shortcut");
-        ui.checkbox(&mut value.filter, "Block Filter Keys shortcut");
-        ui.checkbox(&mut value.toggle, "Block Toggle Keys shortcut");
-        ui.small(
-            "Already enabled features are skipped. Other accessibility settings stay the same.",
-        );
-        let changed = before != value;
-        if changed {
-            *config = envelope(ID, &value);
-        }
-        Ok(changed)
-    }
 }
 impl Module for AccessibilityHotkeys {
     fn target_has_expired(&self, target: &TargetIdentity) -> Result<bool, ModuleError> {

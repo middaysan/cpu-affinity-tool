@@ -67,38 +67,6 @@ impl ModuleEditor for MouseAcceleration {
     fn accepts_config(&self, config: &ModuleEnvelope) -> bool {
         decode::<Config>(ID, config).is_ok_and(|v| v.valid())
     }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()> {
-        let mut value: Config = decode(ID, config).map_err(|_| ())?;
-        if !value.valid() {
-            return Err(());
-        }
-        let before = value.clone();
-        eframe::egui::ComboBox::from_id_salt(ID)
-            .selected_text(match value.acceleration {
-                0 => "Off · consistent movement",
-                1 => "On · one speed threshold",
-                _ => "On · two speed thresholds",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut value.acceleration, 0, "Off · consistent movement");
-                ui.selectable_value(&mut value.acceleration, 1, "On · one speed threshold");
-                ui.selectable_value(&mut value.acceleration, 2, "On · two speed thresholds");
-            });
-        if value.acceleration != 0 {
-            ui.horizontal(|ui| {
-                ui.label("Speed thresholds");
-                ui.add(eframe::egui::DragValue::new(&mut value.threshold1).range(0..=1024));
-                ui.add(eframe::egui::DragValue::new(&mut value.threshold2).range(0..=1024));
-            });
-        }
-        ui.small("With acceleration on, faster mouse movement moves the pointer farther. Games using raw mouse input may ignore this setting.");
-        let changed = before != value;
-        if changed {
-            *config = envelope(ID, &value);
-        }
-        Ok(changed)
-    }
 }
 impl Module for MouseAcceleration {
     fn target_has_expired(&self, target: &TargetIdentity) -> Result<bool, ModuleError> {

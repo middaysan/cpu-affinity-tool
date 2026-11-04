@@ -5,21 +5,238 @@ import ctypes
 import io
 import json
 import math
+import shutil
 import socket
 import subprocess
 import time
+from contextlib import ExitStack
 
 from live_mcp_client import Client, wait_until
-from live_mcp_native import OwnedProcess, available_cpus, listener_pid, pin_workload
+from live_mcp_native import DeniedScheduling, ScopedDebugPrivilege, OwnedProcess, available_cpus, listener_pid, pin_workload
+
+
+def correction_denial(fixture, client, main, helper):
+    """A denied write pauses after three refusals without losing readable CPU/RAM."""
+    cpus = available_cpus()
+    assert len(cpus) >= 2, 'This case requires two available CPUs'
+    cpu, initial = cpus[-2], cpus[-1]
+    group = client.mutate('create_group', {'name': 'Access test', 'cpus': [cpu]})['group_id']
+    rule = {'name': 'Owned denied app', 'path': str(main), 'args': [],
+            'tracked_process_names': [main.name, helper.name], 'manage_descendants': False,
+            'autorun': False, 'priority': 'Normal'}
+    rule_id = client.mutate('create_rule', {'group_id': group, 'rule': rule})['rule_id']
+    children = []
+    for path in [main, helper]:
+        stop = fixture.root / (path.stem + '.stop')
+        child = subprocess.Popen([str(path), str(stop)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fixture.children.append((child, stop))
+        children.append(child)
+        pin_workload(child, initial)
+    client.mutate('update_preferences', {'preferences': {'cpu_load_monitoring_enabled': True}})
+    status = 'app.status.' + rule_id
+
+    def measured(state):
+        rows = controls(state)
+        values = [rows.get('meter.' + scope, {}) for scope in ['rule.' + rule_id, 'group.' + group]]
+        memory = [rows.get('memory.' + scope, {}) for scope in ['rule.' + rule_id, 'group.' + group]]
+        return (all(v.get('instances') == 2 and v.get('measured') == 2
+                    and v.get('cpu_percent') is not None and v['cpu_percent'] >= 0 for v in values)
+                and values[0]['sample_unix_ms'] == values[1]['sample_unix_ms']
+                and abs(values[0]['cpu_percent'] - values[1]['cpu_percent']) < .001
+                and all(m.get('instances') == 2 and m.get('measured') == 2
+                        and (m.get('private_bytes') or 0) > 0 for m in memory)
+                and memory[0]['private_bytes'] == memory[1]['private_bytes'])
+
+    wait_until('owned pair CPU/RAM', fixture.state, measured, seconds=25)
+    with ExitStack() as undo:
+        runner_debug = ScopedDebugPrivilege()
+        undo.callback(runner_debug.restore)
+        app_debug = ScopedDebugPrivilege(fixture.process)
+        undo.callback(app_debug.restore)
+        denial = DeniedScheduling(children[0])
+        undo.callback(denial.restore)
+        # Verify the intended native failure before claiming coverage from a GUI poll.
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        ctypes.set_last_error(0)
+        opened = kernel.OpenProcess(0x200, False, children[0].pid)
+        error = ctypes.get_last_error()
+        if opened:
+            kernel.CloseHandle(opened)
+        assert not opened and error == 5, 'Owned DACL did not actually deny scheduling'
+        client.mutate('update_preferences', {'preferences': {'process_monitoring_enabled': True}})
+        wait_until('three denied automatic corrections', fixture.state,
+                   lambda s: controls(s).get(status, {}).get('denials') == 3
+                   and controls(s)[status]['status'] == 'Limited access', seconds=20)
+        observed = time.monotonic()
+        qualified = 0
+        while time.monotonic() - observed < 7 or qualified < 3:
+            assert time.monotonic() - observed < 15, 'Insufficient qualified observations of the denial pause'
+            state = fixture.state()
+            count = controls(state)[status]['denials']
+            if count is not None:
+                assert count == 3, 'A qualified denial counter changed during pause'
+                qualified += 1
+            assert measured(state), 'Denied writes lost readable rule/group telemetry'
+            time.sleep(.5)
+        for theme, index in [('dark', 2), ('light', 1)]:
+            client.mutate('update_preferences', {'preferences': {'theme_index': index}})
+            image = fixture.rpc({'action': 'screenshot'})
+            assert image.get('image')
+            (fixture.root / ('limited-access-' + theme + '.png')).write_bytes(base64.b64decode(image['image']))
+    # Restored access alone must not silently resume the suspended write episode.
+    restored = wait_until('qualified denial readback after DACL restoration', fixture.state,
+                          lambda state: controls(state)[status]['denials'] is not None)
+    assert controls(restored)[status]['denials'] == 3
+    fixture.click('app.action.' + rule_id)
+    wait_until('explicit Retry clears Limited access', fixture.state,
+               lambda s: controls(s).get(status, {}).get('status') == 'Running · protected'
+               and controls(s)[status]['denials'] == 0, seconds=10)
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.GetProcessAffinityMask.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)]
+    for child in children:
+        process, system = ctypes.c_size_t(), ctypes.c_size_t()
+        assert kernel.GetProcessAffinityMask(ctypes.c_void_p(int(child._handle)), ctypes.byref(process), ctypes.byref(system))
+        assert process.value == 1 << cpu, 'Owned scheduling readback disagrees with saved group'
+    readback = wait_until('complete CPU cut at native readback', fixture.state, measured)
+    readback_cut = controls(readback)['meter.rule.' + rule_id]['sample_seconds']
+    wait_until('fresh in-mask CPU/RAM recovers after Retry', fixture.state,
+               lambda state: measured(state)
+               and controls(state)['meter.rule.' + rule_id]['sample_seconds'] > readback_cut
+               and controls(state)['meter.rule.' + rule_id]['cpu_percent'] > 0)
+    client.mutate('update_preferences', {'preferences': {'process_monitoring_enabled': False}})
+    return {'three_denials_paused': True, 'readable_cpu_ram_preserved': True,
+            'retry_resumed': True, 'both_processes_native_readback': True, 'owned_dacl_restored': True}
+
+
+def installed_read_only(fixture, client, aumid):
+    """Explicit optional real-app observation; never enables enforcement or launches it."""
+    assert client.tool('get_app_state')['preferences']['process_monitoring_enabled'] is False
+    group = client.mutate('create_group', {'name': 'Read-only installed observation', 'cpus': available_cpus()})['group_id']
+    rule = {'name': 'Read-only installed app', 'aumid': aumid, 'args': [],
+            'tracked_process_names': [], 'manage_descendants': False, 'autorun': False, 'priority': 'Normal'}
+    rule_id = client.mutate('create_rule', {'group_id': group, 'rule': rule})['rule_id']
+    client.mutate('update_preferences', {'preferences': {'cpu_load_monitoring_enabled': True}})
+    rows = wait_until('installed interactive processes discovered',
+                      lambda: client.tool('read_cpu_current', {'limit': 256})['current_processes'],
+                      lambda rows: any(p['rule_id'] == rule_id for p in rows), seconds=25)
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.ProcessIdToSessionId.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
+    session = ctypes.c_uint32()
+    assert kernel.ProcessIdToSessionId(fixture.process.pid, ctypes.byref(session)) and session.value != 0
+    members = [p for p in rows if p['rule_id'] == rule_id]
+    for member in members:
+        actual = ctypes.c_uint32()
+        assert kernel.ProcessIdToSessionId(member['pid'], ctypes.byref(actual))
+        assert actual.value == session.value, 'Automatic Installed membership admitted a service/foreign session'
+    assert client.tool('get_app_state')['preferences']['process_monitoring_enabled'] is False
+    assert json.loads(fixture.state_path.read_bytes())['process_monitoring_enabled'] is False
+    return {'interactive_members': len(members), 'all_in_current_nonzero_session': True,
+            'enforcement_remained_off': True, 'real_app_launch_or_mutation': False}
 
 
 def controls(state):
     return {row["id"]: row["extra"] for row in state["controls"]}
 
 
+def assert_capacity_cut(meter, cpus, pages):
+    """Compare the visible meter with complete history at its exact original time."""
+    assert meter['selected_cpu_count'] == len(cpus) == len(pages)
+    loads = []
+    for cpu, page in zip(cpus, pages):
+        assert page['cpu'] == cpu, 'History returned a different logical CPU'
+        row = next((row for row in page['rows'] if row['seconds'] == meter['sample_seconds']), None)
+        assert row and row['unix_ms'] == meter['sample_unix_ms'], 'History must use the same original cut'
+        assert row['delivery'] == 'completed' and row['load_quality'] == 'complete' and row['load'] is not None
+        loads.append(row['load'])
+    assert abs(meter['cpu_percent'] - sum(loads) / len(cpus)) < 0.01, 'Meter differs from selected-CPU scheduler work'
+
+
+def select_owned_steam_process(fixture, process):
+    target = 'steam.process.' + str(process.pid)
+    def visible():
+        assert process.poll() is None, 'Owned Steam workload exited during selection'
+        rows = {row['id']: row for row in fixture.state()['controls']}
+        if rows.get(target, {}).get('enabled'):
+            return True
+        if target not in rows:
+            # The chooser is a request-driven snapshot, not a process watcher.
+            fixture.click('steam.choose_process')
+            fixture.click('steam.choose_process')
+        else:
+            rendered = [key for key, row in rows.items()
+                        if key.startswith('steam.process.') and row['enabled']]
+            if rendered:
+                # Overlap successive views of the 160-point list instead of skipping rows.
+                fixture.call('input', target=rendered[len(rendered) // 2], kind='scroll', delta=80)
+        return False
+    wait_until('visible owned Steam process', visible, bool)
+    fixture.click(target)
+
+
+def steam_selection(fixture, client, workload):
+    """Missing Steam metadata must open the existing chooser, never launch Steam."""
+    cpu = available_cpus()[-1]
+    group = client.mutate('create_group', {'name': 'Steam detection', 'cpus': [cpu]})['group_id']
+    # This deliberately uninstalled AppID has no metadata; no URI is dispatched.
+    rule = {'name': 'Sample Steam game', 'steam_app_id': 4294967294, 'steam_executable': None,
+            'args': [], 'tracked_process_names': [workload.name], 'manage_descendants': False,
+            'autorun': False, 'priority': 'Normal'}
+    rule_id = client.mutate('create_rule', {'group_id': group, 'rule': rule})['rule_id']
+    warning = 'steam.warning.' + rule_id
+    select = 'steam.select.' + rule_id
+    wait_until('actionable Steam warning', fixture.state,
+               lambda s: warning in controls(s) and select in controls(s))
+    for theme, index in [('dark', 2), ('light', 1)]:
+        if index == 1:
+            fixture.click('settings.open')
+            fixture.click('settings.theme.1')
+            fixture.click('settings.open')
+        fixture.call('input', target='nav.groups', kind='move', x=0.05, y=0.1)
+        assert fixture.call('wait', condition='ui_settled', timeout_ms=6000)['satisfied']
+        frame = fixture.rpc({'action': 'screenshot'})
+        assert frame.get('ok') and frame.get('image')
+        (fixture.root / ('steam-warning-' + theme + '.png')).write_bytes(base64.b64decode(frame['image']))
+    original = fixture.state_path.read_bytes()
+    fixture.click(warning)
+    wait_until('warning opens chooser with reason', fixture.state,
+               lambda s: 'steam.picker' in controls(s) and 'steam.detection_reason' in controls(s))
+    frame = fixture.rpc({'action': 'screenshot'})
+    assert frame.get('ok') and frame.get('image')
+    (fixture.root / 'steam-selection.png').write_bytes(base64.b64decode(frame['image']))
+    fixture.click('rule.form.close')
+    assert fixture.state_path.read_bytes() == original, 'Opening/closing warning changed the saved rule'
+    stop = fixture.root / 'steam-workload.stop'
+    process = subprocess.Popen([str(workload), str(stop)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    fixture.children.append((process, stop))
+    fixture.click(select)
+    select_owned_steam_process(fixture, process)
+    assert fixture.state_path.read_bytes() == original, 'Choosing a draft process saved prematurely'
+    fixture.call('input', target='steam.choose_process', kind='scroll', delta=700)
+    assert fixture.call('wait', condition='ui_settled', timeout_ms=6000)['satisfied']
+    fixture.click('rule.form.save')
+    wait_until('saved exact Steam executable', lambda: client.tool('list_rules', {'group_id': group}),
+               lambda value: value['rows'][0]['app']['launch_target']['Steam']['executable'] == str(workload))
+    saved = client.tool('list_rules', {'group_id': group})['rows'][0]['app']
+    assert saved['additional_processes'] == [workload.name], 'Selection rewrote helper names'
+    wait_until('Steam warning clears after exact choice', fixture.state,
+               lambda s: warning not in controls(s) and 'rule.form.close' not in controls(s))
+    client.mutate('update_preferences', {'preferences': {'cpu_load_monitoring_enabled': True}})
+    wait_until('exact owned game is measured', fixture.state,
+               lambda s: controls(s).get('meter.rule.' + rule_id, {}).get('instances') == 1
+               and controls(s).get('meter.rule.' + rule_id, {}).get('measured') == 1,
+               seconds=20)
+    return {'warning_actionable': True, 'reason_visible': True, 'chooser_opened': True,
+            'draft_not_published_early': True, 'exact_choice_measured': True, 'helper_names_preserved': True}
+
+
 def assert_unions(rows, group, first, second):
     cpu = [rows["meter." + key] for key in ["group." + group, "rule." + first, "rule." + second]]
     assert cpu[0]["sample_unix_ms"] and len({r["sample_unix_ms"] for r in cpu}) == 1, "Mixed current CPU samples"
+    assert all(r['cpu_percent_basis'] == 'group_cpu_capacity' for r in cpu)
+    assert cpu[0]['sample_seconds'] is not None and len({r['sample_seconds'] for r in cpu}) == 1, 'Mixed scheduler intervals'
     values = [r["cpu_percent"] for r in cpu]
     assert all(v is not None and math.isfinite(v) for v in values), "Unavailable CPU is not zero"
     assert max(values) - min(values) < 0.001, "Shared process CPU was double counted"
@@ -89,6 +306,28 @@ def configuration(fixture, client, main, helper):
     assert saved["app"]["additional_processes"] == rule["tracked_process_names"]
     assert saved["app"]["priority"] == "Normal" and saved["app"]["args"] == []
     assert client.tool("list_groups")["rows"][0]["group_id"] == second
+    # The pointer-only debug adapter exercises the real GUI form; creation and
+    # failed saves have deterministic state-level coverage without a text RPC.
+    baseline = client.tool('list_groups')['rows']
+    selected = next(row for row in baseline if row['group_id'] == second)
+    client.mutate('update_group', {'group_id': second, 'name': selected['name'],
+                  'cpus': [cpu], 'run_all': True, 'hidden': True})
+    revision = client.tool('get_app_state')['configuration_revision']
+    fixture.click('group.edit.' + second)
+    fixture.click('group.form.run_all')
+    fixture.click('group.form.save')
+    wait_until('GUI group edit durable receipt', lambda: client.tool('get_app_state'),
+               lambda state: state['configuration_revision'] != revision)
+    wait_until('GUI group form closes after its own save', fixture.state,
+               lambda state: 'group.form.close' not in controls(state))
+    edited = next(row for row in client.tool('list_groups')['rows'] if row['group_id'] == second)
+    assert edited['name'] == selected['name'] and edited['cpus'] == [cpu]
+    assert edited['hidden'] is True and edited['run_all'] is False, 'GUI edit changed unrelated saved fields'
+    assert client.tool('list_rules', {'group_id': second})['rows'][0]['rule_id'] == rule_id
+    assert next(row for row in client.tool('list_groups')['rows'] if row['group_id'] == first) == next(row for row in baseline if row['group_id'] == first)
+    # Restore visibility so subsequent telemetry assertions inspect actual rows.
+    client.mutate('update_group', {'group_id': second, 'name': edited['name'],
+                  'cpus': edited['cpus'], 'run_all': edited['run_all'], 'hidden': False})
     durable = json.loads(fixture.state_path.read_bytes())
     fixture.close()
     fixture.start()
@@ -165,7 +404,20 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
                    and rows.get("memory." + key, {}).get("measured") == 2
                    for key in ["group." + group, "rule." + rule_id, "rule." + shared,
                                "group." + peer_group, "rule." + peer])
-    wait_until("root/helper measured", fixture.state, measured, seconds=25)
+    try:
+        wait_until("root/helper measured", fixture.state, measured, seconds=25)
+    except AssertionError:
+        current = fixture.state()
+        scopes = ['group.' + group, 'rule.' + rule_id, 'rule.' + shared,
+                  'group.' + peer_group, 'rule.' + peer]
+        # Only known synthetic metric controls, never a process inventory or credentials.
+        view = controls(current)
+        (fixture.root / 'capacity-failure.json').write_text(json.dumps({
+            'meters': {scope: view.get('meter.' + scope) for scope in scopes},
+            'memory': {scope: view.get('memory.' + scope) for scope in scopes},
+            'collector': {key: (current.get('graph') or {}).get(key) for key in ['error', 'detail_error']},
+        }, indent=2), encoding='utf-8')
+        raise
     seen = set()
     def samples():
         state = fixture.state()
@@ -176,8 +428,123 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
             seen.add(rows["meter.group." + group]["sample_unix_ms"])
         return len(seen)
     wait_until("three independent CPU/RAM union samples", samples, lambda n: n >= 3, seconds=15)
+    # Actual discovery churn in a different group must not blank stable meters.
+    churn_path = fixture.root / ('owned-churn-' + main.name)
+    shutil.copy2(main, churn_path)
+    churn_rule = client.mutate('create_rule', {'group_id': peer_group, 'rule': {
+        'name': 'Owned unrelated churn', 'path': str(churn_path), 'args': [],
+        'tracked_process_names': [churn_path.name], 'manage_descendants': False,
+        'autorun': False, 'priority': 'Normal'}})['rule_id']
+    stable_cuts = set()
+    churn_cpu = next(c for c in available_cpus() if c != cpu)
+
+    def observe_churn(predicate):
+        deadline = time.monotonic() + 15
+        while True:
+            rows = controls(fixture.state())
+            assert_unions(rows, group, rule_id, shared)
+            stable_cuts.add(rows['meter.rule.' + rule_id]['sample_seconds'])
+            if predicate(rows):
+                return
+            assert time.monotonic() < deadline, 'Unrelated churn was not observed'
+            time.sleep(.2)
+
+    for cycle in range(2):
+        stop = fixture.root / ('churn-' + str(cycle) + '.stop')
+        child = subprocess.Popen([str(churn_path), str(stop)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fixture.children.append((child, stop))
+        pin_workload(child, churn_cpu)
+        observe_churn(lambda rows: rows.get('meter.rule.' + churn_rule, {}).get('instances') == 1)
+        cuts_before = len(stable_cuts)
+        observe_churn(lambda rows: len(stable_cuts) >= cuts_before + 2)
+        stop.write_text('stop', encoding='utf-8')
+        assert child.wait(timeout=5) == 0
+        observe_churn(lambda rows: rows.get('meter.rule.' + churn_rule, {}).get('instances') == 0)
+    client.mutate('delete_rule', {'group_id': peer_group, 'rule_id': churn_rule})
+    wait_until('peer union after churn cleanup', fixture.state, measured, seconds=20)
+    # The modal hides the main list. Read its original-time history through HTTP
+    # while the meter is visible, then exercise graph navigation separately.
+    def matches_history(state, cpus):
+        rows = controls(state)
+        meter = rows.get('meter.rule.' + rule_id, {})
+        if (meter.get('sample_seconds') is None or meter.get('measured') != 2
+                or meter.get('selected_cpu_count') != len(cpus)):
+            return False
+        pages = []
+        for selected in cpus:
+            query = {'source': 'rule', 'group_id': group, 'rule_id': rule_id, 'cpu': selected, 'limit': 256}
+            page = client.tool('read_cpu_history', query)
+            if page['total_retained'] > 256:
+                page = client.tool('read_cpu_history', dict(query, offset=page['total_retained'] - 256))
+            row = next((r for r in page['rows'] if r['seconds'] == meter['sample_seconds']), None)
+            if row is None or row['delivery'] != 'completed' or row['load'] is None:
+                return False
+            pages.append(page)
+        assert_capacity_cut(meter, cpus, pages)
+        assert_unions(rows, group, rule_id, shared)
+        return True
+    wait_until('one-CPU capacity equals original history', fixture.state,
+               lambda state: matches_history(state, [cpu]), seconds=20)
+    spare = next(c for c in available_cpus() if c != cpu)
+    saved_group = next(row for row in client.tool('list_groups')['rows'] if row['group_id'] == group)
+    def set_mask(cpus):
+        client.mutate('update_group', {'group_id': group, 'name': saved_group['name'],
+                      'run_all': saved_group['run_all'], 'hidden': saved_group['hidden'], 'cpus': cpus})
+    set_mask([cpu, spare])
+    wait_until('two-CPU capacity uses the full selected denominator', fixture.state,
+               lambda state: matches_history(state, [cpu, spare]), seconds=20)
+    previous_cut = controls(fixture.state())['meter.rule.' + rule_id]['sample_seconds']
+    set_mask([spare])
+    def outside_excluded(state):
+        rows = controls(state)
+        meter = rows.get('meter.rule.' + rule_id, {})
+        if (meter.get('sample_seconds') is None or meter['sample_seconds'] <= previous_cut
+                or meter.get('measured') != 2 or meter.get('cpu_percent') != 0):
+            return False
+        assert_unions(rows, group, rule_id, shared)
+        assert rows['meter.group.' + group]['cpu_percent'] == 0
+        assert rows['meter.group.' + peer_group]['cpu_percent'] > 0, 'The owned children must still be busy outside this mask'
+        return True
+    wait_until('busy outside-mask work is excluded', fixture.state, outside_excluded, seconds=20)
+    set_mask([cpu])
+    wait_until('capacity recovers after mask restoration', fixture.state,
+               lambda state: matches_history(state, [cpu]), seconds=20)
+    fixture.click('monitor.open')
+    fixture.click('monitor.tab.processes')
+    peer_name = next(row['name'] for row in client.tool('list_groups')['rows'] if row['group_id'] == peer_group)
+    wait_until('scoped duplicate launch rules remain in the Process monitor roster', fixture.state,
+               lambda state: all(any(row['pid'] == child.pid and row['group'] == peer_name
+                                    for row in controls(state).get('table.tracked', {}).get('entries', []))
+                                 for child, _ in workloads))
+    fixture.click('monitor.close')
+    fixture.call('open_graph', group_id=group, rule_id=rule_id)
+    wait_until('initial rendered app metadata', fixture.state,
+               lambda s: controls(s).get('graph.metadata', {}).get('name') == 'Renamed owned rule')
+    fixture.call('select_cpu', cpu=cpu)
+    original = next(row for row in reversed(client.tool('read_cpu_history', {'source': 'system', 'cpu': cpu, 'limit': 256})['rows']) if row['delivery'] == 'completed' and row['load'] is not None)
+    saved_rule = next(row['app'] for row in client.tool('list_rules', {'group_id': group})['rows']
+                      if row['rule_id'] == rule_id)
+    edited = {'name': 'Live updated app', 'path': str(main), 'args': saved_rule['args'],
+              'tracked_process_names': [helper.name, main.name], 'manage_descendants': True,
+              'autorun': False, 'priority': saved_rule['priority']}
+    client.mutate('update_rule', {'group_id': group, 'rule_id': rule_id, 'rule': edited})
+    def refreshed(state):
+        rendered = controls(state).get('graph.metadata', {})
+        return (rendered.get('name') == edited['name']
+                and rendered.get('scope') == 'Tracks: ' + ', '.join(edited['tracked_process_names']) + ' + descendants'
+                and rendered.get('cpus') == [cpu]
+                and state['graph']['selected_cpu'] == cpu)
+    wait_until('committed metadata updates without closing the graph', fixture.state, refreshed)
+    retained = client.tool('read_cpu_history', {'source': 'system', 'cpu': cpu, 'limit': 256})['rows']
+    assert any(row['seconds'] == original['seconds'] and row['load'] == original['load'] and row['unix_ms'] == original['unix_ms'] for row in retained), 'Metadata edit erased numeric history'
+    fixture.call('close_graph')
     fixture.call("open_graph", group_id=group)
     graph = fixture.state()["graph"]
+    renamed_group = saved_group['name'] + ' updated'
+    client.mutate('update_group', {'group_id': group, 'name': renamed_group,
+                  'run_all': saved_group['run_all'], 'hidden': saved_group['hidden'], 'cpus': [cpu]})
+    wait_until('committed group graph title', fixture.state,
+               lambda s: controls(s).get('graph.metadata', {}).get('name') == renamed_group)
     fixture.call("close_graph")
     # Stop root: an explicitly added helper must keep both rule and group measured.
     process, stop = workloads[0]
@@ -195,17 +562,29 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
     fixture.call("monitor", enabled=True)
     wait_until("current values recover after On", fixture.state,
                lambda s: controls(s).get("meter.rule." + rule_id, {}).get("measured") == 1)
-    return {"fresh_union_samples": len(seen), "graph_opened": bool(graph), "cpu": cpu}
+    return {"fresh_union_samples": len(seen), "unrelated_churn_cycles": 2, "stable_churn_cuts": len(stable_cuts), "graph_opened": bool(graph), "cpu": cpu,
+            'selected_capacity_matches_history': True, 'outside_mask_excluded': True, 'mask_edits_verified': True, 'open_graph_metadata_updated': True, 'duplicate_roster_verified': True}
 
 
 def history(fixture, client, cpu, helper):
-    query = {"source": "system", "cpu": cpu, "limit": 2}
-    history = wait_until("system history", lambda: client.tool("read_cpu_history", query),
-                         lambda row: any(r["delivery"] == "completed" for r in row.get("rows", [])), seconds=20)
-    original = next(row for row in history["rows"] if row["delivery"] == "completed")
-    contributor = client.tool("read_cpu_contributors", {"source": "system", "cpu": cpu, "seconds": original["seconds"]})
-    assert any(row["name"].lower() == helper.name.lower() and row["load"] > 0
-               and row["historical_lifetime_id"] for row in contributor["rows"]), "Owned helper missing from original-time contributors"
+    query = {"source": "system", "cpu": cpu, "limit": 256}
+    def completed_owned_work():
+        page = client.tool("read_cpu_history", query)
+        if page['total_retained'] > query['limit']:
+            page = client.tool("read_cpu_history", dict(query, offset=page['total_retained'] - query['limit']))
+        # A completed startup cut is not proof that this child ran in it.
+        # Require actual owned work in the newest measured original interval.
+        original = next((r for r in reversed(page['rows'])
+                         if r['delivery'] == 'completed' and r['load'] is not None), None)
+        if original is None:
+            return None
+        contributor = client.tool("read_cpu_contributors", dict(query, seconds=original['seconds']))
+        if any(row['name'].lower() == helper.name.lower() and row['load'] > 0
+               and row['historical_lifetime_id'] for row in contributor['rows']):
+            return page, original
+        return None
+    history, original = wait_until("latest completed interval with owned helper work",
+                                   completed_owned_work, bool, seconds=20)
     prepared = client.tool("export_cpu_history")
     ready = wait_until("CSV preparation", lambda: client.tool("export_cpu_history", {
         "export_id": prepared["export_id"], "limit": 128}), lambda r: r["status"] == "ready")
@@ -232,7 +611,8 @@ def history(fixture, client, cpu, helper):
     retained = client.tool("export_cpu_history", {"export_id": ready["export_id"], "limit": 128})
     assert retained["status"] == "ready", "Off destroyed an immutable export"
     client.tool("read_cpu_history", dict(query, epoch="foreign:0"), error="cursor_reset")
-    return {"csv_rows": len(rows), "csv_bytes": total, "history_rows": len(history["rows"])}
+    return {"csv_rows": len(rows), "csv_bytes": total, "history_rows": len(history["rows"]),
+            "original_seconds": original['seconds']}
 
 
 def execution(fixture, client, executable, cpu):

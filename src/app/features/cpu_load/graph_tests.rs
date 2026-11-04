@@ -588,7 +588,7 @@ fn current_process_table_is_compact_scrollable_and_keeps_scroll_on_snapshot_refr
 }
 
 #[test]
-fn app_modal_switches_to_all_current_pids_without_mask_or_activity_filtering() {
+fn app_modal_keeps_all_tracked_pids_but_percentages_use_only_the_group_mask() {
     for dark in [true, false] {
         let (mut app, target) = fixture();
         let ctx = egui::Context::default();
@@ -629,22 +629,36 @@ fn app_modal_switches_to_all_current_pids_without_mask_or_activity_filtering() {
             &HashMap::from([((101, 10), Some(2.0)), ((102, 20), Some(0.0))]),
             &names,
         );
-        list.record_cores(
-            20,
-            &[
-                os_api::cpu_load::ProcessCpuSample {
-                    pid: 101,
-                    token: 10,
-                    cpus: (0..20)
-                        .map(|cpu| if cpu == 0 { Some(40.0) } else { Some(0.0) })
-                        .collect(),
-                },
-                os_api::cpu_load::ProcessCpuSample {
-                    pid: 102,
-                    token: 20,
-                    cpus: vec![Some(0.0); 20],
-                },
-            ],
+        let samples = [
+            os_api::cpu_load::ProcessCpuSample {
+                pid: 101,
+                token: 10,
+                cpus: (0..20)
+                    .map(|cpu| {
+                        if cpu == 0 {
+                            Some(40.0)
+                        } else if cpu == 12 {
+                            Some(24.0)
+                        } else {
+                            Some(0.0)
+                        }
+                    })
+                    .collect(),
+            },
+            os_api::cpu_load::ProcessCpuSample {
+                pid: 102,
+                token: 20,
+                cpus: vec![Some(0.0); 20],
+            },
+        ];
+        list.record_cores(20, &samples);
+        list.record_capacity(
+            &HashMap::from([(target.group.clone(), (12..20).collect())]),
+            &samples,
+            Some(SampleTime {
+                seconds: 1.0,
+                wall: SystemTime::UNIX_EPOCH,
+            }),
         );
         let mut snapshot = app.cpu_load.snapshot().as_ref().clone();
         snapshot.live_processes = Arc::new(list);
@@ -672,7 +686,7 @@ fn app_modal_switches_to_all_current_pids_without_mask_or_activity_filtering() {
             "101",
             "102",
             "103",
-            "2%",
+            "3%",
             "0%",
             "Idle",
             "Unavailable",
@@ -1071,7 +1085,7 @@ fn expired_pin_stays_unavailable_and_other_controls_still_work() {
         .rect;
     click(&mut app, &ctx, plot.center());
     assert!(app.cpu_load.inspection.pinned.is_some());
-    app.cpu_load.configure(false, true);
+    app.cpu_load.configure(false);
     assert!(
         app.cpu_load.inspection.pinned.is_none(),
         "turning monitoring off clears inspection state"
