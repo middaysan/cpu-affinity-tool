@@ -567,13 +567,24 @@ def telemetry(fixture, client, main, helper, group, peer_group, rule_id, cpu):
 
 
 def history(fixture, client, cpu, helper):
-    query = {"source": "system", "cpu": cpu, "limit": 2}
-    history = wait_until("system history", lambda: client.tool("read_cpu_history", query),
-                         lambda row: any(r["delivery"] == "completed" for r in row.get("rows", [])), seconds=20)
-    original = next(row for row in history["rows"] if row["delivery"] == "completed")
-    contributor = client.tool("read_cpu_contributors", {"source": "system", "cpu": cpu, "seconds": original["seconds"]})
-    assert any(row["name"].lower() == helper.name.lower() and row["load"] > 0
-               and row["historical_lifetime_id"] for row in contributor["rows"]), "Owned helper missing from original-time contributors"
+    query = {"source": "system", "cpu": cpu, "limit": 256}
+    def completed_owned_work():
+        page = client.tool("read_cpu_history", query)
+        if page['total_retained'] > query['limit']:
+            page = client.tool("read_cpu_history", dict(query, offset=page['total_retained'] - query['limit']))
+        # A completed startup cut is not proof that this child ran in it.
+        # Require actual owned work in the newest measured original interval.
+        original = next((r for r in reversed(page['rows'])
+                         if r['delivery'] == 'completed' and r['load'] is not None), None)
+        if original is None:
+            return None
+        contributor = client.tool("read_cpu_contributors", dict(query, seconds=original['seconds']))
+        if any(row['name'].lower() == helper.name.lower() and row['load'] > 0
+               and row['historical_lifetime_id'] for row in contributor['rows']):
+            return page, original
+        return None
+    history, original = wait_until("latest completed interval with owned helper work",
+                                   completed_owned_work, bool, seconds=20)
     prepared = client.tool("export_cpu_history")
     ready = wait_until("CSV preparation", lambda: client.tool("export_cpu_history", {
         "export_id": prepared["export_id"], "limit": 128}), lambda r: r["status"] == "ready")
@@ -600,7 +611,8 @@ def history(fixture, client, cpu, helper):
     retained = client.tool("export_cpu_history", {"export_id": ready["export_id"], "limit": 128})
     assert retained["status"] == "ready", "Off destroyed an immutable export"
     client.tool("read_cpu_history", dict(query, epoch="foreign:0"), error="cursor_reset")
-    return {"csv_rows": len(rows), "csv_bytes": total, "history_rows": len(history["rows"])}
+    return {"csv_rows": len(rows), "csv_bytes": total, "history_rows": len(history["rows"]),
+            "original_seconds": original['seconds']}
 
 
 def execution(fixture, client, executable, cpu):

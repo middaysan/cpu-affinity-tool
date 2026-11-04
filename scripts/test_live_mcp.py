@@ -6,11 +6,41 @@ from unittest.mock import patch
 
 from live_mcp_client import decode_reply, validate_endpoint
 from live_mcp_fixture import Fixture, FixtureCleanupError, synthetic_state, validate_state
-from live_mcp_scenarios import assert_capacity_cut, assert_unions, select_owned_steam_process
+from live_mcp_scenarios import assert_capacity_cut, assert_unions, history, select_owned_steam_process
 from run_live_mcp import owned_workload_paths, retire_fixture
 
 
 class HarnessGuards(unittest.TestCase):
+    def test_history_checks_latest_completed_work_instead_of_a_startup_interval(self):
+        class Client:
+            contributor_times = []
+            def tool(self, name, arguments=None, error=None):
+                arguments = arguments or {}
+                if name == 'read_cpu_history':
+                    if error:
+                        return {'code': error}
+                    rows = [{'seconds': 10, 'delivery': 'completed', 'load': 0},
+                            {'seconds': 11, 'delivery': 'completed', 'load': 25},
+                            {'seconds': 12, 'delivery': 'pending', 'load': None}]
+                    return {'total_retained': 3, 'rows': rows[:arguments['limit']]}
+                if name == 'read_cpu_contributors':
+                    self.contributor_times.append(arguments['seconds'])
+                    return {'rows': [] if arguments['seconds'] == 10 else [
+                        {'name': 'helper.exe', 'load': 25, 'historical_lifetime_id': '7'}]}
+                if name == 'export_cpu_history':
+                    text = ('time_utc,elapsed_seconds,record_type,process,cpu_percent,historical_lifetime_id\r\n'
+                            'utc,11,cpu,,25,\r\nutc,11,process,helper.exe,25,7\r\n')
+                    return {'export_id': 'owned', 'status': 'ready', 'text': text,
+                            'after': '0', 'next_after': str(len(text.encode())), 'eof': True}
+                raise AssertionError('Unexpected test tool: ' + name)
+        class Fixture:
+            def call(self, action, **arguments):
+                return {'satisfied': True}
+        client = Client()
+        history(Fixture(), client, 0, Path('helper.exe'))
+        self.assertEqual(client.contributor_times, [11],
+                         'A pending row or empty startup interval cannot stand in for measured owned work')
+
     def test_cleanup_retry_does_not_reuse_a_closed_owned_process_handle(self):
         class Child:
             closed = False
