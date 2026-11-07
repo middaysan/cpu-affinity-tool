@@ -1,0 +1,14 @@
+## 1.7.3 - 2026-11-08
+
+### What's changed
+- App and group CPU meters now use the CPUs selected for the group. The top CPU meter still shows the whole processor.
+- CPU and RAM readings stay visible when unrelated processes start or stop, as long as the measurements are still valid.
+- If a Steam game cannot be identified, **Select game** explains why and lets you choose the game's executable.
+- After three access denials, Process monitor pauses automatic correction for that process and offers **Retry**. It still shows the CPU and RAM data it can read.
+- Saving a group or an app in the background keeps you on the page you switched to and leaves any newly opened editor in place.
+
+### Upgrading
+Your saved groups and apps carry over. An explicit save upgrades supported older settings to schema v14 and keeps a `state.json.pre-v6*` backup for pre-v6 settings. Rules from before v10 keep descendant tracking enabled if they had no explicit setting. For newer and newly created rules, the missing setting defaults to off. Downgrading after a v14 save is unsupported.
+
+### Download
+Download **cpu-affinity-tool.exe** for Windows x64. It requires administrator approval. **cpu_affinity_tool.pdb** is optional and helps with troubleshooting.

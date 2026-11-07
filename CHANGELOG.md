@@ -6,9 +6,24 @@ Detailed GitHub Release notes continue to live in `changelogs/vX.Y.Z.txt`.
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-11-08
+
+### Changed
+
+- Application and group CPU meters now use the group's selected logical CPUs as 100% of its capacity. The header still shows whole-processor load. Configured helper processes are included, and shared processes count once per group.
+- Process monitor skips Windows services during automatic installed-app discovery. After three access denials it pauses correction for that process instance and offers **Retry**. Available CPU and RAM readings remain visible.
+- GUI and MCP group creation and editing now share the same validation and save path. The GUI theme setting also uses the same write path as MCP.
+- Added built-app MCP scenarios to Windows CI and refreshed the README screenshots. Linux development, CI and beta releases are paused.
+
 ### Fixed
 
 - Steam games now show an actionable **Select game** warning when installation metadata is missing or ambiguous, candidates conflict, or the main EXE is listed as a helper. The warning explains the reason and opens the process chooser directly. Undetected launches offer selection after 30 seconds while keeping the existing five-minute initial-settings limit. Choosing the main EXE preserves helper lists.
+- Unrelated processes starting or exiting no longer clear still-valid app and group CPU/RAM readings. Unavailable data remains marked as such.
+- A completed background save keeps the current page open and leaves a newly reopened editor in place. Open CPU graphs refresh their labels and scope when a saved rule changes.
+
+### Upgrade notes
+
+- Explicit saves upgrade supported older settings to schema v14. The first save of pre-v6 settings keeps a `state.json.pre-v6*` backup. Existing pre-v10 rules without a descendant-management setting retain their previous behavior. For newer and newly created rules, the missing setting defaults to off. Downgrading after a v14 save is unsupported.
 
 ## [1.7.2] - 2026-10-28
 

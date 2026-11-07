@@ -2,6 +2,10 @@
 
 This file records reviewed RustSec findings that remain in the lockfile so release checks do not silently normalize known advisories.
 
+## Release 1.7.3 audit (2026-11-08)
+
+Both lockfiles pass `cargo audit` without advisory ignores and report zero vulnerabilities. The root lockfile retains the five reviewed informational findings and adds a yanked-version warning for `async-executor 1.14.0`. `cargo tree --offline --locked --no-default-features --features windows --target x86_64-pc-windows-msvc -i async-executor@1.14.0` finds no dependency on it in the selected Windows graph. Keep dependency versions pinned for this Windows release and revisit the warning when Linux work resumes. The OS API lockfile has no warnings.
+
 ## Release 1.7.1 audit (2026-10-28)
 
 Both lockfiles pass without advisory ignores against RustSec database commit `40f5be6fb12ed93fc591bf4ab23b7d793b3f2239` (2026-10-28), with zero vulnerabilities. The five informational findings in the 2026-10-21 table below remain unchanged; the separate OS API lockfile has no warnings.
