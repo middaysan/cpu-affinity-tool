@@ -182,6 +182,7 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
         .unwrap()
         .rule_id
         .clone();
+    let steam_issue = app.runtime.steam_detection_issue(&control_rule);
     let mut control_choices = app.ui.app_edit_state.control_choices.clone();
     let mut is_close = false;
     let mut save_clicked = false;
@@ -206,10 +207,9 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                 );
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if close_button(ui)
-                    .on_hover_text("Close")
-                    .clicked()
-                {
+                let close = close_button(ui).on_hover_text("Close");
+                crate::debug_mcp_control!("rule.form.close", close);
+                if close.clicked() {
                     is_close = true;
                 }
             });
@@ -240,6 +240,10 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                 if let crate::app::models::LaunchTarget::Steam { app_id, executable } = &mut selected_app.launch_target {
                     ui.label(RichText::new(format!("Steam game · App ID {app_id}")).strong());
                     ui.label(RichText::new("Launches through Steam. CPU, RAM, affinity and Focus follow the game, not the Steam client.").small().weak());
+                    if let Some(issue) = &steam_issue {
+                        let warning = ui.add(egui::Label::new(RichText::new(issue.reason()).color(crate::app::shell::presenters::shared_elements::warning_color(ui))).wrap());
+                        crate::debug_mcp_control!("steam.detection_reason", warning);
+                    }
                     draft_changed |= app.ui.app_edit_state.steam_picker.show(ui, executable);
                     ui.add_space(6.0);
                 }
@@ -504,14 +508,14 @@ pub fn draw_app_run_settings(app: &mut AppState, root_ui: &mut egui::Ui) {
                 }
 
                 ui.horizontal(|ui| {
-                    if toned_button(
+                    let save = toned_button(
                         ui,
                         egui::Button::new(RichText::new("Save Changes").strong())
                             .min_size(egui::vec2(105.0, 28.0)),
                         ToneRole::Primary,
-                    )
-                        .clicked()
-                    {
+                    );
+                    crate::debug_mcp_control!("rule.form.save", save);
+                    if save.clicked() {
                         save_clicked = true;
                         is_close = true;
                     }

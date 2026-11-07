@@ -73,6 +73,9 @@ struct RunningAppsIterationOutcome {
 }
 
 trait RunningAppsOs {
+    fn current_logon_instance(&self, _pid: u32, _token: u64) -> bool {
+        false
+    }
     fn observed_image(&self, _pid: u32, _token: u64) -> Option<PathBuf> {
         None
     }
@@ -98,8 +101,8 @@ trait RunningAppsOs {
     ) -> Vec<os_api::steam::GameProcess> {
         Vec::new()
     }
-    fn steam_game_directory(&self, _app_id: u32) -> Option<PathBuf> {
-        None
+    fn steam_game_directory(&self, _app_id: u32) -> Result<PathBuf, String> {
+        Err("Steam game installation could not be located.".into())
     }
     fn snapshot_process_tree(&self) -> Result<ProcessSnapshot, String>;
     fn get_process_image_path_and_instance_token(&self, pid: u32)
@@ -124,6 +127,17 @@ struct RealRunningAppsOs {
 }
 
 impl RunningAppsOs for RealRunningAppsOs {
+    fn current_logon_instance(&self, pid: u32, token: u64) -> bool {
+        let cached = self.known_checks.borrow().get(&(pid, token)).copied();
+        cached.unwrap_or_else(|| {
+            let allowed = os_api::app_identity::verify_current_instance(pid, token);
+            let mut cache = self.known_checks.borrow_mut();
+            if cache.len() < 4096 {
+                cache.insert((pid, token), allowed);
+            }
+            allowed
+        })
+    }
     fn observed_image(&self, pid: u32, token: u64) -> Option<PathBuf> {
         self.images.borrow().get(&(pid, token)).cloned()
     }
@@ -165,8 +179,8 @@ impl RunningAppsOs for RealRunningAppsOs {
     ) -> Vec<os_api::steam::GameProcess> {
         os_api::steam::game_processes(app_id, selected, names)
     }
-    fn steam_game_directory(&self, app_id: u32) -> Option<PathBuf> {
-        os_api::steam::game_directory(app_id)
+    fn steam_game_directory(&self, app_id: u32) -> Result<PathBuf, String> {
+        os_api::steam::game_directory_result(app_id)
     }
     fn snapshot_process_tree(&self) -> Result<ProcessSnapshot, String> {
         OS::snapshot_process_tree().map(|tree| ProcessSnapshot {
@@ -525,6 +539,9 @@ fn collect_package_local_pid_candidates<O: RunningAppsOs>(
         if !path_is_under_root_case_insensitive(&image_path, install_root) {
             continue;
         }
+        if !os.current_logon_instance(pid, path_token) {
+            continue;
+        }
 
         let (aumid, aumid_token) = os.get_process_app_user_model_id_and_instance_token(pid)?;
         if path_token != aumid_token {
@@ -610,14 +627,16 @@ fn is_known_auto_managed_installed_pid(snapshot: &ProcessSnapshot, pid: u32) -> 
         .is_some_and(|name| !is_excluded_installed_auto_process(name))
 }
 
-fn retain_auto_managed_installed_pids(
+fn retain_auto_managed_installed_pids<O: RunningAppsOs>(
     snapshot: &ProcessSnapshot,
     tracked_pids: &mut Vec<BoundProcessInstance>,
     explicit_pids: &HashSet<u32>,
+    os: &O,
 ) {
     tracked_pids.retain(|candidate| {
         explicit_pids.contains(&candidate.pid)
-            || is_auto_managed_installed_pid(snapshot, candidate.pid)
+            || (is_auto_managed_installed_pid(snapshot, candidate.pid)
+                && os.current_logon_instance(candidate.pid, candidate.token))
     });
 }
 
@@ -732,7 +751,8 @@ fn rekey_rule_membership(
     true
 }
 
-type SteamObservations = HashMap<AppRuntimeKey, (Option<PathBuf>, Vec<os_api::steam::GameProcess>)>;
+type SteamObservations =
+    HashMap<AppRuntimeKey, (Result<PathBuf, String>, Vec<os_api::steam::GameProcess>)>;
 fn observe_steam<O: RunningAppsOs>(
     configured_programs: &[ConfiguredProgramSnapshot],
     snapshot: &ProcessSnapshot,
@@ -833,14 +853,20 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
             })
             .collect();
         apps.steam_unresolved
-            .retain(|rule| steam_rules.iter().any(|(r, _)| r == rule));
+            .retain(|rule, _| steam_rules.iter().any(|(r, _)| r == rule));
+        super::steam_pending::retain_steam_diagnostics(&steam_rules);
         for configured in configured_programs {
             let key = configured.key.clone();
             processed_keys.insert(key.clone());
             let was_tracked = apps.apps.contains_key(&key);
 
             if let ConfiguredProgramMatcher::Steam { app_id, executable } = &configured.matcher {
-                let (root, candidates) = steam_detected.remove(&key).unwrap_or_default();
+                let (root, candidates) = steam_detected.remove(&key).unwrap_or_else(|| {
+                    (
+                        Err("Steam game observation is unavailable.".into()),
+                        Vec::new(),
+                    )
+                });
                 update_steam_rule(
                     apps,
                     &configured,
@@ -879,15 +905,35 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                 | ConfiguredProgramMatcher::Steam { .. }
                 | ConfiguredProgramMatcher::Known { .. } => Vec::new(),
             };
+            let explicit_installed_pids = match &configured.matcher {
+                ConfiguredProgramMatcher::Installed { aumid }
+                    if was_tracked
+                        || aumid_to_seed_pids.get(aumid).is_some_and(|p| !p.is_empty()) =>
+                {
+                    collect_named_process_pids(
+                        &configured.additional_processes_normalized,
+                        name_to_pids,
+                        os,
+                    )
+                }
+                _ => Vec::new(),
+            };
             let mut detected_pids = match &configured.matcher {
                 ConfiguredProgramMatcher::Path { fallback_names, .. } => {
                     let mut pids = verified_path_roots.clone();
                     extend_with_named_processes(&mut pids, fallback_names, name_to_pids, os);
                     pids
                 }
-                ConfiguredProgramMatcher::Installed { aumid } => {
-                    aumid_to_seed_pids.get(aumid).cloned().unwrap_or_default()
-                }
+                ConfiguredProgramMatcher::Installed { aumid } => aumid_to_seed_pids
+                    .get(aumid)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|candidate| {
+                        os.current_logon_instance(candidate.pid, candidate.token)
+                            || explicit_installed_pids.contains(candidate)
+                    })
+                    .collect(),
                 ConfiguredProgramMatcher::Steam { .. } | ConfiguredProgramMatcher::Known { .. } => {
                     unreachable!()
                 }
@@ -949,11 +995,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                         replace_with_current_process_instances(app, managed_pids, snapshot, os);
                     }
                     ConfiguredProgramMatcher::Installed { aumid } => {
-                        let explicit_pids = collect_named_process_pids(
-                            &configured.additional_processes_normalized,
-                            name_to_pids,
-                            os,
-                        );
+                        let explicit_pids = explicit_installed_pids;
                         let explicit_pid_set: HashSet<u32> = explicit_pids
                             .iter()
                             .map(|candidate| candidate.pid)
@@ -983,6 +1025,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                             snapshot,
                             &mut managed_pids,
                             &explicit_pid_set,
+                            os,
                         );
                         if configured.manage_descendants {
                             extend_with_descendants(snapshot, &mut managed_pids, os);
@@ -994,6 +1037,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                             snapshot,
                             &mut managed_pids,
                             &explicit_pid_set,
+                            os,
                         );
                         replace_with_current_process_instances(app, managed_pids, snapshot, os);
                     }
@@ -1041,11 +1085,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                     );
                 }
                 ConfiguredProgramMatcher::Installed { aumid } => {
-                    let explicit_pids = collect_named_process_pids(
-                        &configured.additional_processes_normalized,
-                        name_to_pids,
-                        os,
-                    );
+                    let explicit_pids = explicit_installed_pids;
                     let explicit_pid_set: HashSet<u32> = explicit_pids
                         .iter()
                         .map(|candidate| candidate.pid)
@@ -1074,6 +1114,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                         snapshot,
                         &mut detected_pids,
                         &explicit_pid_set,
+                        os,
                     );
                     if configured.manage_descendants {
                         extend_with_descendants(snapshot, &mut detected_pids, os);
@@ -1085,6 +1126,7 @@ fn process_running_apps_iteration_with_os<O: RunningAppsOs>(
                         snapshot,
                         &mut detected_pids,
                         &explicit_pid_set,
+                        os,
                     );
                 }
                 ConfiguredProgramMatcher::Steam { .. } | ConfiguredProgramMatcher::Known { .. } => {
@@ -1156,10 +1198,13 @@ mod tests {
     use std::sync::{Arc, RwLock};
 
     struct FakeRunningAppsOs {
+        token_reads: std::cell::RefCell<HashMap<u32, std::collections::VecDeque<u64>>>,
+        foreign_logon_pids: HashSet<u32>,
         denied_tokens: HashSet<u32>,
         denied_steam: HashSet<u32>,
         steam: HashMap<u32, Vec<os_api::steam::GameProcess>>,
         steam_root: Option<PathBuf>,
+        steam_directory_error: Option<String>,
         snapshot: Result<ProcessSnapshot, String>,
         image_paths: HashMap<u32, PathBuf>,
         image_instance_tokens: HashMap<u32, u64>,
@@ -1177,10 +1222,13 @@ mod tests {
     impl Default for FakeRunningAppsOs {
         fn default() -> Self {
             Self {
+                token_reads: Default::default(),
+                foreign_logon_pids: HashSet::new(),
                 denied_tokens: HashSet::new(),
                 denied_steam: HashSet::new(),
                 steam: Default::default(),
                 steam_root: None,
+                steam_directory_error: None,
                 snapshot: Ok(ProcessSnapshot::default()),
                 image_paths: HashMap::new(),
                 image_instance_tokens: HashMap::new(),
@@ -1197,6 +1245,9 @@ mod tests {
     }
 
     impl RunningAppsOs for FakeRunningAppsOs {
+        fn current_logon_instance(&self, pid: u32, _token: u64) -> bool {
+            !self.foreign_logon_pids.contains(&pid)
+        }
         fn known_instance_role(
             &self,
             pid: u32,
@@ -1222,8 +1273,12 @@ mod tests {
         ) -> Vec<os_api::steam::GameProcess> {
             self.steam.get(&id).cloned().unwrap_or_default()
         }
-        fn steam_game_directory(&self, _id: u32) -> Option<PathBuf> {
-            self.steam_root.clone()
+        fn steam_game_directory(&self, _id: u32) -> Result<PathBuf, String> {
+            self.steam_root.clone().ok_or_else(|| {
+                self.steam_directory_error
+                    .clone()
+                    .unwrap_or_else(|| "Steam game installation could not be located.".into())
+            })
         }
         fn snapshot_process_tree(&self) -> Result<ProcessSnapshot, String> {
             self.snapshot.clone()
@@ -1254,6 +1309,14 @@ mod tests {
         }
 
         fn get_process_instance_token(&self, pid: u32) -> Result<u64, String> {
+            if let Some(token) = self
+                .token_reads
+                .borrow_mut()
+                .get_mut(&pid)
+                .and_then(|reads| reads.pop_front())
+            {
+                return Ok(token);
+            }
             if self.denied_tokens.contains(&pid) {
                 return Err("Access denied".into());
             }
@@ -1902,6 +1965,69 @@ mod tests {
     }
 
     #[test]
+    fn s131_installed_foreign_service_cannot_seed_or_keep_app_alive() {
+        let mut state = sample_installed_program_state();
+        state.groups[0].programs[0].additional_processes.clear();
+        let key = state.groups[0].programs[0].get_key();
+        let mut apps = RunningApps::default();
+        let aumid = "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify";
+        let mut os = FakeRunningAppsOs {
+            foreign_logon_pids: HashSet::from([21, 23]),
+            snapshot: Ok(ProcessSnapshot {
+                names: HashMap::from([(21, "service.exe".into())]),
+                ..Default::default()
+            }),
+            aumids: HashMap::from([(21, aumid.into())]),
+            installed_package_infos: HashMap::from([(
+                aumid.to_lowercase(),
+                Ok(InstalledPackageRuntimeInfo {
+                    aumid: aumid.into(),
+                    package_family_name: "SpotifyAB.SpotifyMusic_zpdnekdrzrea0".into(),
+                    install_root: PathBuf::from(r"C:\Package"),
+                }),
+            )]),
+            ..Default::default()
+        };
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert!(apps.apps.is_empty(), "a service cannot seed a GUI app");
+
+        os.snapshot.as_mut().unwrap().names.extend([
+            (20, "spotify.exe".into()),
+            (22, "helper.exe".into()),
+            (23, "another-service.exe".into()),
+        ]);
+        os.aumids.insert(20, aumid.into());
+        for (pid, name) in [
+            (20, "spotify"),
+            (21, "service"),
+            (22, "helper"),
+            (23, "another-service"),
+        ] {
+            os.image_paths
+                .insert(pid, PathBuf::from(format!(r"C:\Package\{name}.exe")));
+        }
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        let mut pids = apps.apps[&key].pids.clone();
+        pids.sort_unstable();
+        assert_eq!(
+            pids,
+            vec![20, 22],
+            "only interactive package members belong"
+        );
+
+        os.snapshot
+            .as_mut()
+            .unwrap()
+            .names
+            .retain(|pid, _| [21, 23].contains(pid));
+        run_iteration(&mut apps, collect_configured_programs(&state), &os);
+        assert!(
+            apps.apps.is_empty(),
+            "persistent services cannot keep the row running"
+        );
+    }
+
+    #[test]
     fn test_installed_background_host_seed_does_not_create_tracking_entry() {
         let state = sample_installed_program_state();
         let configured = collect_configured_programs(&state);
@@ -2082,6 +2208,7 @@ mod tests {
         let configured = collect_configured_programs(&state);
         let mut apps = RunningApps::default();
         let os = FakeRunningAppsOs {
+            token_reads: Default::default(),
             snapshot: Ok(ProcessSnapshot {
                 children_of: HashMap::new(),
                 names: HashMap::from([(21, "spotifyhelper.exe".to_string())]),
@@ -2090,8 +2217,10 @@ mod tests {
             image_instance_tokens: HashMap::new(),
             denied_tokens: HashSet::new(),
             denied_steam: HashSet::new(),
+            foreign_logon_pids: HashSet::new(),
             steam: Default::default(),
             steam_root: None,
+            steam_directory_error: None,
             live_pids: HashSet::from([21]),
             instance_tokens: HashMap::new(),
             aumids: HashMap::new(),
@@ -2500,6 +2629,36 @@ mod tests {
                 BoundProcessInstance { pid: 12, token: 12 },
             ]
         );
+    }
+    #[test]
+    fn s133_explicit_matching_aumid_service_has_consistent_cold_and_warm_membership() {
+        let mut state = sample_installed_program_state();
+        state.groups[0].programs[0].additional_processes = vec!["service.exe".into()];
+        let key = state.groups[0].programs[0].get_key();
+        let aumid = "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify";
+        let mut os = FakeRunningAppsOs {
+            foreign_logon_pids: HashSet::from([21]),
+            snapshot: Ok(ProcessSnapshot {
+                names: HashMap::from([(20, "main.exe".into()), (21, "service.exe".into())]),
+                ..Default::default()
+            }),
+            image_paths: HashMap::from([(21, r"C:\Package\service.exe".into())]),
+            aumids: HashMap::from([(20, aumid.into()), (21, aumid.into())]),
+            ..Default::default()
+        };
+        let mut warm = RunningApps::default();
+        run_iteration(&mut warm, collect_configured_programs(&state), &os);
+        assert!(warm.apps[&key].pids.contains(&21));
+        os.snapshot.as_mut().unwrap().names.remove(&20);
+        run_iteration(&mut warm, collect_configured_programs(&state), &os);
+        assert_eq!(
+            warm.apps[&key].pids,
+            [21],
+            "an explicit matching-AUMID service remains after the GUI exits"
+        );
+        let mut cold = RunningApps::default();
+        run_iteration(&mut cold, collect_configured_programs(&state), &os);
+        assert_eq!(cold.apps.get(&key).map(|app| app.pids.clone()), Some(vec![21]), "restarting the utility must preserve the same explicitly named matching-AUMID membership");
     }
 }
 

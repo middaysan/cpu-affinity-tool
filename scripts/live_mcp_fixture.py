@@ -61,6 +61,12 @@ def assert_diagnostic_exe(path):
         kernel.FreeLibrary(handle)
 
 
+class FixtureCleanupError(AssertionError):
+    def __init__(self, codes):
+        self.codes = list(codes)
+        super().__init__('; '.join(codes))
+
+
 class Fixture:
     def __init__(self, exe, root, state=None):
         state = state or synthetic_state(root)
@@ -130,20 +136,27 @@ class Fixture:
 
     def cleanup(self):
         failures = []
+        pending = []
         for process, stop in self.children:
+            exited = False
             try:
                 stop.write_text("stop", encoding="utf-8")
                 process.wait(timeout=5)
+                exited = True
             except Exception:
                 failures.append("workload required forced cleanup")
                 try:
                     process.kill()  # The retained Popen handle, never a basename/PID search.
                     process.wait(timeout=5)
+                    exited = True
                 except Exception:
                     failures.append("workload cleanup failed")
             finally:
-                if hasattr(process, "close"):
+                if exited and hasattr(process, "close"):
                     process.close()
+                if not exited:
+                    pending.append((process, stop))
+        self.children = pending  # A later retry must retain live handles, never reuse closed ones.
         try:
             self.close()
         except Exception:
@@ -159,4 +172,5 @@ class Fixture:
             if authority.exists():
                 assert authority.resolve().is_relative_to(self.root)
                 shutil.rmtree(authority)
-        assert not failures, "; ".join(failures)
+        if failures:
+            raise FixtureCleanupError(failures)

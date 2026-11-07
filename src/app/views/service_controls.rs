@@ -159,7 +159,8 @@ fn draw_tracked_process_list(
         "table.tracked",
         scroll.inner_rect,
         true,
-        serde_json::json!({"rows":processes.len(),"offset":scroll.state.offset.y}),
+        serde_json::json!({"rows":processes.len(),"offset":scroll.state.offset.y,
+            "entries":processes.iter().take(128).map(|row|serde_json::json!({"group":row.group_name,"pid":row.pid,"name":row.process_name})).collect::<Vec<_>>()}),
     );
     scroll
 }

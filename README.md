@@ -6,9 +6,7 @@ Set up a game and its background apps once, instead of repeating the changes in 
 
 **[Download for Windows](https://github.com/middaysan/cpu-affinity-tool/releases/latest)** · [Getting started](#getting-started) · [MCP guide](docs/mcp.md) · [Documentation](#documentation)
 
-**Latest fix in [1.7.2](https://github.com/middaysan/cpu-affinity-tool/releases/tag/v1.7.2):** System Tweaks offers **Update saved settings** after upgrading from an older version, keeping apps, groups and Undo information.
-
-**New in [1.7.1](https://github.com/middaysan/cpu-affinity-tool/releases/tag/v1.7.1):** Steam game tracking, helper-process profiles for popular apps, shared-process control, and current CPU/RAM totals for apps and groups.
+**New in [1.7.3](https://github.com/middaysan/cpu-affinity-tool/releases/tag/v1.7.3).** App and group CPU meters use the group's selected CPUs, and readings stay visible when unrelated processes come and go. If a Steam game cannot be detected, **Select game** explains why and opens the process chooser.
 
 ![Affinity groups, CPU selection and recorded CPU history in three separate views](assets/screenshot.png)
 
@@ -36,19 +34,19 @@ Performance depends on the application and workload. Compare CPU activity and re
 
 - Create groups of logical CPUs for foreground work, background apps, or a particular workload.
 - Add executables, supported launcher files, or installed apps. Drag and drop from Explorer also works.
-- Steam game shortcuts launch through Steam while CPU/RAM, affinity and Focus follow the game. If automatic detection is ambiguous, choose the running game process in its rule settings. Existing Steam shortcuts can switch using **Use Steam game tracking**.
+- Steam game shortcuts launch through Steam while CPU/RAM, affinity and Focus follow the game. If detection is unavailable or ambiguous, the amber **Select game** warning explains why and opens the process chooser. Select the running game's main EXE and save. Existing Steam shortcuts can switch using **Use Steam game tracking**.
 - New entries recognize 20 application families and fill supported app-owned helper names automatically. Helpers stay tied to the selected installation; shared services/runtimes are excluded. [Supported entries and limits](docs/known-app-processes.md).
 - Save priority, startup behavior, and extra process names, plus launch arguments for file-based targets. Name suggestions come from running processes.
 - Use **Process monitor** to find your saved apps and reapply their affinity and priority. Its **Processes** and **Logs** tabs show what it found and changed.
-- Reorder groups and apps, launch a group together, or create a Windows desktop shortcut for a saved rule.
+- Reorder groups and apps, launch a group together, or create a Windows desktop shortcut for a saved executable rule.
 
-Child-process management is an explicit per-rule option and starts off for new rules. Protected or inaccessible processes may refuse changes; failures appear in **Logs**.
+Child-process management is an explicit per-rule option and starts off for new rules. After three access denials for a running process, automatic correction pauses for that instance. Use **Retry** to try again. Available CPU/RAM readings stay visible, and failures appear in **Logs**.
 
 ### See where CPU time goes
 
 **CPU load** records CPU and process activity independently of Process monitor. Recording continues with graphs closed or the app in the tray. History stays in RAM: choose 30 seconds, 5 minutes (default), or 30 minutes.
 
-Application and group CPU meters show current usage as a percentage of the whole processor. Each group counts its running processes once, including configured helpers shared by several rules. Detailed graphs show scheduler time on individual logical CPUs, with their own scale and sample time.
+Application and group CPU meters use the group's selected logical CPUs as 100% of its capacity. Only work on those CPUs is counted, including configured helpers; shared processes count once per group. Missing scheduler data stays unavailable or explicitly partial. The header CPU meter covers the whole processor. Detailed graphs show scheduler time on each logical CPU, with its own 100% scale and original sample time.
 
 Open a system, group, or application graph to inspect individual logical CPUs, their sampled parking state, and the processes contributing at a selected time. Group graphs start with your tracked apps; **All system processes** expands the scope. The **Processes** tab has sortable columns.
 
@@ -85,9 +83,9 @@ An agent can manage groups and rules, change monitoring settings, launch program
 ## Platforms and data
 
 - **Windows x64** is the stable release platform. The current renderer uses DirectX 12, and the release requires administrator approval. Saved-rule shortcuts may show the same UAC prompt.
-- **Linux** has a separate desktop beta for x86_64 glibc, with X11/Wayland sessions and [beta prereleases](https://github.com/middaysan/cpu-affinity-tool/releases). CPU recording, System Tweaks and production MCP are Windows-only; Linux does not have full Windows feature parity. macOS is unsupported.
+- **Linux** source is retained, but support, development, CI and beta releases are paused while the Windows work is completed. It is not a currently supported or validated target. macOS is unsupported.
 - New Windows configurations use `%LOCALAPPDATA%\CpuAffinityTool\state.json`. An existing `state.json` beside the EXE keeps its legacy location. **Logs → Data folder** opens the active directory.
-- Versions 1.7.1 and 1.7.2 save configuration as schema v14 (Steam game targets, built-in helper provenance and process-control ownership); 1.7.0 used v11. Keep a backup before upgrading; loading an older format alone does not rewrite it, but an explicit save upgrades it. Downgrading after a current-format save is unsupported.
+- Version 1.7.3 continues to save configuration as schema v14, used since 1.7.1. Keep a backup before upgrading. Loading an older format leaves the saved settings intact until you explicitly save. Downgrading after a current-format save is unsupported.
 - Logs and available crash reports stay local and are not uploaded automatically. Review them before sharing. CPU history is retained in memory and saved to a file only when you export it.
 
 ## Build from source
@@ -100,11 +98,6 @@ pwsh -NoProfile -File scripts/build-windows-release.ps1
 ```
 
 The executable is written to `target/release/cpu-affinity-tool.exe`.
-
-```sh
-# Linux desktop beta
-cargo run --features linux --bin cpu-affinity-tool-linux
-```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for dependencies and validation commands, and the [release process](docs/release-process.md) for packaging.
 

@@ -7,7 +7,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::HRESULT;
 
-use crate::{PriorityClass, ProcessSettingsApplyOutcome};
+use crate::{PriorityClass, ProcessSettingsApplyOutcome, ProcessSettingsError};
 
 use super::OS;
 use super::common::{
@@ -42,12 +42,36 @@ impl OS {
         fields: crate::gaming::ProcessSettingsFields,
         apply_changes: bool,
     ) -> Result<ProcessSettingsApplyOutcome, String> {
+        Self::inspect_or_apply_process_fields_if_instance(
+            pid,
+            expected_instance_token,
+            mask,
+            priority,
+            fields,
+            apply_changes,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    pub fn inspect_or_apply_process_fields_if_instance(
+        pid: u32,
+        expected_instance_token: u64,
+        mask: usize,
+        priority: PriorityClass,
+        fields: crate::gaming::ProcessSettingsFields,
+        apply_changes: bool,
+    ) -> Result<ProcessSettingsApplyOutcome, ProcessSettingsError> {
         if fields.affinity && mask == 0 {
-            return Err("affinity mask is empty".to_string());
+            return Err("affinity mask is empty".into());
         }
 
         (|| unsafe {
-            let handle = open_process_for_settings(pid, expected_instance_token)?;
+            let handle = if apply_changes {
+                open_process_for_settings(pid, expected_instance_token)?
+            } else {
+                open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+                    .or_else(|_| open_process(pid, PROCESS_QUERY_INFORMATION))?
+            };
             let _hg = HandleGuard(handle);
 
             let mut created = FILETIME::default();
@@ -55,7 +79,11 @@ impl OS {
             let mut kernel = FILETIME::default();
             let mut user = FILETIME::default();
             GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user).map_err(
-                |error| OsError::Msg(format!("GetProcessTimes failed for PID {pid}: {error}")),
+                |source| OsError::Operation {
+                    operation: "GetProcessTimes",
+                    pid,
+                    source,
+                },
             )?;
             let instance_token = process_instance_token(&created);
             if instance_token != expected_instance_token {
@@ -68,10 +96,10 @@ impl OS {
             let mut system_mask = 0usize;
             if fields.affinity {
                 GetProcessAffinityMask(handle, &mut current_mask, &mut system_mask).map_err(
-                    |error| {
-                        OsError::Msg(format!(
-                            "GetProcessAffinityMask failed for PID {pid}: {error}"
-                        ))
+                    |source| OsError::Operation {
+                        operation: "GetProcessAffinityMask",
+                        pid,
+                        source,
                     },
                 )?;
             }
@@ -81,25 +109,30 @@ impl OS {
                 windows::Win32::System::Threading::NORMAL_PRIORITY_CLASS.0
             };
             if fields.priority && current_priority == 0 {
-                return Err(OsError::Msg(format!(
-                    "GetPriorityClass failed for PID {pid}: {}",
-                    windows::core::Error::from_thread()
-                )));
+                return Err(OsError::Operation {
+                    operation: "GetPriorityClass",
+                    pid,
+                    source: windows::core::Error::from_thread(),
+                });
             }
             let previous_priority = from_win_priority(current_priority);
             let affinity_changed = fields.affinity && current_mask != mask;
             let priority_changed = fields.priority && previous_priority != priority;
             if apply_changes && affinity_changed {
-                SetProcessAffinityMask(handle, mask).map_err(|error| {
-                    OsError::Msg(format!(
-                        "SetProcessAffinityMask failed for PID {pid}: {error}"
-                    ))
+                SetProcessAffinityMask(handle, mask).map_err(|source| OsError::Operation {
+                    operation: "SetProcessAffinityMask",
+                    pid,
+                    source,
                 })?;
             }
             if apply_changes && priority_changed {
-                SetPriorityClass(handle, transform_to_win_priority(priority)).map_err(|error| {
-                    OsError::Msg(format!("SetPriorityClass failed for PID {pid}: {error}"))
-                })?;
+                SetPriorityClass(handle, transform_to_win_priority(priority)).map_err(
+                    |source| OsError::Operation {
+                        operation: "SetPriorityClass",
+                        pid,
+                        source,
+                    },
+                )?;
             }
 
             Ok(ProcessSettingsApplyOutcome {
@@ -109,7 +142,10 @@ impl OS {
                 priority_changed,
             })
         })()
-        .map_err(|error: OsError| format!("Failed to apply settings for process {pid}: {error}"))
+        .map_err(|error: OsError| ProcessSettingsError {
+            access_denied: is_access_denied(&error),
+            message: format!("Failed to apply settings for process {pid}: {error}"),
+        })
     }
 
     /// Gets the current CPU affinity mask for a process.
@@ -207,7 +243,7 @@ fn open_process_for_settings(pid: u32, expected_instance_token: u64) -> Result<H
                         && is_access_denied(&fallback_error)
                         && process_has_protection_level(pid, expected_instance_token) =>
                 {
-                    Err(OsError::Msg(format!(
+                    Err(OsError::AccessDenied(format!(
                         "OpenProcess failed for PID {pid}: Windows protects this process; affinity and priority changes are not permitted"
                     )))
                 }
@@ -218,7 +254,8 @@ fn open_process_for_settings(pid: u32, expected_instance_token: u64) -> Result<H
 }
 
 fn is_access_denied(error: &OsError) -> bool {
-    matches!(error, OsError::Win(error) if error.code() == HRESULT::from_win32(ERROR_ACCESS_DENIED.0))
+    matches!(error, OsError::AccessDenied(_))
+        || matches!(error, OsError::Win(error) if error.code() == HRESULT::from_win32(ERROR_ACCESS_DENIED.0))
         || matches!(error, OsError::Operation { source, .. } if source.code() == HRESULT::from_win32(ERROR_ACCESS_DENIED.0))
 }
 
@@ -286,6 +323,15 @@ mod tests {
 
         assert!(is_access_denied(&error));
         assert!(error.to_string().contains("OpenProcess failed for PID 42"));
+        assert!(is_access_denied(&OsError::AccessDenied(
+            "confirmed protection".into()
+        )));
+        assert!(!is_access_denied(&OsError::Msg(
+            "Access denied in arbitrary text".into()
+        )));
+        assert!(!is_access_denied(&OsError::Win(Error::from_hresult(
+            HRESULT::from_win32(87)
+        ))));
     }
 
     #[test]

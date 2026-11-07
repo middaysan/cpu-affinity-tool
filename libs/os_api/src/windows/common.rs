@@ -22,6 +22,7 @@ pub(super) enum OsError {
         source: windows::core::Error,
     },
     Msg(String),
+    AccessDenied(String),
 }
 
 impl std::fmt::Display for OsError {
@@ -33,7 +34,7 @@ impl std::fmt::Display for OsError {
                 pid,
                 source,
             } => write!(f, "{operation} failed for PID {pid}: {source}"),
-            OsError::Msg(s) => write!(f, "{s}"),
+            OsError::Msg(s) | OsError::AccessDenied(s) => write!(f, "{s}"),
         }
     }
 }

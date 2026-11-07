@@ -92,12 +92,6 @@ impl ModuleEditor for DisplayRefresh {
     fn accepts_config(&self, envelope: &ModuleEnvelope) -> bool {
         config(ID, envelope, true).is_ok()
     }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, envelope: &mut ModuleEnvelope) -> Result<bool, ()> {
-        config(ID, envelope, true).map_err(|_| ())?;
-        ui.label(spec().help);
-        Ok(false)
-    }
     fn tweak_config(&self, target: &TargetIdentity) -> Result<ModuleEnvelope, ModuleError> {
         let modes = native_api::display_modes(&display(target)?).map_err(|e| native("read", e))?;
         restorable_baseline(&modes)?;

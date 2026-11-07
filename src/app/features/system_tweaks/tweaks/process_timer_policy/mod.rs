@@ -37,16 +37,6 @@ impl ModuleEditor for ProcessTimerPolicy {
     fn accepts_config(&self, config: &ModuleEnvelope) -> bool {
         decode::<Config>(ID, config).is_ok_and(|c| c.honor_existing_requests)
     }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()> {
-        let value: Config = decode(ID, config).map_err(|_| ())?;
-        if !value.honor_existing_requests {
-            return Err(());
-        }
-        ui.label("Use the timing requests the game already makes");
-        ui.small("Optional experiment. Creates no new timing requests and changes no timers for other apps. Compare results with the game visible and minimized.");
-        Ok(false)
-    }
 }
 impl Module for ProcessTimerPolicy {
     fn descriptor(&self) -> ModuleDescriptor {

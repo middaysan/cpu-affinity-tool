@@ -1,5 +1,5 @@
 use crate::app::{
-    models::{AppStateStorage, AppToRun, LaunchTarget},
+    models::{AppToRun, LaunchTarget},
     shared::ids::{GroupId, RuleId},
 };
 use os_api::PriorityClass;
@@ -113,59 +113,10 @@ fn validate_name(name: &str) -> Result<(), String> {
     }
     Ok(())
 }
-pub(crate) fn validate_group(
-    name: &str,
-    cpus: &[usize],
-    total: usize,
-) -> Result<(String, Vec<usize>), String> {
-    super::service::validate_group_values(name, cpus, total)
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct PreferencePatch {
-    pub theme_index: Option<usize>,
-    pub process_monitoring_enabled: Option<bool>,
-    pub cpu_load_monitoring_enabled: Option<bool>,
-    pub cpu_load_history_seconds: Option<u32>,
-    pub start_minimized: Option<bool>,
-    pub windows_event_log_diagnostics_enabled: Option<bool>,
-}
-impl PreferencePatch {
-    pub fn apply(&self, state: &mut AppStateStorage) -> Result<(), String> {
-        if self.theme_index.is_some_and(|theme| theme > 2)
-            || self
-                .cpu_load_history_seconds
-                .is_some_and(|seconds| ![30, 300, 1800].contains(&seconds))
-        {
-            return Err("Unsupported theme or history duration".into());
-        }
-        macro_rules! update { ($($field:ident),*) => { $(if let Some(value) = self.$field { state.$field = value; })* }; }
-        update!(
-            theme_index,
-            process_monitoring_enabled,
-            cpu_load_monitoring_enabled,
-            cpu_load_history_seconds,
-            start_minimized,
-            windows_event_log_diagnostics_enabled
-        );
-        Ok(())
-    }
-}
+pub(crate) use crate::app::features::preferences::PreferencePatch;
 #[derive(Clone, Debug)]
 pub(crate) enum BaseCommand {
-    CreateGroup {
-        name: String,
-        cpus: Vec<usize>,
-        run_all: bool,
-    },
-    UpdateGroup {
-        group: GroupId,
-        name: String,
-        cpus: Vec<usize>,
-        run_all: bool,
-        hidden: Option<bool>,
-    },
+    Group(super::GroupEdit),
     RemoveGroup {
         group: GroupId,
     },
@@ -198,6 +149,7 @@ pub(crate) enum BaseCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::features::rules::validate_group_values as validate_group;
     #[test]
     fn agent_rule_input_cannot_persist_realtime_priority_for_later_enforcement() {
         let input: RuleInput = serde_json::from_value(serde_json::json!({"name":"Example","path":"C:\\Tools\\example.exe","priority":"Realtime"})).unwrap();

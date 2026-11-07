@@ -5,8 +5,6 @@ use crate::app::shared::ids::GroupId;
 pub struct GroupFormSession {
     /// Transient logical identity of the group being edited.
     pub editing_group_id: Option<GroupId>,
-    /// Current selection state when editing an existing group.
-    pub editing_selection: Option<Vec<bool>>,
     /// Boolean vector representing which CPU cores are selected in the form.
     pub core_selection: Vec<bool>,
     /// Name of the group being created or edited.
@@ -21,7 +19,6 @@ impl GroupFormSession {
     /// Reset all group form fields to their default values.
     pub fn reset(&mut self) {
         self.editing_group_id = None;
-        self.editing_selection = None;
         self.run_all_enabled = false;
         self.group_name.clear();
         self.core_selection.fill(false);

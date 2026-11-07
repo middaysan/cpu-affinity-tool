@@ -85,7 +85,6 @@ impl UiSession {
             current_window: WindowRoute::Groups(GroupRoute::List),
             group_form: GroupFormSession {
                 editing_group_id: None,
-                editing_selection: None,
                 core_selection: vec![false; total_threads],
                 group_name: String::new(),
                 run_all_enabled: false,

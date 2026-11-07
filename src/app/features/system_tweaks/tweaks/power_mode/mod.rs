@@ -514,34 +514,6 @@ impl ModuleEditor for PowerMode {
     fn accepts_config(&self, config: &ModuleEnvelope) -> bool {
         configuration(config).is_ok()
     }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()> {
-        let mut value: Config = decode(ID, config).map_err(|_| ())?;
-        let before = (value.ac, value.dc);
-        for (id, title, mode) in [
-            ("power_mode_ac", "Plugged in", &mut value.ac),
-            ("power_mode_dc", "On battery", &mut value.dc),
-        ] {
-            ui.horizontal(|ui| {
-                ui.label(title);
-                eframe::egui::ComboBox::from_id_salt(id)
-                    .selected_text(mode.label())
-                    .show_ui(ui, |ui| {
-                        for candidate in [Mode::Efficiency, Mode::Balanced, Mode::Performance] {
-                            ui.selectable_value(mode, candidate, candidate.label());
-                        }
-                    });
-            });
-        }
-        ui.small(
-            "Choose separately for plugged-in and battery use. Windows may adjust the active mode.",
-        );
-        let changed = before != (value.ac, value.dc);
-        if changed {
-            *config = envelope(ID, &value);
-        }
-        Ok(changed)
-    }
 }
 impl Module for PowerMode {
     fn descriptor(&self) -> ModuleDescriptor {

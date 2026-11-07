@@ -1,3 +1,4 @@
+use super::correction::{CorrectionFailure, CorrectionState};
 use crate::app::features::execution::store::{RunningAppInstancesLookup, RunningAppSettingsUpdate};
 use crate::app::features::execution::{
     ensure_package_owner_claim, is_excluded_installed_auto_process, InstalledPackageTrackingState,
@@ -10,7 +11,10 @@ use crate::app::models::{
 };
 use crate::app::shared::ids::{GroupId, RuleId};
 use os_api::gaming::{ProcessLaunch, ProcessSettingsFields};
-use os_api::{InstalledPackageRuntimeInfo, PriorityClass, ProcessSettingsApplyOutcome, OS};
+use os_api::{
+    InstalledPackageRuntimeInfo, PriorityClass, ProcessSettingsApplyOutcome, ProcessSettingsError,
+    OS,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -34,6 +38,7 @@ struct PostLaunchCorrectionOutcome {
 }
 
 struct PostLaunchCorrectionRequest {
+    corrections: Arc<CorrectionState>,
     source: AppToRun,
     wake: Option<MonitorWake>,
     running_apps: Arc<TokioRwLock<crate::app::models::RunningApps>>,
@@ -118,6 +123,17 @@ trait LaunchOs {
         priority: PriorityClass,
         fields: ProcessSettingsFields,
     ) -> Result<ProcessSettingsApplyOutcome, String>;
+    fn apply_process_fields_checked(
+        &self,
+        pid: u32,
+        token: u64,
+        mask: usize,
+        priority: PriorityClass,
+        fields: ProcessSettingsFields,
+    ) -> Result<ProcessSettingsApplyOutcome, ProcessSettingsError> {
+        self.apply_process_fields_if_instance(pid, token, mask, priority, fields)
+            .map_err(Into::into)
+    }
     fn focus_window_by_pid(&self, pid: u32) -> bool;
     fn run_with_fields(
         &self,
@@ -179,7 +195,14 @@ fn activate_installed_with_os(
         .installed_aumid()
         .ok_or("Expected an installed application")?
         .to_owned();
+    let corrections = request
+        .running_apps
+        .try_read()
+        .map_err(|_| "Running app state is temporarily busy")?
+        .correction_denials
+        .clone();
     let mut correction = PostLaunchCorrectionRequest {
+        corrections,
         source: source.app.clone(),
         wake: request.wake,
         running_apps: request.running_apps,
@@ -228,6 +251,26 @@ fn activate_installed_with_os(
 }
 
 impl LaunchOs for RealLaunchOs {
+    fn apply_process_fields_checked(
+        &self,
+        pid: u32,
+        token: u64,
+        mask: usize,
+        priority: PriorityClass,
+        fields: ProcessSettingsFields,
+    ) -> Result<ProcessSettingsApplyOutcome, ProcessSettingsError> {
+        #[cfg(target_os = "windows")]
+        {
+            OS::inspect_or_apply_process_fields_if_instance(
+                pid, token, mask, priority, fields, true,
+            )
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.apply_process_fields_if_instance(pid, token, mask, priority, fields)
+                .map_err(Into::into)
+        }
+    }
     fn launch_known_launcher(&self, app: &AppToRun) -> Result<(), String> {
         crate::app::features::rules::known_apps::launch_ordinary(app)
     }
@@ -531,6 +574,11 @@ fn reapply_existing_app_settings<O: LaunchOs>(
             return LaunchDispatchOutcome::Rejected(message);
         }
     };
+    if !runtime.store.retry_correction(&app_key) {
+        return LaunchDispatchOutcome::Rejected(
+            "Running app state is temporarily busy; try again".into(),
+        );
+    }
     let (failures, shared) = apply_settings_for_instances(
         os,
         &instances,
@@ -1148,7 +1196,8 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
             let launch_instance_token = os
                 .get_process_instance_token(pid)
                 .ok()
-                .filter(|token| created_token.is_none_or(|created| *token == created));
+                .filter(|token| created_token.is_none_or(|created| *token == created))
+                .filter(|token| !is_installed || os.current_logon_instance(pid, *token));
             if !is_installed {
                 if let Some(token) = launch_instance_token {
                     if let Err(error) =
@@ -1170,6 +1219,7 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
                         os,
                         &runtime.control_handle(),
                         &runtime.scheduling_handle(),
+                        &runtime.correction_handle(),
                         super::control::SourceRequest {
                             group: &group_id,
                             rule: &rule_id,
@@ -1185,7 +1235,9 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
             }
 
             if launch_pid_auto_managed {
-                if let Some(instance_token) = launch_instance_token {
+                if let Some(instance_token) = launch_instance_token
+                    .filter(|token| !is_installed || os.current_logon_instance(pid, *token))
+                {
                     record_started_pid(
                         runtime,
                         log_manager,
@@ -1208,6 +1260,7 @@ fn run_launch_decision_with_fields<O: LaunchOs>(
 
             if let LaunchTarget::Installed { aumid } = &app_to_run.launch_target {
                 os.start_post_launch_correction(PostLaunchCorrectionRequest {
+                    corrections: runtime.correction_handle(),
                     source: app_to_run.clone(),
                     wake: runtime.wake_handle(),
                     running_apps: runtime.running_apps_handle(),
@@ -1365,6 +1418,13 @@ fn complete_post_launch_correction<O: LaunchOs>(
             });
             Ok(PostLaunchPublication { changed, helpers })
         })?;
+    request
+        .corrections
+        .observe(apps.apps.values().flat_map(|app| {
+            app.pid_instance_tokens
+                .iter()
+                .map(|(&pid, &token)| (pid, token))
+        }));
     drop(apps);
     for &pid in &publication.helpers {
         if let Some(&token) = outcome.instance_tokens.get(&pid) {
@@ -1372,6 +1432,7 @@ fn complete_post_launch_correction<O: LaunchOs>(
                 os,
                 &request.control,
                 &request.scheduling,
+                &request.corrections,
                 correction_source(request)?,
                 pid,
                 token,
@@ -1422,6 +1483,7 @@ fn spawn_post_launch_correction(request: PostLaunchCorrectionRequest) {
                 &request.scheduling,
                 Some((&request.control, source)),
                 request.initial_token.is_none(),
+                &request.corrections,
             );
 
             if let Ok(outcome) = outcome {
@@ -1500,44 +1562,62 @@ fn post_launch_correction_poll_with_os<O: LaunchOs>(
         &SchedulingHandoff::default(),
         None,
         false,
+        &CorrectionState::default(),
     )
 }
 fn apply_initial_process<O: LaunchOs>(
     os: &O,
     control: &super::control::Authority,
     scheduling: &SchedulingHandoff,
+    corrections: &CorrectionState,
     source: super::control::SourceRequest<'_>,
     pid: u32,
     token: u64,
-) -> Result<(), String> {
+) -> Result<(), CorrectionFailure> {
     let image = os.get_process_image_path(pid).ok();
-    control.initial_with_source(
-        source,
-        super::control::WriteRequest {
-            rule: source.rule,
-            key: source.key,
-            pid,
-            token,
-            image: image.as_deref(),
-            mask: source.mask,
-            priority: source.app.priority,
-            fields: source.fields,
-            change: true,
-        },
-        |owner| {
-            let selected = scheduling
-                .select(pid, token, owner.fields, true)
-                .map_err(|error| format!("{error:?}"))?;
-            os.apply_process_fields_if_instance(
+    let mut native_failure = None;
+    control
+        .initial_with_source(
+            source,
+            super::control::WriteRequest {
+                rule: source.rule,
+                key: source.key,
                 pid,
                 token,
-                owner.mask,
-                owner.app.priority,
-                selected,
-            )
-            .map(|_| ())
-        },
-    )
+                image: image.as_deref(),
+                mask: source.mask,
+                priority: source.app.priority,
+                fields: source.fields,
+                change: true,
+            },
+            |owner| {
+                let selected = scheduling
+                    .select(pid, token, owner.fields, true)
+                    .map_err(|error| format!("{error:?}"))?;
+                corrections
+                    .attempt(
+                        (pid, token),
+                        selected.affinity || selected.priority,
+                        false,
+                        || {
+                            os.apply_process_fields_checked(
+                                pid,
+                                token,
+                                owner.mask,
+                                owner.app.priority,
+                                selected,
+                            )
+                        },
+                    )
+                    .map(|_| ())
+                    .map_err(|error| {
+                        let message = error.to_string();
+                        native_failure = Some(error);
+                        message
+                    })
+            },
+        )
+        .map_err(|message| native_failure.unwrap_or_else(|| CorrectionFailure::other(message)))
 }
 #[allow(clippy::too_many_arguments)] // Same bounded post-launch request plus field handoff metadata.
 fn post_launch_correction_poll_with_fields<O: LaunchOs>(
@@ -1557,6 +1637,7 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
         super::control::SourceRequest<'_>,
     )>,
     acknowledged: bool,
+    corrections: &CorrectionState,
 ) -> Result<PostLaunchCorrectionOutcome, String> {
     let snapshot = os.snapshot_process_tree()?;
     let before: HashSet<u32> = seed_pids.iter().copied().collect();
@@ -1587,9 +1668,10 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
     } else {
         // Retaining a PID from an earlier poll never grants a new lifetime.
         seed_pids.retain(|pid| {
-            seed_tokens
-                .get(pid)
-                .is_some_and(|token| os.get_process_instance_token(*pid).ok() == Some(*token))
+            seed_tokens.get(pid).is_some_and(|token| {
+                os.get_process_instance_token(*pid).ok() == Some(*token)
+                    && os.current_logon_instance(*pid, *token)
+            })
         });
     }
 
@@ -1652,35 +1734,53 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
             || package_tokens
                 .get(&pid)
                 .is_some_and(|token| *token != instance_token)
-            || (acknowledged && !os.current_logon_instance(pid, instance_token))
+            || !os.current_logon_instance(pid, instance_token)
         {
             return false;
         }
         let result = if let Some((control, source)) = authority {
-            apply_initial_process(os, control, scheduling, source, pid, instance_token)
+            apply_initial_process(
+                os,
+                control,
+                scheduling,
+                corrections,
+                source,
+                pid,
+                instance_token,
+            )
         } else {
             #[cfg(test)]
             {
                 let selected = scheduling
                     .select(pid, instance_token, fields, true)
                     .map_err(|error| format!("{error:?}"));
-                selected.and_then(|selected| {
-                    os.apply_process_fields_if_instance(
-                        pid,
-                        instance_token,
-                        mask,
-                        priority,
-                        selected,
-                    )
-                    .map(|_| ())
-                })
+                selected
+                    .map_err(CorrectionFailure::other)
+                    .and_then(|selected| {
+                        corrections
+                            .attempt(
+                                (pid, instance_token),
+                                selected.affinity || selected.priority,
+                                false,
+                                || {
+                                    os.apply_process_fields_checked(
+                                        pid,
+                                        instance_token,
+                                        mask,
+                                        priority,
+                                        selected,
+                                    )
+                                },
+                            )
+                            .map(|_| ())
+                    })
             }
             #[cfg(not(test))]
             {
-                Err("Process authority unavailable".into())
+                Err(CorrectionFailure::other("Process authority unavailable"))
             }
         };
-        if result.is_err() {
+        if result.is_err_and(|error| !error.access_limited) {
             return false;
         }
         instance_tokens.insert(pid, instance_token);
@@ -1695,7 +1795,7 @@ fn post_launch_correction_poll_with_fields<O: LaunchOs>(
             || seed_tokens
                 .get(&pid)
                 .is_some_and(|token| *token != instance_token)
-            || (acknowledged && !os.current_logon_instance(pid, instance_token))
+            || !os.current_logon_instance(pid, instance_token)
         {
             return false;
         }
@@ -1858,6 +1958,9 @@ fn path_is_under_root_case_insensitive(path: &Path, install_root: &Path) -> bool
 
 #[cfg(test)]
 mod tests {
+    use os_api::gaming::ProcessSettingsFields;
+    use os_api::ProcessSettingsError;
+
     include!("launch_known_app_tests.rs");
     use super::{
         collect_autorun_items, post_launch_correction_poll_with_os, record_started_pid,
@@ -1938,6 +2041,21 @@ mod tests {
     }
 
     impl LaunchOs for FakeLaunchOs {
+        fn apply_process_fields_checked(
+            &self,
+            pid: u32,
+            token: u64,
+            mask: usize,
+            priority: PriorityClass,
+            fields: ProcessSettingsFields,
+        ) -> Result<ProcessSettingsApplyOutcome, ProcessSettingsError> {
+            self.apply_process_fields_if_instance(pid, token, mask, priority, fields)
+                .map_err(|message| ProcessSettingsError {
+                    access_denied: message.contains("0x80070005"),
+                    message,
+                })
+        }
+
         fn activate_known_client(&self, app: &AppToRun) -> Result<(), String> {
             self.client_activation_calls
                 .borrow_mut()
@@ -2103,6 +2221,7 @@ mod tests {
         let key = rules.runtime_key(&app, &rule);
         runtime.add_running_app_with_token(&key, 42, 1042, group.clone(), rule.clone());
         PostLaunchCorrectionRequest {
+            corrections: runtime.correction_handle(),
             source: app,
             wake: None,
             running_apps: runtime.running_apps_handle(),
@@ -2200,6 +2319,7 @@ mod tests {
                 super::correction_source(&pending).unwrap(),
             )),
             pending.initial_pid.is_none(),
+            &pending.corrections,
         )
         .unwrap();
         super::complete_post_launch_correction(&pending, &outcome, &os).unwrap();
@@ -2222,6 +2342,35 @@ mod tests {
             saw_identity_seed: true,
             instance_tokens: HashMap::from([(42, 1042), (43, 1043)]),
         }
+    }
+
+    #[test]
+    fn s131_returned_installed_pid_cannot_admit_a_foreign_service() {
+        let os = FakeLaunchOs {
+            snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                names: HashMap::from([(42, "service.exe".into())]),
+                ..Default::default()
+            })),
+            process_aumids: HashMap::from([(42, "Example!Main".into())]),
+            foreign_logon_pids: HashSet::from([42]),
+            ..Default::default()
+        };
+        let mut seeds = vec![42];
+        let outcome = super::post_launch_correction_poll_with_os(
+            &os,
+            "Example!Main",
+            &mut seeds,
+            &[0],
+            PriorityClass::Normal,
+            None,
+            &HashSet::new(),
+            false,
+        )
+        .unwrap();
+        assert!(outcome.seed_pids.is_empty());
+        assert!(outcome.managed_pids.is_empty());
+        assert!(!outcome.saw_identity_seed);
+        assert!(os.affinity_calls.borrow().is_empty());
     }
 
     #[test]
@@ -2284,6 +2433,7 @@ mod tests {
                         super::correction_source(&request).unwrap(),
                     )),
                     false,
+                    &request.corrections,
                 )
                 .unwrap();
             }
@@ -2336,6 +2486,7 @@ mod tests {
                     super::correction_source(&request).unwrap(),
                 )),
                 false,
+                &request.corrections,
             )
             .unwrap();
             super::complete_post_launch_correction(&request, &outcome, &os).unwrap();
@@ -2382,6 +2533,7 @@ mod tests {
                 super::correction_source(&request).unwrap(),
             )),
             false,
+            &request.corrections,
         )
         .unwrap();
         let publication = super::complete_post_launch_correction(&request, &first, &os).unwrap();
@@ -2412,6 +2564,7 @@ mod tests {
                 super::correction_source(&request).unwrap(),
             )),
             false,
+            &request.corrections,
         )
         .unwrap();
         super::complete_post_launch_correction(&request, &second, &os).unwrap();
@@ -2908,6 +3061,29 @@ mod tests {
         assert!(runtime.add_running_app_with_token(&app_key, 41, 1041, group_id(0), rule_id(0)));
         assert!(runtime.add_pid_to_existing_app_with_token(&app_key, 42, 1042));
         set_settings_matched(&runtime, &app, false);
+        {
+            let running = runtime.running_apps_handle();
+            let mut running = running.blocking_write();
+            for _ in 0..3 {
+                let _ = running
+                    .correction_denials
+                    .attempt((41, 1041), true, true, || {
+                        Err::<(), _>(ProcessSettingsError {
+                            message: "denied".into(),
+                            access_denied: true,
+                        })
+                    });
+            }
+            running
+                .apps
+                .get_mut(&app_key)
+                .unwrap()
+                .settings_access_limited = true;
+        }
+        assert_eq!(
+            runtime.get_app_status_sync(&app_key),
+            AppStatus::LimitedAccess
+        );
         let mut log_manager = LogManager::default();
         let os = FakeLaunchOs {
             focus_results: HashMap::from([(41, true)]),
@@ -2932,6 +3108,11 @@ mod tests {
         assert!(os.run_calls.borrow().is_empty());
         assert!(os.activate_calls.borrow().is_empty());
         assert_eq!(runtime.get_app_status_sync(&app_key), AppStatus::Running);
+        assert!(runtime
+            .running_apps_handle()
+            .blocking_read()
+            .correction_denials
+            .is_empty());
     }
 
     #[test]
@@ -3773,5 +3954,130 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.message.contains("metadata unavailable")));
+    }
+    #[test]
+    fn s133_foreign_activation_pid_must_not_be_written_or_tracked() {
+        let runtime = RuntimeRegistry::new();
+        let mut log = LogManager::default();
+        let app = AppToRun::new_installed(
+            "Example".into(),
+            "Example!Main".into(),
+            PriorityClass::High,
+            false,
+        );
+        let key = app.get_key();
+        let os = FakeLaunchOs {
+            activate_result: RefCell::new(Ok(4321)),
+            foreign_logon_pids: HashSet::from([4321]),
+            snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                names: HashMap::from([(4321, "service.exe".into())]),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert_eq!(
+            run_launch_decision(
+                &runtime,
+                &mut log,
+                group_id(0),
+                rule_id(0),
+                app,
+                vec![0, 2],
+                &os
+            ),
+            super::LaunchDispatchOutcome::Accepted
+        );
+        assert!(
+            os.affinity_calls.borrow().is_empty(),
+            "foreign returned activation PID must not receive an automatic native correction"
+        );
+        assert!(
+            runtime.get_running_app_pids(&key).is_none(),
+            "foreign returned activation PID must not be published as app membership"
+        );
+    }
+
+    #[test]
+    fn s133_installed_initial_polls_must_honor_three_denial_pause() {
+        let request = s112_installed_request();
+        for _ in 0..3 {
+            let _ = request.corrections.attempt((42, 1042), true, true, || {
+                Err::<(), _>(ProcessSettingsError {
+                    message: "denied".into(),
+                    access_denied: true,
+                })
+            });
+        }
+        let os = FakeLaunchOs {
+            affinity_results: HashMap::from([(42, Err("Access is denied. (0x80070005)".into()))]),
+            process_aumids: HashMap::from([(42, "Example!Main".into())]),
+            snapshot_result: RefCell::new(Ok(LaunchProcessSnapshot {
+                names: HashMap::from([(42, "main.exe".into())]),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let mut seeds = vec![42];
+        let mut tokens = HashMap::from([(42, 1042)]);
+        for _ in 0..7 {
+            let outcome = super::post_launch_correction_poll_with_fields(
+                &os,
+                &request.expected_aumid,
+                &mut seeds,
+                &mut tokens,
+                &request.group_cores,
+                request.priority,
+                None,
+                &HashSet::new(),
+                false,
+                request.fields,
+                &request.scheduling,
+                Some((
+                    &request.control,
+                    super::correction_source(&request).unwrap(),
+                )),
+                false,
+                &request.corrections,
+            )
+            .unwrap();
+            assert_eq!(
+                outcome.managed_pids,
+                [42],
+                "denied correction cannot discard observed telemetry membership"
+            );
+            assert_eq!(outcome.seed_pids, [42]);
+            super::complete_post_launch_correction(&request, &outcome, &os).unwrap();
+        }
+        assert_eq!(os.affinity_calls.borrow().len(), 0, "a lifetime already paused after three denials must receive no automatic initial writes");
+        request.corrections.reset([(42, 1042)]).unwrap();
+        for _ in 0..7 {
+            let outcome = super::post_launch_correction_poll_with_fields(
+                &os,
+                &request.expected_aumid,
+                &mut seeds,
+                &mut tokens,
+                &request.group_cores,
+                request.priority,
+                None,
+                &HashSet::new(),
+                false,
+                request.fields,
+                &request.scheduling,
+                Some((
+                    &request.control,
+                    super::correction_source(&request).unwrap(),
+                )),
+                false,
+                &request.corrections,
+            )
+            .unwrap();
+            super::complete_post_launch_correction(&request, &outcome, &os).unwrap();
+        }
+        assert_eq!(
+            os.affinity_calls.borrow().len(),
+            3,
+            "after Retry the initial writer gets exactly three fresh attempts"
+        );
+        assert_eq!(request.corrections.count((42, 1042)), 3);
     }
 }

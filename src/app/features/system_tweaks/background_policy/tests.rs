@@ -751,13 +751,6 @@ impl ModuleEditor for Fixture {
     fn accepts_config(&self, envelope: &super::super::platform::codec::ModuleEnvelope) -> bool {
         configured(envelope).is_ok()
     }
-    fn show(
-        &self,
-        _: &mut eframe::egui::Ui,
-        _: &mut super::super::platform::codec::ModuleEnvelope,
-    ) -> Result<bool, ()> {
-        Ok(false)
-    }
 }
 impl Module for Fixture {
     fn requires_session_target(&self) -> bool {

@@ -38,16 +38,6 @@ pub(crate) fn configured_priority(
         ModestPriority::High => os_api::PriorityClass::High,
     })
 }
-#[cfg(test)]
-fn label(priority: ModestPriority) -> &'static str {
-    match priority {
-        ModestPriority::Idle => "Idle",
-        ModestPriority::BelowNormal => "Below normal",
-        ModestPriority::Normal => "Normal",
-        ModestPriority::AboveNormal => "Above normal",
-        ModestPriority::High => "High",
-    }
-}
 fn raw_label(priority: u32) -> &'static str {
     match priority {
         0x40 => "Idle",
@@ -68,30 +58,6 @@ impl ModuleEditor for ProcessPriority {
     }
     fn accepts_config(&self, config: &ModuleEnvelope) -> bool {
         configured_priority(config).is_ok()
-    }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, config: &mut ModuleEnvelope) -> Result<bool, ()> {
-        let mut value: Config = decode(ID, config).map_err(|_| ())?;
-        let before = value.priority;
-        eframe::egui::ComboBox::from_id_salt(ID)
-            .selected_text(label(value.priority))
-            .show_ui(ui, |ui| {
-                for priority in [
-                    ModestPriority::Idle,
-                    ModestPriority::BelowNormal,
-                    ModestPriority::Normal,
-                    ModestPriority::AboveNormal,
-                    ModestPriority::High,
-                ] {
-                    ui.selectable_value(&mut value.priority, priority, label(priority));
-                }
-            });
-        ui.small("Applies to games linked to this profile. Higher priority gives the game preference when apps compete for CPU time. High may make other apps less responsive.");
-        let changed = before != value.priority;
-        if changed {
-            *config = envelope(ID, &value);
-        }
-        Ok(changed)
     }
 }
 impl Module for ProcessPriority {

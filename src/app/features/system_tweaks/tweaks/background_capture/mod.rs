@@ -35,12 +35,6 @@ impl ModuleEditor for BackgroundCapture {
     fn accepts_config(&self, envelope: &ModuleEnvelope) -> bool {
         config(ID, envelope, false).is_ok()
     }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, envelope: &mut ModuleEnvelope) -> Result<bool, ()> {
-        config(ID, envelope, false).map_err(|_| ())?;
-        ui.label(spec().help);
-        Ok(false)
-    }
     fn tweak_ready(&self, target: &TargetIdentity) -> Result<bool, ModuleError> {
         native_api::read_background_capture(&account_user(target)?)
             .map(|stored| stored == StoredDword::Value(0))

@@ -1,15 +1,20 @@
 //! Session-only background policy, advanced by the existing tuning worker.
 use super::tweaks::background_workload::GameRule;
 use super::{
-    config::{ModulePreference, Profile, TuningLoad},
+    config::TuningLoad,
     execution_bridge::{ExecutionObservation, ProcessFacts},
     persistence::ActivationFacts,
     platform::{
         contract::*,
         controller::{LifetimeEvidence, OwnerKey, RecoveryIntent, SessionSource},
     },
-    service::{HeadlessTuning, SaveError},
+    service::HeadlessTuning,
     tweaks::background_workload::{configured, resolve_pool, Config, CpuMode, ID},
+};
+#[cfg(test)]
+use super::{
+    config::{ModulePreference, Profile},
+    service::SaveError,
 };
 use std::{
     collections::BTreeMap,
@@ -23,7 +28,7 @@ pub(super) use rule_settings::prune_deleted_rule_profiles;
 #[cfg(any(test, all(target_os = "windows", feature = "windows")))]
 pub(crate) use rule_settings::rule_policy;
 pub(crate) use rule_settings::{put_rule_policy, RulePolicy};
-#[cfg(any(windows, test))]
+#[cfg(test)]
 const PREVIEW_TIME: Duration = Duration::from_secs(600);
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 fn feature() -> FeatureId {
@@ -137,6 +142,7 @@ impl Runtime {
         }
     }
     #[cfg(any(windows, test))]
+    #[cfg(test)]
     pub(crate) fn start_preview(
         &mut self,
         facts: ProcessFacts,
@@ -158,10 +164,7 @@ impl Runtime {
             .as_ref()
             .is_some_and(|preview| now >= preview.deadline)
     }
-    pub(crate) fn request_inspect(&mut self) {
-        self.inspect_requested = true;
-        self.next_scan = None;
-    }
+    #[cfg(test)]
     pub(crate) fn stop(&mut self) {
         self.preview = None;
         self.acquired.clear();
@@ -394,6 +397,7 @@ fn candidate_skip(
 }
 
 impl HeadlessTuning {
+    #[cfg(test)]
     pub(crate) fn configure_background(
         &mut self,
         enabled: bool,
@@ -452,32 +456,7 @@ impl HeadlessTuning {
         }
         self.save_config(saved)
     }
-    pub(crate) fn preview_background(&mut self) -> Result<(), SaveError> {
-        self.verify_saved()?;
-        if !self.native_admitted || !self.controller.can_admit() {
-            return Err(SaveError::Recovering);
-        }
-        if !matches!(self.state().tuning.decode(), TuningLoad::Known(ref saved) if saved.profiles.iter().any(|profile|profile.name==PROFILE_NAME))
-        {
-            self.configure_background(false, Config::default())?;
-        }
-        #[cfg(windows)]
-        {
-            let native = os_api::OS::tuning_process_identity(std::process::id())
-                .map_err(|_| SaveError::Invalid)?;
-            let facts = ProcessFacts {
-                pid: native.pid(),
-                token: native.creation_time(),
-                image: Arc::from(native.image_path()),
-                native: Some(Arc::new(native)),
-            };
-            self.background.start_preview(facts, Instant::now())
-        }
-        #[cfg(not(windows))]
-        {
-            Err(SaveError::Invalid)
-        }
-    }
+    #[cfg(test)]
     pub(crate) fn undo_background(&mut self) -> Result<(), SaveError> {
         let mut saved = self.configured()?;
         for profile in &mut saved.profiles {
@@ -510,10 +489,12 @@ impl HeadlessTuning {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct GameChoice {
     pub rule: String,
 }
+#[cfg(test)]
 pub(crate) fn game_choices(
     state: &crate::app::models::AppStateStorage,
     rules: &crate::app::features::rules::RulesContext,

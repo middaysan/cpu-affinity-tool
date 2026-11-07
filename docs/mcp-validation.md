@@ -271,3 +271,42 @@ Two independent Astra reviewers completed first and second source-review passes 
 Parent validation passed 884 application tests, 208 default os_api tests plus one documentation test, strict shipping and os_api test-code Clippy, safe background protocol/admission checks, both renderer dependency-partition tests and formatting. The reviewers did not run separate native experiments. The existing group CPU scope (tracked work on the chosen CPUs) and group RAM scope (that group's member-instance union), discovery admission and real-role VM limits remain explicit; this review does not redefine those semantics or claim a fresh performance soak.
 
 The reviewed local ordinary EXE is SHA256 `1D2A46E66E96FCF2315D2179E1629BBA521F92D146A1D2EC07E40CA47670FE56`, 27,046,912 bytes; PDB `f050ecec-d0a1-48a9-8ab1-ce0fbca41ead`, age 1. EXE/PDB identity, administrator manifest and copied-byte hash passed. This local validation precedes remote CI; no CI result or published release is implied.
+
+## 2026-11-01 correction and Steam review follow-up
+
+The review follow-up validates an Installed activation PID's current logon before
+its first write and publication. Initial and periodic automatic correction now
+share the same exact-instance three-denial pause; denied members keep readable
+CPU/RAM. Explicit matching-AUMID names retain consistent cold/warm discovery.
+Steam warnings outlive unrelated launch-intent collection, and only a final
+verified game main clears a warning. Live helper basenames are unique per run.
+
+Concrete regressions reproduced the original failures. Two GPT-6.1 Sol/max
+review cycles found one additional final-lifetime warning race, then reported
+no remaining actionable findings after its regression and fix. The final suite
+passed 1,004 application tests, 223 OS tests and one doc-test; shipping-app and
+OS Clippy, formatting, five Python harness guards and screenshot integrity passed.
+
+The final diagnostic EXE (SHA-256
+`db65b37348c67fd3647f634a66f327ec13a37d106abd339bd669a254591250ef`)
+passed all ten live MCP scenarios, including actual owned-process denial,
+three-attempt pause, Retry/native readback, readable app/group CPU/RAM and both
+themes. Read-only installed-app observation retained 17 current-session members
+with correction Off. Owned DACL/privileges were restored and process/listener/
+ticket/key cleanup passed; the helper exited 0. Evidence:
+`target/lm-9ea48350/evidence/result.json`.
+
+The normal EXE (SHA-256
+`7c24324b02b3b4447c1ca6811a40aa40cb2f4452ad2569a9a0307a3609612206`)
+and matching PDB passed artifact/manifest checks. These diagnostic checks do not
+certify interactive real-game behavior, the shipping UI or real background
+services. No working rules, real services or Windows settings were changed.
+
+The earlier Windows CI live run on `3f11cb2` timed out selecting the owned
+Steam row. The scenario waited for a visible row without navigating the list.
+A script-only follow-up now refreshes the one-shot chooser when needed and
+scrolls overlapping views before clicking; a sixth Python guard protects clipped
+rows, wheel direction and skipped rows. Both reviewers rechecked this follow-up.
+The standard live pack passed again with successful cleanup and helper exit 0
+(`target/lm-b227d1a5/evidence/result.json`); optional E1/D2 were not requested in
+that repeat and retain the preceding run's evidence. No Rust or binary changed.

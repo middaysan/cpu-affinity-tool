@@ -453,7 +453,8 @@ impl AppState {
             if receipt.result.is_ok() && receipt.revision >= pending.revision {
                 match pending.completion {
                     Some(LegacyCompletion::Rule(target, draft, background, choices))
-                        if self.ui.app_edit_state.target.as_ref() == Some(&target)
+                        if matches!(self.ui.current_window, WindowRoute::AppRunSettings)
+                            && self.ui.app_edit_state.target.as_ref() == Some(&target)
                             && self.ui.app_edit_state.current_edit == draft
                             && self.ui.app_edit_state.background == background
                             && self.ui.app_edit_state.control_choices == choices =>
@@ -461,7 +462,11 @@ impl AppState {
                         self.close_app_run_settings()
                     }
                     Some(LegacyCompletion::Group(target, name, selection, run_all))
-                        if self.ui.group_form.editing_group_id == target
+                        if matches!(
+                            (&target, &self.ui.current_window),
+                            (None, WindowRoute::Groups(GroupRoute::Create))
+                                | (Some(_), WindowRoute::Groups(GroupRoute::Edit))
+                        ) && self.ui.group_form.editing_group_id == target
                             && self.ui.group_form.group_name == name
                             && self.ui.group_form.core_selection == selection
                             && self.ui.group_form.run_all_enabled == run_all =>
@@ -867,9 +872,9 @@ impl AppState {
             return MoveRuleToGroupOutcome::LockFailed;
         }
         let message = if source_group_index == target_group_index {
-            format!("Reordered app '{moving_name}' in group '{target_group_name}'")
+            format!("Queued reorder of app '{moving_name}' in group '{target_group_name}'")
         } else {
-            format!("Moved app '{moving_name}' to group '{target_group_name}'")
+            format!("Queued move of app '{moving_name}' to group '{target_group_name}'")
         };
         self.log_manager.add_entry(message);
         MoveRuleToGroupOutcome::Moved
@@ -1041,6 +1046,11 @@ impl AppState {
         self.persistent_state.read().unwrap().theme_index
     }
 
+    #[cfg(all(target_os = "windows", feature = "windows"))]
+    pub(crate) fn configuration_revision(&self) -> u64 {
+        self.tuning_adopted_revision
+    }
+
     pub fn start_app_with_autorun(&mut self) {
         execution::start_app_with_autorun(
             &self.persistent_state,
@@ -1050,12 +1060,24 @@ impl AppState {
     }
 
     pub fn set_theme_index(&mut self, theme_index: usize) {
-        let Some((draft, revision)) = self.base_draft() else {
+        if theme_index > 2
+            || self
+                .persistent_state
+                .try_read()
+                .map_or(true, |saved| saved.theme_index == theme_index)
+        {
             return;
-        };
-        if preferences::set_theme_index(&draft, theme_index) {
-            let _ = self.persist_draft(draft, revision, self.rules.clone(), None);
         }
+        let _ = self.enqueue_legacy(
+            TuningRequest::UpdatePreferences {
+                patch: preferences::PreferencePatch {
+                    theme_index: Some(theme_index),
+                    ..Default::default()
+                },
+                expected_revision: self.tuning_adopted_revision,
+            },
+            None,
+        );
     }
 
     pub fn toggle_process_monitoring(&mut self) {
@@ -1074,58 +1096,59 @@ impl AppState {
     }
 
     pub fn commit_group_form_session(&mut self) {
-        let Some((draft, revision)) = self.base_draft() else {
+        if self.persistent_state.try_read().is_err() {
             return;
+        }
+        if self
+            .ui
+            .group_form
+            .editing_group_id
+            .clone()
+            .as_ref()
+            .is_some_and(|id| self.group_index_for_id(id).is_none())
+        {
+            self.cancel_group_form_session();
+            return;
+        }
+        let form = &self.ui.group_form;
+        let cpus: Vec<_> = form
+            .core_selection
+            .iter()
+            .enumerate()
+            .filter_map(|(cpu, &selected)| selected.then_some(cpu))
+            .collect();
+        // Keep immediate validation feedback; the writer rechecks current bounds.
+        let (name, cpus) = match rules::validate_group_values(
+            &form.group_name,
+            &cpus,
+            form.core_selection.len(),
+        ) {
+            Ok(values) => values,
+            Err(error) => {
+                self.log_manager.add_entry(error);
+                return;
+            }
+        };
+        let edit = rules::GroupEdit {
+            group: form.editing_group_id.clone(),
+            name,
+            cpus,
+            run_all: form.run_all_enabled,
+            hidden: None,
         };
         let completion = LegacyCompletion::Group(
-            self.ui.group_form.editing_group_id.clone(),
-            self.ui.group_form.group_name.clone(),
-            self.ui.group_form.core_selection.clone(),
-            self.ui.group_form.run_all_enabled,
+            form.editing_group_id.clone(),
+            form.group_name.clone(),
+            form.core_selection.clone(),
+            form.run_all_enabled,
         );
-        let should_save = if let Some(group_id) = self.ui.group_form.editing_group_id.clone() {
-            let Some(index) = self.group_index_for_id(&group_id) else {
-                self.ui.reset_group_form();
-                self.ui
-                    .set_current_window(WindowRoute::Groups(GroupRoute::List));
-                return;
-            };
-
-            match rules::update_group_properties(
-                &draft,
-                index,
-                self.ui.group_form.group_name.clone(),
-                &self.ui.group_form.core_selection,
-                self.ui.group_form.run_all_enabled,
-            ) {
-                Ok(updated) => updated,
-                Err(err) => {
-                    self.log_manager.add_entry(err);
-                    false
-                }
-            }
-        } else {
-            match rules::create_group(
-                &draft,
-                &self.ui.group_form.group_name,
-                &self.ui.group_form.core_selection,
-                self.ui.group_form.run_all_enabled,
-            ) {
-                Ok(()) => true,
-                Err(err) => {
-                    self.log_manager.add_entry(err);
-                    false
-                }
-            }
-        };
-
-        if should_save {
-            let mut identities = self.rules.clone();
-            if self.ui.group_form.editing_group_id.is_none() {
-                identities.append_group();
-            }
-            let _ = self.persist_draft(draft, revision, identities, Some(completion));
-        }
+        let _ = self.enqueue_legacy(
+            TuningRequest::EditGroup {
+                edit,
+                expected_revision: self.tuning_adopted_revision,
+            },
+            Some(completion),
+        );
     }
 
     pub fn delete_current_group_form_target(&mut self) {
@@ -1143,7 +1166,21 @@ impl AppState {
         }
     }
 
+    fn detach_editor_completion(&mut self) {
+        if let Some(pending) = self.pending_legacy.as_mut() {
+            if matches!(
+                pending.completion.as_ref(),
+                Some(LegacyCompletion::Group(..) | LegacyCompletion::Rule(..))
+            ) {
+                // Keep the accepted save and its exact pinned receipt consumer.
+                // Only its automatic close action belongs to the old editor.
+                pending.completion = None;
+            }
+        }
+    }
+
     pub fn cancel_group_form_session(&mut self) {
+        self.detach_editor_completion();
         self.ui.reset_group_form();
         self.ui
             .set_current_window(WindowRoute::Groups(GroupRoute::List));
@@ -1161,6 +1198,18 @@ impl AppState {
         let leaving_app_run_settings =
             matches!(self.ui.current_window, WindowRoute::AppRunSettings)
                 && !matches!(window, WindowRoute::AppRunSettings);
+        let leaving_group_form = match self.ui.current_window {
+            WindowRoute::Groups(GroupRoute::Create) => {
+                !matches!(window, WindowRoute::Groups(GroupRoute::Create))
+            }
+            WindowRoute::Groups(GroupRoute::Edit) => {
+                !matches!(window, WindowRoute::Groups(GroupRoute::Edit))
+            }
+            _ => false,
+        };
+        if leaving_group_form {
+            self.detach_editor_completion();
+        }
         #[cfg(all(target_os = "windows", feature = "windows"))]
         let leaving_crash_reports = matches!(self.ui.current_window, WindowRoute::CrashReports)
             && !matches!(window, WindowRoute::CrashReports);
@@ -1184,6 +1233,7 @@ impl AppState {
     }
 
     pub fn start_creating_group(&mut self) {
+        self.detach_editor_completion();
         self.ui.reset_group_form();
         self.set_current_window(WindowRoute::Groups(GroupRoute::Create));
     }
@@ -1194,6 +1244,7 @@ impl AppState {
         };
 
         if let Some(group) = rules::load_group_for_edit(&self.persistent_state, group_index) {
+            self.detach_editor_completion();
             let total_cores = self.ui.group_form.core_selection.len();
             let mut selection = vec![false; total_cores];
             for core in group.selected_cores {
@@ -1594,7 +1645,7 @@ impl AppState {
         // Disabling takes effect now, even if persistence is unavailable.
         if !enabled {
             self.cpu_load.preference_override = Some(false);
-            self.cpu_load.configure(false, false);
+            self.cpu_load.configure(false);
         }
         let (draft, revision) = self
             .base_draft()
@@ -1611,7 +1662,7 @@ impl AppState {
     }
 
     #[cfg(all(target_os = "windows", feature = "windows"))]
-    pub(crate) fn poll_cpu_load(&mut self, visible: bool) {
+    pub(crate) fn poll_cpu_load(&mut self) {
         if self.pending_legacy.is_none() {
             if let Some(wanted) = self.cpu_load.preference_override {
                 let saved = self
@@ -1641,7 +1692,7 @@ impl AppState {
         let enabled = self.cpu_load_enabled();
         let history_seconds = self.cpu_load_history_seconds();
         self.cpu_load.set_history_seconds(history_seconds);
-        self.cpu_load.configure(enabled, visible);
+        self.cpu_load.configure(enabled);
     }
 
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -1708,6 +1759,7 @@ impl AppState {
         }
         let central = self.build_central_panel_snapshot();
         let handle = self.runtime.running_apps_handle();
+        let control = self.runtime.control_handle();
         let instances = {
             let Ok(running) = handle.try_read() else {
                 return None;
@@ -1715,7 +1767,7 @@ impl AppState {
             let mut instances = Vec::new();
             for group in central.groups {
                 for program in group.programs {
-                    let Some(app) = running.apps.get(&program.app_key) else {
+                    let Some((_, app)) = control.member(&running, &program.runtime_key) else {
                         continue;
                     };
                     if app.group_id != group.group_id || app.rule_id != program.rule_id {
@@ -1952,6 +2004,7 @@ impl AppState {
     }
 
     pub fn open_app_run_settings(&mut self, group_id: GroupId, rule_id: RuleId) {
+        self.detach_editor_completion();
         self.ui.app_edit_state.process_names.request_refresh();
         self.ui.app_edit_state.current_edit = None;
         self.ui.app_edit_state.control_choices.clear();
@@ -2348,6 +2401,7 @@ impl AppState {
     }
 
     fn reset_app_run_settings_session(&mut self) {
+        self.detach_editor_completion();
         self.ui.app_edit_state.steam_picker.reset_view();
         self.ui.app_edit_state.current_edit = None;
         self.ui.app_edit_state.control_choices.clear();
@@ -2364,6 +2418,84 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use crate::app::features::system_tweaks::{
+        service::{SavedState, StatePersistence},
+        SaveError,
+    };
+    use std::sync::mpsc;
+    struct GatedSave {
+        entered: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+        fail: bool,
+    }
+    impl StatePersistence for GatedSave {
+        fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+            self.entered.send(()).unwrap();
+            if self
+                .release
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_err()
+                || self.fail
+            {
+                Err(SaveError::Storage)
+            } else {
+                Ok(SavedState::Unavailable)
+            }
+        }
+    }
+
+    #[test]
+    fn failed_move_never_reports_completed_success() {
+        use crate::app::features::system_tweaks::{
+            service::{SavedState, StatePersistence},
+            SaveError, TuningRuntime,
+        };
+        struct RefusedSave;
+        impl StatePersistence for RefusedSave {
+            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
+                Err(SaveError::Storage)
+            }
+        }
+        let mut app = sample_state();
+        add_empty_group(&mut app, "Background");
+        let original = app.persistent_state.read().unwrap().clone();
+        let runtime = TuningRuntime::start(
+            crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                .headless(original, Box::new(RefusedSave))
+                .without_modules(),
+            app.runtime.running_apps_handle(),
+        );
+        app.replace_tuning_for_test(runtime, Default::default());
+        assert_eq!(
+            app.move_rule_to_group_at(group_id(&app, 0), rule_id(&app, 0, 0), group_id(&app, 1), 0),
+            MoveRuleToGroupOutcome::Moved
+        );
+        assert!(
+            app.log_manager
+                .entries
+                .iter()
+                .any(|entry| entry.message.starts_with("Queued")),
+            "Queue admission must be explicit"
+        );
+        assert!(
+            !app.log_manager
+                .entries
+                .iter()
+                .any(|entry| entry.message.starts_with("Moved app")
+                    || entry.message.starts_with("Reordered app")),
+            "Acceptance must not claim a durable move"
+        );
+        app.wait_for_test_save();
+        let saved = app.persistent_state.read().unwrap();
+        assert_eq!(saved.groups[0].programs.len(), 1);
+        assert!(saved.groups[1].programs.is_empty());
+        assert!(app
+            .log_manager
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("not saved")));
+    }
+
     #[test]
     fn s116_gui_save_completion_survives_unrelated_request_churn() {
         use crate::app::features::system_tweaks::{
@@ -2461,103 +2593,301 @@ mod tests {
     }
 
     #[test]
-    fn followup_classic_save_reports_acceptance_before_gated_completion() {
-        use crate::app::features::system_tweaks::{
-            service::{SavedState, StatePersistence},
-            SaveError, TuningOperationState, TuningRuntime,
-        };
-        use std::sync::mpsc;
-        struct GatedSave {
-            entered: mpsc::SyncSender<()>,
-            release: mpsc::Receiver<()>,
-            fail: bool,
-        }
-        impl StatePersistence for GatedSave {
-            fn save(&mut self, _: &mut AppStateStorage) -> Result<SavedState, SaveError> {
-                self.entered.send(()).unwrap();
-                if self
-                    .release
-                    .recv_timeout(std::time::Duration::from_secs(1))
-                    .is_err()
-                    || self.fail
-                {
-                    Err(SaveError::Storage)
+    fn delayed_editor_save_preserves_navigation_and_reopened_drafts() {
+        use crate::app::features::system_tweaks::{Tuning, TuningRuntime};
+        for rule_editor in [false, true] {
+            for transition in ["logs", "cancel_reopen", "reopen", "changed_draft"] {
+                let mut app = sample_state();
+                app.persistent_state.write().unwrap().groups[0].cores = vec![0];
+                rebase_sample_fixture(&mut app);
+                let original = app.persistent_state.read().unwrap().clone();
+                let identities = app.rules.to_persisted_identities();
+                let group = group_id(&app, 0);
+                let rule = rule_id(&app, 0, 0);
+                let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+                let (release_tx, release_rx) = mpsc::sync_channel(1);
+                let runtime = TuningRuntime::start(
+                    Tuning::from_registry(Default::default())
+                        .headless(
+                            original.clone(),
+                            Box::new(GatedSave {
+                                entered: entered_tx,
+                                release: release_rx,
+                                fail: false,
+                            }),
+                        )
+                        .without_modules(),
+                    app.runtime.running_apps_handle(),
+                );
+                app.replace_tuning_for_test(runtime, Default::default());
+                if rule_editor {
+                    app.open_app_run_settings(group.clone(), rule.clone());
+                    assert!(app.ensure_current_edit_loaded());
+                    app.commit_current_app_edit_session();
                 } else {
-                    Ok(SavedState::Unavailable)
+                    app.start_editing_group(group.clone());
+                    app.commit_group_form_session();
                 }
+                entered_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+                let pending = app.pending_legacy.as_ref().unwrap();
+                let receipt_owner = (pending.id, pending.revision);
+                if transition == "logs" {
+                    app.set_current_window(WindowRoute::Logs);
+                } else if transition == "changed_draft" {
+                    if rule_editor {
+                        app.ui
+                            .app_edit_state
+                            .current_edit
+                            .as_mut()
+                            .unwrap()
+                            .name
+                            .push_str(" fresh");
+                    } else {
+                        app.ui.group_form.group_name.push_str(" fresh");
+                    }
+                } else {
+                    if transition == "cancel_reopen" {
+                        if rule_editor {
+                            app.close_app_run_settings();
+                        } else {
+                            app.cancel_group_form_session();
+                        }
+                    }
+                    if rule_editor {
+                        app.open_app_run_settings(group.clone(), rule.clone());
+                        assert!(app.ensure_current_edit_loaded());
+                    } else {
+                        app.start_editing_group(group.clone());
+                    }
+                }
+                let pending = app
+                    .pending_legacy
+                    .as_ref()
+                    .expect("Navigation cannot discard the receipt consumer");
+                assert_eq!((pending.id, pending.revision), receipt_owner);
+                let group_draft = (
+                    app.ui.group_form.editing_group_id.clone(),
+                    app.ui.group_form.group_name.clone(),
+                    app.ui.group_form.core_selection.clone(),
+                    app.ui.group_form.run_all_enabled,
+                );
+                let rule_draft = (
+                    app.ui.app_edit_state.target.clone(),
+                    app.ui.app_edit_state.current_edit.clone(),
+                );
+                release_tx.send(()).unwrap();
+                app.wait_for_test_save();
+                assert_eq!(
+                    app.tuning_snapshot().revision,
+                    1,
+                    "Leaving the editor must not revoke an accepted save"
+                );
+                assert_eq!(
+                    serde_json::to_value(&app.persistent_state.read().unwrap().groups).unwrap(),
+                    serde_json::to_value(&original.groups).unwrap()
+                );
+                assert_eq!(app.rules.to_persisted_identities(), identities);
+                assert!(app.pending_legacy.is_none());
+                if transition == "logs" {
+                    assert!(
+                        matches!(app.ui.current_window, WindowRoute::Logs),
+                        "A late completion stole Logs navigation (rule={rule_editor})"
+                    );
+                } else if rule_editor {
+                    assert!(
+                        matches!(app.ui.current_window, WindowRoute::AppRunSettings),
+                        "A late completion closed a newer rule draft: {transition}"
+                    );
+                    assert_eq!(
+                        (
+                            app.ui.app_edit_state.target.clone(),
+                            app.ui.app_edit_state.current_edit.clone()
+                        ),
+                        rule_draft
+                    );
+                } else {
+                    assert!(
+                        matches!(app.ui.current_window, WindowRoute::Groups(GroupRoute::Edit)),
+                        "A late completion closed a newer group draft: {transition}"
+                    );
+                    assert_eq!(
+                        (
+                            app.ui.group_form.editing_group_id.clone(),
+                            app.ui.group_form.group_name.clone(),
+                            app.ui.group_form.core_selection.clone(),
+                            app.ui.group_form.run_all_enabled
+                        ),
+                        group_draft
+                    );
+                }
+                // The exact old GUI receipt must be consumed, permitting another save.
+                app.set_theme_index(2);
+                assert!(
+                    app.pending_legacy.is_some(),
+                    "Editor exit must not leak a pinned GUI receipt"
+                );
+                release_tx.send(()).unwrap();
+                app.wait_for_test_save();
+                assert_eq!(app.get_theme_index(), 2);
             }
         }
-        for fail in [false, true] {
-            let mut app = sample_state();
-            let original = app.persistent_state.read().unwrap().clone();
-            let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-            let (release_tx, release_rx) = mpsc::sync_channel(1);
-            let runtime = TuningRuntime::start(
-                crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
-                    .headless(
-                        original.clone(),
-                        Box::new(GatedSave {
-                            entered: entered_tx,
-                            release: release_rx,
-                            fail,
-                        }),
-                    )
-                    .without_modules(),
-                app.runtime.running_apps_handle(),
-            );
-            app.replace_tuning_for_test(runtime, Default::default());
-            let mut candidate = original.clone();
-            candidate.theme_index = 2;
-            let accepted = app.enqueue_legacy(
-                super::TuningRequest::SaveBase {
-                    gui_import: false,
-                    candidate: Box::new(candidate),
-                    expected_revision: 0,
-                },
-                None,
-            );
-            entered_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap();
-            let pending = matches!(
-                app.tuning_snapshot().operation,
-                TuningOperationState::Pending { .. }
-            );
-            let before = app.persistent_state.read().unwrap().theme_index;
-            let _ = release_tx.send(());
-            assert!(
-                accepted,
-                "acceptance is independent of persistence completion"
-            );
-            assert!(
-                pending,
-                "the gated save must still be pending after enqueue returns"
-            );
-            assert_eq!(before, original.theme_index);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while matches!(
-                app.tuning_snapshot().operation,
-                TuningOperationState::Pending { .. }
-            ) {
-                assert!(std::time::Instant::now() < deadline);
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            app.poll_tuning();
-            assert_eq!(
-                app.get_theme_index(),
-                if fail { original.theme_index } else { 2 }
-            );
-            assert!(app.pending_legacy.is_none());
-            assert_eq!(
-                matches!(
-                    app.tuning_snapshot().operation,
-                    TuningOperationState::Refused {
-                        error: SaveError::Storage,
-                        ..
+    }
+
+    #[test]
+    fn followup_classic_save_reports_acceptance_before_gated_completion() {
+        use crate::app::features::system_tweaks::{SaveError, TuningOperationState, TuningRuntime};
+        use std::sync::mpsc;
+        for case in 0..3 {
+            for fail in [false, true] {
+                let mut app = sample_state();
+                if case == 2 {
+                    app.persistent_state.write().unwrap().groups[0].is_hidden = true;
+                    rebase_sample_fixture(&mut app);
+                }
+                let original = app.persistent_state.read().unwrap().clone();
+                let original_ids = app.rules.to_persisted_identities();
+                let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+                let (release_tx, release_rx) = mpsc::sync_channel(1);
+                let runtime = TuningRuntime::start(
+                    crate::app::features::system_tweaks::Tuning::from_registry(Default::default())
+                        .headless(
+                            original.clone(),
+                            Box::new(GatedSave {
+                                entered: entered_tx,
+                                release: release_rx,
+                                fail,
+                            }),
+                        )
+                        .without_modules(),
+                    app.runtime.running_apps_handle(),
+                );
+                app.replace_tuning_for_test(runtime, Default::default());
+                if case == 0 {
+                    app.set_theme_index(original.theme_index);
+                    app.set_theme_index(3);
+                    assert!(
+                        app.pending_legacy.is_none(),
+                        "No-op and invalid themes must not save"
+                    );
+                    app.set_theme_index(2);
+                } else {
+                    if case == 1 {
+                        app.start_creating_group();
+                    } else {
+                        app.start_editing_group(group_id(&app, 0));
                     }
-                ),
-                fail
-            );
+                    app.ui.group_form.group_name = if case == 1 {
+                        " New group "
+                    } else {
+                        " Edited group "
+                    }
+                    .into();
+                    app.ui.group_form.core_selection = vec![true, true, false, false];
+                    app.ui.group_form.run_all_enabled = true;
+                    app.commit_group_form_session();
+                }
+                let accepted = app.pending_legacy.is_some();
+                entered_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+                let pending = matches!(
+                    app.tuning_snapshot().operation,
+                    TuningOperationState::Pending { .. }
+                );
+                let before = serde_json::to_value(&*app.persistent_state.read().unwrap()).unwrap();
+                let ids_before_completion = app.rules.to_persisted_identities();
+                if case != 0 {
+                    assert!(!app.ui.group_form.group_name.is_empty());
+                }
+                let _ = release_tx.send(());
+                assert!(
+                    accepted,
+                    "acceptance is independent of persistence completion"
+                );
+                assert!(
+                    pending,
+                    "the gated save must still be pending after enqueue returns"
+                );
+                assert_eq!(
+                    before,
+                    serde_json::to_value(&original).unwrap(),
+                    "Pending edits cannot publish optimistically"
+                );
+                assert_eq!(ids_before_completion, original_ids);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while matches!(
+                    app.tuning_snapshot().operation,
+                    TuningOperationState::Pending { .. }
+                ) {
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                app.poll_tuning();
+                if case == 0 {
+                    assert_eq!(
+                        app.get_theme_index(),
+                        if fail { original.theme_index } else { 2 }
+                    );
+                } else {
+                    let saved = app.persistent_state.read().unwrap();
+                    let ids = app.rules.to_persisted_identities();
+                    if fail {
+                        assert_eq!(
+                            serde_json::to_value(&*saved).unwrap(),
+                            serde_json::to_value(&original).unwrap()
+                        );
+                        assert_eq!(ids, original_ids);
+                        assert!(
+                            !app.ui.group_form.group_name.is_empty(),
+                            "Failed save must retain the draft"
+                        );
+                    } else {
+                        let i = usize::from(case == 1);
+                        assert_eq!(
+                            saved.groups[i].name,
+                            if case == 1 {
+                                "New group"
+                            } else {
+                                "Edited group"
+                            }
+                        );
+                        assert_eq!(saved.groups[i].cores, vec![0, 1]);
+                        assert!(saved.groups[i].run_all_button);
+                        assert_eq!(
+                            ids.groups[0], original_ids.groups[0],
+                            "Existing group/rule IDs must survive"
+                        );
+                        assert_eq!(saved.groups[0].programs, original.groups[0].programs);
+                        assert_eq!(saved.groups[0].is_hidden, original.groups[0].is_hidden);
+                        assert_eq!(
+                            ids.groups.len(),
+                            original_ids.groups.len() + usize::from(case == 1)
+                        );
+                        assert_eq!(saved.rule_identities.as_ref(), Some(&ids));
+                        assert!(
+                            app.ui.group_form.group_name.is_empty(),
+                            "Only completed saves may close the form"
+                        );
+                        assert!(matches!(
+                            app.ui.current_window,
+                            WindowRoute::Groups(GroupRoute::List)
+                        ));
+                    }
+                }
+                assert!(app.pending_legacy.is_none());
+                assert_eq!(
+                    matches!(
+                        app.tuning_snapshot().operation,
+                        TuningOperationState::Refused {
+                            error: SaveError::Storage,
+                            ..
+                        }
+                    ),
+                    fail
+                );
+            }
         }
     }
     #[cfg(all(target_os = "windows", feature = "windows"))]
@@ -3237,6 +3567,20 @@ mod tests {
             app.log_manager.entries[0].message,
             "Group name cannot be empty"
         );
+        app.ui.group_form.group_name = "Valid".into();
+        app.ui.group_form.core_selection[0] = true;
+        let projection = app.persistent_state.clone();
+        let held = projection.write().unwrap();
+        app.commit_group_form_session();
+        assert!(
+            app.pending_legacy.is_none(),
+            "An unavailable GUI projection must not queue a save"
+        );
+        assert_eq!(app.ui.group_form.group_name, "Valid");
+        drop(held);
+        app.commit_group_form_session();
+        app.wait_for_test_save();
+        assert_eq!(app.persistent_state.read().unwrap().groups.len(), 2);
     }
 
     #[test]
@@ -3512,6 +3856,8 @@ mod tests {
 
     #[test]
     fn test_select_theme_saves_only_valid_changes_and_monitoring_still_saves() {
+        use super::{preferences, TuningRequest};
+        use crate::app::features::system_tweaks::{SaveError, TuningOperationState};
         let mut app = sample_state();
 
         app.set_theme_index(2);
@@ -3533,6 +3879,50 @@ mod tests {
         app.wait_for_test_save();
         assert!(app.is_process_monitoring_enabled());
         assert_eq!(app.save_count(), 3);
+
+        // Another request completes before the GUI adopts its revision.
+        let revision = app.tuning_adopted_revision;
+        app.request_tuning(TuningRequest::UpdatePreferences {
+            patch: preferences::PreferencePatch {
+                start_minimized: Some(true),
+                ..Default::default()
+            },
+            expected_revision: revision,
+        })
+        .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.tuning_snapshot().revision == revision
+            || matches!(
+                app.tuning_snapshot().operation,
+                TuningOperationState::Pending { .. }
+            )
+        {
+            assert!(std::time::Instant::now() < until);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.set_theme_index(2);
+        assert!(
+            app.pending_legacy.is_some(),
+            "The stale request must reach revision admission"
+        );
+        app.wait_for_test_save();
+        assert!(matches!(
+            app.tuning_snapshot().operation,
+            TuningOperationState::Refused {
+                error: SaveError::Invalid,
+                ..
+            }
+        ));
+        assert_eq!(
+            app.get_theme_index(),
+            0,
+            "A stale GUI theme intent must be refused"
+        );
+        assert!(app.start_minimized());
+        assert_eq!(app.save_count(), 4, "Only the earlier request may save");
+        app.set_theme_index(2);
+        app.wait_for_test_save();
+        assert_eq!(app.get_theme_index(), 2, "Retry after adoption may save");
     }
 
     #[test]
@@ -3656,10 +4046,93 @@ mod tests {
     }
 
     #[test]
+    fn group_save_rejects_stale_projection_and_retains_draft_for_retry() {
+        use super::{rules, TuningRequest};
+        use crate::app::features::system_tweaks::{SaveError, TuningOperationState};
+        for create in [true, false] {
+            let mut app = sample_state();
+            let original_ids = app.rules.to_persisted_identities();
+            if create {
+                app.start_creating_group();
+            } else {
+                app.start_editing_group(group_id(&app, 0));
+            }
+            app.ui.group_form.group_name = "GUI group".into();
+            app.ui.group_form.core_selection = vec![true, false, false, false];
+            let revision = app.tuning_adopted_revision;
+            app.request_tuning(TuningRequest::EditGroup {
+                edit: rules::GroupEdit {
+                    group: None,
+                    name: "External group".into(),
+                    cpus: vec![0],
+                    run_all: false,
+                    hidden: None,
+                },
+                expected_revision: revision,
+            })
+            .unwrap();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while app.tuning_snapshot().revision == revision
+                || matches!(
+                    app.tuning_snapshot().operation,
+                    TuningOperationState::Pending { .. }
+                )
+            {
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let external = app.tuning_snapshot();
+            app.commit_group_form_session();
+            assert!(
+                app.pending_legacy.is_some(),
+                "Stale request must reach revision admission"
+            );
+            app.wait_for_test_save();
+            assert!(matches!(
+                app.tuning_snapshot().operation,
+                TuningOperationState::Refused {
+                    error: SaveError::Invalid,
+                    ..
+                }
+            ));
+            assert_eq!(
+                serde_json::to_value(&*app.persistent_state.read().unwrap()).unwrap(),
+                serde_json::to_value(&*external.state).unwrap()
+            );
+            assert_eq!(
+                app.rules.to_persisted_identities(),
+                external.rules.to_persisted_identities()
+            );
+            assert_eq!(app.ui.group_form.group_name, "GUI group");
+            assert!(!matches!(
+                app.ui.current_window,
+                WindowRoute::Groups(GroupRoute::List)
+            ));
+            assert!(app.pending_legacy.is_none());
+            app.commit_group_form_session();
+            app.wait_for_test_save();
+            assert_eq!(app.tuning_snapshot().revision, external.revision + 1);
+            let ids = app.rules.to_persisted_identities();
+            assert_eq!(
+                &ids.groups[..2],
+                &external.rules.to_persisted_identities().groups[..]
+            );
+            assert_eq!(ids.groups[0], original_ids.groups[0]);
+            let state = app.persistent_state.read().unwrap();
+            assert_eq!(state.groups[1].name, "External group");
+            assert_eq!(state.groups[if create { 2 } else { 0 }].name, "GUI group");
+            assert!(matches!(
+                app.ui.current_window,
+                WindowRoute::Groups(GroupRoute::List)
+            ));
+        }
+    }
+
+    #[test]
     fn test_successful_group_create_and_delete_save_once_each() {
         let mut app = sample_state();
         app.ui.group_form.group_name = "Work".to_string();
-        app.ui.group_form.core_selection[2] = true;
+        app.ui.group_form.core_selection[0] = true;
 
         app.commit_group_form_session();
         app.wait_for_test_save();
@@ -3944,54 +4417,62 @@ mod tests {
 
     #[test]
     fn tracked_process_snapshot_uses_only_the_runtime_rule_owner() {
-        let mut app = sample_state();
-        {
-            let mut storage = app.persistent_state.write().unwrap();
+        for scoped in [false, true] {
+            let seed = sample_state();
+            let mut storage = seed.persistent_state.read().unwrap().clone();
             let mut second = storage.groups[0].clone();
             second.name = "Background".into();
             let duplicate = second.programs[0].clone();
             second.programs.push(duplicate);
             storage.groups.push(second);
-        }
-        let central = app.build_central_panel_snapshot();
-        let owner_group = &central.groups[1];
-        // Own the second duplicate rule, not the first matching configured key.
-        let owner = &owner_group.programs[1];
-        assert!(app.runtime.add_running_app_with_token(
-            &owner.app_key,
-            701,
-            1001,
-            owner_group.group_id.clone(),
-            owner.rule_id.clone(),
-        ));
-        let mut inspections = 0;
-        let rows = app
-            .tracked_processes_snapshot_with_inspector(|pid| {
-                inspections += 1;
-                assert_eq!(pid, 701);
-                Ok((PathBuf::from("sample.exe"), 1001))
-            })
-            .unwrap();
-        assert_eq!(
-            rows,
-            vec![TrackedProcessSnapshot {
-                group_name: "Background".into(),
-                process_name: "sample.exe".into(),
-                pid: 701,
-            }]
-        );
-        assert_eq!(inspections, 1);
+            storage.rule_identities = None;
+            let mut app = AppState::new_for_test(Arc::new(RwLock::new(storage)), 4);
+            let central = app.build_central_panel_snapshot();
+            let owner_group = &central.groups[1];
+            // Own the second duplicate rule, not the first matching configured key.
+            let owner = &owner_group.programs[1];
+            assert_ne!(owner.app_key, owner.runtime_key);
+            let key = if scoped {
+                &owner.runtime_key
+            } else {
+                &owner.app_key
+            };
+            assert!(app.runtime.add_running_app_with_token(
+                key,
+                701,
+                1001,
+                owner_group.group_id.clone(),
+                owner.rule_id.clone(),
+            ));
+            let mut inspections = 0;
+            let rows = app
+                .tracked_processes_snapshot_with_inspector(|pid| {
+                    inspections += 1;
+                    assert_eq!(pid, 701);
+                    Ok((PathBuf::from("sample.exe"), 1001))
+                })
+                .unwrap();
+            assert_eq!(
+                rows,
+                vec![TrackedProcessSnapshot {
+                    group_name: "Background".into(),
+                    process_name: "sample.exe".into(),
+                    pid: 701,
+                }]
+            );
+            assert_eq!(inspections, 1);
 
-        // A removed owner must not be relabeled as another rule with the same key.
-        app.persistent_state.write().unwrap().groups[1]
-            .programs
-            .pop();
-        assert!(app
-            .tracked_processes_snapshot_with_inspector(|_| {
-                panic!("stale runtime ownership must not be inspected")
-            })
-            .unwrap()
-            .is_empty());
+            // A removed owner must not be relabeled as another rule with the same key.
+            app.persistent_state.write().unwrap().groups[1]
+                .programs
+                .pop();
+            assert!(app
+                .tracked_processes_snapshot_with_inspector(|_| {
+                    panic!("stale runtime ownership must not be inspected")
+                })
+                .unwrap()
+                .is_empty());
+        }
     }
 
     #[test]

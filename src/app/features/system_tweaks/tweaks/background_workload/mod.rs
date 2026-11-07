@@ -265,10 +265,6 @@ impl ModuleEditor for BackgroundWorkload {
     fn accepts_config(&self, value: &ModuleEnvelope) -> bool {
         configured(value).is_ok()
     }
-    #[cfg(test)]
-    fn show(&self, _: &mut eframe::egui::Ui, _: &mut ModuleEnvelope) -> Result<bool, ()> {
-        Ok(false)
-    }
 }
 impl Module for BackgroundWorkload {
     fn requires_session_target(&self) -> bool {

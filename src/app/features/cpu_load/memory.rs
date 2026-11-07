@@ -47,6 +47,7 @@ impl MemoryUsage {
 pub(super) struct MemoryTotals {
     pub rules: HashMap<RuleTarget, MemoryUsage>,
     pub groups: HashMap<GroupId, MemoryUsage>,
+    pub readings: HashMap<(u32, u64), Option<u64>>,
 }
 
 pub(super) fn tracked_memory(
@@ -86,7 +87,11 @@ pub(super) fn tracked_memory(
     for usage in groups.values_mut() {
         usage.bytes = usage.bytes.filter(|_| usage.measured > 0);
     }
-    MemoryTotals { rules, groups }
+    MemoryTotals {
+        rules,
+        groups,
+        readings: values,
+    }
 }
 
 #[cfg(test)]

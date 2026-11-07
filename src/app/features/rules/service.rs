@@ -10,30 +10,6 @@ pub struct EditableGroup {
     pub run_all_enabled: bool,
 }
 
-pub(super) fn validate_group_values(
-    name: &str,
-    cpus: &[usize],
-    total: usize,
-) -> Result<(String, Vec<usize>), String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("Group name cannot be empty".into());
-    }
-    if name.len() > 256 || name.contains('\0') {
-        return Err("Group name must contain at most 256 bytes and no NUL".into());
-    }
-    if cpus.is_empty() {
-        return Err("At least one core must be selected".into());
-    }
-    if cpus.len() > 4096 || cpus.iter().any(|cpu| *cpu >= total) {
-        return Err("Select existing logical CPUs".into());
-    }
-    let mut cpus = cpus.to_vec();
-    cpus.sort_unstable();
-    cpus.dedup();
-    Ok((name.into(), cpus))
-}
-
 pub fn set_group_is_hidden(
     persistent_state: &Arc<RwLock<AppStateStorage>>,
     index: usize,
@@ -65,50 +41,6 @@ pub fn move_group_to_index(
     let group = state.groups.remove(source_index);
     state.groups.insert(target_index, group);
     true
-}
-
-pub fn create_group(
-    persistent_state: &Arc<RwLock<AppStateStorage>>,
-    group_name: &str,
-    core_selection: &[bool],
-    run_all_enabled: bool,
-) -> Result<(), String> {
-    let (group_name_trimmed, selected_cores) = validate_group_values(
-        group_name,
-        &selected_cores(core_selection),
-        core_selection.len(),
-    )?;
-
-    let mut state = persistent_state.write().unwrap();
-    state.groups.push(CoreGroup {
-        name: group_name_trimmed.to_string(),
-        cores: selected_cores,
-        programs: vec![],
-        is_hidden: false,
-        run_all_button: run_all_enabled,
-    });
-    Ok(())
-}
-
-pub fn update_group_properties(
-    persistent_state: &Arc<RwLock<AppStateStorage>>,
-    index: usize,
-    name: String,
-    core_selection: &[bool],
-    run_all_button: bool,
-) -> Result<bool, String> {
-    let (group_name_trimmed, selected_cores) =
-        validate_group_values(&name, &selected_cores(core_selection), core_selection.len())?;
-
-    let mut state = persistent_state.write().unwrap();
-    if index < state.groups.len() {
-        state.groups[index].name = group_name_trimmed.to_string();
-        state.groups[index].cores = selected_cores;
-        state.groups[index].run_all_button = run_all_button;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
 }
 
 pub fn load_group_for_edit(
@@ -274,16 +206,9 @@ pub fn move_rule_between_groups_at(
     Some(moved)
 }
 
-fn selected_cores(core_selection: &[bool]) -> Vec<usize> {
-    core_selection
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &selected)| selected.then_some(index))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::{GroupEdit, RulesContext};
     use super::*;
     use crate::app::models::{CpuSchema, LaunchTarget};
     use os_api::PriorityClass;
@@ -360,71 +285,114 @@ mod tests {
     #[test]
     fn test_create_and_edit_group() {
         let persistent_state = sample_persistent_state();
-        create_group(&persistent_state, "Work", &[true, false, true, false], true).unwrap();
-        assert_eq!(persistent_state.read().unwrap().groups.len(), 2);
-
+        let mut state = persistent_state.write().unwrap();
+        state.groups[0].is_hidden = true;
+        let mut rules = RulesContext::from_storage(&state);
+        let old_ids = rules.to_persisted_identities();
+        let old_programs = state.groups[0].programs.clone();
+        GroupEdit {
+            group: None,
+            name: " Work ".into(),
+            cpus: vec![2, 0, 2],
+            run_all: true,
+            hidden: None,
+        }
+        .apply(&mut state, &mut rules, 4)
+        .unwrap();
+        assert_eq!(state.groups.len(), 2);
+        assert_eq!(state.groups[1].cores, vec![0, 2]);
+        assert_eq!(state.groups[1].name, "Work");
+        assert!(!state.groups[1].is_hidden);
+        let ids = rules.to_persisted_identities();
+        assert_eq!(ids.groups[0], old_ids.groups[0]);
+        assert_ne!(ids.groups[0].id, ids.groups[1].id);
+        GroupEdit {
+            group: Some(ids.groups[0].id.clone()),
+            name: " Edited ".into(),
+            cpus: vec![3, 1, 3],
+            run_all: false,
+            hidden: None,
+        }
+        .apply(&mut state, &mut rules, 4)
+        .unwrap();
+        assert_eq!(
+            rules.to_persisted_identities(),
+            ids,
+            "An edit cannot allocate new identities"
+        );
+        assert_eq!(state.groups[0].programs, old_programs);
+        assert!(state.groups[0].is_hidden, "GUI edits preserve visibility");
+        drop(state);
         let editable = load_group_for_edit(&persistent_state, 0).unwrap();
-        assert_eq!(editable.name, "Games");
+        assert_eq!(editable.name, "Edited");
         assert_eq!(editable.selected_cores, vec![1, 3]);
-        assert!(editable.run_all_enabled);
-
-        assert!(update_group_properties(
-            &persistent_state,
-            0,
-            "Edited".to_string(),
-            &[false, true, false, true],
-            false,
-        )
-        .unwrap());
-        assert_eq!(persistent_state.read().unwrap().groups[0].name, "Edited");
+        assert!(!editable.run_all_enabled);
+        GroupEdit {
+            group: Some(ids.groups[0].id.clone()),
+            name: "Edited".into(),
+            cpus: vec![1, 3],
+            run_all: false,
+            hidden: Some(false),
+        }
+        .apply(&mut persistent_state.write().unwrap(), &mut rules, 4)
+        .unwrap();
+        assert!(
+            !persistent_state.read().unwrap().groups[0].is_hidden,
+            "Explicit agent visibility edits remain supported"
+        );
     }
 
     #[test]
-    fn test_create_group_validation_does_not_mutate_state() {
+    fn test_group_validation_does_not_mutate_state_or_ids() {
         let persistent_state = sample_persistent_state();
-
-        assert_eq!(
-            create_group(&persistent_state, "   ", &[true, false], true),
-            Err("Group name cannot be empty".to_string())
-        );
-        assert_eq!(
-            create_group(&persistent_state, "No Cores", &[false, false], true),
-            Err("At least one core must be selected".to_string())
-        );
-
-        let state = persistent_state.read().unwrap();
-        assert_eq!(state.groups.len(), 1);
-        assert_eq!(state.groups[0].name, "Games");
-    }
-
-    #[test]
-    fn test_update_group_validation_and_missing_index_do_not_mutate_state() {
-        let persistent_state = sample_persistent_state();
-
-        assert_eq!(
-            update_group_properties(&persistent_state, 0, " ".to_string(), &[true], false),
-            Err("Group name cannot be empty".to_string())
-        );
-        assert_eq!(
-            update_group_properties(&persistent_state, 0, "Edited".to_string(), &[false], false),
-            Err("At least one core must be selected".to_string())
-        );
-        assert_eq!(
-            update_group_properties(&persistent_state, 99, "Missing".to_string(), &[true], false),
-            Ok(false)
-        );
-
-        let state = persistent_state.read().unwrap();
-        assert_eq!(state.groups.len(), 1);
-        assert_eq!(state.groups[0].name, "Games");
-        assert_eq!(state.groups[0].cores, vec![1, 3]);
-        assert!(state.groups[0].run_all_button);
+        let mut state = persistent_state.write().unwrap();
+        let mut rules = RulesContext::from_storage(&state);
+        let before = serde_json::to_value(&*state).unwrap();
+        let ids = rules.to_persisted_identities();
+        let target = ids.groups[0].id.clone();
+        for group in [None, Some(target)] {
+            for (name, cpus, error) in [
+                ("   ", vec![0], "Group name cannot be empty"),
+                ("No Cores", vec![], "At least one core must be selected"),
+                ("Invalid CPU", vec![4], "Select existing logical CPUs"),
+            ] {
+                assert_eq!(
+                    GroupEdit {
+                        group: group.clone(),
+                        name: name.into(),
+                        cpus,
+                        run_all: true,
+                        hidden: Some(true)
+                    }
+                    .apply(&mut state, &mut rules, 4)
+                    .unwrap_err(),
+                    error
+                );
+            }
+        }
+        assert!(GroupEdit {
+            group: Some(crate::app::shared::ids::GroupId("missing".into())),
+            name: "Valid".into(),
+            cpus: vec![0],
+            run_all: true,
+            hidden: None
+        }
+        .apply(&mut state, &mut rules, 4)
+        .is_err());
+        assert_eq!(serde_json::to_value(&*state).unwrap(), before);
+        assert_eq!(rules.to_persisted_identities(), ids);
     }
 
     #[test]
     fn test_group_visibility_and_move_report_only_real_changes() {
         let persistent_state = sample_persistent_state();
-        create_group(&persistent_state, "Work", &[true, false], false).unwrap();
+        persistent_state.write().unwrap().groups.push(CoreGroup {
+            name: "Work".into(),
+            cores: vec![0],
+            programs: vec![],
+            is_hidden: false,
+            run_all_button: false,
+        });
 
         assert!(set_group_is_hidden(&persistent_state, 0, true));
         assert!(!set_group_is_hidden(&persistent_state, 0, true));
@@ -442,7 +410,13 @@ mod tests {
     #[test]
     fn test_move_rule_between_groups_rejects_invalid_indices_without_mutation() {
         let persistent_state = sample_persistent_state();
-        create_group(&persistent_state, "Work", &[true, false], false).unwrap();
+        persistent_state.write().unwrap().groups.push(CoreGroup {
+            name: "Work".into(),
+            cores: vec![0],
+            programs: vec![],
+            is_hidden: false,
+            run_all_button: false,
+        });
         let mut state = persistent_state.write().unwrap();
         let before = state
             .groups

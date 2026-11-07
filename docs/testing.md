@@ -1,5 +1,7 @@
 # Testing without another test platform
 
+Current validation targets Windows. Linux support, local builds/tests/Clippy and CI are paused while Windows work is completed; the source and disabled jobs are retained for explicit future resumption.
+
 The fast Rust tests and built-app MCP scenarios answer different questions. Keep
 deterministic tests for identity, ownership, stale generations, failed saves,
 conditional Undo, CPU/RAM unions, unknown data and shutdown. A successful GUI poll
@@ -69,17 +71,37 @@ checked publication. CI validates committed assets without taking screenshots.
 | Case | Evidence |
 | --- | --- |
 | R1 | Selected artifact hash, actual child PID, synthetic monitoring Off, orderly exit |
-| C1 | Real durable receipts; groups/rules/additional names; incomplete replacement and stale revision refused; reorder/move; stable IDs and unchanged saved values after restart |
+| C1 | Real durable receipts; groups/rules/additional names; incomplete replacement and stale revision refused; reorder/move; GUI group edit after HTTP update with visibility/peer-field and logical-ID retention; stable IDs and unchanged saved values after restart |
 | U1 | Real schema-13 file, no eager write on notice, actual read-only-file failure and retry, schema-14 readback, group/list retention and restart, both themes |
 | E1, interactive opt-in | Ordinary managed launch, independent exact-handle affinity/priority readback, bounded output/EOF, wrong creation-token refusal, actual Focus acknowledgement |
-| T1 | Two owned workloads, extra process, identical overlapping rule sets in two groups; three fresh coherent CPU/RAM union samples; helper after primary exit; graph opening and Off/On |
+| T1 | Two owned workloads, extra process, identical overlapping rule sets in two groups; three fresh coherent CPU/RAM union samples; two unrelated owned-process start/exit cycles with stable app/group CPU/RAM throughout; helper after primary exit; saved app/group metadata changes in an open graph without losing history/CPU selection; Off/On |
 | T2 | Original system history, bounded UTF-8 CSV cursor download and parsing, retained immutable export after Off, foreign history epoch refused |
+| S1 | Deliberately uninstalled synthetic Steam AppID, actionable warning in both themes, direct reason/chooser, no premature draft save, exact owned-process selection/measurement and unchanged helper list; never launches Steam |
+| D1 | Three native scheduling access denials on an exact owned child, paused correction with readable app/group CPU/RAM, Limited access in both themes, explicit Retry/native affinity readback, and exact process-DACL restoration |
 
 The opt-in E1 requires a real same-logon Explorer broker; CI does not pretend to
 certify that interactive path. Windows may refuse foreground activation; the
 acknowledgement is recorded, not represented as a foreground guarantee. Real
 Steam/Discord/game acceptance, DPI/tray/login, PNG save dialogs and shipping
 bootstrap remain in the [release smoke matrix](release-smoke-matrix.md).
+
+D1 temporarily changes only an exact owned workload's process DACL. If enabled,
+the runner and its retained diagnostic app temporarily disable their own debug
+privilege so it cannot bypass that DACL. The original DACL and privilege flags
+are restored before cleanup; no account privilege or Windows policy is changed.
+The native access-denied preflight is mandatory, and readable metrics are checked
+through the same app/group snapshots while correction is paused.
+All C1/D1 workload basenames include the run's unique stamp: explicit helper-name
+matching cannot admit another concurrent runner's owned processes.
+S1 checks its retained child's liveness, refreshes the request-driven picker when needed
+and scrolls overlapping list views before clicking the owned row; process count
+and viewport position must not determine whether selection succeeds.
+
+The optional `-ReadOnlyInstalledAumid 'Publisher.Package!App'` adds D2 in a separate
+fresh profile when real-app observation is authorized. Enforcement stays Off;
+it never launches that application or changes its scheduling. It requires an
+already running app and checks automatic members belong to the current nonzero
+Windows session. This does not qualify real services for mutation.
 
 ### Isolation and evidence
 
@@ -120,3 +142,34 @@ remain covered elsewhere.
 No identity/ownership/CPU/RAM/Undo/persistence/revocation/shutdown tests are moved
 to GUI polling. Build-contract parser tests remain while that parser exists.
 Consolidation has no test-count target.
+
+The CPU union scenario also verifies group-capacity units against the same original app history interval through HTTP, changes one/two-CPU masks, and excludes owned busy work outside a temporary mask. Graph windows are opened separately because an opaque modal hides the main list. Group fields are preserved and the synthetic mask is restored before subsequent cases. The denial case accepts measured zero CPU while its owned children are outside the selected group mask; readable telemetry must remain complete through refused writes.
+
+Diagnostic denial counts are nullable when a nonblocking observation is busy. D1 requires at least three qualified pause observations and rejects any known reset; an unavailable read is never treated as zero. Completed fixtures are cleaned up before the next fixture starts. Cleanup failures retain the synthetic fixture label and bounded stage codes without paths, inventories or exception contents.
+
+The first simplification slice removes only the retired test-only module editor,
+its self-tests and unconstructed internal background-toolbar requests. Current
+compact Apply/options/unknown-value tests, typed configuration validation,
+controller/recovery/conditional Undo and background role admission checks remain.
+The roster regression covers both launch-key transition and scoped runtime keys;
+the graph regression uses actual rendered labels on successful and refused saves.
+Theme selection reuses the gated writer fixture for no-op/invalid input, pending
+publication and save failure rather than adding a separate persistence mock suite.
+Normal README scenes retain their existing layout and copy: the graph change is
+observable only after editing an already open source. Existing capture provenance
+is retained; the live metadata case exercises that conditional update separately.
+
+Group create/edit unification extends the existing gated writer fixture with
+pending/success/refused GUI saves and retains field/identity checks. A stale GUI
+projection must refuse its admitted request, retain the draft and newer external
+group, then permit retry after adoption. The MCP-specific create limit stays
+at its adapter. C1 uses the existing pointer input to edit a real group form after
+an HTTP edit, checks unrelated fields/IDs, and verifies restart persistence.
+GUI creation is covered by deterministic state fixtures; no text-input RPC or
+new testing framework is introduced for this refactor.
+
+Delayed editor completion is covered by the existing gated persistence fixture:
+leave for Logs, cancel/reopen the same values, reopen directly, and edit the draft
+while a save is pending. Both group and rule cases preserve the accepted save,
+exact receipt consumption and subsequent GUI-save admission. Navigation only
+detaches stale UI-close effects; it never revokes an already accepted write.

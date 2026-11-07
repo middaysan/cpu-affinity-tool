@@ -376,19 +376,21 @@ impl Services {
                         "group-{}",
                         snapshot.rules.to_persisted_identities().next_group_id
                     ));
-                    BaseCommand::CreateGroup {
+                    BaseCommand::Group(crate::app::features::rules::GroupEdit {
+                        group: None,
+                        hidden: None,
                         name: required(args.name, "name")?,
                         cpus: required(args.cpus, "cpus")?,
                         run_all: args.run_all,
-                    }
+                    })
                 }
-                "update_group" => BaseCommand::UpdateGroup {
-                    group: required(group, "group_id")?,
+                "update_group" => BaseCommand::Group(crate::app::features::rules::GroupEdit {
+                    group: Some(required(group, "group_id")?),
                     name: required(args.name, "name")?,
                     cpus: required(args.cpus, "cpus")?,
                     run_all: args.run_all,
                     hidden: args.hidden,
-                },
+                }),
                 "delete_group" => BaseCommand::RemoveGroup {
                     group: required(group, "group_id")?,
                 },

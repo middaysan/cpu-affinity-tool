@@ -59,12 +59,6 @@ impl ModuleEditor for GpuPreference {
     fn accepts_config(&self, envelope: &ModuleEnvelope) -> bool {
         config(ID, envelope, false).is_ok()
     }
-    #[cfg(test)]
-    fn show(&self, ui: &mut eframe::egui::Ui, envelope: &mut ModuleEnvelope) -> Result<bool, ()> {
-        config(ID, envelope, false).map_err(|_| ())?;
-        ui.label(spec().help);
-        Ok(false)
-    }
     fn selects_saved_exe(&self) -> bool {
         true
     }

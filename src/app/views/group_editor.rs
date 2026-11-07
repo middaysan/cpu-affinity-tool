@@ -40,10 +40,11 @@ fn draw_group_form_ui(
 
         ui.add_space(6.0);
 
-        ui.checkbox(
+        let run_all = ui.checkbox(
             &mut groups.run_all_enabled,
             "Show a Run all action for this group",
         );
+        crate::debug_mcp_control!("group.form.run_all", run_all);
 
         ui.add_space(5.0);
         ui.separator();
@@ -61,14 +62,14 @@ fn draw_group_form_ui(
             } else {
                 "Create group"
             };
-            if toned_button(
+            let save = toned_button(
                 ui,
                 egui::Button::new(RichText::new(save_label).strong())
                     .min_size(egui::vec2(110.0, 28.0)),
                 ToneRole::Primary,
-            )
-            .clicked()
-                || ui.input(|i| i.key_pressed(egui::Key::Enter))
+            );
+            crate::debug_mcp_control!("group.form.save", save);
+            if save.clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter))
             {
                 on_save();
             }
@@ -580,7 +581,6 @@ mod tests {
         ctx.set_fonts(ui_font_definitions());
         let mut groups = GroupFormSession {
             editing_group_id: None,
-            editing_selection: None,
             core_selection: vec![is_selected; 20],
             group_name: String::new(),
             run_all_enabled: false,

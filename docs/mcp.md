@@ -91,6 +91,8 @@ CPU tools read the existing collector and bounded RAM histories. MCP does not cr
 | Whole-host process percentage | GetProcessTimes CPU time divided by the whole machine's capacity; it has its own measurement interval. |
 | ETW residency | Scheduler time on one logical CPU in an original event-time interval. System, saved tracked union, a saved rule, or one exact managed root are distinct scopes. |
 
+The app/group meters in the GUI use a separate selected-group-capacity view: sum the tracked scheduler work on the saved group CPUs and divide by their full count. Whole-host fields in `read_cpu_current` and `read_run_cpu` retain the units above. A missing/stale scheduler cut makes the GUI capacity value unavailable while independently readable whole-host counters and RAM remain available.
+
 History includes original monotonic time, wall-clock time, native QPC interval bounds/frequency, quality and mutation revision. Pending intervals can complete later. Establish a baseline with `read_cpu_history`; page at a fixed revision. Then call `read_cpu_changes` with its epoch, scope key and last revision. **Upsert original rows**, advance the revision after completing the page set, and prune rows before the returned retention boundary. A changed epoch/scope requires a fresh baseline. Real loss, expiry and unknown attribution remain unavailable; a positive measured subtotal is explicitly partial. Historical ETW lifetime IDs are not native creation tokens and cannot authorize process control.
 
 Contributor rows use the same original interval as the selected history sample. Run CPU scope needs a retained Run ID managed by this connection. The saved tracked union excludes unrelated transient runs. Run CPU describes the exact managed root, not an invented process-tree total.
@@ -129,6 +131,18 @@ A saved Steam game uses `launch_target.Steam.app_id` and optional `executable`. 
 `launch_saved`/`restart_saved` dispatch through ordinary interactive Steam and return `activation_requested` with no invented PID. Elevated launch/output capture are unavailable for this route. Read actual tracked instances and CPU data after discovery; an alive Steam client does not establish that the game started. Automatic detection requires an unambiguous game-window image in the resolved local installation. For an unresolved/brokered game choose its exact running executable through the rule editor, or set `steam_executable`. This reuses the existing process monitor, collector and exact-instance scheduling boundary. Desired affinity from the game's first instruction is not guaranteed. Restart requires existing game instances to exit first.
 
 Steam launch intent follows the logical rule and matching AppID for at most five minutes, including a later exact-EXE selection. With Process monitor Off, initial settings are applied once per discovered exact instance and confirmed by subsequent native readback; late helpers can join during that window. After expiry, use Run/launch_saved again if the game is still unresolved. Off does not become continuous enforcement. Ambiguous/cross-game evidence withdraws automatic membership; choose the game process rather than treating the Steam client as the game.
+
+The desktop shows an amber **Select game** warning for unavailable/ambiguous
+installation metadata, competing processes, or a possible main EXE listed among
+helpers. A launch with no detected main after 30 seconds also offers selection;
+this does not extend the five-minute scheduling intent. Click the warning or
+**Select** to open the existing rule editor and process chooser, with the reason
+visible. Start the game in Steam, choose its main running EXE and save. This
+saves `steam_executable`; adding `dota2.exe` to optional helper names does not
+select the main game. Selection preserves those names and does not launch a
+candidate. The warning clears when exact game membership is verified. If initial
+intent has expired with Process monitor Off, use **Fix** on the detected game or
+request another saved launch to apply settings explicitly.
 
 
 ## Built-in application rules

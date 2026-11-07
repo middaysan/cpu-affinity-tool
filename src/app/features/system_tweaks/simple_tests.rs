@@ -148,9 +148,6 @@ impl ModuleEditor for Setting {
                 .and_then(serde_json::Value::as_u64)
                 .is_some_and(|v| v <= 255)
     }
-    fn show(&self, _: &mut eframe::egui::Ui, _: &mut ModuleEnvelope) -> Result<bool, ()> {
-        Ok(false)
-    }
 }
 impl Module for Setting {
     fn field_context(&self, _: &ResourceKey) -> Result<Option<Vec<u8>>, ModuleError> {

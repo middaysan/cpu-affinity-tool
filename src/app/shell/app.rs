@@ -654,7 +654,7 @@ impl eframe::App for App {
         }
         #[cfg(all(target_os = "windows", feature = "windows"))]
         {
-            self.state.poll_cpu_load(!self.is_hidden);
+            self.state.poll_cpu_load();
             if self.state.cpu_load_enabled() && !self.is_hidden {
                 ctx.request_repaint_after(Duration::from_secs(1));
             }
@@ -2139,7 +2139,7 @@ impl App {
             self.restore_focus = None;
         }
         #[cfg(all(target_os = "windows", feature = "windows"))]
-        self.state.poll_cpu_load(false);
+        self.state.poll_cpu_load();
 
         #[cfg(target_os = "windows")]
         if let Err(error) = crate::app::adapters::os::normalize_winit_event_target_window() {

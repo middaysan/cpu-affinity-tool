@@ -278,9 +278,6 @@ impl ModuleEditor for PlannedFixture {
     fn accepts_config(&self, value: &ModuleEnvelope) -> bool {
         configured(value).is_ok()
     }
-    fn show(&self, _: &mut eframe::egui::Ui, _: &mut ModuleEnvelope) -> Result<bool, ()> {
-        Ok(false)
-    }
 }
 impl Module for PlannedFixture {
     fn requires_session_target(&self) -> bool {
